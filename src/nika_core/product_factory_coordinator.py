@@ -240,8 +240,7 @@ class ProductFactoryCoordinator:
         return updated
 
     def review(self, component_id: str, decision: ReviewDecision) -> WorkRecord:
-        if type(decision) is not ReviewDecision:
-            raise CoordinatorError("independent review decision must be exact ReviewDecision")
+        decision = _canonical_review_decision(decision)
         record = self._record(component_id)
         if record.state is not WorkState.REVIEW_REQUIRED or record.result is None:
             raise CoordinatorError("component is not awaiting independent review")
@@ -581,15 +580,31 @@ class ProductFactoryCoordinator:
         self._revision += 1
 
 
+def _canonical_review_decision(value: object) -> ReviewDecision:
+    if type(value) is not ReviewDecision:
+        raise CoordinatorError("independent review decision must be exact ReviewDecision")
+    return ReviewDecision(
+        reviewer_id=value.reviewer_id,
+        accepted=value.accepted,
+        reason=value.reason,
+        evidence_refs=value.evidence_refs,
+    )
+
+
 def _canonical_restored_record(record: WorkRecord) -> WorkRecord:
     result = None
     if record.result is not None:
         result = _canonical_worker_result_envelope(record.result)
+
+    review = None
+    if record.review is not None:
+        review = _canonical_review_decision(record.review)
+
     return WorkRecord(
         request=record.request,
         state=record.state,
         result=result,
-        review=record.review,
+        review=review,
         blocker=record.blocker,
     )
 

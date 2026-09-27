@@ -5,6 +5,7 @@ import pytest
 from nika_core.product_factory_coordinator import (
     CoordinatorError,
     ProductFactoryCoordinator,
+    ReviewDecision,
     WorkerResultEnvelope,
     WorkState,
 )
@@ -97,7 +98,7 @@ def test_worker_result_rejects_coding_result_subclass_success_override() -> None
         _envelope(coding_result=forged)
 
 
-def _running_coordinator():
+def _running_coordinator(*, review_authority=None):
     graph = ProductRepositoryGraph(
         project_id="project-1",
         repositories=(RepositoryRef("repo-1", "github", "org/repo", "main"),),
@@ -110,7 +111,7 @@ def _running_coordinator():
             ),
         ),
     )
-    coordinator = ProductFactoryCoordinator(graph)
+    coordinator = ProductFactoryCoordinator(graph, review_authority=review_authority)
     coordinator.plan(
         base_shas={"repo-1": SHA_A},
         goals={"core": "build core"},
@@ -220,4 +221,85 @@ def test_restore_snapshots_result_evidence_before_accepting_snapshot() -> None:
     assert live.result.diff_digest == DIFF_DIGEST
     assert live.result.coding_result.test_evidence[0] is not external_evidence
     assert live.result.coding_result.test_evidence[0].output_digest == "tests-ok"
+
+class _AllowReviewAuthority:
+    def verify(self, _subject, _evidence_refs):
+        return True
+
+
+def test_review_snapshots_authorized_decision_before_storing_state() -> None:
+    authority = _AllowReviewAuthority()
+    coordinator, request = _running_coordinator(review_authority=authority)
+    coordinator.record_result(
+        _request_envelope(
+            request,
+            CodingResult(
+                job_id=request.work_id,
+                test_evidence=(TestEvidence(("pytest",), 0, "tests-ok"),),
+            ),
+        )
+    )
+    decision = ReviewDecision(
+        reviewer_id="reviewer:qa",
+        accepted=True,
+        reason="verified",
+        evidence_refs=("review:evidence",),
+    )
+
+    reviewed = coordinator.review("core", decision)
+
+    assert reviewed.state is WorkState.ACCEPTED
+    assert reviewed.review is not None
+    assert reviewed.review is not decision
+
+    object.__setattr__(decision, "accepted", False)
+    object.__setattr__(decision, "reason", "forged after review")
+
+    live = coordinator.snapshot().records[0]
+    assert live.state is WorkState.ACCEPTED
+    assert live.review is not None
+    assert live.review.accepted is True
+    assert live.review.reason == "verified"
+
+
+def test_restore_snapshots_review_decision_before_accepting_snapshot() -> None:
+    authority = _AllowReviewAuthority()
+    source, request = _running_coordinator(review_authority=authority)
+    source.record_result(
+        _request_envelope(
+            request,
+            CodingResult(
+                job_id=request.work_id,
+                test_evidence=(TestEvidence(("pytest",), 0, "tests-ok"),),
+            ),
+        )
+    )
+    source.review(
+        "core",
+        ReviewDecision(
+            reviewer_id="reviewer:qa",
+            accepted=True,
+            reason="verified",
+            evidence_refs=("review:evidence",),
+        ),
+    )
+    external_snapshot = source.snapshot()
+    external_review = external_snapshot.records[0].review
+    assert external_review is not None
+
+    restored = ProductFactoryCoordinator(source.graph, review_authority=authority)
+    restored.restore(
+        external_snapshot,
+        trusted_plan_fingerprint=source.trusted_plan_fingerprint,
+    )
+
+    object.__setattr__(external_review, "accepted", False)
+    object.__setattr__(external_review, "evidence_refs", ("forged:evidence",))
+
+    live = restored.snapshot().records[0]
+    assert live.state is WorkState.ACCEPTED
+    assert live.review is not None
+    assert live.review is not external_review
+    assert live.review.accepted is True
+    assert live.review.evidence_refs == ("review:evidence",)
 
