@@ -280,6 +280,64 @@ def test_envelope_with_non_coding_result_is_contained() -> None:
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
 
+def test_nested_malformed_test_evidence_is_contained() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    malformed_result = CodingResult(
+        job_id=request.work_id,
+        test_evidence=(object(),),  # type: ignore[arg-type]
+        recovery_state=state,
+    )
+    malformed = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=malformed_result,
+    )
+    worker = FakeRecoveryPort(state, envelope_override=malformed)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.record.result is None
+    assert outcome.recovery_state == state
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_nested_malformed_failure_evidence_is_contained() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    malformed_result = CodingResult(
+        job_id=request.work_id,
+        recovery_state=state,
+        failure=object(),  # type: ignore[arg-type]
+    )
+    malformed = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=malformed_result,
+    )
+    worker = FakeRecoveryPort(state, envelope_override=malformed)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.record.result is None
+    assert outcome.recovery_state == state
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
 def test_recovery_cannot_mutate_another_running_component_with_valid_foreign_evidence() -> None:
     coordinator = _coordinator()
     coordinator.start("core")

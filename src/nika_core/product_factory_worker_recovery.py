@@ -139,7 +139,7 @@ class ProductFactoryWorkerRecovery:
             )
         try:
             updated = coordinator.record_result(envelope)
-        except CoordinatorError:
+        except (CoordinatorError, AttributeError, TypeError):
             blocked = coordinator.block(
                 component_id,
                 "worker recovery evidence is invalid; host reconciliation required",
