@@ -28,11 +28,20 @@ from nika_core.model_gateway.api_route import (
     CredentialResolverPort,
     EnvironmentCredentialResolver,
 )
-from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
+from nika_core.model_gateway.contracts import (
+    ModelRequest,
+    PrivacyClass,
+    ProviderCapabilities,
+    ProviderKind,
+)
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
 from nika_core.model_gateway.providers import OllamaProvider
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
+from nika_core.security.model_cloud_authority import (
+    StandingPermissionCloudEffectAuthorizer,
+    StandingPermissionExecutionAuthority,
+)
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
 from nika_core.ui.bridge_models import UIResult
@@ -490,6 +499,52 @@ class V01ModelSettings:
             return accepted
 
 
+class _TaskBoundCloudEffectAuthorizer:
+    """Enter standing authority on the exact task that admits the cloud effect."""
+
+    def __init__(
+        self,
+        *,
+        delegate: StandingPermissionCloudEffectAuthorizer,
+        task_id: str,
+        authority: StandingPermissionExecutionAuthority,
+    ) -> None:
+        if type(delegate) is not StandingPermissionCloudEffectAuthorizer:
+            raise TypeError("delegate must be StandingPermissionCloudEffectAuthorizer")
+        if type(task_id) is not str or not task_id:
+            raise TypeError("task_id must be exact non-empty text")
+        if type(authority) is not StandingPermissionExecutionAuthority:
+            raise TypeError("authority must be StandingPermissionExecutionAuthority")
+        if authority.context.task_id != task_id:
+            raise ValueError("cloud execution authority does not match the bound task")
+        self._delegate = delegate
+        self._task_id = task_id
+        self._authority = StandingPermissionExecutionAuthority(
+            subject_id=authority.subject_id,
+            context=authority.context,
+        )
+
+    def authorize_cloud_effect(
+        self,
+        *,
+        request: ModelRequest,
+        provider: ProviderCapabilities,
+    ) -> None:
+        request_id = request.request_id
+        task_prefix = f"{self._task_id}:"
+        if (
+            type(request_id) is not str
+            or not request_id.startswith(task_prefix)
+            or len(request_id) == len(task_prefix)
+        ):
+            raise PermissionError("cloud model request does not belong to the bound task")
+        with self._delegate.execution_scope(self._authority):
+            self._delegate.authorize_cloud_effect(
+                request=request,
+                provider=provider,
+            )
+
+
 class V01BoundModelRuntimeFactory:
     """Reconstruct the existing ModelGatewayAgentRuntime from a task's frozen route."""
 
@@ -503,7 +558,30 @@ class V01BoundModelRuntimeFactory:
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
         foundry_manager_factory: Callable[[], Any] | None = None,
         intelligence_policy: IntelligenceModePolicy | None = None,
+        cloud_effect_authorizer: StandingPermissionCloudEffectAuthorizer | None = None,
+        cloud_execution_authority_resolver: (
+            Callable[[str], StandingPermissionExecutionAuthority | None] | None
+        ) = None,
     ) -> None:
+        if (cloud_effect_authorizer is None) != (
+            cloud_execution_authority_resolver is None
+        ):
+            raise TypeError(
+                "cloud effect authorizer and execution authority resolver "
+                "must be configured together"
+            )
+        if (
+            cloud_effect_authorizer is not None
+            and type(cloud_effect_authorizer) is not StandingPermissionCloudEffectAuthorizer
+        ):
+            raise TypeError(
+                "cloud_effect_authorizer must be StandingPermissionCloudEffectAuthorizer"
+            )
+        if (
+            cloud_execution_authority_resolver is not None
+            and not callable(cloud_execution_authority_resolver)
+        ):
+            raise TypeError("cloud_execution_authority_resolver must be callable")
         self._store = store
         self._definitions = definitions
         self._settings = settings or V01ModelSettings(store)
@@ -511,12 +589,14 @@ class V01BoundModelRuntimeFactory:
         self._client_factory = client_factory
         self._foundry_manager_factory = foundry_manager_factory
         self._intelligence_policy = intelligence_policy or IntelligenceModePolicy()
+        self._cloud_effect_authorizer = cloud_effect_authorizer
+        self._cloud_execution_authority_resolver = cloud_execution_authority_resolver
 
     def for_task(self, task_id: str) -> ModelGatewayAgentRuntime | None:
         selection = self._settings.for_task(task_id)
         if selection.route_kind == "deterministic":
             return None
-        return self._runtime_for_selection(selection)
+        return self._runtime_for_selection(selection, task_id=task_id)
 
     def supervisor_for_task(
         self,
@@ -538,7 +618,7 @@ class V01BoundModelRuntimeFactory:
                 "Детермінований режим виконується packaged runtime без ModelGateway."
             )
         return MultiAgentSupervisor(
-            runtime=self._runtime_for_selection(selection),
+            runtime=self._runtime_for_selection(selection, task_id=task_id),
             store=store,
             definitions=self._definitions,
             runtime_timeout_seconds=selection.timeout_seconds,
@@ -550,7 +630,46 @@ class V01BoundModelRuntimeFactory:
             raise ModelSetupError(f"Збережений маршрут моделі не має поля {field}.")
         return value
 
-    def _runtime_for_selection(self, selection: ModelSelection) -> ModelGatewayAgentRuntime:
+    def _task_cloud_authorizer(
+        self,
+        *,
+        task_id: str,
+    ) -> _TaskBoundCloudEffectAuthorizer | None:
+        authorizer = self._cloud_effect_authorizer
+        resolver = self._cloud_execution_authority_resolver
+        if authorizer is None or resolver is None:
+            return None
+        try:
+            authority = resolver(task_id)
+        except Exception:  # noqa: BLE001 - trusted host resolver boundary
+            raise ModelSetupError(
+                "Не вдалося перевірити дозвіл для хмарної моделі."
+            ) from None
+        if type(authority) is not StandingPermissionExecutionAuthority:
+            raise ModelSetupError(
+                "Для цього завдання немає чинного дозволу на хмарну модель."
+            )
+        if authority.context.task_id != task_id:
+            raise ModelSetupError(
+                "Дозвіл на хмарну модель не належить цьому завданню."
+            )
+        try:
+            return _TaskBoundCloudEffectAuthorizer(
+                delegate=authorizer,
+                task_id=task_id,
+                authority=authority,
+            )
+        except (TypeError, ValueError):
+            raise ModelSetupError(
+                "Дозвіл на хмарну модель має некоректну прив'язку."
+            ) from None
+
+    def _runtime_for_selection(
+        self,
+        selection: ModelSelection,
+        *,
+        task_id: str,
+    ) -> ModelGatewayAgentRuntime:
         if selection.route_kind == "deterministic":
             raise ModelSetupError(
                 "Детермінований режим не повинен створювати ModelGateway runtime."
@@ -561,7 +680,19 @@ class V01BoundModelRuntimeFactory:
         if provider_kind is None:
             raise ModelSetupError("Збережений маршрут моделі не має типу постачальника.")
 
-        gateway = ModelGateway(audit_log=AuditLog(self._store))
+        cloud_effect_authorizer = (
+            self._task_cloud_authorizer(task_id=task_id)
+            if provider_kind is ProviderKind.CLOUD
+            else None
+        )
+        gateway = (
+            ModelGateway(
+                audit_log=AuditLog(self._store),
+                cloud_effect_authorizer=cloud_effect_authorizer,
+            )
+            if cloud_effect_authorizer is not None
+            else ModelGateway(audit_log=AuditLog(self._store))
+        )
         mode = {
             "foundry_local": IntelligenceMode.EMBEDDED_LOCAL,
             "ollama": IntelligenceMode.EXTERNAL_LOCAL,
