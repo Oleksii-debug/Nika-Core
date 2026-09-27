@@ -27,6 +27,14 @@ from .contracts import (
     WorkspaceLease,
 )
 from .fake_worker import DeterministicCodingWorker
+from .openhands_remote_worker import (
+    OpenHandsRemoteCodingWorker,
+    OpenHandsRemoteWorkerConfig,
+    OpenHandsRemoteWorkerError,
+    OpenHandsSandboxAttestation,
+    OpenHandsSandboxAttestor,
+    PinnedOpenHandsSandboxAttestor,
+)
 from .repository import InvalidTransitionError, StaleTransitionError, ToolsmithRepository
 from .reuse_search import (
     REUSE_SOURCE_ORDER,
@@ -58,6 +66,12 @@ __all__ = [
     "IsolationClass",
     "NetworkMode",
     "NetworkPolicy",
+    "OpenHandsRemoteCodingWorker",
+    "OpenHandsRemoteWorkerConfig",
+    "OpenHandsRemoteWorkerError",
+    "OpenHandsSandboxAttestation",
+    "OpenHandsSandboxAttestor",
+    "PinnedOpenHandsSandboxAttestor",
     "ProcessPolicy",
     "RecoveryState",
     "RepositorySnapshot",
