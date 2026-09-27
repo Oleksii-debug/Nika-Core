@@ -95,7 +95,8 @@ class ProductFactoryWorkerRecovery:
                 record=blocked,
                 recovery_state=None,
             )
-        if not _valid_recovery_state_carrier(state):
+        observed_state = _canonical_recovery_state(state)
+        if observed_state is None:
             blocked = coordinator.block(
                 component_id,
                 "worker recovery evidence is invalid; host reconciliation required",
@@ -108,7 +109,10 @@ class ProductFactoryWorkerRecovery:
             )
 
         try:
-            envelope = await self.worker.recover(record.request, state)
+            envelope = await self.worker.recover(
+                record.request,
+                RecoveryState(observed_state.phase, observed_state.opaque_token),
+            )
         except Exception:  # noqa: BLE001 - isolate one external worker boundary failure
             blocked = coordinator.block(
                 component_id,
@@ -118,9 +122,10 @@ class ProductFactoryWorkerRecovery:
                 component_id=component_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_RECOVERY_FAILED,
                 record=blocked,
-                recovery_state=state,
+                recovery_state=observed_state,
             )
-        if not _valid_recovery_envelope_carriers(envelope):
+        canonical_envelope = _canonical_recovery_envelope(envelope)
+        if canonical_envelope is None:
             blocked = coordinator.block(
                 component_id,
                 "worker recovery evidence is invalid; host reconciliation required",
@@ -129,9 +134,9 @@ class ProductFactoryWorkerRecovery:
                 component_id=component_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
                 record=blocked,
-                recovery_state=state,
+                recovery_state=observed_state,
             )
-        if envelope.component_id != component_id:
+        if canonical_envelope.component_id != component_id:
             blocked = coordinator.block(
                 component_id,
                 "worker recovery evidence is invalid; host reconciliation required",
@@ -140,10 +145,10 @@ class ProductFactoryWorkerRecovery:
                 component_id=component_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
                 record=blocked,
-                recovery_state=state,
+                recovery_state=observed_state,
             )
         try:
-            updated = coordinator.record_result(envelope)
+            updated = coordinator.record_result(canonical_envelope)
         except (CoordinatorError, AttributeError, TypeError):
             blocked = coordinator.block(
                 component_id,
@@ -153,46 +158,44 @@ class ProductFactoryWorkerRecovery:
                 component_id=component_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
                 record=blocked,
-                recovery_state=state,
+                recovery_state=observed_state,
             )
         return WorkerRecoveryOutcome(
             component_id=component_id,
             disposition=WorkerRecoveryDisposition.RECOVERED,
             record=updated,
-            recovery_state=state,
+            recovery_state=observed_state,
         )
 
 
-def _valid_recovery_state_carrier(value: object) -> bool:
+def _canonical_recovery_state(value: object) -> RecoveryState | None:
     if not (
         type(value) is RecoveryState
         and type(value.phase) is str
         and (value.opaque_token is None or type(value.opaque_token) is str)
     ):
-        return False
+        return None
     try:
-        RecoveryState(value.phase, value.opaque_token)
+        return RecoveryState(value.phase, value.opaque_token)
     except (TypeError, ValueError):
-        return False
-    return True
+        return None
 
 
-def _valid_changed_file_carrier(value: object) -> bool:
+def _canonical_changed_file(value: object) -> ChangedFile | None:
     if not (
         type(value) is ChangedFile
         and type(value.path) is str
         and type(value.sha256) is str
         and type(value.size_bytes) is int
     ):
-        return False
+        return None
     try:
-        ChangedFile(value.path, value.sha256, value.size_bytes)
+        return ChangedFile(value.path, value.sha256, value.size_bytes)
     except (TypeError, ValueError):
-        return False
-    return True
+        return None
 
 
-def _valid_test_evidence_carrier(value: object) -> bool:
+def _canonical_test_evidence(value: object) -> TestEvidence | None:
     if not (
         type(value) is TestEvidence
         and type(value.command) is tuple
@@ -200,47 +203,44 @@ def _valid_test_evidence_carrier(value: object) -> bool:
         and type(value.exit_code) is int
         and type(value.output_digest) is str
     ):
-        return False
+        return None
     try:
-        TestEvidence(value.command, value.exit_code, value.output_digest)
+        return TestEvidence(value.command, value.exit_code, value.output_digest)
     except (TypeError, ValueError):
-        return False
-    return True
+        return None
 
 
-def _valid_artifact_evidence_carrier(value: object) -> bool:
+def _canonical_artifact_evidence(value: object) -> ArtifactEvidence | None:
     if not (
         type(value) is ArtifactEvidence
         and type(value.name) is str
         and type(value.digest) is str
         and type(value.media_type) is str
     ):
-        return False
+        return None
     try:
-        ArtifactEvidence(value.name, value.digest, value.media_type)
+        return ArtifactEvidence(value.name, value.digest, value.media_type)
     except (TypeError, ValueError):
-        return False
-    return True
+        return None
 
 
-def _valid_worker_failure_carrier(value: object) -> bool:
+def _canonical_worker_failure(value: object) -> WorkerFailure | None:
     if not (
         type(value) is WorkerFailure
         and type(value.kind) is WorkerFailureKind
         and type(value.message) is str
         and type(value.retryable) is bool
     ):
-        return False
+        return None
     try:
-        WorkerFailure(value.kind, value.message, value.retryable)
+        return WorkerFailure(value.kind, value.message, value.retryable)
     except (TypeError, ValueError):
-        return False
-    return True
+        return None
 
 
-def _valid_recovery_envelope_carriers(value: object) -> bool:
+def _canonical_recovery_envelope(value: object) -> WorkerResultEnvelope | None:
     if type(value) is not WorkerResultEnvelope:
-        return False
+        return None
     if not all(
         type(item) is str
         for item in (
@@ -252,42 +252,71 @@ def _valid_recovery_envelope_carriers(value: object) -> bool:
             value.diff_digest,
         )
     ):
-        return False
+        return None
+
+    result = value.coding_result
+    if type(result) is not CodingResult or type(result.job_id) is not str:
+        return None
+    if type(result.changed_files) is not tuple:
+        return None
+    if type(result.test_evidence) is not tuple:
+        return None
+    if type(result.artifacts) is not tuple:
+        return None
+
+    changed_files: list[ChangedFile] = []
+    for item in result.changed_files:
+        canonical = _canonical_changed_file(item)
+        if canonical is None:
+            return None
+        changed_files.append(canonical)
+
+    test_evidence: list[TestEvidence] = []
+    for item in result.test_evidence:
+        canonical = _canonical_test_evidence(item)
+        if canonical is None:
+            return None
+        test_evidence.append(canonical)
+
+    artifacts: list[ArtifactEvidence] = []
+    for item in result.artifacts:
+        canonical = _canonical_artifact_evidence(item)
+        if canonical is None:
+            return None
+        artifacts.append(canonical)
+
+    recovery_state = None
+    if result.recovery_state is not None:
+        recovery_state = _canonical_recovery_state(result.recovery_state)
+        if recovery_state is None:
+            return None
+
+    failure = None
+    if result.failure is not None:
+        failure = _canonical_worker_failure(result.failure)
+        if failure is None:
+            return None
+
+    canonical_result = CodingResult(
+        job_id=result.job_id,
+        changed_files=tuple(changed_files),
+        test_evidence=tuple(test_evidence),
+        artifacts=tuple(artifacts),
+        recovery_state=recovery_state,
+        failure=failure,
+    )
     try:
-        WorkerResultEnvelope(
+        return WorkerResultEnvelope(
             work_id=value.work_id,
             component_id=value.component_id,
             repository_id=value.repository_id,
             base_sha=value.base_sha,
             result_sha=value.result_sha,
             diff_digest=value.diff_digest,
-            coding_result=value.coding_result,
+            coding_result=canonical_result,
         )
     except (TypeError, ValueError):
-        return False
-
-    result = value.coding_result
-    if type(result) is not CodingResult or type(result.job_id) is not str:
-        return False
-    if type(result.changed_files) is not tuple or not all(
-        _valid_changed_file_carrier(item) for item in result.changed_files
-    ):
-        return False
-    if type(result.test_evidence) is not tuple or not all(
-        _valid_test_evidence_carrier(item) for item in result.test_evidence
-    ):
-        return False
-    if type(result.artifacts) is not tuple or not all(
-        _valid_artifact_evidence_carrier(item) for item in result.artifacts
-    ):
-        return False
-    if result.recovery_state is not None and not _valid_recovery_state_carrier(
-        result.recovery_state
-    ):
-        return False
-    if result.failure is not None and not _valid_worker_failure_carrier(result.failure):
-        return False
-    return True
+        return None
 
 
 def _record_from_snapshot(
