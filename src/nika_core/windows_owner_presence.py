@@ -141,6 +141,10 @@ class WindowsOwnerPresenceObserver:
         if last_after != last_before:
             presence = OwnerPresence.ACTIVE
         else:
+            if current_tick < _DWORD_MODULUS and last_after > current_tick:
+                raise ValueError(
+                    "last input tick cannot be ahead of current tick before the first DWORD wrap"
+                )
             idle_ms = ((current_tick & _DWORD_MAX) - last_after) & _DWORD_MAX
             presence = (
                 OwnerPresence.AWAY
