@@ -270,8 +270,8 @@ class BatchCursor:
             input_count=len(targets),
             plan_fingerprint=_plan_fingerprint(normalized, batch_size, len(targets)),
             targets=normalized,
+            next_scheduled_intent=_target_intent(normalized[0]) if normalized else None,
         )
-        state.next_scheduled_intent = _derive_intent(state)
         cursor = cls(memory, ledger, state)
         cursor._persist()
         return cursor
