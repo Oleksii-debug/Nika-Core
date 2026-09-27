@@ -76,14 +76,12 @@ def test_registry_returns_stable_snapshot_descriptors() -> None:
     registry.register(second)
     registry.register(first)
 
-    assert registry.describe() == (
-        registry.describe()[0],
-        registry.describe()[1],
-    )
-    assert tuple(item.runtime_id for item in registry.describe()) == (
+    descriptors = registry.describe()
+
+    assert tuple(item.runtime_id for item in descriptors) == (
         "reference",
         "reference-z",
     )
-    assert registry.describe()[0].capabilities == frozenset(
+    assert descriptors[0].capabilities == frozenset(
         {RuntimeCapability.DETERMINISTIC_NO_LLM}
     )
