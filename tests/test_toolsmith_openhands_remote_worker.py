@@ -140,6 +140,89 @@ def test_remote_worker_applies_only_validated_delta_and_runs_nika_acceptance(
     assert "Do not commit, push" in runtime.calls[0][2]
 
 
+
+def test_remote_worker_does_not_disclose_acceptance_arguments_to_engine(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    canary = "NIKA_ACCEPTANCE_ARGUMENT_CANARY"
+    job = CodingJob(
+        job.job_id,
+        job.task_id,
+        job.goal,
+        job.repository,
+        job.lease,
+        job.allowed_paths,
+        job.process_policy,
+        job.network_policy,
+        job.resource_budget,
+        (AcceptanceCommand((sys.executable, "-c", f"print('{canary}')")),),
+        job.permission_ceiling,
+    )
+    runtime = Runtime()
+
+    result = _run(OpenHandsRemoteCodingWorker(Provider(), runtime).execute(job))
+
+    assert result.succeeded
+    assert canary not in runtime.calls[0][2]
+    assert "Acceptance command arguments are intentionally withheld" in runtime.calls[0][2]
+
+
+def test_failed_acceptance_preserves_changed_evidence_and_requires_new_job(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    job = CodingJob(
+        job.job_id,
+        job.task_id,
+        job.goal,
+        job.repository,
+        job.lease,
+        job.allowed_paths,
+        job.process_policy,
+        job.network_policy,
+        job.resource_budget,
+        (AcceptanceCommand((sys.executable, "-c", "raise SystemExit(7)")),),
+        job.permission_ceiling,
+    )
+    runtime = Runtime((RemoteFile("src/value.txt", b"after\n"),))
+    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+
+    result = _run(worker.execute(job))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "process_failed"
+    assert result.failure.retryable is True
+    assert [item.path for item in result.changed_files] == ["src/value.txt"]
+    assert result.test_evidence[0].exit_code == 7
+    assert result.recovery_state is not None
+    assert result.recovery_state.phase == "repair_required"
+    assert root.joinpath("src/value.txt").read_bytes() == b"after\n"
+
+    recovery = _run(worker.recover(job, result.recovery_state))
+
+    assert not recovery.succeeded
+    assert recovery.failure is not None
+    assert recovery.failure.kind.value == "invalid_request"
+    assert len(runtime.calls) == 1
+
+
+def test_worker_visible_git_metadata_is_rejected_before_remote_execution(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    root.joinpath(".git").mkdir()
+    provider = Provider()
+    runtime = Runtime()
+    job = _job(root)
+
+    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(job))
+
+    assert not result.succeeded
+    assert ".git" in result.failure.message
+    assert provider.acquired == []
+    assert runtime.calls == []
+
+
 def test_remote_worker_rejects_out_of_scope_change_before_local_mutation(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime(
