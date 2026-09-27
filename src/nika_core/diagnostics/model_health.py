@@ -269,7 +269,7 @@ class OllamaModelHealthProbe:
         return ModelHealthFact.UNKNOWN
 
     def _presence_from_response(self, response: httpx.Response) -> ModelHealthFact:
-        if not 200 <= response.status_code < 300:
+        if not self._successful_response(response):
             return ModelHealthFact.UNKNOWN
         models = self._models(response)
         if models is None:
@@ -277,7 +277,7 @@ class OllamaModelHealthProbe:
         return ModelHealthFact.YES if self._selected_model_in(models) else ModelHealthFact.NO
 
     def _readiness_from_response(self, response: httpx.Response) -> ModelHealthFact:
-        if not 200 <= response.status_code < 300:
+        if not self._successful_response(response):
             return ModelHealthFact.UNKNOWN
         models = self._models(response)
         if models is None:
@@ -296,22 +296,29 @@ class OllamaModelHealthProbe:
         return f"{self._model_id}:latest" in models
 
     @staticmethod
+    def _successful_response(response: httpx.Response) -> bool:
+        status_code = response.status_code
+        return type(status_code) is int and 200 <= status_code < 300
+
+    @staticmethod
     def _models(response: httpx.Response) -> set[str] | None:
         try:
             body = response.json()
         except (ValueError, TypeError):
             return None
-        if not isinstance(body, dict):
+        if type(body) is not dict:
             return None
         raw_models = body.get("models")
-        if not isinstance(raw_models, list):
+        if type(raw_models) is not list:
             return None
         identities: set[str] = set()
         for item in raw_models:
-            if not isinstance(item, dict):
+            if type(item) is not dict:
                 return None
             for key in ("model", "name"):
                 value = item.get(key)
-                if isinstance(value, str) and value:
+                if isinstance(value, str) and type(value) is not str:
+                    return None
+                if type(value) is str and value:
                     identities.add(value)
         return identities

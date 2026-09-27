@@ -14,6 +14,25 @@ from nika_core.diagnostics import (
 )
 
 
+class _BehavioralDict(dict[str, object]):
+    def get(self, key: str, default: object = None) -> object:
+        raise AssertionError("behavioral dict must not execute")
+
+
+class _BehavioralList(list[object]):
+    def __iter__(self):  # type: ignore[no-untyped-def]
+        raise AssertionError("behavioral list must not execute")
+
+
+class _BehavioralString(str):
+    def __hash__(self) -> int:
+        raise AssertionError("behavioral string must not execute")
+
+
+class _BehavioralStatus(int):
+    pass
+
+
 class _Response:
     def __init__(self, payload: object, *, status_code: int = 200) -> None:
         self._payload = payload
@@ -97,6 +116,33 @@ def _probe(
         ),
         calls,
     )
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        _Response(_BehavioralDict({"models": []})),
+        _Response({"models": _BehavioralList([])}),
+        _Response({"models": [_BehavioralDict({"name": "local-model:1"})]}),
+        _Response({"models": [{"name": _BehavioralString("local-model:1")}]}),
+        _Response(
+            {"models": [{"name": "local-model:1"}]},
+            status_code=_BehavioralStatus(200),
+        ),
+    ],
+)
+def test_noncanonical_provider_response_carriers_never_gain_model_authority(
+    response: _Response,
+) -> None:
+    probe, calls = _probe(tags=response)
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.configured is ModelHealthFact.YES
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["http://localhost:11434/api/tags"]
 
 
 def test_server_reachable_but_model_absent_is_not_ready() -> None:
