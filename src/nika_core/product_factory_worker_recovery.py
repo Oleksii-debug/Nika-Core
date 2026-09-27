@@ -164,48 +164,78 @@ class ProductFactoryWorkerRecovery:
 
 
 def _valid_recovery_state_carrier(value: object) -> bool:
-    return (
+    if not (
         type(value) is RecoveryState
         and type(value.phase) is str
         and (value.opaque_token is None or type(value.opaque_token) is str)
-    )
+    ):
+        return False
+    try:
+        RecoveryState(value.phase, value.opaque_token)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _valid_changed_file_carrier(value: object) -> bool:
-    return (
+    if not (
         type(value) is ChangedFile
         and type(value.path) is str
         and type(value.sha256) is str
         and type(value.size_bytes) is int
-    )
+    ):
+        return False
+    try:
+        ChangedFile(value.path, value.sha256, value.size_bytes)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _valid_test_evidence_carrier(value: object) -> bool:
-    return (
+    if not (
         type(value) is TestEvidence
         and type(value.command) is tuple
         and all(type(part) is str for part in value.command)
         and type(value.exit_code) is int
         and type(value.output_digest) is str
-    )
+    ):
+        return False
+    try:
+        TestEvidence(value.command, value.exit_code, value.output_digest)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _valid_artifact_evidence_carrier(value: object) -> bool:
-    return (
+    if not (
         type(value) is ArtifactEvidence
         and type(value.name) is str
         and type(value.digest) is str
         and type(value.media_type) is str
-    )
+    ):
+        return False
+    try:
+        ArtifactEvidence(value.name, value.digest, value.media_type)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _valid_worker_failure_carrier(value: object) -> bool:
-    return (
+    if not (
         type(value) is WorkerFailure
         and type(value.kind) is WorkerFailureKind
         and type(value.message) is str
         and type(value.retryable) is bool
-    )
+    ):
+        return False
+    try:
+        WorkerFailure(value.kind, value.message, value.retryable)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _valid_recovery_envelope_carriers(value: object) -> bool:
@@ -222,6 +252,18 @@ def _valid_recovery_envelope_carriers(value: object) -> bool:
             value.diff_digest,
         )
     ):
+        return False
+    try:
+        WorkerResultEnvelope(
+            work_id=value.work_id,
+            component_id=value.component_id,
+            repository_id=value.repository_id,
+            base_sha=value.base_sha,
+            result_sha=value.result_sha,
+            diff_digest=value.diff_digest,
+            coding_result=value.coding_result,
+        )
+    except (TypeError, ValueError):
         return False
 
     result = value.coding_result
