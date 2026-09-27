@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import pathlib
+import shutil
 import tempfile
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
@@ -208,7 +209,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 changed = _validate_and_apply_snapshot(job, local_root, source_evidence, run.files)
                 applied = True
                 candidate_evidence = collect_tree_evidence(local_root)
-                tests = _run_acceptance(job, local_root)
+                tests = _run_acceptance(job, local_root, candidate_evidence)
                 post_acceptance_evidence = collect_tree_evidence(local_root)
                 if post_acceptance_evidence != candidate_evidence:
                     raise OpenHandsWorkspaceMutationError(
@@ -547,36 +548,54 @@ def _validate_and_apply_snapshot(
     )
 
 
-def _run_acceptance(job: CodingJob, root: pathlib.Path) -> tuple[TestEvidence, ...]:
-    evidence: list[TestEvidence] = []
-    environment = sterile_git_environment(os.environ)
-    for command in job.acceptance_commands:
-        cwd = root
-        if command.cwd != ".":
-            policy = WorkspacePathPolicy((command.cwd,))
-            cwd = ensure_path_policy(root, command.cwd, policy, must_exist=True)
-            if not cwd.is_dir():
-                raise OpenHandsWorkerError("acceptance command cwd is not a directory")
-        timeout_seconds = command.timeout_seconds or job.resource_budget.timeout_seconds
-        budget = ResourceBudget(
-            timeout_seconds=timeout_seconds,
-            max_output_bytes=job.resource_budget.max_output_bytes,
-            max_changed_files=job.resource_budget.max_changed_files,
-        )
-        result = run_typed_process(
-            command.argv,
-            process_policy=job.process_policy,
-            resource_budget=budget,
-            cwd=cwd,
-            environment=environment,
-        )
-        output_digest = hashlib.sha256(
-            result.stdout.encode("utf-8") + b"\x00" + result.stderr.encode("utf-8")
-        ).hexdigest()
-        evidence.append(TestEvidence(result.argv, result.returncode, output_digest))
-        if result.timed_out or result.cancelled or result.output_limit_exceeded:
-            break
-    return tuple(evidence)
+def _run_acceptance(
+    job: CodingJob,
+    root: pathlib.Path,
+    candidate_evidence: TreeEvidence,
+) -> tuple[TestEvidence, ...]:
+    with tempfile.TemporaryDirectory(prefix="nika-openhands-acceptance-") as temp_root_text:
+        acceptance_root = pathlib.Path(temp_root_text) / "candidate"
+        shutil.copytree(root, acceptance_root, copy_function=shutil.copy2)
+        copied_evidence = collect_tree_evidence(acceptance_root)
+        if copied_evidence != candidate_evidence:
+            raise OpenHandsWorkspaceMutationError(
+                "acceptance workspace copy does not match validated candidate"
+            )
+
+        evidence: list[TestEvidence] = []
+        environment = sterile_git_environment(os.environ)
+        for command in job.acceptance_commands:
+            cwd = acceptance_root
+            if command.cwd != ".":
+                policy = WorkspacePathPolicy((command.cwd,))
+                cwd = ensure_path_policy(
+                    acceptance_root,
+                    command.cwd,
+                    policy,
+                    must_exist=True,
+                )
+                if not cwd.is_dir():
+                    raise OpenHandsWorkerError("acceptance command cwd is not a directory")
+            timeout_seconds = command.timeout_seconds or job.resource_budget.timeout_seconds
+            budget = ResourceBudget(
+                timeout_seconds=timeout_seconds,
+                max_output_bytes=job.resource_budget.max_output_bytes,
+                max_changed_files=job.resource_budget.max_changed_files,
+            )
+            result = run_typed_process(
+                command.argv,
+                process_policy=job.process_policy,
+                resource_budget=budget,
+                cwd=cwd,
+                environment=environment,
+            )
+            output_digest = hashlib.sha256(
+                result.stdout.encode("utf-8") + b"\x00" + result.stderr.encode("utf-8")
+            ).hexdigest()
+            evidence.append(TestEvidence(result.argv, result.returncode, output_digest))
+            if result.timed_out or result.cancelled or result.output_limit_exceeded:
+                break
+        return tuple(evidence)
 
 
 def _failure_result(
