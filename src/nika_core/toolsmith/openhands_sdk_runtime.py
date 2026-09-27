@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import hashlib
 import importlib.metadata
 import io
@@ -36,6 +37,17 @@ class OpenHandsSdkCompatibilityError(RuntimeError):
     """Raised when the installed OpenHands SDK cannot satisfy the pinned adapter contract."""
 
 
+class OpenHandsSdkExecutionCancelled(RuntimeError):
+    """Raised inside the SDK thread when Nika requested cancellation before/during a run."""
+
+
+@dataclasses.dataclass(slots=True)
+class _ActiveExecution:
+    conversation: Any | None = None
+    cancel_requested: threading.Event = dataclasses.field(default_factory=threading.Event)
+    done: threading.Event = dataclasses.field(default_factory=threading.Event)
+
+
 class OpenHandsSdkRemoteRuntime:
     """Thin OpenHands SDK adapter for an already-provisioned remote sandbox.
 
@@ -60,7 +72,7 @@ class OpenHandsSdkRemoteRuntime:
         self._workspace_factory = workspace_factory
         self._agent_factory = agent_factory
         self._max_iterations = max_iterations
-        self._active: dict[str, Any] = {}
+        self._active: dict[str, _ActiveExecution] = {}
         self._active_lock = threading.Lock()
 
     async def execute(
@@ -71,6 +83,13 @@ class OpenHandsSdkRemoteRuntime:
         source_root: pathlib.Path,
         source_evidence: TreeEvidence,
     ) -> OpenHandsRunEvidence:
+        active = _ActiveExecution()
+        with self._active_lock:
+            if job.job_id in self._active:
+                raise OpenHandsSdkCompatibilityError(
+                    "OpenHands SDK job identity is already active"
+                )
+            self._active[job.job_id] = active
         try:
             return await asyncio.to_thread(
                 self._execute_sync,
@@ -79,6 +98,7 @@ class OpenHandsSdkRemoteRuntime:
                 prompt,
                 source_root,
                 source_evidence,
+                active,
             )
         except asyncio.CancelledError:
             await self.cancel(job.job_id)
@@ -86,26 +106,29 @@ class OpenHandsSdkRemoteRuntime:
 
     async def cancel(self, job_id: str) -> bool:
         with self._active_lock:
-            conversation = self._active.get(job_id)
-        if conversation is None:
-            return False
-        try:
-            await asyncio.to_thread(conversation.interrupt)
-        except Exception as exc:  # noqa: BLE001 - third-party SDK boundary
-            _LOGGER.warning(
-                "OpenHands interrupt failed; remote stop remains unverified (%s)",
-                type(exc).__name__,
-            )
-            return False
+            active = self._active.get(job_id)
+            if active is None:
+                return False
+            active.cancel_requested.set()
+            conversation = active.conversation
 
-        # interrupt() is only a request. A stop is considered proven only when the
-        # blocking SDK execution has unwound and removed its active conversation.
+        if conversation is not None:
+            try:
+                await asyncio.to_thread(conversation.interrupt)
+            except Exception as exc:  # noqa: BLE001 - third-party SDK boundary
+                _LOGGER.warning(
+                    "OpenHands interrupt failed; remote stop remains unverified (%s)",
+                    type(exc).__name__,
+                )
+
+        # Cancellation can arrive while source upload/agent creation is still running,
+        # before a Conversation exists. The sync thread observes cancel_requested before
+        # send/run. A stop is proven only when that thread reaches its finalizer.
         for _ in range(50):
+            if active.done.is_set():
+                return True
             await asyncio.sleep(0.1)
-            with self._active_lock:
-                if job_id not in self._active:
-                    return True
-        return False
+        return active.done.is_set()
 
     def _execute_sync(
         self,
@@ -114,21 +137,34 @@ class OpenHandsSdkRemoteRuntime:
         prompt: str,
         source_root: pathlib.Path,
         source_evidence: TreeEvidence,
+        active: _ActiveExecution,
     ) -> OpenHandsRunEvidence:
-        Conversation = _load_conversation_type()
-        workspace = self._workspace_factory(endpoint)
-        if getattr(workspace, "working_dir", None) != endpoint.working_dir:
-            raise OpenHandsSdkCompatibilityError(
-                "workspace factory returned a different remote working directory"
-            )
-        if getattr(workspace, "host", "").rstrip("/") != endpoint.host.rstrip("/"):
-            raise OpenHandsSdkCompatibilityError("workspace factory returned a different endpoint")
-
         conversation = None
         try:
+            Conversation = _load_conversation_type()
+            workspace = self._workspace_factory(endpoint)
+            if getattr(workspace, "working_dir", None) != endpoint.working_dir:
+                raise OpenHandsSdkCompatibilityError(
+                    "workspace factory returned a different remote working directory"
+                )
+            if getattr(workspace, "host", "").rstrip("/") != endpoint.host.rstrip("/"):
+                raise OpenHandsSdkCompatibilityError(
+                    "workspace factory returned a different endpoint"
+                )
+
             with workspace:
                 self._upload_source(workspace, endpoint, source_root, source_evidence)
+                if active.cancel_requested.is_set():
+                    raise OpenHandsSdkExecutionCancelled(
+                        "OpenHands execution cancelled before agent creation"
+                    )
+
                 agent = self._agent_factory(job, endpoint)
+                if active.cancel_requested.is_set():
+                    raise OpenHandsSdkExecutionCancelled(
+                        "OpenHands execution cancelled before conversation creation"
+                    )
+
                 conversation = Conversation(
                     agent=agent,
                     workspace=workspace,
@@ -141,12 +177,25 @@ class OpenHandsSdkRemoteRuntime:
                     },
                 )
                 with self._active_lock:
-                    self._active[job.job_id] = conversation
+                    active.conversation = conversation
+                if active.cancel_requested.is_set():
+                    raise OpenHandsSdkExecutionCancelled(
+                        "OpenHands execution cancelled before message dispatch"
+                    )
+
                 conversation.send_message(prompt, sender="nika-core")
+                if active.cancel_requested.is_set():
+                    raise OpenHandsSdkExecutionCancelled(
+                        "OpenHands execution cancelled before conversation run"
+                    )
                 conversation.run(
                     blocking=True,
                     timeout=float(job.resource_budget.timeout_seconds),
                 )
+                if active.cancel_requested.is_set():
+                    raise OpenHandsSdkExecutionCancelled(
+                        "OpenHands execution cancelled before snapshot collection"
+                    )
                 files = _download_snapshot(
                     workspace,
                     endpoint,
@@ -155,8 +204,6 @@ class OpenHandsSdkRemoteRuntime:
                 )
                 return OpenHandsRunEvidence(str(conversation.id), files)
         finally:
-            with self._active_lock:
-                self._active.pop(job.job_id, None)
             if conversation is not None:
                 try:
                     conversation.close()
@@ -165,6 +212,10 @@ class OpenHandsSdkRemoteRuntime:
                         "OpenHands conversation close requires reconciliation (%s)",
                         type(exc).__name__,
                     )
+            active.done.set()
+            with self._active_lock:
+                if self._active.get(job.job_id) is active:
+                    self._active.pop(job.job_id, None)
 
     @staticmethod
     def _upload_source(
