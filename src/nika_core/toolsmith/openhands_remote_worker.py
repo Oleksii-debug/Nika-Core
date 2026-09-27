@@ -178,12 +178,14 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
 
     async def execute(self, job: CodingJob) -> CodingResult:
         async with self._lock:
-            if job.job_id in self._states and self._states[job.job_id].phase == "running":
+            existing = self._states.get(job.job_id)
+            if existing is not None:
                 return _failure_result(
                     job,
                     WorkerFailureKind.INVALID_REQUEST,
-                    "coding job is already running",
+                    "coding job identity already has worker state; use recovery or a new job",
                     retryable=False,
+                    state=existing,
                 )
             self._states[job.job_id] = RecoveryState("running")
 
@@ -290,7 +292,9 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     test_evidence=tests,
                 )
             except Exception:  # noqa: BLE001 - untrusted coding-engine boundary
-                state = RecoveryState("interrupted")
+                state = RecoveryState(
+                    "manual_reconcile_required" if applied else "interrupted"
+                )
                 await self._set_state(job.job_id, state)
                 return _failure_result(
                     job,
