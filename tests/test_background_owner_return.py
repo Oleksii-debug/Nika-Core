@@ -403,3 +403,111 @@ def test_presence_from_different_audit_store_cannot_authorize_continue(
 
     assert queue.get(task_id).state is TaskState.RUNNING
     assert runtime.cancel_calls == []
+
+
+def test_runtime_start_before_background_permission_cannot_prove_background_origin(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = SQLiteStore(tmp_path / "misordered-provenance.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    audit = AuditLog(store)
+    coordinator = TaskRuntimeCoordinator(queue, audit, recovery_owner_id="misordered-test")
+    task = queue.create(workspace_id="living", agent_id="nika")
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    thread_id = f"background-{task.task_id}"
+    coordinator.sessions.record_active(
+        task_id=task.task_id,
+        runtime_id=PausableRuntime.runtime_id,
+        thread_id=thread_id,
+        resume_token="resume-token",
+    )
+    audit.append(
+        event_type="runtime.started",
+        entity_type="task",
+        entity_id=task.task_id,
+        payload={"runtime_id": PausableRuntime.runtime_id, "thread_id": thread_id},
+    )
+    audit.append(
+        event_type="background.dispatch_permitted",
+        entity_type="task",
+        entity_id=task.task_id,
+        payload={"work_kind": "reading_research", "resumed": False},
+    )
+    runtime = PausableRuntime()
+    controller = WindowsBackgroundOwnerReturnController(
+        coordinator=coordinator,
+        audit=audit,
+        presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
+        clock=lambda: now,
+    )
+
+    with pytest.raises(ValueError, match="matching runtime start"):
+        asyncio.run(
+            controller.reconcile(
+                runtime=runtime,
+                task_id=task.task_id,
+                thread_id=thread_id,
+            )
+        )
+
+    assert queue.get(task.task_id).state is TaskState.RUNNING
+    assert runtime.cancel_calls == []
+    assert audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+    ) == ()
+
+
+def test_foreign_runtime_start_after_permission_cannot_prove_background_origin(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = SQLiteStore(tmp_path / "foreign-runtime-provenance.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    audit = AuditLog(store)
+    coordinator = TaskRuntimeCoordinator(queue, audit, recovery_owner_id="foreign-runtime-test")
+    task = queue.create(workspace_id="living", agent_id="nika")
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    thread_id = f"background-{task.task_id}"
+    coordinator.sessions.record_active(
+        task_id=task.task_id,
+        runtime_id=PausableRuntime.runtime_id,
+        thread_id=thread_id,
+        resume_token="resume-token",
+    )
+    audit.append(
+        event_type="background.dispatch_permitted",
+        entity_type="task",
+        entity_id=task.task_id,
+        payload={"work_kind": "reading_research", "resumed": False},
+    )
+    audit.append(
+        event_type="runtime.started",
+        entity_type="task",
+        entity_id=task.task_id,
+        payload={"runtime_id": "other-runtime", "thread_id": thread_id},
+    )
+    runtime = PausableRuntime()
+    controller = WindowsBackgroundOwnerReturnController(
+        coordinator=coordinator,
+        audit=audit,
+        presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
+        clock=lambda: now,
+    )
+
+    with pytest.raises(ValueError, match="matching runtime start"):
+        asyncio.run(
+            controller.reconcile(
+                runtime=runtime,
+                task_id=task.task_id,
+                thread_id=thread_id,
+            )
+        )
+
+    assert queue.get(task.task_id).state is TaskState.RUNNING
+    assert runtime.cancel_calls == []
