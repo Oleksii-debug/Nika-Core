@@ -14,6 +14,11 @@ from nika_core.product_command.product_project_adapter import (
     ProductProjectPresentationConsistencyError,
 )
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_packaged_planning import (
+    PackagedProductFactoryPlanningError,
+    PackagedProductFactoryTeamPlanner,
+    PackagedTeamPlanResult,
+)
 from nika_core.product_project import ProductProjectSpec
 from nika_core.ui.bridge_models import UIResult
 
@@ -33,6 +38,22 @@ _CURRENT_PROJECT_COMMANDS = frozenset(
         "show current productproject",
         "поточний productproject",
         "покажи поточний productproject",
+    }
+)
+_PLAN_CURRENT_PRODUCT_FACTORY_COMMANDS = frozenset(
+    {
+        "plan current productproject",
+        "plan current product factory",
+        "сплануй поточний productproject",
+        "сплануй product factory для поточного productproject",
+    }
+)
+_SHOW_CURRENT_PRODUCT_FACTORY_PLAN_COMMANDS = frozenset(
+    {
+        "current product factory plan",
+        "show current product factory plan",
+        "поточний план product factory",
+        "покажи поточний план product factory",
     }
 )
 
@@ -71,8 +92,17 @@ def packaged_product_reopen_target(command: str) -> str | None:
 
 def packaged_current_product_command(command: str) -> bool:
     """Recognize an exact keyboard command that reports the durable presentation selection."""
-    normalized = " ".join(command.split()).casefold().strip(" :")
-    return normalized in _CURRENT_PROJECT_COMMANDS
+    return _normalized_exact_command(command) in _CURRENT_PROJECT_COMMANDS
+
+
+def packaged_plan_current_product_factory_command(command: str) -> bool:
+    """Recognize an exact command that persists a planning-only Product Factory team plan."""
+    return _normalized_exact_command(command) in _PLAN_CURRENT_PRODUCT_FACTORY_COMMANDS
+
+
+def packaged_show_current_product_factory_plan_command(command: str) -> bool:
+    """Recognize an exact command that reports the persisted deterministic team plan."""
+    return _normalized_exact_command(command) in _SHOW_CURRENT_PRODUCT_FACTORY_PLAN_COMMANDS
 
 
 class PackagedProductSelectionStore:
@@ -121,7 +151,8 @@ class PackagedProductCommandRouter:
     """Route packaged command input to durable ProductProject or ordinary task handling.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
-    This boundary deliberately does not dispatch workers, deploy providers, Toolsmith, or any
+    The optional team planner invokes the integrated deterministic PF2 DynamicTeamComposer but
+    remains planning-only: it does not dispatch workers, deploy providers, Toolsmith, or any
     high-impact external action. Those remain downstream explicit factory/security boundaries.
     """
 
@@ -131,10 +162,12 @@ class PackagedProductCommandRouter:
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
         selection_store: PackagedProductSelectionStore | None = None,
+        team_planner: PackagedProductFactoryTeamPlanner | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
         self._selection_store = selection_store
+        self._team_planner = team_planner
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
     @property
@@ -199,6 +232,45 @@ class PackagedProductCommandRouter:
             focus_id="tasks-heading",
         )
 
+    def _plan_current_product_factory(self) -> UIResult:
+        planner, project_id = self._require_team_planner_and_project()
+        try:
+            result = planner.plan(project_id)
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except PackagedProductFactoryPlanningError as exc:
+            raise PackagedProductJourneyError(str(exc)) from exc
+        return _team_plan_ui_result(result)
+
+    def _describe_current_product_factory_plan(self) -> UIResult:
+        planner, project_id = self._require_team_planner_and_project()
+        try:
+            result = planner.inspect(project_id)
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except PackagedProductFactoryPlanningError as exc:
+            raise PackagedProductJourneyError(str(exc)) from exc
+        return _team_plan_ui_result(result)
+
+    def _require_team_planner_and_project(
+        self,
+    ) -> tuple[PackagedProductFactoryTeamPlanner, str]:
+        if self._active_project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
+            )
+        if self._team_planner is None:
+            raise PackagedProductJourneyError(
+                "Product Factory planning is unavailable in this packaged context."
+            )
+        return self._team_planner, self._active_project_id
+
     def create(self, payload: Mapping[str, Any]) -> UIResult:
         command = str(payload.get("command", "")).strip()
         if not command:
@@ -208,6 +280,10 @@ class PackagedProductCommandRouter:
 
         if packaged_current_product_command(command):
             return self._describe_current_project()
+        if packaged_plan_current_product_factory_command(command):
+            return self._plan_current_product_factory()
+        if packaged_show_current_product_factory_plan_command(command):
+            return self._describe_current_product_factory_plan()
 
         reopen_target = packaged_product_reopen_target(command)
         if reopen_target is not None:
@@ -296,6 +372,22 @@ class PackagedProductStateProvider:
         return state
 
 
+def _team_plan_ui_result(result: PackagedTeamPlanResult) -> UIResult:
+    permission_ceiling = ", ".join(sorted(result.plan.permission_ceiling)) or "none"
+    return UIResult(
+        request_id="desktop-handler",
+        status="completed",
+        message=(
+            f"План Product Factory: {result.plan.plan_id}; "
+            f"ProductProject: {result.project_id}; spec version {result.spec_version}; "
+            f"state {result.state}; scale medium; roles {len(result.plan.roles)}; "
+            f"independent review roles {result.independent_review_count}; "
+            f"permission ceiling: {permission_ceiling}; worker dispatch: not started."
+        ),
+        focus_id="tasks-heading",
+    )
+
+
 def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
     status_counts = Counter(item.kind.value for item in detail.statuses)
     decision_counts = Counter(item.state for item in detail.decisions)
@@ -311,6 +403,10 @@ def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
         "decision_count": len(detail.decisions),
         "decision_state_counts": dict(sorted(decision_counts.items())),
     }
+
+
+def _normalized_exact_command(command: str) -> str:
+    return " ".join(command.split()).casefold().strip(" :")
 
 
 def _project_title(goal: str) -> str:
