@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from nika_core.media.errors import MediaError, MediaErrorCode
-from nika_core.media.privacy import redact_text
+from nika_core.media.privacy import redact_argv, redact_text
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +156,7 @@ class SafeProcessRunner:
             raise failure
 
         result = ProcessResult(
-            argv=tuple(redact_text(part) for part in normalized),
+            argv=redact_argv(normalized),
             returncode=int(process.returncode or 0),
             stdout=bytes(stdout_reader.data),
             stderr=bytes(stderr_reader.data),

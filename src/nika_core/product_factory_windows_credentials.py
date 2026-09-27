@@ -15,6 +15,7 @@ _GENERIC_TARGET_MAX_CHARS = 32767
 _SERVICE_PREFIX = "NikaCore.ProductFactory.v1"
 _USERNAME = "nika-core"
 _AUTHORITY_SEGMENT = "authority"
+_SNAPSHOT_SEGMENT = "snapshot-checkpoint"
 _ERROR_ALREADY_EXISTS = 183
 _TOKEN_QUERY = 0x0008
 _TOKEN_USER = 1
@@ -141,6 +142,68 @@ class WindowsCredentialStore:
             if existing is None:
                 return False
             return hmac.compare_digest(_fingerprint(existing), fingerprint)
+
+    def snapshot_checkpoint_matches(self, *, checkpoint_fingerprint: str) -> bool:
+        target = self._snapshot_checkpoint_target()
+        checkpoint = _fingerprint(checkpoint_fingerprint)
+        with self._lock:
+            existing = self._read_password(target)
+            if existing is None:
+                return False
+            return hmac.compare_digest(_fingerprint(existing), checkpoint)
+
+    def seal_snapshot_checkpoint(
+        self,
+        *,
+        expected_fingerprint: str | None,
+        checkpoint_fingerprint: str,
+    ) -> None:
+        target = self._snapshot_checkpoint_target()
+        checkpoint = _fingerprint(checkpoint_fingerprint)
+        expected = (
+            None if expected_fingerprint is None else _fingerprint(expected_fingerprint)
+        )
+        with self._lock:
+            existing = self._read_password(target)
+            if existing is not None:
+                current = _fingerprint(existing)
+                if hmac.compare_digest(current, checkpoint):
+                    return
+                if expected is None or not hmac.compare_digest(current, expected):
+                    raise ProtectedCredentialStoreError(
+                        "credential snapshot checkpoint conflicts with protected metadata"
+                    )
+            elif expected is not None:
+                raise ProtectedCredentialStoreError(
+                    "credential snapshot checkpoint is missing prior protected state"
+                )
+            try:
+                self._set_password(target, checkpoint)
+            except ProtectedCredentialStoreError:
+                observed = self._read_password(target)
+                if observed is not None and hmac.compare_digest(
+                    _fingerprint(observed), checkpoint
+                ):
+                    return
+                raise
+            observed = self._read_password(target)
+            if observed is None or not hmac.compare_digest(
+                _fingerprint(observed), checkpoint
+            ):
+                raise ProtectedCredentialStoreError(
+                    "credential snapshot checkpoint write could not be verified"
+                )
+
+    def delete_snapshot_checkpoint(self) -> bool:
+        target = self._snapshot_checkpoint_target()
+        with self._lock:
+            if self._read_password(target) is None:
+                return False
+            try:
+                self._backend.delete_password(target, _USERNAME)
+            except Exception as exc:
+                raise _backend_error("delete snapshot checkpoint", exc) from None
+            return True
 
     def retire_authority(
         self,
@@ -411,6 +474,9 @@ class WindowsCredentialStore:
         return self._bounded_target(
             f"{self.service_prefix}.{_AUTHORITY_SEGMENT}.{digest}.g{generation}"
         )
+
+    def _snapshot_checkpoint_target(self) -> str:
+        return self._bounded_target(f"{self.service_prefix}.{_SNAPSHOT_SEGMENT}")
 
     def _reference_digest(self, secret_ref: str, generation: int) -> str:
         _nonempty("secret_ref", secret_ref)

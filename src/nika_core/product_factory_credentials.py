@@ -251,6 +251,15 @@ class ProtectedSecretStorePort(Protocol):
         expires_at: datetime,
     ) -> str | None: ...
 
+    def snapshot_checkpoint_matches(self, *, checkpoint_fingerprint: str) -> bool: ...
+
+    def seal_snapshot_checkpoint(
+        self,
+        *,
+        expected_fingerprint: str | None,
+        checkpoint_fingerprint: str,
+    ) -> None: ...
+
     def revoke_handles(self, secret_ref: str, generation: int) -> None: ...
 
 
@@ -264,6 +273,7 @@ class CredentialBroker:
     _pending_lease: _PendingCredentialLease | None = field(default=None, init=False, repr=False)
     _next_lease: int = field(default=1, init=False, repr=False)
     _next_event: int = field(default=1, init=False, repr=False)
+    _sealed_snapshot_fingerprint: str | None = field(default=None, init=False, repr=False)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def register_secret(self, secret: SecretRef, *, now: datetime | None = None) -> None:
@@ -586,13 +596,25 @@ class CredentialBroker:
 
     def snapshot(self) -> CredentialBrokerSnapshot:
         with self._lock:
-            return CredentialBrokerSnapshot(
+            snapshot = CredentialBrokerSnapshot(
                 tuple(self._secrets[key] for key in sorted(self._secrets)),
                 tuple(self._identities[key] for key in sorted(self._identities)),
                 tuple(self._audit),
                 self._next_lease,
                 self._next_event,
             )
+            checkpoint = credential_snapshot_fingerprint(snapshot)
+            try:
+                self.store.seal_snapshot_checkpoint(
+                    expected_fingerprint=self._sealed_snapshot_fingerprint,
+                    checkpoint_fingerprint=checkpoint,
+                )
+            except (AttributeError, RuntimeError):
+                raise CredentialBrokerError(
+                    "protected store snapshot checkpoint could not be sealed"
+                ) from None
+            self._sealed_snapshot_fingerprint = checkpoint
+            return snapshot
 
     def restore(self, snapshot: CredentialBrokerSnapshot) -> None:
         with self._lock:
@@ -656,6 +678,19 @@ class CredentialBroker:
                     raise CredentialBrokerError(
                         "protected store active secret generation is unavailable during restore"
                     )
+            checkpoint = credential_snapshot_fingerprint(snapshot)
+            try:
+                checkpoint_matches = self.store.snapshot_checkpoint_matches(
+                    checkpoint_fingerprint=checkpoint
+                )
+            except (AttributeError, RuntimeError):
+                raise CredentialBrokerError(
+                    "protected store snapshot checkpoint is unavailable"
+                ) from None
+            if not checkpoint_matches:
+                raise CredentialBrokerError(
+                    "credential broker snapshot does not match protected checkpoint"
+                )
             self._secrets = secrets
             self._identities = {
                 identity.identity_ref: identity for identity in snapshot.identities
@@ -665,6 +700,7 @@ class CredentialBroker:
             self._audit = list(snapshot.audit_events)
             self._next_lease = snapshot.next_lease
             self._next_event = snapshot.next_event
+            self._sealed_snapshot_fingerprint = checkpoint
 
     def _require_secret(self, secret_ref: str) -> SecretRef:
         secret = self._secrets.get(secret_ref)
@@ -741,6 +777,59 @@ def _secret_authority_fingerprint(secret: SecretRef) -> str:
         "scopes": sorted(secret.scopes),
         "allowed_audiences": sorted(secret.allowed_audiences),
         "state": secret.state.value,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def credential_snapshot_fingerprint(snapshot: CredentialBrokerSnapshot) -> str:
+    """Return the canonical non-secret integrity identity of one broker snapshot."""
+
+    if not isinstance(snapshot, CredentialBrokerSnapshot):
+        raise TypeError("credential snapshot fingerprint requires CredentialBrokerSnapshot")
+    payload = {
+        "schema": "nika-product-factory-credential-snapshot-v1",
+        "secrets": [
+            {
+                "secret_ref": secret.secret_ref,
+                "project_id": secret.project_id,
+                "provider": secret.provider,
+                "purpose": secret.purpose,
+                "scopes": sorted(secret.scopes),
+                "allowed_audiences": sorted(secret.allowed_audiences),
+                "generation": secret.generation,
+                "state": secret.state.value,
+            }
+            for secret in snapshot.secrets
+        ],
+        "identities": [
+            {
+                "identity_ref": identity.identity_ref,
+                "project_id": identity.project_id,
+                "provider": identity.provider,
+                "subject_ref": identity.subject_ref,
+                "secret_refs": list(identity.secret_refs),
+            }
+            for identity in snapshot.identities
+        ],
+        "audit_events": [
+            {
+                "event_id": event.event_id,
+                "action": event.action,
+                "project_id": event.project_id,
+                "secret_ref": event.secret_ref,
+                "at": _aware(event.at).isoformat(),
+                "detail": event.detail,
+            }
+            for event in snapshot.audit_events
+        ],
+        "next_lease": snapshot.next_lease,
+        "next_event": snapshot.next_event,
     }
     encoded = json.dumps(
         payload,
