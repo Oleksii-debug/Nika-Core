@@ -933,7 +933,10 @@ def _canonical_json(value: Any) -> str:
 
 
 def _canonical_json_equal(left: Any, right: Any) -> bool:
-    return _canonical_json(left) == _canonical_json(right)
+    try:
+        return _canonical_json(left) == _canonical_json(right)
+    except (TypeError, ValueError):
+        return False
 
 
 def _sha256(value: str) -> str:
