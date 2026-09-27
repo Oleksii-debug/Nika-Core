@@ -12,6 +12,7 @@ from nika_core.model_gateway.contracts import PrivacyClass, ProviderKind
 
 _MAX_ID_UTF8_BYTES = 256
 _MAX_LANGUAGE_CHARS = 64
+_MAX_SUPPORTED_MODELS = 64
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}\Z")
 _LANGUAGE_RE = re.compile(r"[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*\Z")
 
@@ -75,9 +76,7 @@ class SpeechToTextPolicy:
     def __post_init__(self) -> None:
         _positive_int(self.max_audio_bytes, "max_audio_bytes")
         _positive_int(self.max_transcript_chars, "max_transcript_chars")
-        if isinstance(self.timeout_seconds, bool) or not isinstance(
-            self.timeout_seconds, (int, float)
-        ):
+        if type(self.timeout_seconds) not in (int, float):
             raise TypeError("timeout_seconds must be a finite number")
         timeout = float(self.timeout_seconds)
         if not math.isfinite(timeout) or not 0 < timeout <= 3_600.0:
@@ -174,6 +173,7 @@ class SpeechToTextResult:
 class SpeechToTextAdapter(Protocol):
     provider_kind: ProviderKind
     provider_id: str
+    supported_models: tuple[str, ...]
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse: ...
 
@@ -183,8 +183,14 @@ class UnavailableSpeechToTextAdapter:
 
     provider_kind = ProviderKind.LOCAL
 
-    def __init__(self, *, provider_id: str = "local-stt") -> None:
+    def __init__(
+        self,
+        *,
+        provider_id: str = "local-stt",
+        supported_models: tuple[str, ...] = ("uk-small-v1",),
+    ) -> None:
         self.provider_id = _bounded_token(provider_id, "provider_id")
+        self.supported_models = _bounded_models(supported_models)
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse:
         raise SpeechToTextAdapterError(
@@ -207,8 +213,18 @@ class SpeechToTextService:
         self._adapter = adapter
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextResult:
-        adapter_provider_id = self._trusted_local_provider_id()
-        if adapter_provider_id is None or request.provider_id != adapter_provider_id:
+        route = self._trusted_local_route()
+        if route is None:
+            return self._failure(
+                request,
+                code=SpeechToTextFailureCode.PROVIDER_ERROR,
+                retryable=False,
+            )
+        adapter_provider_id, supported_models = route
+        if (
+            request.provider_id != adapter_provider_id
+            or request.model not in supported_models
+        ):
             return self._failure(
                 request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
@@ -236,6 +252,16 @@ class SpeechToTextService:
                 retryable=True,
             )
         except SpeechToTextAdapterError as error:
+            if (
+                type(error) is not SpeechToTextAdapterError
+                or type(error.code) is not SpeechToTextFailureCode
+                or type(error.retryable) is not bool
+            ):
+                return self._failure(
+                    request,
+                    code=SpeechToTextFailureCode.PROVIDER_ERROR,
+                    retryable=False,
+                )
             status = (
                 SpeechToTextStatus.UNAVAILABLE
                 if error.code is SpeechToTextFailureCode.UNAVAILABLE
@@ -281,7 +307,7 @@ class SpeechToTextService:
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
-        if not isinstance(response.text, str) or not response.text.strip():
+        if type(response.text) is not str or not response.text.strip():
             return self._failure(
                 request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
@@ -323,15 +349,16 @@ class SpeechToTextService:
         )
         return SpeechToTextResult(text=text, evidence=evidence)
 
-    def _trusted_local_provider_id(self) -> str | None:
+    def _trusted_local_route(self) -> tuple[str, tuple[str, ...]] | None:
         try:
             provider_kind = self._adapter.provider_kind
             provider_id = _bounded_token(self._adapter.provider_id, "adapter.provider_id")
+            supported_models = _bounded_models(self._adapter.supported_models)
         except Exception:  # noqa: BLE001 - adapter route metadata is an untrusted boundary
             return None
         if provider_kind is not ProviderKind.LOCAL:
             return None
-        return provider_id
+        return provider_id, supported_models
 
     def _failure(
         self,
@@ -400,6 +427,15 @@ def _bounded_token(value: object, field: str) -> str:
     return value
 
 
+def _bounded_models(value: object) -> tuple[str, ...]:
+    if type(value) is not tuple or not 1 <= len(value) <= _MAX_SUPPORTED_MODELS:
+        raise ValueError("supported_models must be a bounded non-empty tuple")
+    normalized = tuple(_bounded_token(item, "supported_models item") for item in value)
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("supported_models must not contain duplicates")
+    return normalized
+
+
 def _positive_int(value: object, field: str) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError(f"{field} must be a positive integer")
@@ -409,7 +445,7 @@ def _positive_int(value: object, field: str) -> int:
 def _validated_latency(value: float | None) -> float | None:
     if value is None:
         return None
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise TypeError("latency_ms must be a finite non-negative number or None")
     normalized = float(value)
     if not math.isfinite(normalized) or normalized < 0:
