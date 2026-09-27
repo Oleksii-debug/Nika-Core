@@ -146,6 +146,7 @@ def test_health_service_rejects_behavioral_clock_before_datetime_methods() -> No
     with pytest.raises(TypeError, match="health clock must return a canonical datetime"):
         service._normalized_now()
 
+
 def test_health_report_rejects_mutable_check_container() -> None:
     check = HealthCheck(
         check_id="authority",
