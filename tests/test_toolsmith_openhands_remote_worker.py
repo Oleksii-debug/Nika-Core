@@ -229,6 +229,51 @@ def test_failed_acceptance_preserves_changed_evidence_and_requires_new_job(
     assert len(runtime.calls) == 1
 
 
+def test_completed_job_identity_cannot_be_executed_twice(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    job = _job(root)
+
+    first = _run(worker.execute(job))
+    second = _run(worker.execute(job))
+
+    assert first.succeeded
+    assert not second.succeeded
+    assert second.failure is not None
+    assert second.failure.kind.value == "invalid_request"
+    assert second.recovery_state == first.recovery_state
+    assert len(runtime.calls) == 1
+
+
+def test_unexpected_post_apply_failure_requires_manual_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime((RemoteFile("src/value.txt", b"after\n"),))
+    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    job = _job(root)
+
+    def fail_acceptance(*_args):
+        raise RuntimeError("untrusted post-apply failure")
+
+    monkeypatch.setattr(openhands_worker_module, "_run_acceptance", fail_acceptance)
+    result = _run(worker.execute(job))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.retryable is False
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert root.joinpath("src/value.txt").read_bytes() == b"after\n"
+
+    recovery = _run(worker.recover(job, result.recovery_state))
+    assert not recovery.succeeded
+    assert recovery.failure is not None
+    assert recovery.failure.retryable is False
+    assert len(runtime.calls) == 1
+
+
 def test_worker_visible_git_metadata_is_rejected_before_remote_execution(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     root.joinpath(".git").mkdir()
