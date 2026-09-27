@@ -278,6 +278,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         tests: tuple[TestEvidence, ...] = ()
         applied = False
         task_cancelled = False
+        remote_dispatched = False
         sandbox_acquisition_unresolved = False
         endpoint_reserved = False
         endpoint_collision = False
@@ -333,6 +334,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         )
                     result = cancelled
                 else:
+                    remote_dispatched = True
                     try:
                         run = await asyncio.wait_for(
                             self._runtime.execute(
@@ -517,14 +519,22 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                         test_evidence=tests,
                     )
             except Exception:  # noqa: BLE001 - untrusted coding-engine boundary
+                stopped = False
+                stop_cancelled = False
+                if remote_dispatched and not applied:
+                    cancel_event.set()
+                    stopped, stop_cancelled = await self._runtime_stop_proof(job.job_id)
+                    task_cancelled = task_cancelled or stop_cancelled
                 state = RecoveryState(
-                    "manual_reconcile_required" if applied else "interrupted"
+                    "interrupted"
+                    if stopped and not applied
+                    else "manual_reconcile_required"
                 )
                 result = _failure_result(
                     job,
                     WorkerFailureKind.INTERNAL_ERROR,
                     "remote coding engine failed without trusted diagnostics",
-                    retryable=not applied,
+                    retryable=stopped and not applied,
                     state=state,
                     changed_files=changed,
                     test_evidence=tests,
