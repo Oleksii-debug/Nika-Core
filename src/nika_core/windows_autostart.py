@@ -39,6 +39,12 @@ class AutostartBackend(Protocol):
     def delete(self) -> None: ...
 
 
+class _StaleAutostartRegistration(RuntimeError):
+    def __init__(self, registered_command: str) -> None:
+        super().__init__("Nika autostart registration uses a noncanonical string type")
+        self.registered_command = registered_command
+
+
 class WindowsRunKeyBackend:
     """Per-user Windows Run-key storage. Never requests elevation."""
 
@@ -56,10 +62,14 @@ class WindowsRunKeyBackend:
                 value, value_type = winreg.QueryValueEx(key, _VALUE_NAME)
         except FileNotFoundError:
             return None
-        if type(value_type) is not int or value_type != winreg.REG_SZ:
+        if type(value_type) is not int:
             raise RuntimeError("Nika autostart registration has an unsupported value type")
         if not isinstance(value, str) or not value:
             raise RuntimeError("Nika autostart registration is malformed")
+        if value_type == winreg.REG_EXPAND_SZ:
+            raise _StaleAutostartRegistration(value)
+        if value_type != winreg.REG_SZ:
+            raise RuntimeError("Nika autostart registration has an unsupported value type")
         return value
 
     def write(self, command: str) -> None:
@@ -115,7 +125,10 @@ class WindowsAutostartService:
         return command
 
     def status(self) -> AutostartStatus:
-        registered = self._backend.read()
+        try:
+            registered = self._backend.read()
+        except _StaleAutostartRegistration as exc:
+            return AutostartStatus(AutostartState.STALE, exc.registered_command)
         if registered is None:
             return AutostartStatus(AutostartState.DISABLED, None)
         try:

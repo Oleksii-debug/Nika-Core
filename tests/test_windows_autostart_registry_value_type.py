@@ -42,6 +42,10 @@ class _Backend(WindowsRunKeyBackend):
     def _winreg(self):
         return self._fake_winreg
 
+    def write(self, command: str) -> None:
+        self._fake_winreg.value = command
+        self._fake_winreg.value_type = self._fake_winreg.REG_SZ
+
 
 def test_exact_reg_sz_value_can_match_percent_containing_executable() -> None:
     fake = _FakeWinreg("", _FakeWinreg.REG_SZ)
@@ -54,13 +58,17 @@ def test_exact_reg_sz_value_can_match_percent_containing_executable() -> None:
     assert status.registered_command == service.expected_command
 
 
-def test_expandable_value_never_authorizes_same_visible_command() -> None:
+def test_expandable_value_is_stale_and_explicit_enable_repairs_it() -> None:
     fake = _FakeWinreg("", _FakeWinreg.REG_EXPAND_SZ)
     service = WindowsAutostartService(Path(r"C:\%NIKA_HOME%\Nika.exe"), _Backend(fake))
     fake.value = service.expected_command
 
-    with pytest.raises(RuntimeError, match="unsupported value type"):
-        service.status()
+    status = service.status()
+
+    assert status.state is AutostartState.STALE
+    assert status.registered_command == service.expected_command
+    assert service.enable().state is AutostartState.ENABLED
+    assert fake.value_type == _FakeWinreg.REG_SZ
 
 
 def test_noncanonical_registry_type_carrier_is_rejected() -> None:
