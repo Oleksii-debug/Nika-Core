@@ -1696,7 +1696,7 @@ def test_agent_server_runtime_uses_authenticated_profile_only_contract(
         requests.append(request)
         assert request.headers["X-Session-API-Key"] == SESSION_KEY
         if request.url.path == "/api/file/upload":
-            assert binding_calls
+            assert binding_calls == []
             assert request.method == "POST"
             assert request.url.params["path"] == "/workspace/nika-job/src/value.txt"
             assert b"before\n" in request.content
@@ -1722,6 +1722,7 @@ def test_agent_server_runtime_uses_authenticated_profile_only_contract(
                 },
             )
         if request.url.path.endswith("/events") and request.method == "POST":
+            assert len(binding_calls) == 1
             payload = json.loads(request.content)
             message_payload.update(payload)
             assert payload == {
@@ -1774,6 +1775,46 @@ def test_agent_server_runtime_uses_authenticated_profile_only_contract(
         f"/api/conversations/{expected_conversation_id}",
         "/api/file/archive",
     ]
+
+
+def test_agent_server_binding_failure_stops_before_message_or_run(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    paths: list[str] = []
+
+    class FailingBindingStore:
+        def bind(self, *_args):
+            raise RuntimeError("database secret diagnostic must not escape")
+
+        def load(self, _job_id):
+            return None
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/file/upload":
+            return httpx.Response(200, json={"success": True})
+        if request.url.path == "/api/conversations" and request.method == "POST":
+            payload = json.loads(request.content)
+            return httpx.Response(201, json={"id": payload["conversation_id"]})
+        raise AssertionError("binding failure must prevent message/run dispatch")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+        recovery_binding_store=FailingBindingStore(),
+    )
+
+    with pytest.raises(
+        OpenHandsAgentServerCompatibilityError,
+        match="durable recovery binding",
+    ):
+        _run(runtime.execute(job, endpoint, "do work", root, evidence))
+
+    assert paths == ["/api/file/upload", "/api/conversations"]
 
 
 def test_agent_server_reconcile_uses_only_existing_conversation_and_snapshot(

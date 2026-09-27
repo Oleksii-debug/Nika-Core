@@ -337,36 +337,6 @@ class OpenHandsAgentServerRuntime:
             )
             if active.cancel_requested.is_set():
                 raise OpenHandsAgentServerExecutionCancelled(
-                    "OpenHands execution cancelled before recovery binding"
-                )
-            binding_store = self._recovery_binding_store
-            if binding_store is not None:
-                try:
-                    binding = binding_store.bind(
-                        job,
-                        endpoint,
-                        conversation_id,
-                        profile_id,
-                    )
-                except Exception as exc:  # noqa: BLE001 - durable host boundary
-                    _LOGGER.error(
-                        "OpenHands recovery binding persistence failed (%s)",
-                        type(exc).__name__,
-                    )
-                    raise OpenHandsAgentServerCompatibilityError(
-                        "OpenHands durable recovery binding could not be persisted"
-                    ) from None
-                if (
-                    binding.job_id != job.job_id
-                    or binding.endpoint != endpoint
-                    or binding.conversation_id != conversation_id
-                    or binding.agent_profile_id != profile_id
-                ):
-                    raise OpenHandsAgentServerCompatibilityError(
-                        "OpenHands durable recovery binding changed dispatch identity"
-                    )
-            if active.cancel_requested.is_set():
-                raise OpenHandsAgentServerExecutionCancelled(
                     "OpenHands execution cancelled before source upload"
                 )
 
@@ -421,6 +391,36 @@ class OpenHandsAgentServerRuntime:
             with self._active_lock:
                 active.conversation_id = conversation_id
 
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before recovery binding"
+                )
+            binding_store = self._recovery_binding_store
+            if binding_store is not None:
+                try:
+                    binding = binding_store.bind(
+                        job,
+                        endpoint,
+                        conversation_id,
+                        profile_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - durable host boundary
+                    _LOGGER.error(
+                        "OpenHands recovery binding persistence failed (%s)",
+                        type(exc).__name__,
+                    )
+                    raise OpenHandsAgentServerCompatibilityError(
+                        "OpenHands durable recovery binding could not be persisted"
+                    ) from None
+                if (
+                    binding.job_id != job.job_id
+                    or binding.endpoint != endpoint
+                    or binding.conversation_id != conversation_id
+                    or binding.agent_profile_id != profile_id
+                ):
+                    raise OpenHandsAgentServerCompatibilityError(
+                        "OpenHands durable recovery binding changed dispatch identity"
+                    )
             if active.cancel_requested.is_set():
                 raise OpenHandsAgentServerExecutionCancelled(
                     "OpenHands execution cancelled before message dispatch"
