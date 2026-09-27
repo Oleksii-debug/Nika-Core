@@ -249,6 +249,7 @@ def test_real_standing_authority_reaches_cloud_provider_from_runtime_child_task(
         now=now,
     )
     authorizer_task: list[asyncio.Task[object] | None] = []
+    authority_requests: list[str] = []
 
     def binding_resolver(
         candidate: StandingPermissionExecutionAuthority,
@@ -271,14 +272,15 @@ def test_real_standing_authority_reaches_cloud_provider_from_runtime_child_task(
         transport=transport,
         authorizer=authorizer,
         authority_resolver=lambda candidate_task: (
-            authority if candidate_task == task_id else None
+            authority_requests.append(candidate_task)
+            or (authority if candidate_task == task_id else None)
         ),
     ).for_task(task_id)
     assert runtime is not None
 
     async def scenario() -> object:
         caller_task = asyncio.current_task()
-        result = await runtime.run(_runtime_request(task_id))
+        result = await runtime.run(_runtime_request("team:team-authorized:worker-a"))
         assert authorizer_task
         assert authorizer_task[0] is not caller_task
         assert transport.tasks[0] is authorizer_task[0]
@@ -291,6 +293,7 @@ def test_real_standing_authority_reaches_cloud_provider_from_runtime_child_task(
     assert result.output["model"] == "api-model"
     assert resolver.references == ["env:NIKA_PACKAGED_CLOUD_KEY"]
     assert transport.calls == 1
+    assert authority_requests == [task_id]
 
 
 def test_missing_host_authority_fails_before_credentials_or_transport(
@@ -414,17 +417,17 @@ def test_revoked_authority_fails_before_credentials_or_transport(
     assert transport.calls == 0
 
 
-def test_task_a_authority_cannot_authorize_task_b_runtime_request(
+def test_member_execution_identity_cannot_retarget_outer_cloud_authority(
     tmp_path: Path,
 ) -> None:
     now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
     store = _store(tmp_path)
     settings = _settings(store)
     definitions = _definitions(store)
-    task_a = _task(store, settings)
+    outer_task = _task(store, settings)
     permissions, binding, authority = _standing_authority(
         store,
-        task_id=task_a,
+        task_id=outer_task,
         now=now,
     )
     authorizer = StandingPermissionCloudEffectAuthorizer(
@@ -432,6 +435,7 @@ def test_task_a_authority_cannot_authorize_task_b_runtime_request(
         lambda candidate: binding if candidate == authority else None,
         clock=lambda: now + timedelta(minutes=1),
     )
+    authority_requests: list[str] = []
     resolver = _CountingCredentialResolver()
     transport = _CountingTransport()
     runtime = _factory(
@@ -442,17 +446,20 @@ def test_task_a_authority_cannot_authorize_task_b_runtime_request(
         transport=transport,
         authorizer=authorizer,
         authority_resolver=lambda candidate_task: (
-            authority if candidate_task == task_a else None
+            authority_requests.append(candidate_task)
+            or (authority if candidate_task == outer_task else None)
         ),
-    ).for_task(task_a)
+    ).for_task(outer_task)
     assert runtime is not None
 
-    result = asyncio.run(runtime.run(_runtime_request(f"{task_a}:forged-child")))
+    result = asyncio.run(
+        runtime.run(_runtime_request("team:untrusted-correlation:worker-b"))
+    )
 
-    assert result.outcome is RuntimeOutcome.FAILED
-    assert result.output["model_error_code"] == "invalid_request"
-    assert resolver.references == []
-    assert transport.calls == 0
+    assert result.outcome is RuntimeOutcome.COMPLETED
+    assert authority_requests == [outer_task]
+    assert resolver.references == ["env:NIKA_PACKAGED_CLOUD_KEY"]
+    assert transport.calls == 1
 
 
 def test_local_route_never_consults_cloud_authority_resolver(

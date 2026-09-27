@@ -40,13 +40,6 @@ from nika_core.model_gateway.providers import OllamaProvider
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
-from nika_core.runtime.contracts import (
-    RuntimeErrorCode,
-    RuntimeOutcome,
-    RuntimeRequest,
-    RuntimeResult,
-    RuntimeResumeRequest,
-)
 from nika_core.security.model_cloud_authority import (
     StandingPermissionCloudEffectAuthorizer,
     StandingPermissionExecutionAuthority,
@@ -507,7 +500,7 @@ class V01ModelSettings:
 
 
 class _TaskBoundCloudEffectAuthorizer:
-    """Resolve and enter current standing authority on the exact effect task."""
+    """Resolve current outer-task authority on the exact effect task."""
 
     def __init__(
         self,
@@ -535,14 +528,6 @@ class _TaskBoundCloudEffectAuthorizer:
         request: ModelRequest,
         provider: ProviderCapabilities,
     ) -> None:
-        request_id = request.request_id
-        task_prefix = f"{self._task_id}:"
-        if (
-            type(request_id) is not str
-            or not request_id.startswith(task_prefix)
-            or len(request_id) == len(task_prefix)
-        ):
-            raise PermissionError("cloud model request does not belong to the bound task")
         try:
             authority = self._authority_resolver(self._task_id)
         except Exception:  # noqa: BLE001 - trusted host resolver boundary
@@ -556,46 +541,6 @@ class _TaskBoundCloudEffectAuthorizer:
                 request=request,
                 provider=provider,
             )
-
-
-class _TaskBoundModelGatewayAgentRuntime(ModelGatewayAgentRuntime):
-    """Preserve one frozen task identity before any model request can be built."""
-
-    def __init__(self, *, bound_task_id: str, **kwargs: Any) -> None:
-        if type(bound_task_id) is not str or not bound_task_id:
-            raise TypeError("bound_task_id must be exact non-empty text")
-        self._bound_task_id = bound_task_id
-        super().__init__(**kwargs)
-
-    async def run(self, request: RuntimeRequest) -> RuntimeResult:
-        if not self._matches_task(request.task_id):
-            return self._task_mismatch()
-        return await super().run(request)
-
-    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
-        if not self._matches_task(request.task_id):
-            return self._task_mismatch()
-        return await super().resume(request)
-
-    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
-        if not self._matches_task(task_id):
-            return False
-        return await super().cancel(task_id=task_id, thread_id=thread_id)
-
-    def _matches_task(self, task_id: object) -> bool:
-        return type(task_id) is str and task_id == self._bound_task_id
-
-    @staticmethod
-    def _task_mismatch() -> RuntimeResult:
-        return RuntimeResult(
-            outcome=RuntimeOutcome.FAILED,
-            output={
-                "model_error_code": "invalid_request",
-                "recoverable": False,
-            },
-            error="The configured model runtime belongs to a different task.",
-            error_code=RuntimeErrorCode.INTERNAL,
-        )
 
 
 class V01BoundModelRuntimeFactory:
@@ -785,8 +730,7 @@ class V01BoundModelRuntimeFactory:
                 ),
                 default=True,
             )
-        return _TaskBoundModelGatewayAgentRuntime(
-            bound_task_id=task_id,
+        return ModelGatewayAgentRuntime(
             gateway=gateway,
             definitions=self._definitions,
             provider_id=provider_id,
