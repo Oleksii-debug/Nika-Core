@@ -73,6 +73,36 @@ def test_record_active_uses_underlying_resume_token_text_not_overridden_strip(
     assert _raw_session(store, task_id) is None
 
 
+def test_record_result_rejects_laundered_resumable_token_without_rebinding_session(
+    tmp_path,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime",
+        thread_id="thread",
+        resume_token="resume-1",
+    )
+
+    hostile_result = RuntimeResult(
+        outcome=RuntimeOutcome.PAUSED,
+        resume_token=_BehavioralText(""),
+    )
+    with pytest.raises(ValueError, match="usable resume token"):
+        sessions.record_result(
+            task_id=task_id,
+            runtime_id="runtime",
+            thread_id="thread",
+            result=hostile_result,
+        )
+
+    raw = _raw_session(store, task_id)
+    assert raw is not None
+    assert raw["resume_token"] == "resume-1"
+    assert raw["outcome"] == "__ACTIVE__"
+
+
 def test_record_result_rejects_nontext_resume_token_without_rebinding_session(
     tmp_path,
 ) -> None:
