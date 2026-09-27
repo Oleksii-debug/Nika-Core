@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -765,4 +766,153 @@ def test_restore_rejects_confirmed_cursor_with_noncompleted_ledger_without_mutat
     assert unchanged.status is ledger_status
     assert unchanged.result is None
     assert _state_value(memory, "task") == confirmed_state
+
+def test_restore_rejects_confirmed_cursor_with_conflicting_completed_result_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    confirmed_state = _state_value(memory, "task")
+    tampered_result = {
+        "__nika_batch_cursor_completion_v1__": {
+            "result": {"ok": False},
+            "next_batch_not_before": None,
+        }
+    }
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET result_json = ?
+            WHERE operation_key = ?
+            """,
+            (json.dumps(tampered_result, sort_keys=True), grant.operation_key),
+        )
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed cursor result contradicts idempotency evidence",
+    ):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=_targets(1),
+            batch_size=1,
+        )
+
+    assert ledger.require(grant.operation_key).result == tampered_result
+    assert _state_value(memory, "task") == confirmed_state
+
+
+@pytest.mark.parametrize(
+    "tampered_due",
+    [
+        None,
+        datetime(2031, 1, 2, 3, 4, 5, tzinfo=UTC).isoformat(),
+    ],
+)
+def test_restore_rejects_confirmed_cursor_with_conflicting_completed_deadline_without_mutation(
+    tmp_path: Path,
+    tampered_due: str | None,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True}, next_batch_not_before=due)
+    confirmed_state = _state_value(memory, "task")
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.deadline_source == "completion"
+    assert intent.not_before == due.isoformat()
+
+    tampered_result = {
+        "__nika_batch_cursor_completion_v1__": {
+            "result": {"ok": True},
+            "next_batch_not_before": tampered_due,
+        }
+    }
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET result_json = ?
+            WHERE operation_key = ?
+            """,
+            (json.dumps(tampered_result, sort_keys=True), grant.operation_key),
+        )
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed cursor deadline contradicts idempotency evidence",
+    ):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=_targets(2),
+            batch_size=1,
+        )
+
+    assert ledger.require(grant.operation_key).result == tampered_result
+    assert _state_value(memory, "task") == confirmed_state
+
+
+def test_explicit_inter_batch_schedule_survives_restore_as_scheduler_authority(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    cursor.schedule_inter_batch_wait(due)
+
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.deadline_source == "scheduler"
+    assert intent.not_before == due.isoformat()
+
+    restored = BatchCursor.restore(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    restored_intent = restored.state.next_scheduled_intent
+    assert restored_intent is not None
+    assert restored_intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert restored_intent.deadline_source == "scheduler"
+    assert restored_intent.not_before == due.isoformat()
 

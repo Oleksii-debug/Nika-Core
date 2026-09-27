@@ -84,6 +84,7 @@ class ScheduledIntent(BaseModel):
     batch_index: StrictInt
     target_id: StrictStr
     not_before: StrictStr | None = None
+    deadline_source: Literal["completion", "scheduler"] | None = None
 
     @model_validator(mode="after")
     def validate_deadline(self) -> ScheduledIntent:
@@ -93,6 +94,10 @@ class ScheduledIntent(BaseModel):
             raise ValueError("intent target_id must not be empty")
         if self.not_before is not None:
             _parse_utc(self.not_before)
+        if self.kind is not IntentKind.INTER_BATCH_WAIT and self.deadline_source is not None:
+            raise ValueError("only an inter-batch wait may carry deadline_source")
+        if self.deadline_source == "scheduler" and self.not_before is None:
+            raise ValueError("scheduler deadline source requires not_before")
         return self
 
 
@@ -438,6 +443,7 @@ class BatchCursor:
         if intent is None or intent.kind is not IntentKind.INTER_BATCH_WAIT:
             raise BatchCursorBlockedError("cursor is not waiting between batches")
         intent.not_before = _as_utc(not_before).isoformat()
+        intent.deadline_source = "scheduler"
         self._persist()
 
     def release_inter_batch_wait(self, *, now: datetime | None = None) -> None:
@@ -482,6 +488,31 @@ class BatchCursor:
                 raise BatchCursorStateError(
                     "confirmed cursor target contradicts idempotency evidence"
                 )
+            if (
+                target.attempt_state is AttemptState.CONFIRMED
+                and durable.status is IdempotencyStatus.COMPLETED
+            ):
+                result, durable_due = _decode_completion_result(durable.result)
+                if target.confirmed_result != result:
+                    raise BatchCursorStateError(
+                        "confirmed cursor result contradicts idempotency evidence"
+                    )
+                intent = self._state.next_scheduled_intent
+                if (
+                    index == frontier_index - 1
+                    and intent is not None
+                    and intent.kind is IntentKind.INTER_BATCH_WAIT
+                    and intent.deadline_source != "scheduler"
+                ):
+                    durable_not_before = (
+                        _as_utc(durable_due).isoformat()
+                        if durable_due is not None
+                        else None
+                    )
+                    if intent.not_before != durable_not_before:
+                        raise BatchCursorStateError(
+                            "confirmed cursor deadline contradicts idempotency evidence"
+                        )
             if index > frontier_index:
                 raise BatchCursorStateError(
                     "idempotency evidence exists beyond cursor execution frontier"
@@ -499,15 +530,10 @@ class BatchCursor:
                     )
                 continue
             if durable.status is IdempotencyStatus.COMPLETED:
-                result, durable_due = _decode_completion_result(durable.result)
-                prior_intent = self._state.next_scheduled_intent.model_copy(deep=True) if self._state.next_scheduled_intent is not None else None
-                if target.attempt_state is not AttemptState.CONFIRMED or (
-                    target.confirmed_result != result
-                ):
+                if target.attempt_state is not AttemptState.CONFIRMED:
+                    result, durable_due = _decode_completion_result(durable.result)
                     self._confirm_from_durable(target, result)
-                    changed = True
-                self._advance(durable_due)
-                if self._state.next_scheduled_intent != prior_intent:
+                    self._advance(durable_due)
                     changed = True
             elif durable.status is IdempotencyStatus.UNCERTAIN:
                 if target.attempt_state is not AttemptState.UNCERTAIN:
@@ -578,6 +604,7 @@ class BatchCursor:
                 batch_index=next_target.batch_index,
                 target_id=next_target.target_id,
                 not_before=due,
+                deadline_source="completion",
             )
         else:
             self._state.next_scheduled_intent = _target_intent(next_target)
@@ -743,18 +770,19 @@ def _derive_intent(state: BatchCursorState) -> ScheduledIntent | None:
         return None
     if target.batch_index > state.ready_batch_index:
         existing = state.next_scheduled_intent
-        due = (
-            existing.not_before
-            if existing is not None
+        preserve_wait = (
+            existing is not None
             and existing.kind is IntentKind.INTER_BATCH_WAIT
             and existing.target_id == target.target_id
-            else None
         )
+        due = existing.not_before if preserve_wait else None
+        deadline_source = existing.deadline_source if preserve_wait else None
         return ScheduledIntent(
             kind=IntentKind.INTER_BATCH_WAIT,
             batch_index=target.batch_index,
             target_id=target.target_id,
             not_before=due,
+            deadline_source=deadline_source,
         )
     return _target_intent(target)
 
