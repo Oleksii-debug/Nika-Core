@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
@@ -10,6 +14,20 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.memory.contracts import MemoryScope
 from nika_core.memory.service import MemoryService
 from nika_core.resources.contracts import ResourceSnapshot
+
+
+class _QueryOnlyTrackingStore(SQLiteStore):
+    def __init__(self, path: Path) -> None:
+        super().__init__(path)
+        self.observed_query_only: int | None = None
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        with super().connection() as conn:
+            yield conn
+            row = conn.execute("PRAGMA query_only").fetchone()
+            assert row is not None
+            self.observed_query_only = int(row[0])
 
 
 class _ResourceObserver:
@@ -218,6 +236,33 @@ def test_report_uses_half_open_window_and_never_synthesizes_missing_activity(tmp
     assert report.resource_snapshot is None
     assert "немає зафіксованих подій" in report.render_text()
     assert "не синтезується" in report.render_text()
+
+
+def test_report_missing_database_fails_without_creating_storage(tmp_path) -> None:
+    db_path = tmp_path / "missing" / "nika.sqlite3"
+    service = DailyActivityReportService(SQLiteStore(db_path))
+
+    with pytest.raises(FileNotFoundError, match="does not exist"):
+        service.build_window(
+            start=datetime(2026, 9, 12, tzinfo=UTC),
+            end=datetime(2026, 9, 13, tzinfo=UTC),
+        )
+
+    assert not db_path.exists()
+    assert not db_path.parent.exists()
+
+
+def test_report_enables_sqlite_query_only_before_projection(tmp_path) -> None:
+    db_path = tmp_path / "nika.sqlite3"
+    _prepared_store(tmp_path)
+    tracking_store = _QueryOnlyTrackingStore(db_path)
+
+    DailyActivityReportService(tracking_store).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert tracking_store.observed_query_only == 1
 
 
 @pytest.mark.parametrize(

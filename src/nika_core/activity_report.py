@@ -81,7 +81,10 @@ class DailyActivityReportService:
 
         start_iso = start_utc.isoformat()
         end_iso = end_utc.isoformat()
+        if not self._store.path.is_file():
+            raise FileNotFoundError(f"Nika database does not exist: {self._store.path}")
         with self._store.connection() as conn:
+            conn.execute("PRAGMA query_only = ON")
             task_transitions = _grouped_counts(
                 conn.execute(
                     "SELECT new_state AS value, COUNT(*) AS count "
