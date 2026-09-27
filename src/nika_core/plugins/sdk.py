@@ -353,24 +353,27 @@ class PluginRuntime:
         publication_error: Exception | None = None
         existing_active: PluginAdapter | None = None
         with self._registry_lock:
-            current = self._factories.get(plugin_id)
-            if current != (manifest, factory):
-                publication_error = PluginCompatibilityError(
-                    "plugin registration changed during activation; retry activation"
-                )
+            if plugin_id in self._deactivating:
+                publication_error = RuntimeError("plugin deactivation is still in progress")
             else:
-                active = self._active.get(plugin_id)
-                if active is not None:
-                    if self._effective_permissions[plugin_id] != selected_permissions:
-                        publication_error = PermissionError(
-                            "active plugin permission set differs from requested activation"
-                        )
-                    else:
-                        existing_active = active
+                current = self._factories.get(plugin_id)
+                if current != (manifest, factory):
+                    publication_error = PluginCompatibilityError(
+                        "plugin registration changed during activation; retry activation"
+                    )
                 else:
-                    self._active[plugin_id] = adapter
-                    self._effective_permissions[plugin_id] = selected_permissions
-                    return adapter
+                    active = self._active.get(plugin_id)
+                    if active is not None:
+                        if self._effective_permissions[plugin_id] != selected_permissions:
+                            publication_error = PermissionError(
+                                "active plugin permission set differs from requested activation"
+                            )
+                        else:
+                            existing_active = active
+                    else:
+                        self._active[plugin_id] = adapter
+                        self._effective_permissions[plugin_id] = selected_permissions
+                        return adapter
 
         # Adapter code is third-party execution and must never run under the registry lock.
         adapter.close()
