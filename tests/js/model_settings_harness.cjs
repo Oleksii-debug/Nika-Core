@@ -458,6 +458,33 @@ const status = element("model-settings-status");
   assert.equal(provider.disabled, false);
   assert.equal(credential.value, "env:NIKA_TEST_API_KEY", "Rejected draft must survive state refresh");
 
+  route.value = "ollama";
+  fire(route, "change");
+  model.value = "qwen3:8b";
+  fire(model, "input");
+  baseUrl.value = "https://api.example.test/v1";
+  fire(baseUrl, "input");
+  assert.equal(provider.disabled, true, "Ollama provider identity is route-owned and disabled");
+  dispatchMode = "reject-provider";
+  releaseStateRead = holdNextStateRead();
+  model.focus();
+  click(save);
+  await tick();
+  assert.equal(
+    document.activeElement,
+    model,
+    "A rejected local-route save must not temporarily enable its disabled provider target",
+  );
+  releaseStateRead();
+  await tick(); await tick();
+  dispatchMode = "success";
+  assert.equal(provider.disabled, true);
+  assert.equal(
+    document.activeElement,
+    route,
+    "After refresh, an unfocusable backend correction target must fall back to the enabled route selector",
+  );
+
   model.focus();
   model.value = "unsaved-model";
   fire(model, "input");
