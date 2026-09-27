@@ -270,7 +270,7 @@ def test_durable_scope_scalar_type_is_not_string_coerced(tmp_path) -> None:
         restarted.get("perm-durable")
 
 
-def test_text_migration_version_is_not_integer_coerced(tmp_path) -> None:
+def test_text_migration_schema_is_rejected_before_version_coercion(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "bad-migration.db")
     with store.connection() as conn:
         conn.execute(
@@ -284,7 +284,7 @@ def test_text_migration_version_is_not_integer_coerced(tmp_path) -> None:
         )
 
     permissions = StandingPermissionStore(store)
-    with pytest.raises(StandingPermissionIntegrityError, match="schema version.*storage type"):
+    with pytest.raises(StandingPermissionIntegrityError, match="schema shape"):
         permissions.initialize()
 
 
@@ -311,6 +311,32 @@ def test_standing_permission_schema_shape_is_validated(tmp_path) -> None:
 
     permissions = StandingPermissionStore(store)
     with pytest.raises(StandingPermissionIntegrityError, match="schema shape"):
+        permissions.initialize()
+
+
+def test_parent_authority_foreign_key_is_part_of_durable_schema(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "missing-parent-fk.db")
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE standing_permission_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO standing_permission_schema_migrations(version, applied_at) "
+            "VALUES (1, ?)",
+            (datetime(2026, 9, 27, tzinfo=UTC).isoformat(),),
+        )
+        conn.execute(
+            "CREATE TABLE standing_permissions ("
+            "permission_id TEXT PRIMARY KEY, "
+            "parent_permission_id TEXT, "
+            "scope_json TEXT NOT NULL, "
+            "scope_fingerprint TEXT NOT NULL, "
+            "revoked_at TEXT)"
+        )
+
+    permissions = StandingPermissionStore(store)
+    with pytest.raises(StandingPermissionIntegrityError, match="foreign key"):
         permissions.initialize()
 
 
