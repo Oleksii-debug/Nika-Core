@@ -79,12 +79,14 @@ class FakeRecoveryPort:
         inspect_error: Exception | None = None,
         recover_error: Exception | None = None,
         component_id_override: str | None = None,
+        envelope_override: WorkerResultEnvelope | None = None,
     ) -> None:
         self.state = state
         self.failure = failure
         self.inspect_error = inspect_error
         self.recover_error = recover_error
         self.component_id_override = component_id_override
+        self.envelope_override = envelope_override
         self.inspected: list[str] = []
         self.recovered = []
 
@@ -98,6 +100,8 @@ class FakeRecoveryPort:
         self.recovered.append((request, state))
         if self.recover_error is not None:
             raise self.recover_error
+        if self.envelope_override is not None:
+            return self.envelope_override
         result = CodingResult(
             job_id=request.work_id,
             test_evidence=()
@@ -223,6 +227,44 @@ def test_invalid_recovery_evidence_blocks_only_the_affected_component() -> None:
     assert "host reconciliation required" in (outcome.record.blocker or "")
     assert "foreign-component" not in (outcome.record.blocker or "")
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_recovery_cannot_mutate_another_running_component_with_valid_foreign_evidence() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    docs_request = coordinator.start("docs")
+    state = RecoveryState("interrupted", "resume-token")
+    foreign_result = CodingResult(
+        job_id=docs_request.work_id,
+        test_evidence=(TestEvidence(("pytest",), 0, "docs-ok"),),
+        recovery_state=state,
+    )
+    foreign_envelope = WorkerResultEnvelope(
+        work_id=docs_request.work_id,
+        component_id=docs_request.component_id,
+        repository_id=docs_request.repository_id,
+        base_sha=docs_request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=foreign_result,
+    )
+    worker = FakeRecoveryPort(state, envelope_override=foreign_envelope)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.component_id == "core"
+    assert outcome.record.request.component_id == "core"
+    assert outcome.record.state is WorkState.BLOCKED
+
+    records = {
+        record.request.component_id: record
+        for record in coordinator.snapshot().records
+    }
+    assert records["core"].state is WorkState.BLOCKED
+    assert records["core"].result is None
+    assert records["docs"].state is WorkState.RUNNING
+    assert records["docs"].result is None
 
 
 def test_recovered_cancelled_result_preserves_typed_repair_evidence() -> None:

@@ -101,6 +101,17 @@ class ProductFactoryWorkerRecovery:
                 record=blocked,
                 recovery_state=state,
             )
+        if envelope.component_id != component_id:
+            blocked = coordinator.block(
+                component_id,
+                "worker recovery evidence is invalid; host reconciliation required",
+            )
+            return WorkerRecoveryOutcome(
+                component_id=component_id,
+                disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
+                record=blocked,
+                recovery_state=state,
+            )
         try:
             updated = coordinator.record_result(envelope)
         except CoordinatorError:
