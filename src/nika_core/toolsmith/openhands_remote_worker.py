@@ -987,6 +987,20 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         job: CodingJob,
         state: RecoveryState,
     ) -> CodingResult:
+        async with self._lock:
+            current = self._states.get(job.job_id)
+        if current != state:
+            return _failure_result(
+                job,
+                WorkerFailureKind.INVALID_REQUEST,
+                "bound cancellation cleanup requires process-local stop proof",
+                retryable=False,
+                state=RecoveryState(
+                    "manual_reconcile_required",
+                    state.opaque_token,
+                ),
+            )
+
         binding_store = self._recovery_binding_store
         assert binding_store is not None
         try:
