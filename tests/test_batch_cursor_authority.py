@@ -366,6 +366,110 @@ def test_mark_uncertain_validates_evidence_before_ledger_mutation(
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
 
 
+def test_stale_mark_uncertain_on_confirmed_target_preserves_scheduler_wait(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    cursor.schedule_inter_batch_wait(due)
+
+    cursor.mark_uncertain("target-0", {"reason": "late timeout notification"})
+
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.deadline_source == "scheduler"
+    assert intent.not_before == due.isoformat()
+    assert cursor.state.targets[0].attempt_state is AttemptState.CONFIRMED
+    assert ledger.require(grant.operation_key).status is IdempotencyStatus.COMPLETED
+    with pytest.raises(BatchCursorBlockedError, match="deadline has not been reached"):
+        cursor.release_inter_batch_wait(now=due - timedelta(seconds=1))
+
+
+def test_mark_uncertain_rejects_confirmed_target_with_noncompleted_ledger_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    confirmed_state = _state_value(memory, "task")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET status = ?, result_json = NULL
+            WHERE operation_key = ?
+            """,
+            (IdempotencyStatus.PENDING.value, grant.operation_key),
+        )
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed cursor target contradicts idempotency evidence",
+    ):
+        cursor.mark_uncertain("target-0", {"reason": "late timeout notification"})
+
+    record = ledger.require(grant.operation_key)
+    assert record.status is IdempotencyStatus.PENDING
+    assert record.result is None
+    assert cursor.state.targets[0].attempt_state is AttemptState.CONFIRMED
+    assert _state_value(memory, "task") == confirmed_state
+
+
+def test_confirm_rejects_completed_ledger_without_durable_result(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    in_flight_state = _state_value(memory, "task")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET status = ?, result_json = NULL
+            WHERE operation_key = ?
+            """,
+            (IdempotencyStatus.COMPLETED.value, grant.operation_key),
+        )
+
+    with pytest.raises(BatchCursorStateError, match="missing durable result"):
+        cursor.confirm("target-0", {"ok": True})
+
+    record = ledger.require(grant.operation_key)
+    assert record.status is IdempotencyStatus.COMPLETED
+    assert record.result is None
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+    assert _state_value(memory, "task") == in_flight_state
+
+
 def test_restore_rejects_nonfinite_uncertain_evidence_before_mutation(
     tmp_path: Path,
 ) -> None:
