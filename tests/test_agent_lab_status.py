@@ -118,6 +118,25 @@ def test_snapshot_projects_bounded_restart_safe_status_without_secret_payloads(
     assert "очікують підтвердження" in text
 
 
+def test_snapshot_reports_current_paused_child_state_accessibly(tmp_path: Path) -> None:
+    store = _store(tmp_path / "nika.db")
+    _create_team(store)
+    MultiAgentStore(store).set_member_state(
+        team_id="team-alpha",
+        member_id="child-1",
+        state=MemberState.PAUSED,
+    )
+
+    snapshot = AgentLabStatusReader(store).snapshot()
+
+    team = snapshot.teams[0]
+    assert team.nonterminal_child_count == 1
+    assert team.waiting_approval_count == 0
+    assert team.paused_member_count == 1
+    assert snapshot.as_dict()["teams"][0]["paused_member_count"] == 1
+    assert "призупинених 1" in snapshot.accessible_text()
+
+
 def test_state_provider_composes_without_overwriting_base_state(tmp_path: Path) -> None:
     store = _store(tmp_path / "nika.db")
     provider = AgentLabStateProvider(

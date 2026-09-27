@@ -12,6 +12,7 @@ class AgentLabTeamView:
     child_count: int
     nonterminal_child_count: int
     waiting_approval_count: int
+    paused_member_count: int
     completed_member_count: int
     failed_member_count: int
     cancelled_member_count: int
@@ -68,9 +69,10 @@ class AgentLabOperationalSnapshot:
                 lines.append(
                     f"Команда {item.team_id}; стан {item.state}; "
                     f"учасників {item.member_count}; дочірніх виконавців {item.child_count}; "
-                    f"активних або очікуючих дочірніх виконавців "
+                    f"нетермінальних дочірніх виконавців "
                     f"{item.nonterminal_child_count}; "
-                    f"очікують підтвердження {item.waiting_approval_count}."
+                    f"очікують підтвердження {item.waiting_approval_count}; "
+                    f"призупинених {item.paused_member_count}."
                 )
         else:
             lines.append("Останні команди: немає.")

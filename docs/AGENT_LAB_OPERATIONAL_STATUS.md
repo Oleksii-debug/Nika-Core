@@ -32,7 +32,7 @@ The projection intentionally exposes only:
 - team state;
 - total member count and child-worker count;
 - nonterminal child-worker count;
-- waiting-approval, completed, failed and cancelled child-worker counts;
+- waiting-approval, paused, completed, failed and cancelled child-worker counts;
 - persisted team `max_total_agents` and `max_parallel` limits;
 - team update timestamp;
 - opaque experiment ID;
@@ -70,7 +70,9 @@ consistency. Secret-bearing source fields are not copied to the returned view or
 - Existing databases are opened through `SQLiteStore.connection()` and immediately switched to
   SQLite `PRAGMA query_only = ON` before operational reads.
 - Schema versions before Agent Lab v7 fail closed with an instruction to use the normal Nika
-  migration/startup path.
+  migration/startup path; later core migrations remain readable up to the running Nika schema.
+- The current supplemental multi-agent member-state contract, including 'paused', is projected
+  without changing lifecycle authority.
 - A database newer than the running Nika schema fails closed instead of guessing forward
   compatibility.
 - No status read writes migrations, audit events, timestamps, checkpoints or lifecycle state.
@@ -141,9 +143,9 @@ state without changing M7/M8 execution authority.
 
 Automated tests cover restart equivalence, Unicode/space database paths, secret-canary
 non-disclosure, provider composition, missing-database no-create behavior, limits, quota corruption,
-legal terminal-root semantics, illegal terminal child state, orphan parent/evidence corruption,
-member-depth lineage corruption, unsafe output identifiers, bounded malformed-database failure,
-experiment identity substitution and lifecycle-tail mismatch.
+current paused-child operational reporting, legal terminal-root semantics, illegal terminal child
+state, orphan parent/evidence corruption, member-depth lineage corruption, unsafe output identifiers,
+bounded malformed-database failure, experiment identity substitution and lifecycle-tail mismatch.
 
 Repository acceptance still requires exact-head dependency consistency, Ruff, compile, full pytest
 on Ubuntu and Windows, the applicable pre-human gate, current-main compatibility reread, and

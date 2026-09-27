@@ -94,7 +94,8 @@ class AgentLabStatusReader:
         row = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()
         value = None if row is None else row[0]
         if isinstance(value, bool) or not isinstance(value, int):
-            raise RuntimeError("Nika database schema version is invalid")
+            # Persisted corruption is an operational read failure, not caller type misuse.
+            raise RuntimeError("Nika database schema version is invalid")  # noqa: TRY004
         if value < _MIN_SCHEMA:
             raise RuntimeError(
                 "Nika database predates the Agent Lab durable schema; "
@@ -218,6 +219,7 @@ class AgentLabStatusReader:
             child_count=child_count,
             nonterminal_child_count=nonterminal_count,
             waiting_approval_count=child_states[MemberState.WAITING_APPROVAL],
+            paused_member_count=child_states[MemberState.PAUSED],
             completed_member_count=child_states[MemberState.COMPLETED],
             failed_member_count=child_states[MemberState.FAILED],
             cancelled_member_count=child_states[MemberState.CANCELLED],
@@ -229,7 +231,8 @@ class AgentLabStatusReader:
     @staticmethod
     def _quota(raw: object, team_id: str) -> TeamQuota:
         if not isinstance(raw, str):
-            raise RuntimeError(f"Agent Lab team {team_id} quota is not text")
+            # Persisted corruption is an operational read failure, not caller type misuse.
+            raise RuntimeError(f"Agent Lab team {team_id} quota is not text")  # noqa: TRY004
         try:
             payload = json.loads(raw)
         except ValueError as exc:
