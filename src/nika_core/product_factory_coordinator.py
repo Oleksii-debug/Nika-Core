@@ -15,7 +15,15 @@ from nika_core.product_factory_review_authority import (
     ProductFactoryReviewAuthorityPort,
     ProductFactoryReviewSubject,
 )
-from nika_core.toolsmith.contracts import CodingResult, TestEvidence
+from nika_core.toolsmith.contracts import (
+    ArtifactEvidence,
+    ChangedFile,
+    CodingResult,
+    RecoveryState,
+    TestEvidence,
+    WorkerFailure,
+    WorkerFailureKind,
+)
 
 
 class CoordinatorError(ValueError):
@@ -215,8 +223,7 @@ class ProductFactoryCoordinator:
         return record.request
 
     def record_result(self, envelope: WorkerResultEnvelope) -> WorkRecord:
-        if type(envelope) is not WorkerResultEnvelope:
-            raise CoordinatorError("worker result must be exact WorkerResultEnvelope")
+        envelope = _canonical_worker_result_envelope(envelope)
         record = self._record(envelope.component_id)
         if record.state is not WorkState.RUNNING:
             raise CoordinatorError("worker result is only valid for a running component")
@@ -569,6 +576,122 @@ class ProductFactoryCoordinator:
     def _touch(self) -> None:
         self._revision += 1
 
+
+
+def _canonical_worker_result_envelope(value: object) -> WorkerResultEnvelope:
+    if type(value) is not WorkerResultEnvelope:
+        raise CoordinatorError("worker result must be exact WorkerResultEnvelope")
+
+    result = value.coding_result
+    if type(result) is not CodingResult or type(result.job_id) is not str:
+        raise CoordinatorError("worker result coding_result must be exact canonical evidence")
+    if type(result.changed_files) is not tuple:
+        raise CoordinatorError("worker result changed_files must be an exact tuple")
+    if type(result.test_evidence) is not tuple:
+        raise CoordinatorError("worker result test_evidence must be an exact tuple")
+    if type(result.artifacts) is not tuple:
+        raise CoordinatorError("worker result artifacts must be an exact tuple")
+
+    changed_files = tuple(_canonical_changed_file(item) for item in result.changed_files)
+    test_evidence = tuple(_canonical_test_evidence(item) for item in result.test_evidence)
+    artifacts = tuple(_canonical_artifact_evidence(item) for item in result.artifacts)
+
+    recovery_state = None
+    if result.recovery_state is not None:
+        recovery_state = _canonical_recovery_state(result.recovery_state)
+
+    failure = None
+    if result.failure is not None:
+        failure = _canonical_worker_failure(result.failure)
+
+    canonical_result = CodingResult(
+        job_id=result.job_id,
+        changed_files=changed_files,
+        test_evidence=test_evidence,
+        artifacts=artifacts,
+        recovery_state=recovery_state,
+        failure=failure,
+    )
+    return WorkerResultEnvelope(
+        work_id=value.work_id,
+        component_id=value.component_id,
+        repository_id=value.repository_id,
+        base_sha=value.base_sha,
+        result_sha=value.result_sha,
+        diff_digest=value.diff_digest,
+        coding_result=canonical_result,
+        producer_actor_id=value.producer_actor_id,
+    )
+
+
+def _canonical_changed_file(value: object) -> ChangedFile:
+    if not (
+        type(value) is ChangedFile
+        and type(value.path) is str
+        and type(value.sha256) is str
+        and type(value.size_bytes) is int
+    ):
+        raise CoordinatorError("worker result contains invalid changed-file evidence")
+    try:
+        return ChangedFile(value.path, value.sha256, value.size_bytes)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError("worker result contains invalid changed-file evidence") from exc
+
+
+def _canonical_test_evidence(value: object) -> TestEvidence:
+    if not (
+        type(value) is TestEvidence
+        and type(value.command) is tuple
+        and all(type(part) is str for part in value.command)
+        and type(value.exit_code) is int
+        and type(value.output_digest) is str
+    ):
+        raise CoordinatorError("worker result contains invalid test evidence")
+    try:
+        return TestEvidence(value.command, value.exit_code, value.output_digest)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError("worker result contains invalid test evidence") from exc
+
+
+def _canonical_artifact_evidence(value: object) -> ArtifactEvidence:
+    if not (
+        type(value) is ArtifactEvidence
+        and type(value.name) is str
+        and type(value.digest) is str
+        and type(value.media_type) is str
+    ):
+        raise CoordinatorError("worker result contains invalid artifact evidence")
+    try:
+        return ArtifactEvidence(value.name, value.digest, value.media_type)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError("worker result contains invalid artifact evidence") from exc
+
+
+def _canonical_recovery_state(value: object) -> RecoveryState:
+    if not (
+        type(value) is RecoveryState
+        and type(value.phase) is str
+        and (value.opaque_token is None or type(value.opaque_token) is str)
+    ):
+        raise CoordinatorError("worker result contains invalid recovery-state evidence")
+    try:
+        return RecoveryState(value.phase, value.opaque_token)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError("worker result contains invalid recovery-state evidence") from exc
+
+
+def _canonical_worker_failure(value: object) -> WorkerFailure:
+    if not (
+        type(value) is WorkerFailure
+        and type(value.kind) is WorkerFailureKind
+        and type(value.message) is str
+        and type(value.retryable) is bool
+    ):
+        raise CoordinatorError("worker result contains invalid failure evidence")
+    try:
+        return WorkerFailure(value.kind, value.message, value.retryable)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError("worker result contains invalid failure evidence") from exc
 
 def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
     if not plan:
