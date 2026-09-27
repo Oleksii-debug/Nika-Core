@@ -118,6 +118,7 @@ class BatchCursorState(BaseModel):
 
         seen_ids: set[str] = set()
         input_positions: list[int] = []
+        first_unfinished: TargetCursor | None = None
         for index, target in enumerate(self.targets):
             if target.target_id in seen_ids:
                 raise ValueError("restored cursor contains duplicate target identity")
@@ -146,12 +147,30 @@ class BatchCursorState(BaseModel):
             )
             if target.operation_key != expected_key:
                 raise ValueError("target operation key mismatch")
+            if target.attempt_state is AttemptState.CONFIRMED:
+                if first_unfinished is not None:
+                    raise ValueError("confirmed targets must form a contiguous prefix")
+            elif first_unfinished is None:
+                first_unfinished = target
+            elif target.attempt_state is not AttemptState.PENDING:
+                raise ValueError("only the first unfinished target may be active")
 
         if sorted(input_positions) != list(range(self.input_count)):
             raise ValueError("input positions do not match input_count")
         max_batch = self.targets[-1].batch_index if self.targets else 0
         if self.ready_batch_index > max_batch:
             raise ValueError("ready_batch_index exceeds plan batches")
+        if first_unfinished is None:
+            allowed_ready_batches = {max_batch}
+        elif first_unfinished.batch_index == 0 or first_unfinished.batch_position > 0:
+            allowed_ready_batches = {first_unfinished.batch_index}
+        else:
+            allowed_ready_batches = {
+                first_unfinished.batch_index - 1,
+                first_unfinished.batch_index,
+            }
+        if self.ready_batch_index not in allowed_ready_batches:
+            raise ValueError("ready_batch_index is inconsistent with cursor frontier")
         if self.plan_fingerprint != _plan_fingerprint(
             self.targets,
             self.batch_size,
@@ -215,8 +234,7 @@ class BatchCursor:
     ) -> BatchCursor:
         task_id = _required("task_id", task_id)
         cursor_id = _required("cursor_id", cursor_id)
-        if batch_size <= 0:
-            raise ValueError("batch_size must be greater than zero")
+        batch_size = _positive_batch_size(batch_size)
         if memory.get(
             scope=MemoryScope.TASK,
             owner_id=task_id,
@@ -250,11 +268,14 @@ class BatchCursor:
         targets: Sequence[BatchTargetSpec],
         batch_size: int,
     ) -> BatchCursor:
+        task_id = _required("task_id", task_id)
+        cursor_id = _required("cursor_id", cursor_id)
+        batch_size = _positive_batch_size(batch_size)
         record = memory.get(
             scope=MemoryScope.TASK,
-            owner_id=_required("task_id", task_id),
+            owner_id=task_id,
             namespace=_NAMESPACE,
-            key=_required("cursor_id", cursor_id),
+            key=cursor_id,
         )
         if record is None:
             raise KeyError(f"Unknown batch cursor: {cursor_id}")
@@ -264,8 +285,6 @@ class BatchCursor:
             raise BatchCursorStateError("malformed restored batch cursor state") from exc
         if state.task_id != task_id or state.cursor_id != cursor_id:
             raise BatchCursorStateError("restored batch cursor identity mismatch")
-        if batch_size <= 0:
-            raise ValueError("batch_size must be greater than zero")
         expected_targets = _normalize_targets(
             task_id,
             cursor_id,
@@ -355,7 +374,7 @@ class BatchCursor:
             return
         if target.attempt_state is not AttemptState.IN_FLIGHT:
             raise BatchCursorBlockedError("only an in-flight target may be confirmed")
-        clean_result = _json_copy(result)
+        clean_result = _json_object("result", result)
         record = self._ledger.require(target.operation_key)
         if record.status is IdempotencyStatus.UNCERTAIN:
             raise BatchCursorBlockedError("uncertain effect requires reconciliation")
@@ -384,7 +403,7 @@ class BatchCursor:
                 self._ledger.mark_uncertain(target.operation_key)
             target.attempt_state = AttemptState.UNCERTAIN
             target.confirmed_result = None
-            target.uncertain_result = _json_copy(evidence)
+            target.uncertain_result = _json_object("evidence", evidence)
             self._state.next_scheduled_intent = _reconcile_intent(target)
         self._persist()
 
@@ -541,6 +560,7 @@ class BatchCursor:
         return next_target is not None and next_target.target_id == target.target_id
 
     def _find(self, target_id: str) -> TargetCursor:
+        target_id = _required("target_id", target_id)
         target = next(
             (item for item in self._state.targets if item.target_id == target_id),
             None,
@@ -736,7 +756,12 @@ def _decode_completion_result(
         if due is None:
             parsed_due = None
         elif isinstance(due, str):
-            parsed_due = _parse_utc(due)
+            try:
+                parsed_due = _parse_utc(due)
+            except (TypeError, ValueError) as exc:
+                raise BatchCursorStateError(
+                    "completed effect wake deadline is malformed"
+                ) from exc
         else:
             raise BatchCursorStateError("completed effect wake deadline is malformed")
         return _json_copy(result), parsed_due
@@ -752,6 +777,15 @@ def _json_copy(value: Any) -> Any:
         raise BatchCursorStateError("batch cursor values must be JSON-serializable") from exc
 
 
+def _json_object(name: str, value: dict[str, Any]) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise TypeError(f"{name} must be an exact JSON object")
+    copied = _json_copy(value)
+    if not isinstance(copied, dict):
+        raise BatchCursorStateError(f"{name} must remain a JSON object")
+    return copied
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -761,20 +795,37 @@ def _sha256(value: str) -> str:
 
 
 def _required(name: str, value: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be an exact string")
     result = value.strip()
     if not result:
         raise ValueError(f"{name} must not be empty")
     return result
 
 
+def _positive_batch_size(value: int) -> int:
+    if type(value) is not int:
+        raise TypeError("batch_size must be an exact integer")
+    if value <= 0:
+        raise ValueError("batch_size must be greater than zero")
+    return value
+
+
 def _as_utc(value: datetime) -> datetime:
+    if type(value) is not datetime:
+        raise TypeError("datetime must be an exact datetime")
     if value.tzinfo is None:
         raise ValueError("datetime must be timezone-aware")
     return value.astimezone(UTC)
 
 
 def _parse_utc(value: str) -> datetime:
+    if type(value) is not str:
+        raise TypeError("scheduled intent datetime must be an exact string")
     parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None:
         raise ValueError("scheduled intent datetime must be timezone-aware")
-    return parsed.astimezone(UTC)
+    normalized = parsed.astimezone(UTC)
+    if normalized.isoformat() != value:
+        raise ValueError("scheduled intent datetime must use canonical UTC form")
+    return normalized
