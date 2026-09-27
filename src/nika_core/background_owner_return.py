@@ -9,8 +9,6 @@ from math import isfinite
 from nika_core.background_life import OwnerPresence
 from nika_core.background_runtime import OwnerPresenceObservation
 from nika_core.kernel.audit import AuditLog
-from nika_core.kernel.task_queue import TaskQueue
-from nika_core.kernel.task_state import TaskState
 from nika_core.runtime.contracts import AgentRuntimePort
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.windows_owner_presence import WindowsOwnerPresenceObserver
@@ -29,7 +27,6 @@ class RunningBackgroundReconcileResult:
     action: RunningBackgroundAction
     reason: str
     pause_applied: bool
-    background_pause_owned: bool = False
 
 
 class WindowsBackgroundOwnerReturnController:
@@ -43,19 +40,12 @@ class WindowsBackgroundOwnerReturnController:
         self,
         *,
         coordinator: TaskRuntimeCoordinator,
-        queue: TaskQueue,
         audit: AuditLog,
         presence: WindowsOwnerPresenceObserver,
         max_presence_age_seconds: int | float = 5.0,
         max_future_skew_seconds: int | float = 1.0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if type(queue) is not TaskQueue:
-            raise TypeError("queue must be exact TaskQueue")
-        if getattr(coordinator, "_queue", None) is not queue:
-            raise ValueError("coordinator must use the controller canonical TaskQueue")
-        if getattr(audit, "_store", None) is not queue.store:
-            raise ValueError("audit must use the controller canonical SQLiteStore")
         if type(presence) is not WindowsOwnerPresenceObserver:
             raise TypeError("presence must be exact WindowsOwnerPresenceObserver")
         if getattr(presence, "_audit", None) is not audit:
@@ -73,7 +63,6 @@ class WindowsBackgroundOwnerReturnController:
         if self._max_future_skew > self._max_age:
             raise ValueError("max_future_skew_seconds cannot exceed max_presence_age_seconds")
         self._coordinator = coordinator
-        self._queue = queue
         self._audit = audit
         self._presence = presence
         self._source_id = presence.source_id
@@ -118,7 +107,6 @@ class WindowsBackgroundOwnerReturnController:
                     action=RunningBackgroundAction.CONTINUE,
                     reason="owner_away",
                     pause_applied=False,
-                    background_pause_owned=False,
                 )
             reason = (
                 "owner_active"
@@ -126,7 +114,6 @@ class WindowsBackgroundOwnerReturnController:
                 else "owner_presence_unknown"
             )
 
-        pre_pause_event_id = self._latest_task_event_id(task_id)
         try:
             applied = await self._coordinator.pause(
                 runtime,
@@ -153,83 +140,19 @@ class WindowsBackgroundOwnerReturnController:
                 action=RunningBackgroundAction.NOT_ACTIVE,
                 reason=reason,
                 pause_applied=False,
-                background_pause_owned=False,
             )
 
-        background_pause_owned = self._claim_background_pause_ownership(
-            task_id=task_id,
-            reason=reason,
-            pre_pause_event_id=pre_pause_event_id,
-        )
         self._audit.append(
             event_type="background.running_paused_for_owner",
             entity_type="task",
             entity_id=task_id,
-            payload={
-                "reason": reason,
-                "source_id": self._source_id,
-                "background_pause_owned": background_pause_owned,
-            },
+            payload={"reason": reason, "source_id": self._source_id},
         )
         return RunningBackgroundReconcileResult(
             action=RunningBackgroundAction.PAUSED,
             reason=reason,
             pause_applied=True,
-            background_pause_owned=background_pause_owned,
         )
-
-    def _latest_task_event_id(self, task_id: str) -> int:
-        with self._queue.store.connection() as conn:
-            row = conn.execute(
-                "SELECT event_id FROM task_events WHERE task_id = ? "
-                "ORDER BY event_id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-        if row is None:
-            raise RuntimeError("background task has no durable task event")
-        return int(row["event_id"])
-
-    def _claim_background_pause_ownership(
-        self,
-        *,
-        task_id: str,
-        reason: str,
-        pre_pause_event_id: int,
-    ) -> bool:
-        with self._queue.store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            task_row = conn.execute(
-                "SELECT state FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            if task_row is None or task_row["state"] != TaskState.PAUSED.value:
-                return False
-            rows = conn.execute(
-                "SELECT event_id, previous_state, new_state FROM task_events "
-                "WHERE task_id = ? AND event_id > ? ORDER BY event_id",
-                (task_id, pre_pause_event_id),
-            ).fetchall()
-            if len(rows) != 1:
-                return False
-            pause_event = rows[0]
-            if (
-                pause_event["previous_state"] != TaskState.RUNNING.value
-                or pause_event["new_state"] != TaskState.PAUSED.value
-            ):
-                return False
-            pause_event_id = int(pause_event["event_id"])
-            self._audit.append_with_connection(
-                conn,
-                event_type="background.dispatch_paused",
-                entity_type="task",
-                entity_id=task_id,
-                payload={
-                    "reason": reason,
-                    "phase": "owner_return",
-                    "task_event_id": pause_event_id,
-                },
-            )
-            return True
 
     def _require_background_runtime_provenance(
         self,
