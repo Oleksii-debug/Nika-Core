@@ -29,6 +29,10 @@ agent = [
   "psutil>=7,<8",
   "mcp>=2,<3",
 ]
+coding-openhands = [
+  "openhands-sdk==1.49.2",
+  "openhands-tools==1.49.2",
+]
 embedded-ai = [
   "foundry-local-sdk-winml>=1.2.3,<2; sys_platform == 'win32'",
   "foundry-local-sdk>=1.2.3,<2; sys_platform != 'win32'",
