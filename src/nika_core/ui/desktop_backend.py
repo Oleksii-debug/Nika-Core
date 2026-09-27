@@ -202,6 +202,12 @@ class DesktopBackend:
         record = self._only_with_state(TaskState.PAUSED, action="продовження")
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
+        with self._active_lock:
+            pending_pause = self._pause_futures.get(record.task_id)
+            if pending_pause is not None and not pending_pause.done():
+                raise ValueError(
+                    "Runtime ще завершує безпечне призупинення; продовження поки недоступне."
+                )
 
         session = self._coordinator.sessions.get(record.task_id)
         if session is not None:
@@ -580,15 +586,32 @@ class DesktopBackend:
             raise ValueError(
                 "Неможливо призупинити завдання, поки виконується запит на зупинку."
             )
+        active_future = self._active_futures.get(task_id)
         future = self._host().submit(
-            self._coordinator.pause(
-                self._runtime,
+            self._pause_active(
                 task_id=task_id,
                 thread_id=thread_id,
+                active_future=active_future,
             )
         )
         self._pause_futures[task_id] = future
         return future
+
+    async def _pause_active(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        active_future: Future[Any] | None,
+    ) -> bool:
+        applied = await self._coordinator.pause(
+            self._runtime,
+            task_id=task_id,
+            thread_id=thread_id,
+        )
+        if applied and active_future is not None and not active_future.done():
+            await asyncio.wrap_future(active_future)
+        return applied
 
     def _schedule_cancel_locked(self, task_id: str, thread_id: str) -> Future[bool]:
         if RuntimeCapability.CANCELLATION not in self._runtime.capabilities:
