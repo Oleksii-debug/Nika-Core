@@ -224,9 +224,7 @@ def test_failed_acceptance_preserves_changed_evidence_and_requires_new_job(
 
     recovery = _run(worker.recover(job, result.recovery_state))
 
-    assert not recovery.succeeded
-    assert recovery.failure is not None
-    assert recovery.failure.kind.value == "invalid_request"
+    assert recovery == result
     assert len(runtime.calls) == 1
 
 
@@ -249,6 +247,38 @@ def test_completed_job_identity_cannot_be_executed_twice(tmp_path: Path) -> None
     assert second.recovery_state == first.recovery_state
     assert state == first.recovery_state
     assert recovered == first
+    assert len(runtime.calls) == 1
+
+
+def test_late_cancel_of_finalized_interruption_never_restarts_job(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime(error=RuntimeError("untrusted engine failure"))
+    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    job = _job(root)
+
+    result = _run(worker.execute(job))
+    _run(worker.cancel(job.job_id))
+    state = _run(worker.inspect(job.job_id))
+    recovered = _run(worker.recover(job, state))
+
+    assert not result.succeeded
+    assert result.recovery_state == RecoveryState("interrupted")
+    assert state == result.recovery_state
+    assert recovered == result
+    assert len(runtime.calls) == 1
+
+
+def test_unfinalized_interrupted_state_can_resume_exact_job_once(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    job = _job(root)
+    interrupted = RecoveryState("interrupted")
+    _run(worker._set_state(job.job_id, interrupted))
+
+    result = _run(worker.recover(job, interrupted))
+
+    assert result.succeeded
     assert len(runtime.calls) == 1
 
 
