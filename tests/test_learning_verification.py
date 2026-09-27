@@ -20,6 +20,7 @@ CHECKER_A = "3" * 64
 CHECKER_B = "4" * 64
 EVIDENCE_A = "5" * 64
 EVIDENCE_B = "6" * 64
+TRUSTED_CHECKERS = (("integrity", CHECKER_A), ("quality", CHECKER_B))
 
 
 def _check(
@@ -59,17 +60,107 @@ class _OversizeBytes(bytes):
         raise AssertionError("oversize bytes must be rejected before UTF-8 decoding")
 
 
+class _ShaSubclass(str):
+    pass
+
+
 def test_create_canonicalizes_required_checks_and_evidence() -> None:
     receipt = _verified_receipt()
 
     assert receipt.required_check_ids == ("integrity", "quality")
     assert tuple(item.check_id for item in receipt.checks) == ("integrity", "quality")
     assert receipt.is_verified is True
-    assert receipt.verification_sha256 == receipt.receipt_sha256
+    assert len(receipt.receipt_sha256) == 64
+    with pytest.raises(
+        LearningVerificationRejectedError,
+        match="trusted verification authority is required",
+    ):
+        _ = receipt.verification_sha256
+
+
+def test_trusted_verification_sha256_requires_external_policy_and_checkers() -> None:
+    receipt = _verified_receipt()
+
+    assert receipt.trusted_verification_sha256(
+        expected_verification_policy_sha256=POLICY,
+        expected_required_checkers=TRUSTED_CHECKERS,
+    ) == receipt.receipt_sha256
+
+
+@pytest.mark.parametrize(
+    ("policy", "checkers", "message"),
+    [
+        ("a" * 64, TRUSTED_CHECKERS, "policy does not match"),
+        (
+            POLICY,
+            (("integrity", "a" * 64), ("quality", CHECKER_B)),
+            "checker authority does not match",
+        ),
+        (POLICY, (("integrity", CHECKER_A),), "checker authority does not match"),
+    ],
+)
+def test_trusted_verification_rejects_policy_or_checker_substitution(
+    policy: str,
+    checkers: tuple[tuple[str, str], ...],
+    message: str,
+) -> None:
+    receipt = _verified_receipt()
+
+    with pytest.raises(LearningVerificationRejectedError, match=message):
+        receipt.trusted_verification_sha256(
+            expected_verification_policy_sha256=policy,
+            expected_required_checkers=checkers,
+        )
+
+
+def test_self_selected_pass_does_not_become_trusted_verification_evidence() -> None:
+    self_approved = CandidateDatasetVerification.create(
+        candidate_material_sha256=MATERIAL,
+        verification_policy_sha256="a" * 64,
+        required_check_ids=("self-check",),
+        checks=(
+            _check(
+                "self-check",
+                checker="b" * 64,
+                evidence=EVIDENCE_A,
+            ),
+        ),
+    )
+
+    assert self_approved.is_verified is True
+    assert len(self_approved.receipt_sha256) == 64
+    with pytest.raises(LearningVerificationRejectedError):
+        _ = self_approved.verification_sha256
+    with pytest.raises(
+        LearningVerificationRejectedError,
+        match="policy does not match",
+    ):
+        self_approved.trusted_verification_sha256(
+            expected_verification_policy_sha256=POLICY,
+            expected_required_checkers=TRUSTED_CHECKERS,
+        )
+
+
+def test_trusted_authority_inputs_require_exact_primitive_sha_values() -> None:
+    receipt = _verified_receipt()
+
+    with pytest.raises(LearningVerificationValidationError):
+        receipt.trusted_verification_sha256(
+            expected_verification_policy_sha256=_ShaSubclass(POLICY),
+            expected_required_checkers=TRUSTED_CHECKERS,
+        )
+    with pytest.raises(LearningVerificationValidationError):
+        receipt.trusted_verification_sha256(
+            expected_verification_policy_sha256=POLICY,
+            expected_required_checkers=(
+                ("integrity", _ShaSubclass(CHECKER_A)),
+                ("quality", CHECKER_B),
+            ),
+        )
 
 
 def test_verification_digest_binds_material_policy_checker_and_evidence() -> None:
-    baseline = _verified_receipt().verification_sha256
+    baseline = _verified_receipt().receipt_sha256
 
     variants = (
         CandidateDatasetVerification.create(
@@ -110,7 +201,7 @@ def test_verification_digest_binds_material_policy_checker_and_evidence() -> Non
         ),
     )
 
-    assert all(item.verification_sha256 != baseline for item in variants)
+    assert all(item.receipt_sha256 != baseline for item in variants)
 
 
 def test_failed_required_check_never_exposes_verification_sha256() -> None:
@@ -132,6 +223,14 @@ def test_failed_required_check_never_exposes_verification_sha256() -> None:
     assert len(receipt.receipt_sha256) == 64
     with pytest.raises(LearningVerificationRejectedError):
         _ = receipt.verification_sha256
+    with pytest.raises(
+        LearningVerificationRejectedError,
+        match="did not pass every required check",
+    ):
+        receipt.trusted_verification_sha256(
+            expected_verification_policy_sha256=POLICY,
+            expected_required_checkers=(("integrity", CHECKER_A),),
+        )
 
 
 @pytest.mark.parametrize(
@@ -237,7 +336,10 @@ def test_canonical_json_round_trip_binds_trusted_digest() -> None:
     )
 
     assert restored == receipt
-    assert restored.verification_sha256 == receipt.verification_sha256
+    assert restored.trusted_verification_sha256(
+        expected_verification_policy_sha256=POLICY,
+        expected_required_checkers=TRUSTED_CHECKERS,
+    ) == receipt.receipt_sha256
 
 
 def test_round_trip_preserves_failed_receipt_without_promoting_it() -> None:
