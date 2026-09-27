@@ -239,6 +239,7 @@ class BatchCursor:
         self._ledger = ledger
         self._state = state
         self._durable_state = state.model_copy(deep=True)
+        self._persistence_blocked = False
 
     @classmethod
     def create(
@@ -334,12 +335,14 @@ class BatchCursor:
         return self._state.model_copy(deep=True)
 
     def next_target(self) -> TargetCursor | None:
+        self._require_persistence_authority()
         intent = self._state.next_scheduled_intent
         if intent is None or intent.kind is not IntentKind.TARGET:
             return None
         return self._find(intent.target_id).model_copy(deep=True)
 
     def begin_effect(self, target_id: str) -> EffectGrant:
+        self._require_persistence_authority()
         target = self._find(target_id)
         if target.attempt_state is AttemptState.CONFIRMED:
             return EffectGrant(
@@ -388,6 +391,7 @@ class BatchCursor:
         *,
         next_batch_not_before: datetime | None = None,
     ) -> None:
+        self._require_persistence_authority()
         target = self._find(target_id)
         if target.attempt_state is AttemptState.CONFIRMED:
             return
@@ -411,6 +415,7 @@ class BatchCursor:
         self._persist()
 
     def mark_uncertain(self, target_id: str, evidence: dict[str, Any]) -> None:
+        self._require_persistence_authority()
         target = self._find(target_id)
         record = self._ledger.require(target.operation_key)
         if record.status is IdempotencyStatus.COMPLETED:
@@ -428,6 +433,7 @@ class BatchCursor:
         self._persist()
 
     def schedule_inter_batch_wait(self, not_before: datetime) -> None:
+        self._require_persistence_authority()
         intent = self._state.next_scheduled_intent
         if intent is None or intent.kind is not IntentKind.INTER_BATCH_WAIT:
             raise BatchCursorBlockedError("cursor is not waiting between batches")
@@ -435,6 +441,7 @@ class BatchCursor:
         self._persist()
 
     def release_inter_batch_wait(self, *, now: datetime | None = None) -> None:
+        self._require_persistence_authority()
         intent = self._state.next_scheduled_intent
         if intent is None or intent.kind is not IntentKind.INTER_BATCH_WAIT:
             raise BatchCursorBlockedError("cursor is not waiting between batches")
@@ -607,6 +614,12 @@ class BatchCursor:
             raise KeyError(f"Unknown batch target: {target_id}")
         return target
 
+    def _require_persistence_authority(self) -> None:
+        if self._persistence_blocked:
+            raise BatchCursorBlockedError(
+                "batch cursor persistence outcome is unknown; restore is required"
+            )
+
     def _persist(self) -> None:
         try:
             candidate = BatchCursorState.model_validate(
@@ -615,6 +628,8 @@ class BatchCursor:
         except (TypeError, ValueError) as exc:
             self._state = self._durable_state.model_copy(deep=True)
             raise BatchCursorStateError("refusing to persist malformed batch cursor") from exc
+
+        prior = self._durable_state.model_copy(deep=True)
         try:
             self._memory.put(
                 scope=MemoryScope.TASK,
@@ -623,11 +638,46 @@ class BatchCursor:
                 key=candidate.cursor_id,
                 value=candidate.model_dump(mode="json"),
             )
-        except Exception:
-            self._state = self._durable_state.model_copy(deep=True)
+        except Exception as exc:
+            try:
+                record = self._memory.get(
+                    scope=MemoryScope.TASK,
+                    owner_id=candidate.task_id,
+                    namespace=_NAMESPACE,
+                    key=candidate.cursor_id,
+                )
+                if record is None:
+                    raise BatchCursorStateError(
+                        "persisted batch cursor disappeared after failed write"
+                    )
+                persisted = BatchCursorState.model_validate(record.value)
+            except Exception:
+                self._state = prior
+                self._persistence_blocked = True
+                raise BatchCursorStateError(
+                    "batch cursor persistence outcome is unknown; restore is required"
+                ) from exc
+
+            if persisted == candidate:
+                self._state = candidate
+                self._durable_state = candidate.model_copy(deep=True)
+                self._persistence_blocked = False
+            elif persisted == prior:
+                self._state = prior
+                self._durable_state = prior.model_copy(deep=True)
+                self._persistence_blocked = False
+            else:
+                self._state = prior
+                self._persistence_blocked = True
+                raise BatchCursorStateError(
+                    "batch cursor persistence outcome conflicts with durable state; "
+                    "restore is required"
+                ) from exc
             raise
+
         self._state = candidate
         self._durable_state = candidate.model_copy(deep=True)
+        self._persistence_blocked = False
 
 
 def _normalize_targets(
