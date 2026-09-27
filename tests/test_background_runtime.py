@@ -866,3 +866,163 @@ def test_deferred_effect_result_cannot_escape_authority_window(tmp_path: Path) -
         if event.event_type == "background.dispatch_uncertain"
     ]
     assert uncertain[-1].payload["error_type"] == "DeferredEffectResult"
+
+
+
+def test_mutated_exact_presence_carrier_is_resnapshotted_and_rejected(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    observation = _obs(201, OwnerPresence.AWAY, now=now)
+    object.__setattr__(observation, "sequence", True)
+
+    guard, queue, audit, _resources = _guard(
+        store=store,
+        observations=[observation],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+
+    async def effect() -> object:
+        raise AssertionError("effect must not run")
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.PAUSE
+    assert result.reason == "owner_presence_untrusted"
+    assert queue.get(task_id).state is TaskState.PAUSED
+    rejected = [
+        event
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+        if event.event_type == "background.owner_presence_rejected"
+    ]
+    assert rejected[-1].payload["error_type"] == "OwnerPresenceEvidenceError"
+
+
+def test_stored_non_utc_presence_evidence_fails_closed(tmp_path: Path) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    audit = AuditLog(store)
+    audit.append(
+        event_type="background.owner_presence_observed",
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+        payload={
+            "task_id": "historical",
+            "phase": "preflight",
+            "sequence": 210,
+            "presence": OwnerPresence.AWAY.value,
+            "observed_at": "2030-01-01T01:00:00+01:00",
+        },
+    )
+    guard, queue, _audit, _resources = _guard(
+        store=store,
+        observations=[_obs(211, OwnerPresence.AWAY, now=now)],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+
+    async def effect() -> object:
+        raise AssertionError("effect must not run")
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            effect=effect,
+        )
+    )
+
+    assert result.reason == "owner_presence_untrusted"
+    assert queue.get(task_id).state is TaskState.PAUSED
+
+
+class WrongOwnerStatusResourceManager(ResourceManager):
+    def status(self, *, scope: str, owner_id: str):
+        status = super().status(scope=scope, owner_id=owner_id)
+        return type(status)(
+            budget=ResourceBudget(
+                scope=status.budget.scope,
+                owner_id="different-owner",
+                max_concurrent=status.budget.max_concurrent,
+                max_cpu_percent=status.budget.max_cpu_percent,
+                max_memory_percent=status.budget.max_memory_percent,
+            ),
+            snapshot=status.snapshot,
+            active_count=status.active_count,
+            queued_count=status.queued_count,
+            concurrency_headroom=status.concurrency_headroom,
+            cpu_headroom_percent=status.cpu_headroom_percent,
+            memory_headroom_percent=status.memory_headroom_percent,
+            pressure_reasons=status.pressure_reasons,
+        )
+
+
+def test_resource_status_must_bind_to_exact_background_owner(tmp_path: Path) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    queue = TaskQueue(store)
+    audit = AuditLog(store)
+    resources = WrongOwnerStatusResourceManager(store, SequenceResourceObserver())
+    resources.set_budget(
+        ResourceBudget(
+            scope="background_life",
+            owner_id="living-agent",
+            max_concurrent=1,
+            max_cpu_percent=80.0,
+            max_memory_percent=80.0,
+        )
+    )
+    guard = BackgroundDispatchGuard(
+        queue=queue,
+        audit=audit,
+        resources=resources,
+        presence=SequencePresence([_obs(220, OwnerPresence.AWAY, now=now)]),
+        source_id="win32-owner-presence",
+        clock=lambda: now,
+    )
+    task_id = _ready_task(queue)
+
+    async def effect() -> object:
+        raise AssertionError("effect must not run")
+
+    with pytest.raises(ValueError, match="owner_id"):
+        asyncio.run(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.SELF_TEST,
+                effect=effect,
+            )
+        )
+
+    assert queue.get(task_id).state is TaskState.READY
+
+
+def test_presence_source_identity_is_bounded(tmp_path: Path) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+
+    with pytest.raises(ValueError, match="too long"):
+        BackgroundDispatchGuard(
+            queue=TaskQueue(store),
+            audit=AuditLog(store),
+            resources=ResourceManager(store, SequenceResourceObserver()),
+            presence=SequencePresence([]),
+            source_id="x" * 257,
+            clock=lambda: now,
+        )
+
+    with pytest.raises(ValueError, match="too long"):
+        OwnerPresenceObservation(
+            source_id="x" * 257,
+            sequence=1,
+            presence=OwnerPresence.AWAY,
+            observed_at=now,
+        )
