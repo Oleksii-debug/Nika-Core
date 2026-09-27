@@ -549,6 +549,40 @@ def test_multiwrap_ambiguity_uses_minimum_idle_and_stays_conservatively_active(
     assert observer.observe().presence is OwnerPresence.ACTIVE
 
 
+def test_failed_sample_resets_stability_probation(tmp_path: Path) -> None:
+    audit = _audit(tmp_path)
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    clock_values: list[object] = [now, RuntimeError("synthetic clock failure"), now]
+
+    def clock() -> datetime:
+        value = clock_values.pop(0)
+        if isinstance(value, Exception):
+            raise value
+        return value  # type: ignore[return-value]
+
+    observer = WindowsOwnerPresenceObserver(
+        audit,
+        away_after_seconds=1,
+        api=FakeLastInputApi(
+            last_ticks=[1_000] * 6,
+            current_ticks=[5_000, 6_000, 7_000],
+        ),
+        clock=clock,
+    )
+
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+    with pytest.raises(RuntimeError, match="synthetic clock failure"):
+        observer.observe()
+    assert observer.observe().presence is OwnerPresence.ACTIVE
+
+    sampled = audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+    )
+    assert len(sampled) == 2
+    assert [event.payload["presence"] for event in sampled] == ["active", "active"]
+
+
 def test_first_stable_ancient_tick_cannot_authorize_away(tmp_path: Path) -> None:
     observer, _audit_log = _observer(
         tmp_path,
