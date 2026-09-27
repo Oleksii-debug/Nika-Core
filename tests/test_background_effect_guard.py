@@ -105,6 +105,7 @@ def guard(
             presence_observer=observer,
             resource_reader=resources,
             owner_id="living-agent",
+            presence_source_id="windows-session-presence",
             max_presence_age_seconds=max_age,
             clock=lambda: NOW,
         ),
@@ -318,6 +319,7 @@ def test_behavioral_presence_subclass_is_rejected_before_resource_or_effect() ->
         presence_observer=observer,
         resource_reader=resources,
         owner_id="living-agent",
+        presence_source_id="windows-session-presence",
         clock=lambda: NOW,
     )
 
@@ -350,6 +352,7 @@ def test_presence_freshness_configuration_is_bounded(value: object) -> None:
             presence_observer=PresenceObserver(observation()),
             resource_reader=resources,
             owner_id="living-agent",
+            presence_source_id="windows-session-presence",
             max_presence_age_seconds=value,  # type: ignore[arg-type]
             clock=lambda: NOW,
         )
@@ -367,3 +370,63 @@ def test_capacity_for_different_owner_cannot_authorize_effect() -> None:
         )
 
     assert effects == []
+
+
+def test_untrusted_presence_source_cannot_authorize_effect() -> None:
+    resources = ResourceReader(capacity())
+    service, _ = guard(observation(source_id="untrusted-source"), resources)
+    effects: list[str] = []
+
+    with pytest.raises(ValueError, match="trusted presence source"):
+        service.run(
+            BackgroundWorkKind.READING_RESEARCH,
+            lambda: effects.append("forbidden"),
+        )
+
+    assert resources.calls == 0
+    assert effects == []
+
+
+def test_presence_revision_cannot_move_backwards_after_prior_observation() -> None:
+    resources = ResourceReader(capacity())
+    service, observer = guard(observation(revision=7), resources)
+
+    assert service.preview(BackgroundWorkKind.SELF_TEST).allowed is True
+    observer.observation = observation(revision=6)
+
+    with pytest.raises(ValueError, match="backwards"):
+        service.run(BackgroundWorkKind.SELF_TEST, lambda: "forbidden")
+
+    assert resources.calls == 1
+
+
+def test_same_presence_revision_cannot_change_authoritative_fact() -> None:
+    resources = ResourceReader(capacity())
+    service, observer = guard(observation(revision=7), resources)
+
+    assert service.preview(BackgroundWorkKind.SELF_TEST).allowed is True
+    observer.observation = observation(OwnerPresence.ACTIVE, revision=7)
+
+    with pytest.raises(ValueError, match="reused"):
+        service.run(BackgroundWorkKind.SELF_TEST, lambda: "forbidden")
+
+    assert resources.calls == 1
+
+
+@pytest.mark.parametrize("kind", ["coroutine", "generator"])
+def test_deferred_effect_functions_are_rejected_before_authority_reads(kind: str) -> None:
+    resources = ResourceReader(capacity())
+    service, observer = guard(observation(), resources)
+
+    async def async_effect() -> object:
+        return "later"
+
+    def generator_effect():
+        yield "later"
+
+    effect = async_effect if kind == "coroutine" else generator_effect
+    with pytest.raises(TypeError, match="synchronously"):
+        service.run(BackgroundWorkKind.SELF_TEST, effect)
+
+    assert observer.calls == 0
+    assert resources.calls == 0

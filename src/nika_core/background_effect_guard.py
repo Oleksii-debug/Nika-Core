@@ -3,7 +3,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from inspect import isasyncgenfunction, isawaitable, iscoroutinefunction, isgenerator
+from inspect import isgeneratorfunction
 from math import isfinite
+from threading import Lock
 from typing import Protocol
 
 from nika_core.background_life import (
@@ -163,17 +166,47 @@ class BackgroundEffectGuard:
         presence_observer: OwnerPresenceObserverPort,
         resource_reader: ResourceCapacityReaderPort,
         owner_id: str,
+        presence_source_id: str,
         max_presence_age_seconds: int | float = _DEFAULT_MAX_PRESENCE_AGE_SECONDS,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         self._presence_observer = presence_observer
         self._resource_reader = resource_reader
         self._owner_id = _require_nonempty_exact_str(owner_id, "owner_id")
+        self._presence_source_id = _require_nonempty_exact_str(
+            presence_source_id,
+            "presence_source_id",
+        )
         self._max_presence_age_seconds = _require_presence_age(max_presence_age_seconds)
         self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
+        self._presence_lock = Lock()
+        self._last_presence_revision: int | None = None
+        self._last_presence_fingerprint: tuple[OwnerPresence, datetime] | None = None
 
     def _read_presence(self) -> tuple[OwnerPresenceObservation, datetime]:
         observation = _snapshot_presence(self._presence_observer.observe())
+        if observation.source_id != self._presence_source_id:
+            raise ValueError("presence source_id does not match trusted presence source")
+
+        fingerprint = (observation.presence, observation.observed_at)
+        with self._presence_lock:
+            if (
+                self._last_presence_revision is not None
+                and observation.revision < self._last_presence_revision
+            ):
+                raise ValueError("presence revision moved backwards")
+            if (
+                observation.revision == self._last_presence_revision
+                and fingerprint != self._last_presence_fingerprint
+            ):
+                raise ValueError("presence revision was reused for different evidence")
+            if (
+                self._last_presence_revision is None
+                or observation.revision > self._last_presence_revision
+            ):
+                self._last_presence_revision = observation.revision
+                self._last_presence_fingerprint = fingerprint
+
         now = _require_utc_datetime(self._clock(), "trusted clock result")
         return observation, now
 
@@ -235,6 +268,22 @@ class BackgroundEffectGuard:
         decision, _ = self._decision(work_kind)
         return decision
 
+    @staticmethod
+    def _require_synchronous_effect(effect: object) -> Callable[[], object]:
+        if not callable(effect):
+            raise TypeError("effect must be callable")
+        type_call = getattr(type(effect), "__call__", None)
+        if (
+            iscoroutinefunction(effect)
+            or isgeneratorfunction(effect)
+            or isasyncgenfunction(effect)
+            or iscoroutinefunction(type_call)
+            or isgeneratorfunction(type_call)
+            or isasyncgenfunction(type_call)
+        ):
+            raise TypeError("background effect must complete synchronously")
+        return effect
+
     def run(
         self,
         work_kind: BackgroundWorkKind,
@@ -242,8 +291,7 @@ class BackgroundEffectGuard:
     ) -> BackgroundEffectOutcome:
         """Revalidate at effect time and execute the effect at most once on RUN."""
 
-        if not callable(effect):
-            raise TypeError("effect must be callable")
+        synchronous_effect = self._require_synchronous_effect(effect)
         decision, observation = self._decision(work_kind)
         if not decision.allowed:
             return BackgroundEffectOutcome(
@@ -253,7 +301,12 @@ class BackgroundEffectGuard:
                 presence_revision=observation.revision,
             )
 
-        result = effect()
+        result = synchronous_effect()
+        if isawaitable(result) or isgenerator(result):
+            close = getattr(result, "close", None)
+            if callable(close):
+                close()
+            raise TypeError("background effect returned deferred execution")
         return BackgroundEffectOutcome(
             decision=decision,
             executed=True,
