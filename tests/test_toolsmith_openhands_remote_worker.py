@@ -4,11 +4,11 @@ import asyncio
 import io
 import json
 import sys
+import uuid
 import tarfile
 import threading
 from pathlib import Path
-from typing import ClassVar
-
+import httpx
 import pytest
 
 import nika_core.toolsmith.openhands_remote_worker as openhands_worker_module
@@ -33,8 +33,9 @@ from nika_core.toolsmith.openhands_remote_worker import (
     RemoteFile,
 )
 from nika_core.toolsmith.openhands_sdk_runtime import (
-    OpenHandsSdkCompatibilityError,
-    OpenHandsSdkRemoteRuntime,
+    OpenHandsAgentServerCompatibilityError,
+    OpenHandsAgentServerExecutionCancelled,
+    OpenHandsAgentServerRuntime,
     _read_snapshot_archive,
 )
 from nika_core.toolsmith.workspace_security import TreeEvidence, collect_tree_evidence
@@ -1411,230 +1412,290 @@ def _tar_snapshot(files: dict[str, bytes], *, root: str = "nika-job") -> bytes:
 
 
 
-class FakeArchiveResponse:
-    def __init__(self, payload: bytes) -> None:
-        self.payload = payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, _exc_type, _exc, _tb):
-        return False
-
-    def raise_for_status(self) -> None:
-        return None
-
-    def iter_bytes(self):
-        yield self.payload
+PROFILE_ID = "11111111-1111-4111-8111-111111111111"
+SESSION_KEY = "session-key-header-only-canary"
 
 
-class FakeArchiveClient:
-    def __init__(self, payload: bytes) -> None:
-        self.payload = payload
-        self.calls = []
-
-    def stream(self, method, route, *, params, timeout):
-        self.calls.append((method, route, params, timeout))
-        return FakeArchiveResponse(self.payload)
-
-
-class FakeRemoteWorkspace:
-    def __init__(self, endpoint: OpenHandsSandboxEndpoint, payload: bytes) -> None:
-        self.working_dir = endpoint.working_dir
-        self.host = endpoint.host
-        self.api_prefix = "/api"
-        self.client = FakeArchiveClient(payload)
-        self.uploads = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, _exc_type, _exc, _tb):
-        return False
-
-    def file_upload(self, local_path, remote_path):
-        self.uploads.append((Path(local_path).read_bytes(), remote_path))
-        return type("UploadResult", (), {"success": True})()
+def _agent_server_client(
+    endpoint: OpenHandsSandboxEndpoint,
+    handler,
+    *,
+    authenticated: bool = True,
+) -> httpx.Client:
+    headers = {"X-Session-API-Key": SESSION_KEY} if authenticated else {}
+    return httpx.Client(
+        base_url=endpoint.host,
+        headers=headers,
+        transport=httpx.MockTransport(handler),
+    )
 
 
-class BlockingUploadWorkspace(FakeRemoteWorkspace):
-    def __init__(self, endpoint: OpenHandsSandboxEndpoint, payload: bytes) -> None:
-        super().__init__(endpoint, payload)
-        self.upload_started = threading.Event()
-        self.allow_upload = threading.Event()
-
-    def file_upload(self, local_path, remote_path):
-        self.upload_started.set()
-        if not self.allow_upload.wait(timeout=5):
-            raise RuntimeError("test upload release was not signalled")
-        return super().file_upload(local_path, remote_path)
-
-
-class FakeConversation:
-    instances: ClassVar[list[FakeConversation]] = []
-
-    def __init__(self, *, agent, workspace, max_iteration_per_run, visualizer, delete_on_close, tags):
-        self.agent = agent
-        self.workspace = workspace
-        self.max_iteration_per_run = max_iteration_per_run
-        self.visualizer = visualizer
-        self.delete_on_close = delete_on_close
-        self.tags = tags
-        self.id = "conversation-sdk-contract"
-        self.messages = []
-        self.runs = []
-        self.closed = False
-        self.interrupted = False
-        self.on_interrupt = None
-        self.__class__.instances.append(self)
-
-    def send_message(self, prompt, *, sender):
-        self.messages.append((prompt, sender))
-
-    def run(self, *, blocking, timeout):
-        self.runs.append((blocking, timeout))
-
-    def interrupt(self):
-        self.interrupted = True
-        if self.on_interrupt is not None:
-            self.on_interrupt()
-
-    def close(self):
-        self.closed = True
-
-
-def test_sdk_runtime_contract_executes_upload_conversation_and_archive(
+def test_agent_server_runtime_uses_authenticated_profile_only_contract(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
     job = _job(root)
     evidence = collect_tree_evidence(root)
     endpoint = _endpoint()
-    payload = _tar_snapshot({"src/value.txt": b"after-sdk\n"})
-    workspace = FakeRemoteWorkspace(endpoint, payload)
-    FakeConversation.instances.clear()
-    monkeypatch.setattr(
-        openhands_sdk_module,
-        "_load_conversation_type",
-        lambda: FakeConversation,
-    )
-    runtime = OpenHandsSdkRemoteRuntime(
-        workspace_factory=lambda _endpoint: workspace,
-        agent_factory=lambda _job, _endpoint: object(),
+    archive = _tar_snapshot({"src/value.txt": b"after-http\n"})
+    requests: list[httpx.Request] = []
+    create_payload: dict[str, object] = {}
+    message_payload: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        assert request.headers["X-Session-API-Key"] == SESSION_KEY
+        if request.url.path == "/api/file/upload":
+            assert request.method == "POST"
+            assert request.url.params["path"] == "/workspace/nika-job/src/value.txt"
+            assert b"before\n" in request.content
+            return httpx.Response(200, json={"success": True})
+        if request.url.path == "/api/conversations" and request.method == "POST":
+            payload = json.loads(request.content)
+            create_payload.update(payload)
+            assert payload["agent_profile_id"] == PROFILE_ID
+            assert payload["workspace"] == {
+                "kind": "LocalWorkspace",
+                "working_dir": "/workspace/nika-job",
+            }
+            assert payload["secrets"] == {}
+            assert "agent" not in payload
+            assert "agent_settings" not in payload
+            assert "api_key" not in json.dumps(payload).casefold()
+            assert SESSION_KEY not in request.content.decode()
+            return httpx.Response(
+                201,
+                json={
+                    "id": payload["conversation_id"],
+                    "execution_status": "idle",
+                },
+            )
+        if request.url.path.endswith("/events") and request.method == "POST":
+            payload = json.loads(request.content)
+            message_payload.update(payload)
+            assert payload == {
+                "role": "user",
+                "content": [{"type": "text", "text": "do work"}],
+                "run": False,
+            }
+            assert SESSION_KEY not in request.content.decode()
+            return httpx.Response(200, json={"success": True})
+        if request.url.path.endswith("/run") and request.method == "POST":
+            assert json.loads(request.content) == {}
+            return httpx.Response(200, json={"success": True})
+        if request.url.path.startswith("/api/conversations/") and request.method == "GET":
+            return httpx.Response(200, json={"execution_status": "finished"})
+        if request.url.path == "/api/file/archive":
+            assert request.url.params["path"] == endpoint.working_dir
+            assert request.url.params["format"] == "tar.gz"
+            return httpx.Response(200, content=archive)
+        raise AssertionError(f"unexpected Agent Server request: {request.method} {request.url}")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
         max_iterations=7,
+        poll_interval_seconds=0.01,
     )
 
     result = _run(runtime.execute(job, endpoint, "do work", root, evidence))
 
-    assert result.conversation_id == "conversation-sdk-contract"
-    assert result.files == (RemoteFile("src/value.txt", b"after-sdk\n"),)
-    assert workspace.uploads == [(b"before\n", "/workspace/nika-job/src/value.txt")]
-    conversation = FakeConversation.instances[-1]
-    assert conversation.messages == [("do work", "nika-core")]
-    assert conversation.runs == [(True, float(job.resource_budget.timeout_seconds))]
-    assert conversation.closed is True
+    expected_conversation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
+        )
+    )
+    assert result.conversation_id == expected_conversation_id
+    assert result.files == (RemoteFile("src/value.txt", b"after-http\n"),)
+    assert create_payload["conversation_id"] == expected_conversation_id
+    assert create_payload["max_iterations"] == 7
+    assert create_payload["autotitle"] is False
+    assert message_payload["role"] == "user"
+    assert [request.url.path for request in requests] == [
+        "/api/file/upload",
+        "/api/conversations",
+        f"/api/conversations/{expected_conversation_id}/events",
+        f"/api/conversations/{expected_conversation_id}/run",
+        f"/api/conversations/{expected_conversation_id}",
+        "/api/file/archive",
+    ]
 
 
-def test_sdk_cancel_reserved_before_execute_prevents_workspace_acquisition(
+def test_agent_server_runtime_rejects_missing_session_auth_before_remote_effect(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(
+            supplied,
+            handler,
+            authenticated=False,
+        ),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+    )
+
+    with pytest.raises(
+        OpenHandsAgentServerCompatibilityError,
+        match="session API authentication",
+    ):
+        _run(runtime.execute(_job(root), endpoint, "do work", root, evidence))
+
+    assert requests == []
+
+
+def test_agent_server_runtime_rejects_mismatched_client_endpoint_before_remote_effect(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda _supplied: httpx.Client(
+            base_url="http://127.0.0.1:39999",
+            headers={"X-Session-API-Key": SESSION_KEY},
+            transport=httpx.MockTransport(handler),
+        ),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+    )
+
+    with pytest.raises(OpenHandsAgentServerCompatibilityError, match="different endpoint"):
+        _run(runtime.execute(_job(root), endpoint, "do work", root, evidence))
+
+    assert requests == []
+
+
+def test_agent_server_runtime_validates_profile_identity_before_upload(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: "not-a-profile-uuid",
+    )
+
+    with pytest.raises(OpenHandsAgentServerCompatibilityError, match="profile id"):
+        _run(runtime.execute(_job(root), endpoint, "do work", root, evidence))
+
+    assert requests == []
+
+
+def test_agent_server_cancel_reserved_before_execute_prevents_client_acquisition(
     tmp_path: Path,
 ) -> None:
     root = _workspace(tmp_path)
     job = _job(root)
     evidence = collect_tree_evidence(root)
     endpoint = _endpoint()
-    workspace_calls: list[OpenHandsSandboxEndpoint] = []
-    runtime = OpenHandsSdkRemoteRuntime(
-        workspace_factory=lambda supplied: workspace_calls.append(supplied),
-        agent_factory=lambda _job, _endpoint: object(),
+    client_calls: list[OpenHandsSandboxEndpoint] = []
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: client_calls.append(supplied),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
     )
 
     assert _run(runtime.cancel(job.job_id)) is True
     with pytest.raises(
-        openhands_sdk_module.OpenHandsSdkExecutionCancelled,
-        match="before workspace acquisition",
+        OpenHandsAgentServerExecutionCancelled,
+        match="before HTTP client acquisition",
     ):
         _run(runtime.execute(job, endpoint, "do work", root, evidence))
 
-    assert workspace_calls == []
+    assert client_calls == []
 
 
-def test_sdk_cancel_covers_pre_conversation_upload_window(
+def test_agent_server_cancel_covers_upload_before_conversation_creation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
     job = _job(root)
     evidence = collect_tree_evidence(root)
     endpoint = _endpoint()
-    workspace = BlockingUploadWorkspace(
-        endpoint,
-        _tar_snapshot({"src/value.txt": b"unused\n"}),
-    )
-    FakeConversation.instances.clear()
-    monkeypatch.setattr(
-        openhands_sdk_module,
-        "_load_conversation_type",
-        lambda: FakeConversation,
-    )
-    runtime = OpenHandsSdkRemoteRuntime(
-        workspace_factory=lambda _endpoint: workspace,
-        agent_factory=lambda _job, _endpoint: object(),
-        max_iterations=7,
+    upload_started = threading.Event()
+    allow_upload = threading.Event()
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/file/upload":
+            upload_started.set()
+            assert allow_upload.wait(timeout=5)
+            return httpx.Response(200, json={"success": True})
+        raise AssertionError("conversation must not be created after upload-window cancellation")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
     )
 
     async def scenario() -> None:
         execution = asyncio.create_task(
             runtime.execute(job, endpoint, "do work", root, evidence)
         )
-        started = await asyncio.to_thread(workspace.upload_started.wait, 2)
-        assert started
+        assert await asyncio.to_thread(upload_started.wait, 2)
         cancellation = asyncio.create_task(runtime.cancel(job.job_id))
         await asyncio.sleep(0)
-        workspace.allow_upload.set()
+        allow_upload.set()
         assert await cancellation is True
-        with pytest.raises(openhands_sdk_module.OpenHandsSdkExecutionCancelled):
+        with pytest.raises(OpenHandsAgentServerExecutionCancelled):
             await execution
 
     _run(scenario())
 
-    assert FakeConversation.instances == []
-    assert workspace.uploads == [(b"before\n", "/workspace/nika-job/src/value.txt")]
+    assert paths == ["/api/file/upload"]
 
 
-def test_sdk_task_cancellation_preserves_one_shot_stop_proof(
+def test_agent_server_task_cancellation_preserves_one_shot_stop_proof(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = _workspace(tmp_path)
     job = _job(root)
     evidence = collect_tree_evidence(root)
     endpoint = _endpoint()
-    workspace = BlockingUploadWorkspace(
-        endpoint,
-        _tar_snapshot({"src/value.txt": b"unused\n"}),
-    )
-    FakeConversation.instances.clear()
-    monkeypatch.setattr(
-        openhands_sdk_module,
-        "_load_conversation_type",
-        lambda: FakeConversation,
-    )
-    runtime = OpenHandsSdkRemoteRuntime(
-        workspace_factory=lambda _endpoint: workspace,
-        agent_factory=lambda _job, _endpoint: object(),
-        max_iterations=7,
+    upload_started = threading.Event()
+    allow_upload = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/file/upload":
+            upload_started.set()
+            assert allow_upload.wait(timeout=5)
+            return httpx.Response(200, json={"success": True})
+        raise AssertionError("unexpected request after task cancellation")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
     )
 
     async def scenario() -> None:
         execution = asyncio.create_task(
             runtime.execute(job, endpoint, "do work", root, evidence)
         )
-        started = await asyncio.to_thread(workspace.upload_started.wait, 2)
-        assert started
+        assert await asyncio.to_thread(upload_started.wait, 2)
         execution.cancel()
         await asyncio.sleep(0)
-        workspace.allow_upload.set()
+        allow_upload.set()
         with pytest.raises(asyncio.CancelledError):
             await execution
         assert await runtime.cancel(job.job_id) is True
@@ -1642,45 +1703,151 @@ def test_sdk_task_cancellation_preserves_one_shot_stop_proof(
 
     _run(scenario())
 
-    assert FakeConversation.instances == []
 
-
-def test_sdk_upload_requires_exact_boolean_success_carrier(tmp_path: Path) -> None:
+def test_agent_server_upload_requires_exact_boolean_success_carrier(
+    tmp_path: Path,
+) -> None:
     root = _workspace(tmp_path)
     evidence = collect_tree_evidence(root)
     endpoint = _endpoint()
 
-    class TruthyUploadWorkspace(FakeRemoteWorkspace):
-        def file_upload(self, local_path, remote_path):
-            self.uploads.append((Path(local_path).read_bytes(), remote_path))
-            return type("UploadResult", (), {"success": 1})()
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"success": 1})
 
-    workspace = TruthyUploadWorkspace(
-        endpoint,
-        _tar_snapshot({"src/value.txt": b"unused\n"}),
-    )
+    with _agent_server_client(endpoint, handler) as client:
+        with pytest.raises(
+            OpenHandsAgentServerCompatibilityError,
+            match="non-canonical success",
+        ):
+            OpenHandsAgentServerRuntime._upload_source(
+                client,
+                endpoint,
+                root,
+                evidence,
+                timeout_seconds=30,
+            )
 
-    with pytest.raises(OpenHandsSdkCompatibilityError, match="source upload failed"):
-        OpenHandsSdkRemoteRuntime._upload_source(workspace, endpoint, root, evidence)
 
-
-def test_sdk_upload_rejects_source_bytes_changed_after_captured_evidence(tmp_path: Path) -> None:
+def test_agent_server_upload_rejects_changed_source_before_http_effect(
+    tmp_path: Path,
+) -> None:
     root = _workspace(tmp_path)
     evidence = collect_tree_evidence(root)
     endpoint = _endpoint()
-    workspace = FakeRemoteWorkspace(
-        endpoint,
-        _tar_snapshot({"src/value.txt": b"unused\n"}),
+    requests: list[httpx.Request] = []
+    root.joinpath("src/value.txt").write_text(
+        "changed-after-evidence\n",
+        encoding="utf-8",
     )
-    root.joinpath("src/value.txt").write_text("changed-after-evidence\n", encoding="utf-8")
 
-    with pytest.raises(OpenHandsSdkCompatibilityError, match="captured tree evidence"):
-        OpenHandsSdkRemoteRuntime._upload_source(workspace, endpoint, root, evidence)
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(500)
 
-    assert workspace.uploads == []
+    with _agent_server_client(endpoint, handler) as client:
+        with pytest.raises(
+            OpenHandsAgentServerCompatibilityError,
+            match="captured tree evidence",
+        ):
+            OpenHandsAgentServerRuntime._upload_source(
+                client,
+                endpoint,
+                root,
+                evidence,
+                timeout_seconds=30,
+            )
+
+    assert requests == []
 
 
-def test_sdk_snapshot_reader_removes_only_consistent_synthetic_manifest() -> None:
+def test_agent_server_rejects_terminal_failure_without_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        if request.url.path == "/api/file/upload":
+            return httpx.Response(200, json={"success": True})
+        if request.url.path == "/api/conversations" and request.method == "POST":
+            payload = json.loads(request.content)
+            return httpx.Response(201, json={"id": payload["conversation_id"]})
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, json={"success": True})
+        if request.url.path.endswith("/run"):
+            return httpx.Response(200, json={"success": True})
+        if request.method == "GET" and request.url.path.startswith("/api/conversations/"):
+            return httpx.Response(200, json={"execution_status": "error"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+        poll_interval_seconds=0.01,
+    )
+
+    with pytest.raises(OpenHandsAgentServerCompatibilityError, match="status error"):
+        _run(runtime.execute(job, endpoint, "do work", root, evidence))
+
+    assert "/api/file/archive" not in paths
+
+
+def test_agent_server_cancel_interrupts_active_conversation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    status_started = threading.Event()
+    allow_status = threading.Event()
+    interrupt_seen = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/file/upload":
+            return httpx.Response(200, json={"success": True})
+        if request.url.path == "/api/conversations" and request.method == "POST":
+            payload = json.loads(request.content)
+            return httpx.Response(201, json={"id": payload["conversation_id"]})
+        if request.url.path.endswith("/events") or request.url.path.endswith("/run"):
+            return httpx.Response(200, json={"success": True})
+        if request.url.path.endswith("/interrupt"):
+            interrupt_seen.set()
+            return httpx.Response(200, json={"success": True})
+        if request.method == "GET" and request.url.path.startswith("/api/conversations/"):
+            status_started.set()
+            assert allow_status.wait(timeout=5)
+            return httpx.Response(200, json={"execution_status": "paused"})
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+        poll_interval_seconds=0.01,
+    )
+
+    async def scenario() -> None:
+        execution = asyncio.create_task(
+            runtime.execute(job, endpoint, "do work", root, evidence)
+        )
+        assert await asyncio.to_thread(status_started.wait, 2)
+        cancellation = asyncio.create_task(runtime.cancel(job.job_id))
+        assert await asyncio.to_thread(interrupt_seen.wait, 2)
+        allow_status.set()
+        assert await cancellation is True
+        with pytest.raises(
+            (OpenHandsAgentServerCompatibilityError, OpenHandsAgentServerExecutionCancelled)
+        ):
+            await execution
+
+    _run(scenario())
+
+
+def test_agent_server_snapshot_reader_removes_only_consistent_synthetic_manifest() -> None:
     ordinary = {"src/value.txt": b"after\n"}
     manifest = json.dumps(
         {
@@ -1702,7 +1869,7 @@ def test_sdk_snapshot_reader_removes_only_consistent_synthetic_manifest() -> Non
     assert files == (RemoteFile("src/value.txt", b"after\n"),)
 
 
-def test_sdk_snapshot_reader_preserves_authored_archive_manifest() -> None:
+def test_agent_server_snapshot_reader_preserves_authored_archive_manifest() -> None:
     payload = _tar_snapshot({"archive_manifest.json": b"authored\n"})
 
     files = _read_snapshot_archive(
@@ -1714,7 +1881,7 @@ def test_sdk_snapshot_reader_preserves_authored_archive_manifest() -> None:
     assert files == (RemoteFile("archive_manifest.json", b"authored\n"),)
 
 
-def test_sdk_snapshot_reader_rejects_member_count_exhaustion() -> None:
+def test_agent_server_snapshot_reader_rejects_member_count_exhaustion() -> None:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for index in range(openhands_sdk_module._MAX_SNAPSHOT_MEMBERS + 1):
@@ -1723,7 +1890,7 @@ def test_sdk_snapshot_reader_rejects_member_count_exhaustion() -> None:
             archive.addfile(member)
     buffer.seek(0)
 
-    with pytest.raises(OpenHandsSdkCompatibilityError, match="member-count"):
+    with pytest.raises(OpenHandsAgentServerCompatibilityError, match="member-count"):
         _read_snapshot_archive(
             buffer,
             expected_root="nika-job",
@@ -1731,7 +1898,7 @@ def test_sdk_snapshot_reader_rejects_member_count_exhaustion() -> None:
         )
 
 
-def test_sdk_snapshot_reader_rejects_symlink_member() -> None:
+def test_agent_server_snapshot_reader_rejects_symlink_member() -> None:
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         member = tarfile.TarInfo("nika-job/src/link")
@@ -1740,7 +1907,7 @@ def test_sdk_snapshot_reader_rejects_symlink_member() -> None:
         archive.addfile(member)
     buffer.seek(0)
 
-    with pytest.raises(OpenHandsSdkCompatibilityError, match="non-regular"):
+    with pytest.raises(OpenHandsAgentServerCompatibilityError, match="non-regular"):
         _read_snapshot_archive(
             buffer,
             expected_root="nika-job",
