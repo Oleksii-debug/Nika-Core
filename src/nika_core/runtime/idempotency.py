@@ -109,7 +109,11 @@ def _stored_result(row: sqlite3.Row) -> Mapping[str, Any] | None:
         raise RuntimeError("persisted idempotency result_json is invalid") from exc
     if type(decoded) is not dict:
         raise RuntimeError("persisted idempotency result_json must be an object")
-    if _serialize_result(decoded) != raw:
+    try:
+        canonical = _serialize_result(decoded)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("persisted idempotency result_json is invalid") from exc
+    if canonical != raw:
         raise RuntimeError("persisted idempotency result_json is not canonical")
     return decoded
 
