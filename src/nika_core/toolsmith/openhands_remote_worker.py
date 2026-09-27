@@ -6,7 +6,6 @@ import hashlib
 import os
 import pathlib
 import tempfile
-import threading
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlparse
@@ -37,6 +36,10 @@ from nika_core.toolsmith.workspace_security import (
 
 class OpenHandsWorkerError(RuntimeError):
     """Raised when a remote coding run cannot satisfy Nika's worker contract."""
+
+
+class OpenHandsWorkspaceMutationError(RuntimeError):
+    """Raised when a local staging mutation cannot be proven rolled back."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -150,6 +153,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
 
         endpoint: OpenHandsSandboxEndpoint | None = None
         local_root: pathlib.Path | None = None
+        changed: tuple[ChangedFile, ...] = ()
+        tests: tuple[TestEvidence, ...] = ()
         applied = False
         succeeded = False
         try:
@@ -199,12 +204,26 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 "remote coding worker exceeded its Nika resource deadline",
                 retryable=not applied,
                 state=state,
+                changed_files=changed,
+                test_evidence=tests,
             )
         except asyncio.CancelledError:
             await self._runtime.cancel(job.job_id)
             state = RecoveryState("cancelled")
             await self._set_state(job.job_id, state)
             raise
+        except OpenHandsWorkspaceMutationError:
+            state = RecoveryState("manual_reconcile_required")
+            await self._set_state(job.job_id, state)
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "local staging mutation could not be proven rolled back",
+                retryable=False,
+                state=state,
+                changed_files=changed,
+                test_evidence=tests,
+            )
         except (WorkspaceSecurityError, ValueError, OpenHandsWorkerError) as exc:
             state = RecoveryState("blocked")
             await self._set_state(job.job_id, state)
@@ -214,6 +233,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 _safe_message(exc, "remote coding result violated Nika policy"),
                 retryable=False,
                 state=state,
+                changed_files=changed,
+                test_evidence=tests,
             )
         except Exception:
             state = RecoveryState("interrupted")
@@ -224,6 +245,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 "remote coding engine failed without trusted diagnostics",
                 retryable=not applied,
                 state=state,
+                changed_files=changed,
+                test_evidence=tests,
             )
         finally:
             if endpoint is not None:
@@ -243,7 +266,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             return self._states.get(job_id)
 
     async def recover(self, job: CodingJob, state: RecoveryState) -> CodingResult:
-        if state.phase not in {"interrupted", "cancelled", "repair_required", "blocked"}:
+        if state.phase not in {"interrupted", "cancelled"}:
             return _failure_result(
                 job,
                 WorkerFailureKind.INVALID_REQUEST,
@@ -251,9 +274,9 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                 retryable=False,
                 state=state,
             )
-        # A remote sandbox never publishes directly and local bytes are only applied
-        # after full policy validation. Starting from the current Nika-owned private
-        # workspace is therefore the safe retry/recovery boundary.
+        # Only pre-apply interruption/cancellation is restartable with the same snapshot.
+        # Failed acceptance already changed the private staging tree and requires a new
+        # Nika-owned repository snapshot/job before another coding attempt.
         return await self.execute(job)
 
     async def _set_state(self, job_id: str, state: RecoveryState) -> None:
@@ -303,7 +326,7 @@ def _validate_endpoint(job: CodingJob, endpoint: OpenHandsSandboxEndpoint) -> No
     if job.network_policy.mode is not NetworkMode.APPROVED_HOSTS:
         raise OpenHandsWorkerError("remote coding requires explicit approved-host network policy")
     approved = {_normalize_host(host) for host in job.network_policy.approved_hosts}
-    if endpoint.control_plane_host not in {"127.0.0.1", "localhost", "::1"}:
+    if endpoint.control_plane_host not in {"127.0.0.1", "localhost"}:
         raise OpenHandsWorkerError("current OpenHands control plane must be loopback-local")
     required = {endpoint.control_plane_host}
     required.update(_normalize_host(host) for host in endpoint.sandbox_egress_hosts)
@@ -313,17 +336,13 @@ def _validate_endpoint(job: CodingJob, endpoint: OpenHandsSandboxEndpoint) -> No
 
 def _build_prompt(job: CodingJob) -> str:
     allowed = "\n".join(f"- {root}" for root in job.allowed_paths.roots)
-    commands = "\n".join(
-        "- " + " ".join(command.argv) + (f" (cwd={command.cwd})" if command.cwd != "." else "")
-        for command in job.acceptance_commands
-    ) or "- No acceptance command was supplied; make the smallest correct change."
     return (
         "You are a coding engine operating inside a disposable Nika sandbox.\n"
         "Do not commit, push, authenticate to GitHub, inspect host secrets, or change "
-        "files outside "
-        "the allowed paths. Nika will independently validate and test every returned byte.\n\n"
-        f"Goal:\n{job.goal}\n\nAllowed paths:\n{allowed}\n\nAcceptance commands owned by Nika:\n"
-        f"{commands}\n"
+        "files outside the allowed paths. Nika will independently validate and test "
+        "every returned byte. Acceptance command arguments are intentionally withheld "
+        "from this external engine.\n\n"
+        f"Goal:\n{job.goal}\n\nAllowed paths:\n{allowed}\n"
     )
 
 
@@ -371,11 +390,13 @@ def _validate_and_apply_snapshot(
             raise OpenHandsWorkerError("remote snapshot would replace a non-file path")
         destinations.append((destination, staged[path]))
 
-    backups: list[tuple[pathlib.Path, bytes | None]] = []
+    backups: list[tuple[pathlib.Path, bytes | None, int | None]] = []
     try:
         for destination, item in destinations:
-            previous = destination.read_bytes() if destination.is_file() else None
-            backups.append((destination, previous))
+            exists = destination.is_file()
+            previous = destination.read_bytes() if exists else None
+            previous_mode = destination.stat().st_mode & 0o777 if exists else None
+            backups.append((destination, previous, previous_mode))
             destination.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
                 dir=destination.parent,
@@ -384,17 +405,26 @@ def _validate_and_apply_snapshot(
             ) as handle:
                 handle.write(item.data)
                 temporary = pathlib.Path(handle.name)
+            if previous_mode is not None:
+                temporary.chmod(previous_mode)
             os.replace(temporary, destination)
         after = collect_tree_evidence(local_root)
     except Exception:
-        for destination, previous in reversed(backups):
+        rollback_failed = False
+        for destination, previous, previous_mode in reversed(backups):
             try:
                 if previous is None:
                     destination.unlink(missing_ok=True)
                 else:
                     destination.write_bytes(previous)
+                    if previous_mode is not None:
+                        destination.chmod(previous_mode)
             except OSError:
-                pass
+                rollback_failed = True
+        if rollback_failed:
+            raise OpenHandsWorkspaceMutationError(
+                "local staging mutation could not be proven rolled back"
+            ) from None
         raise
 
     after_map = {item.path: item for item in after.files}
@@ -454,9 +484,13 @@ def _failure_result(
     *,
     retryable: bool,
     state: RecoveryState | None = None,
+    changed_files: tuple[ChangedFile, ...] = (),
+    test_evidence: tuple[TestEvidence, ...] = (),
 ) -> CodingResult:
     return CodingResult(
         job_id=job.job_id,
+        changed_files=changed_files,
+        test_evidence=test_evidence,
         recovery_state=state,
         failure=WorkerFailure(kind, message, retryable=retryable),
     )
