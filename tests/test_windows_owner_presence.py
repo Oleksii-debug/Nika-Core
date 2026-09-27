@@ -540,3 +540,16 @@ def test_multiwrap_ambiguity_uses_minimum_idle_and_stays_conservatively_active(
     )
 
     assert observer.observe().presence is OwnerPresence.ACTIVE
+
+
+def test_input_after_current_tick_sample_can_legitimately_be_ahead_and_is_active(
+    tmp_path: Path,
+) -> None:
+    observer, _audit_log = _observer(
+        tmp_path,
+        last_ticks=[1_000, 6_000],
+        current_ticks=[5_000],
+        away_after_seconds=1,
+    )
+
+    assert observer.observe().presence is OwnerPresence.ACTIVE
