@@ -180,21 +180,8 @@ class OpenHandsAgentServerRuntime:
                 active.client = client
             if active.cancel_requested.is_set():
                 raise OpenHandsAgentServerExecutionCancelled(
-                    "OpenHands execution cancelled before source upload"
-                )
-
-            self._upload_source(
-                client,
-                endpoint,
-                source_root,
-                source_evidence,
-                timeout_seconds=job.resource_budget.timeout_seconds,
-            )
-            if active.cancel_requested.is_set():
-                raise OpenHandsAgentServerExecutionCancelled(
                     "OpenHands execution cancelled before profile binding"
                 )
-
             profile_id = _canonical_uuid(
                 self._agent_profile_id_factory(job, endpoint),
                 field="agent profile id",
@@ -204,6 +191,18 @@ class OpenHandsAgentServerRuntime:
                     uuid.NAMESPACE_URL,
                     f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
                 )
+            )
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before source upload"
+                )
+
+            self._upload_source(
+                client,
+                endpoint,
+                source_root,
+                source_evidence,
+                timeout_seconds=job.resource_budget.timeout_seconds,
             )
             if active.cancel_requested.is_set():
                 raise OpenHandsAgentServerExecutionCancelled(
