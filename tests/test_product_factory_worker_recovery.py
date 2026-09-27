@@ -259,6 +259,22 @@ def test_malformed_inspection_state_is_contained_before_recover_call() -> None:
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
 
+def test_forged_recovery_state_contract_invariant_is_rejected_before_recover_call() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    object.__setattr__(state, "phase", "")
+    worker = FakeRecoveryPort(state)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state is None
+    assert worker.recovered == []
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
 def test_non_envelope_recovery_result_is_contained_without_coordinator_mutation() -> None:
     coordinator = _coordinator()
     coordinator.start("core")
@@ -292,6 +308,41 @@ def test_envelope_with_non_coding_result_is_contained() -> None:
 
     assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
     assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state == state
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_forged_outer_envelope_contract_invariant_is_rejected() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    malformed = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=CodingResult(
+            job_id=request.work_id,
+            test_evidence=(
+                TestEvidence(
+                    ("python", "-m", "pytest", "tests/core"),
+                    0,
+                    "tests-ok",
+                ),
+            ),
+            recovery_state=state,
+        ),
+    )
+    object.__setattr__(malformed, "diff_digest", "forged")
+    worker = FakeRecoveryPort(state, envelope_override=malformed)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.record.result is None
     assert outcome.recovery_state == state
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
@@ -371,6 +422,36 @@ def test_behavioral_primitive_inside_canonical_failure_is_rejected() -> None:
             job_id=request.work_id,
             recovery_state=state,
             failure=behavioral_failure,
+        ),
+    )
+    worker = FakeRecoveryPort(state, envelope_override=malformed)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.record.result is None
+    assert outcome.recovery_state == state
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_forged_nested_failure_contract_invariant_is_rejected() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    failure = WorkerFailure(WorkerFailureKind.INTERNAL_ERROR, "worker failed")
+    object.__setattr__(failure, "message", "")
+    malformed = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=CodingResult(
+            job_id=request.work_id,
+            recovery_state=state,
+            failure=failure,
         ),
     )
     worker = FakeRecoveryPort(state, envelope_override=malformed)
