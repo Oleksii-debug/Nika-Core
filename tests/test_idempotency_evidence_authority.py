@@ -149,6 +149,94 @@ def test_lookup_rejects_behavioral_operation_key_carrier(tmp_path) -> None:
     assert ledger.require("effect:1").status is IdempotencyStatus.PENDING
 
 
+
+def test_blob_operation_key_alias_cannot_hide_existing_effect_or_allow_duplicate(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id, key="effect:alias")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET operation_key = CAST(? AS BLOB)
+            WHERE operation_key = ?
+            """,
+            ("effect:alias", "effect:alias"),
+        )
+
+    with pytest.raises(RuntimeError, match=r"operation_key.*SQLite storage class"):
+        ledger.get("effect:alias")
+    with pytest.raises(RuntimeError, match=r"operation_key.*SQLite storage class"):
+        _reserve(ledger, task_id, key="effect:alias")
+
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT operation_key FROM idempotency_records"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["operation_key"] == b"effect:alias"
+
+
+def test_blob_task_id_alias_cannot_disappear_from_task_inventory(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET task_id = CAST(? AS BLOB)
+            WHERE operation_key = ?
+            """,
+            (task_id, "effect:1"),
+        )
+
+    with pytest.raises(RuntimeError, match=r"task_id.*SQLite storage class"):
+        ledger.list_for_task(task_id)
+    with pytest.raises(RuntimeError, match=r"task_id.*SQLite storage class"):
+        ledger.promote_pending_to_uncertain(task_id)
+
+    raw = _raw_record(store, "effect:1")
+    assert raw is not None
+    assert raw["task_id"] == task_id.encode()
+    assert raw["status"] == IdempotencyStatus.PENDING.value
+
+
+def test_duplicate_storage_aliases_fail_closed_before_effect_reservation(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id, key="effect:alias")
+
+    with store.connection() as conn:
+        original = conn.execute(
+            "SELECT * FROM idempotency_records WHERE operation_key = ?",
+            ("effect:alias",),
+        ).fetchone()
+        conn.execute(
+            """
+            INSERT INTO idempotency_records(
+                operation_key, task_id, operation_type, input_fingerprint,
+                status, result_json, created_at, updated_at
+            ) VALUES (CAST(? AS BLOB), ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                "effect:alias",
+                task_id,
+                original["operation_type"],
+                original["input_fingerprint"],
+                IdempotencyStatus.PENDING.value,
+                original["created_at"],
+                original["updated_at"],
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="multiple persisted.*storage aliases"):
+        ledger.get("effect:alias")
+    with pytest.raises(RuntimeError, match="multiple persisted.*storage aliases"):
+        _reserve(ledger, task_id, key="effect:alias")
+
 def test_persisted_blob_identity_fails_closed_without_normalization(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
