@@ -213,26 +213,28 @@ class SpeechToTextService:
         self._adapter = adapter
 
     async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextResult:
+        trusted_request = _snapshot_request(request)
+        effect_request = _snapshot_request(trusted_request)
         route = self._trusted_local_route()
         if route is None:
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
         adapter_provider_id, supported_models = route
         if (
-            request.provider_id != adapter_provider_id
-            or request.model not in supported_models
+            trusted_request.provider_id != adapter_provider_id
+            or trusted_request.model not in supported_models
         ):
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
-        if len(request.audio.data) > request.policy.max_audio_bytes:
+        if len(trusted_request.audio.data) > trusted_request.policy.max_audio_bytes:
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.RESOURCE_LIMIT,
                 retryable=False,
                 include_audio_digest=False,
@@ -240,14 +242,14 @@ class SpeechToTextService:
 
         try:
             response = await asyncio.wait_for(
-                self._adapter.transcribe(request),
-                timeout=float(request.policy.timeout_seconds),
+                self._adapter.transcribe(effect_request),
+                timeout=float(trusted_request.policy.timeout_seconds),
             )
         except asyncio.CancelledError:
             raise
         except TimeoutError:
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.TIMEOUT,
                 retryable=True,
             )
@@ -258,7 +260,7 @@ class SpeechToTextService:
                 or type(error.retryable) is not bool
             ):
                 return self._failure(
-                    request,
+                    trusted_request,
                     code=SpeechToTextFailureCode.PROVIDER_ERROR,
                     retryable=False,
                 )
@@ -268,21 +270,21 @@ class SpeechToTextService:
                 else SpeechToTextStatus.FAILED
             )
             return self._failure(
-                request,
+                trusted_request,
                 code=error.code,
                 retryable=error.retryable,
                 status=status,
             )
         except Exception:  # noqa: BLE001 - adapter execution is an untrusted boundary
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
 
         if type(response) is not SpeechToTextAdapterResponse:
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
@@ -292,30 +294,30 @@ class SpeechToTextService:
             response_model = _bounded_token(response.model, "response.model")
         except ValueError:
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
         if (
-            response_request_id != request.request_id
-            or response_provider_id != request.provider_id
+            response_request_id != trusted_request.request_id
+            or response_provider_id != trusted_request.provider_id
             or response_provider_id != adapter_provider_id
-            or response_model != request.model
+            or response_model != trusted_request.model
         ):
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
         if type(response.text) is not str or not response.text.strip():
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
-        if len(response.text) > request.policy.max_transcript_chars:
+        if len(response.text) > trusted_request.policy.max_transcript_chars:
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.RESOURCE_LIMIT,
                 retryable=False,
             )
@@ -325,7 +327,7 @@ class SpeechToTextService:
             or not _LANGUAGE_RE.fullmatch(response.detected_language)
         ):
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
@@ -333,14 +335,14 @@ class SpeechToTextService:
             latency_ms = _validated_latency(response.latency_ms)
         except (TypeError, ValueError):
             return self._failure(
-                request,
+                trusted_request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
                 retryable=False,
             )
 
         text = response.text
         evidence = self._base_evidence(
-            request,
+            trusted_request,
             status=SpeechToTextStatus.SUCCEEDED,
             detected_language=response.detected_language,
             transcript_chars=len(text),
@@ -417,6 +419,36 @@ class SpeechToTextService:
             error_code=error_code,
             retryable=retryable,
         )
+
+
+def _snapshot_request(request: SpeechToTextRequest) -> SpeechToTextRequest:
+    if type(request) is not SpeechToTextRequest:
+        raise TypeError("request must be an exact SpeechToTextRequest")
+    if type(request.audio) is not SpeechAudio:
+        raise TypeError("request.audio must be an exact SpeechAudio")
+    if type(request.policy) is not SpeechToTextPolicy:
+        raise TypeError("request.policy must be an exact SpeechToTextPolicy")
+
+    audio = SpeechAudio(
+        data=request.audio.data,
+        audio_format=request.audio.audio_format,
+        sample_rate_hz=request.audio.sample_rate_hz,
+        channels=request.audio.channels,
+    )
+    policy = SpeechToTextPolicy(
+        max_audio_bytes=request.policy.max_audio_bytes,
+        max_transcript_chars=request.policy.max_transcript_chars,
+        timeout_seconds=request.policy.timeout_seconds,
+    )
+    return SpeechToTextRequest(
+        request_id=request.request_id,
+        provider_id=request.provider_id,
+        model=request.model,
+        audio=audio,
+        language=request.language,
+        privacy=request.privacy,
+        policy=policy,
+    )
 
 
 def _bounded_token(value: object, field: str) -> str:

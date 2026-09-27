@@ -113,6 +113,53 @@ class _MalformedTypedFailureAdapter:
         )
 
 
+class _MutatingIdentityAdapter:
+    provider_kind = ProviderKind.LOCAL
+    provider_id = "local-stt"
+    supported_models = ("uk-small-v1",)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def transcribe(
+        self,
+        request: SpeechToTextRequest,
+    ) -> SpeechToTextAdapterResponse:
+        self.calls += 1
+        object.__setattr__(request, "request_id", "forged-request")
+        object.__setattr__(request, "model", "forged-model")
+        return SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="forged identity",
+        )
+
+
+class _MutatingEvidenceAdapter:
+    provider_kind = ProviderKind.LOCAL
+    provider_id = "local-stt"
+    supported_models = ("uk-small-v1",)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def transcribe(
+        self,
+        request: SpeechToTextRequest,
+    ) -> SpeechToTextAdapterResponse:
+        self.calls += 1
+        object.__setattr__(request.policy, "max_transcript_chars", 100)
+        object.__setattr__(request, "privacy", PrivacyClass.PRIVATE)
+        object.__setattr__(request.audio, "data", b"tampered-audio")
+        return SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="four",
+        )
+
+
 class _BehavioralText(str):
     def strip(self, *_args: object, **_kwargs: object) -> str:
         return "forged transcript"
@@ -345,6 +392,56 @@ def test_response_identity_mismatch_fails_closed(field: str, replacement: str) -
 
     assert result.text is None
     assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+
+
+def test_adapter_cannot_retarget_admitted_request_identity() -> None:
+    request = _request()
+    adapter = _MutatingIdentityAdapter()
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))
+
+    assert adapter.calls == 1
+    assert result.text is None
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+    assert result.evidence.request_id == "stt-1"
+    assert result.evidence.model == "uk-small-v1"
+    assert request.request_id == "stt-1"
+    assert request.model == "uk-small-v1"
+
+
+def test_adapter_cannot_mutate_policy_privacy_or_audio_evidence() -> None:
+    request = _request(policy=SpeechToTextPolicy(max_transcript_chars=3))
+    original_audio = request.audio.data
+    adapter = _MutatingEvidenceAdapter()
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))
+
+    assert adapter.calls == 1
+    assert result.text is None
+    assert result.evidence.error_code is SpeechToTextFailureCode.RESOURCE_LIMIT
+    assert result.evidence.privacy is PrivacyClass.SENSITIVE
+    assert result.evidence.audio_bytes == len(original_audio)
+    assert request.policy.max_transcript_chars == 3
+    assert request.privacy is PrivacyClass.SENSITIVE
+    assert request.audio.data == original_audio
+
+
+def test_post_init_forged_audio_is_rejected_before_adapter_dispatch() -> None:
+    request = _request()
+    object.__setattr__(request.audio, "data", bytearray(b"forged-audio"))
+    adapter = _RecordingAdapter(
+        SpeechToTextAdapterResponse(
+            request_id="stt-1",
+            provider_id="local-stt",
+            model="uk-small-v1",
+            text="must not run",
+        )
+    )
+
+    with pytest.raises(ValueError, match="audio data must be non-empty bytes"):
+        asyncio.run(SpeechToTextService(adapter).transcribe(request))
+
+    assert adapter.calls == []
 
 
 def test_behavioral_transcript_carrier_is_rejected() -> None:
