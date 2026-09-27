@@ -55,6 +55,7 @@ class OpenHandsSandboxEndpoint:
     working_dir: str
     isolation_class: IsolationClass
     sandbox_egress_hosts: tuple[str, ...] = ()
+    network_policy_enforced: bool = False
     fresh_workspace: bool = True
 
     def __post_init__(self) -> None:
@@ -69,6 +70,8 @@ class OpenHandsSandboxEndpoint:
             raise ValueError("OpenHands endpoint must attest REMOTE_SANDBOXED isolation")
         if not self.fresh_workspace:
             raise ValueError("OpenHands endpoint must provide a fresh per-job workspace")
+        if not self.network_policy_enforced:
+            raise ValueError("OpenHands endpoint must attest enforced sandbox network policy")
         if any(not host.strip() for host in self.sandbox_egress_hosts):
             raise ValueError("OpenHands sandbox egress hosts must not be empty")
 
@@ -77,6 +80,10 @@ class OpenHandsSandboxEndpoint:
         parsed = urlparse(self.host)
         assert parsed.hostname is not None
         return parsed.hostname.casefold()
+
+    @property
+    def control_plane_scheme(self) -> str:
+        return urlparse(self.host).scheme.casefold()
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -326,12 +333,13 @@ def _validate_endpoint(job: CodingJob, endpoint: OpenHandsSandboxEndpoint) -> No
     if job.network_policy.mode is not NetworkMode.APPROVED_HOSTS:
         raise OpenHandsWorkerError("remote coding requires explicit approved-host network policy")
     approved = {_normalize_host(host) for host in job.network_policy.approved_hosts}
-    if endpoint.control_plane_host not in {"127.0.0.1", "localhost"}:
-        raise OpenHandsWorkerError("current OpenHands control plane must be loopback-local")
     required = {endpoint.control_plane_host}
     required.update(_normalize_host(host) for host in endpoint.sandbox_egress_hosts)
     if not required <= approved:
         raise OpenHandsWorkerError("remote coding endpoint or sandbox egress is not approved")
+    loopback = endpoint.control_plane_host in {"127.0.0.1", "localhost"}
+    if not loopback and endpoint.control_plane_scheme != "https":
+        raise OpenHandsWorkerError("non-loopback OpenHands control plane requires HTTPS")
 
 
 def _build_prompt(job: CodingJob) -> str:

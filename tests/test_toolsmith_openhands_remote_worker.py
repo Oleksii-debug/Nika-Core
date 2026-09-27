@@ -47,6 +47,7 @@ def _endpoint(host: str = "http://127.0.0.1:30000") -> OpenHandsSandboxEndpoint:
         working_dir="/workspace/nika-job",
         isolation_class=IsolationClass.REMOTE_SANDBOXED,
         sandbox_egress_hosts=("localhost",),
+        network_policy_enforced=True,
     )
 
 
@@ -264,7 +265,7 @@ def test_remote_worker_requires_explicit_loopback_network_authorization(tmp_path
     assert result.failure.kind.value == "policy_violation"
 
 
-def test_remote_worker_rejects_non_loopback_agent_server(tmp_path: Path) -> None:
+def test_remote_worker_accepts_approved_https_remote_agent_server(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     provider = Provider(_endpoint("https://agent.example.test"))
     job = _job(
@@ -277,8 +278,35 @@ def test_remote_worker_rejects_non_loopback_agent_server(tmp_path: Path) -> None
 
     result = _run(OpenHandsRemoteCodingWorker(provider, Runtime()).execute(job))
 
+    assert result.succeeded
+
+
+def test_remote_worker_rejects_cleartext_non_loopback_control_plane(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    provider = Provider(_endpoint("http://agent.example.test"))
+    job = _job(
+        root,
+        network=NetworkPolicy(
+            NetworkMode.APPROVED_HOSTS,
+            ("agent.example.test", "localhost"),
+        ),
+    )
+
+    result = _run(OpenHandsRemoteCodingWorker(provider, Runtime()).execute(job))
+
     assert not result.succeeded
-    assert "loopback" in result.failure.message
+    assert "HTTPS" in result.failure.message
+
+
+def test_endpoint_requires_explicit_network_enforcement_attestation() -> None:
+    with pytest.raises(ValueError, match="network policy"):
+        OpenHandsSandboxEndpoint(
+            endpoint_id="sandbox-unenforced",
+            host="https://agent.example.test",
+            working_dir="/workspace/nika-job",
+            isolation_class=IsolationClass.REMOTE_SANDBOXED,
+            sandbox_egress_hosts=("model.example.test",),
+        )
 
 
 def test_remote_worker_rejects_stale_local_tree_before_acquiring_sandbox(tmp_path: Path) -> None:
