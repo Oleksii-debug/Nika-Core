@@ -522,7 +522,7 @@ def test_rollback_evidence_mismatch_escalates_to_manual_reconcile_error(
     assert root.joinpath("src/value.txt").read_bytes() == b"before\n"
 
 
-def test_acceptance_mutation_invalidates_candidate_after_test_execution(tmp_path: Path) -> None:
+def test_acceptance_side_effects_are_isolated_from_validated_candidate(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     base = _job(root)
     job = CodingJob(
@@ -549,10 +549,39 @@ def test_acceptance_mutation_invalidates_candidate_after_test_execution(tmp_path
 
     result = _run(OpenHandsRemoteCodingWorker(Provider(), Runtime()).execute(job))
 
+    assert result.succeeded
+    assert not root.joinpath("src/acceptance.txt").exists()
+
+
+def test_acceptance_escape_mutation_invalidates_original_candidate(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    base = _job(root)
+    escaped = root / "src" / "acceptance-escape.txt"
+    command = (
+        "from pathlib import Path; "
+        f"Path({str(escaped)!r}).write_text('mutated', encoding='utf-8')"
+    )
+    job = CodingJob(
+        base.job_id,
+        base.task_id,
+        base.goal,
+        base.repository,
+        base.lease,
+        base.allowed_paths,
+        base.process_policy,
+        base.network_policy,
+        base.resource_budget,
+        (AcceptanceCommand((sys.executable, "-c", command)),),
+        base.permission_ceiling,
+    )
+
+    result = _run(OpenHandsRemoteCodingWorker(Provider(), Runtime()).execute(job))
+
     assert not result.succeeded
     assert result.failure is not None
     assert result.failure.kind.value == "internal_error"
     assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert escaped.read_text(encoding="utf-8") == "mutated"
 
 
 def _tar_snapshot(files: dict[str, bytes], *, root: str = "nika-job") -> bytes:
