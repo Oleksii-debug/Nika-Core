@@ -63,6 +63,8 @@ class StandingPermissionBinding:
     network_host: str | None
 
     def __post_init__(self) -> None:
+        if type(self.context) is not PermissionContext:
+            raise TypeError("binding context must be an exact PermissionContext value")
         _permission_id(self.permission_id)
         _identity(self.subject_id, "subject_id")
         _identity(self.target, "target")
@@ -86,6 +88,8 @@ class StandingPermissionScope:
     expires_at: datetime
 
     def __post_init__(self) -> None:
+        if type(self.context) is not PermissionContext:
+            raise TypeError("scope context must be an exact PermissionContext value")
         if type(self.risk_ceiling) is not ToolRisk:
             raise TypeError("risk ceiling must be an exact ToolRisk value")
         _identity(self.subject_id, "subject_id")
@@ -111,6 +115,10 @@ class StandingPermissionUse:
     resource_id: str
 
     def __post_init__(self) -> None:
+        if type(self.context) is not PermissionContext:
+            raise TypeError("use context must be an exact PermissionContext value")
+        if type(self.intent) is not ActionIntent:
+            raise TypeError("standing permission intent must be an exact ActionIntent value")
         _identity(self.subject_id, "subject_id")
         _action(self.intent.tool_id)
         _identity(self.intent.target, "target")
