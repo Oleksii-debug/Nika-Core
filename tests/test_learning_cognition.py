@@ -352,6 +352,125 @@ def test_caller_selected_check_set_cannot_replace_trusted_requirements() -> None
         )
 
 
+def test_candidate_create_reconstructs_nested_evidence_carriers() -> None:
+    class ForgedString(str):
+        pass
+
+    forged_evidence = object.__new__(CognitionEvidenceRef)
+    object.__setattr__(forged_evidence, "source_type", "audit_event")
+    object.__setattr__(forged_evidence, "source_id", ForgedString("event-1"))
+    object.__setattr__(forged_evidence, "evidence_sha256", "a" * 64)
+
+    with pytest.raises(TypeError, match="exact string"):
+        _candidate(evidence=(forged_evidence,))
+
+
+def test_verification_creation_revalidates_received_candidate() -> None:
+    class ForgedString(str):
+        pass
+
+    canonical = _candidate()
+    forged = object.__new__(CognitionCandidate)
+    object.__setattr__(forged, "candidate_id", canonical.candidate_id)
+    object.__setattr__(forged, "workspace_id", ForgedString(canonical.workspace_id))
+    object.__setattr__(forged, "agent_id", canonical.agent_id)
+    object.__setattr__(forged, "kind", canonical.kind)
+    object.__setattr__(forged, "statement", canonical.statement)
+    object.__setattr__(forged, "evidence", canonical.evidence)
+
+    requirement = _requirement("causality")
+    check = _check("causality", passed=True, digest_char="1")
+    with pytest.raises(TypeError, match="exact string"):
+        _verification(
+            candidate=forged,
+            requirements=(requirement,),
+            checks=(check,),
+        )
+
+
+def test_candidate_revalidation_returns_canonical_equivalent() -> None:
+    candidate = _candidate(
+        evidence=(
+            _evidence("event-2", "b", source_type="memory"),
+            _evidence("event-1", "a"),
+        )
+    )
+
+    canonical = CognitionCandidate.revalidate(candidate)
+
+    assert canonical is not candidate
+    assert canonical == candidate
+    assert canonical.candidate_sha256 == candidate.candidate_sha256
+
+
+def test_verification_revalidation_rejects_forged_policy_receipt() -> None:
+    candidate = _candidate()
+    attacker_requirement = _requirement("only-check")
+    attacker_check = _check("only-check", passed=True, digest_char="1")
+    forged = object.__new__(CognitionVerification)
+    object.__setattr__(forged, "candidate_sha256", candidate.candidate_sha256)
+    object.__setattr__(forged, "verification_policy_sha256", "8" * 64)
+    object.__setattr__(forged, "requirements", (attacker_requirement,))
+    object.__setattr__(forged, "checks", (attacker_check,))
+
+    with pytest.raises(ValueError, match="trusted expectation"):
+        CognitionVerification.revalidate(
+            forged,
+            candidate=candidate,
+            expected_verification_policy_sha256=_POLICY_SHA,
+            expected_requirements=(_requirement("causality"),),
+        )
+
+
+def test_verification_revalidation_reconstructs_nested_receipt_carriers() -> None:
+    class ForgedString(str):
+        pass
+
+    candidate = _candidate()
+    forged_requirement = object.__new__(CognitionVerificationRequirement)
+    object.__setattr__(forged_requirement, "check_id", ForgedString("causality"))
+    object.__setattr__(forged_requirement, "verifier_sha256", "f" * 64)
+    forged_check = object.__new__(CognitionVerificationCheck)
+    object.__setattr__(forged_check, "check_id", "causality")
+    object.__setattr__(forged_check, "verifier_sha256", "f" * 64)
+    object.__setattr__(forged_check, "evidence_sha256", "1" * 64)
+    object.__setattr__(forged_check, "passed", True)
+    forged = object.__new__(CognitionVerification)
+    object.__setattr__(forged, "candidate_sha256", candidate.candidate_sha256)
+    object.__setattr__(forged, "verification_policy_sha256", _POLICY_SHA)
+    object.__setattr__(forged, "requirements", (forged_requirement,))
+    object.__setattr__(forged, "checks", (forged_check,))
+
+    with pytest.raises(TypeError, match="exact string"):
+        CognitionVerification.revalidate(
+            forged,
+            candidate=candidate,
+            expected_verification_policy_sha256=_POLICY_SHA,
+            expected_requirements=(_requirement("causality"),),
+        )
+
+
+def test_verification_revalidation_returns_equivalent_canonical_receipt() -> None:
+    candidate = _candidate()
+    requirement = _requirement("causality")
+    verification = _verification(
+        candidate=candidate,
+        requirements=(requirement,),
+        checks=(_check("causality", passed=True, digest_char="1"),),
+    )
+
+    canonical = CognitionVerification.revalidate(
+        verification,
+        candidate=candidate,
+        expected_verification_policy_sha256=_POLICY_SHA,
+        expected_requirements=(requirement,),
+    )
+
+    assert canonical is not verification
+    assert canonical.verification_sha256 == verification.verification_sha256
+    assert canonical.decision is CognitionVerificationDecision.VERIFIED
+
+
 def test_oversized_collections_fail_before_canonical_sort(monkeypatch: pytest.MonkeyPatch) -> None:
     evidence = _evidence("event-1", "a")
     requirement = _requirement("causality")
