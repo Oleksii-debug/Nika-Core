@@ -30,6 +30,7 @@ from nika_core.runtime.idempotency import (
 _MAX_SIGNED_64 = (1 << 63) - 1
 _SOURCE_ENTITY_TYPE = "owner_presence_source"
 _OBSERVED_EVENT = "background.owner_presence_observed"
+_BACKGROUND_PAUSED_EVENT = "background.dispatch_paused"
 _DISPATCH_OPERATION_TYPE = "background.dispatch"
 _MAX_IDENTITY_LENGTH = 256
 _MAX_CONFIGURED_PRESENCE_AGE_SECONDS = 60.0
@@ -40,6 +41,7 @@ class PresenceEvidencePhase(StrEnum):
     EFFECT_RECHECK = "effect_recheck"
     EFFECT_COMMIT = "effect_commit"
     POST_GRANT_FENCE = "post_grant_fence"
+    EFFECT_START_FENCE = "effect_start_fence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,6 +288,35 @@ class BackgroundDispatchGuard:
                     task_id=task_id,
                     decision=post_grant_decision,
                     phase="post_grant_resource_fence",
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
+            final_observation = self._observe_or_pause(
+                task_id=task_id,
+                phase=PresenceEvidencePhase.EFFECT_START_FENCE,
+            )
+            if final_observation is None:
+                self._idempotency.release_pending(claim_key)
+                return BackgroundDispatchResult(
+                    action=BackgroundAction.PAUSE,
+                    reason="owner_presence_untrusted",
+                    effect_started=False,
+                )
+            if final_observation.presence is not OwnerPresence.AWAY:
+                final_decision = BackgroundDecision(
+                    action=BackgroundAction.PAUSE,
+                    work_kind=work_kind,
+                    reason=(
+                        "owner_active"
+                        if final_observation.presence is OwnerPresence.ACTIVE
+                        else "owner_presence_unknown"
+                    ),
+                )
+                denial = self._apply_denial(
+                    task_id=task_id,
+                    decision=final_decision,
+                    phase=PresenceEvidencePhase.EFFECT_START_FENCE.value,
                 )
                 self._idempotency.release_pending(claim_key)
                 return denial
@@ -613,17 +644,31 @@ class BackgroundDispatchGuard:
             state = self._task_state_with_connection(conn, task_id)
             if state is TaskState.READY:
                 self._queue.transition_with_connection(conn, task_id, TaskState.PAUSED)
-            elif state is not TaskState.PAUSED:
+                pause_event_id = self._latest_task_event_id_with_connection(
+                    conn,
+                    task_id=task_id,
+                    expected_state=TaskState.PAUSED,
+                )
+                self._audit.append_with_connection(
+                    conn,
+                    event_type=_BACKGROUND_PAUSED_EVENT,
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "reason": reason,
+                        "phase": phase,
+                        "task_event_id": pause_event_id,
+                    },
+                )
+                return
+            if state is not TaskState.PAUSED:
                 raise ValueError(
                     "background dispatch can only pause READY or already-PAUSED tasks"
                 )
-            self._audit.append_with_connection(
-                conn,
-                event_type="background.dispatch_paused",
-                entity_type="task",
-                entity_id=task_id,
-                payload={"reason": reason, "phase": phase},
-            )
+            if not self._background_pause_owned_with_connection(conn, task_id):
+                raise ValueError(
+                    "background dispatch cannot claim an externally PAUSED task"
+                )
 
     def _resume_for_dispatch(self, *, task_id: str, work_kind: BackgroundWorkKind) -> None:
         with self._queue.store.connection() as conn:
@@ -631,6 +676,10 @@ class BackgroundDispatchGuard:
             state = self._task_state_with_connection(conn, task_id)
             resumed = False
             if state is TaskState.PAUSED:
+                if not self._background_pause_owned_with_connection(conn, task_id):
+                    raise ValueError(
+                        "background dispatch cannot resume a PAUSED task it does not own"
+                    )
                 self._queue.transition_with_connection(conn, task_id, TaskState.READY)
                 resumed = True
             elif state is not TaskState.READY:
@@ -648,9 +697,60 @@ class BackgroundDispatchGuard:
             raise TypeError("task_id must be exact built-in str")
         if not task_id or task_id != task_id.strip():
             raise ValueError("task_id must be non-empty without surrounding whitespace")
-        state = self._queue.get(task_id).state
-        if state not in {TaskState.READY, TaskState.PAUSED}:
-            raise ValueError("background dispatch requires a durable READY or PAUSED task")
+        with self._queue.store.connection() as conn:
+            state = self._task_state_with_connection(conn, task_id)
+            if state is TaskState.PAUSED:
+                if not self._background_pause_owned_with_connection(conn, task_id):
+                    raise ValueError(
+                        "background dispatch cannot resume a PAUSED task it does not own"
+                    )
+                return
+            if state is not TaskState.READY:
+                raise ValueError(
+                    "background dispatch requires a durable READY or owned-PAUSED task"
+                )
+
+    @staticmethod
+    def _latest_task_event_id_with_connection(
+        conn,
+        *,
+        task_id: str,
+        expected_state: TaskState,
+    ) -> int:
+        row = conn.execute(
+            "SELECT event_id, new_state FROM task_events "
+            "WHERE task_id = ? ORDER BY event_id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("background task has no durable task event")
+        if row["new_state"] != expected_state.value:
+            raise RuntimeError("background task event does not match current state")
+        return int(row["event_id"])
+
+    @classmethod
+    def _background_pause_owned_with_connection(cls, conn, task_id: str) -> bool:
+        latest_pause_id = cls._latest_task_event_id_with_connection(
+            conn,
+            task_id=task_id,
+            expected_state=TaskState.PAUSED,
+        )
+        row = conn.execute(
+            "SELECT payload_json FROM audit_events "
+            "WHERE event_type = ? AND entity_type = ? AND entity_id = ? "
+            "ORDER BY event_id DESC LIMIT 1",
+            (_BACKGROUND_PAUSED_EVENT, "task", task_id),
+        ).fetchone()
+        if row is None:
+            return False
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError):
+            return False
+        if type(payload) is not dict:
+            return False
+        task_event_id = payload.get("task_event_id")
+        return type(task_event_id) is int and task_event_id == latest_pause_id
 
     @staticmethod
     def _task_state_with_connection(conn, task_id: str) -> TaskState:
