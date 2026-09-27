@@ -786,6 +786,12 @@ def _validate_and_apply_snapshot(
     before: TreeEvidence,
     remote_files: tuple[RemoteFile, ...],
 ) -> tuple[ChangedFile, ...]:
+    current_before = collect_tree_evidence(local_root)
+    if current_before != before:
+        raise OpenHandsWorkerError(
+            "local staging workspace changed during remote coding execution"
+        )
+
     before_map = {item.path: item for item in before.files}
     before_casefold: dict[str, str] = {}
     for path in before_map:
