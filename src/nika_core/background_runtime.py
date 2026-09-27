@@ -175,6 +175,11 @@ class BackgroundDispatchGuard:
             request_id=request_id,
         )
         if not resource_decision.granted:
+            waiting_removed = self._resources.cancel_waiting(
+                scope="background_life",
+                owner_id=owner_id,
+                request_id=request_id,
+            )
             self._audit.append(
                 event_type="background.dispatch_deferred",
                 entity_type="task",
@@ -183,6 +188,7 @@ class BackgroundDispatchGuard:
                     "reason": resource_decision.reason,
                     "work_kind": work_kind.value,
                     "phase": "resource_commit",
+                    "waiting_removed": waiting_removed,
                 },
             )
             return BackgroundDispatchResult(
