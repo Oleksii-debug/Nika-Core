@@ -35,7 +35,7 @@ from nika_core.toolsmith.openhands_sdk_runtime import (
     OpenHandsSdkRemoteRuntime,
     _read_snapshot_archive,
 )
-from nika_core.toolsmith.workspace_security import collect_tree_evidence
+from nika_core.toolsmith.workspace_security import TreeEvidence, collect_tree_evidence
 
 SHA = "a" * 40
 
@@ -482,6 +482,35 @@ def test_post_apply_evidence_mismatch_rolls_back_preimage(
     with pytest.raises(
         openhands_worker_module.OpenHandsWorkerError,
         match="post-apply evidence",
+    ):
+        openhands_worker_module._validate_and_apply_snapshot(
+            job,
+            root,
+            before,
+            (RemoteFile("src/value.txt", b"after\n"),),
+        )
+
+    assert root.joinpath("src/value.txt").read_bytes() == b"before\n"
+
+
+def test_rollback_evidence_mismatch_escalates_to_manual_reconcile_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    before = collect_tree_evidence(root)
+    forged = TreeEvidence(before.files, "0" * 64, before.total_bytes)
+    observations = iter((before, forged))
+    monkeypatch.setattr(
+        openhands_worker_module,
+        "collect_tree_evidence",
+        lambda _root: next(observations),
+    )
+
+    with pytest.raises(
+        openhands_worker_module.OpenHandsWorkspaceMutationError,
+        match="proven rolled back",
     ):
         openhands_worker_module._validate_and_apply_snapshot(
             job,
