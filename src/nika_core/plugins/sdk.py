@@ -205,6 +205,7 @@ class PluginRuntime:
         self._policy_catalog = policy_catalog or PluginPolicyCatalog()
         self._activation_authority = activation_authority
         self._registry_lock = Lock()
+        self._deactivating: set[str] = set()
         self._factories: dict[str, tuple[PluginManifest, PluginFactory]] = {}
         self._active: dict[str, PluginAdapter] = {}
         self._effective_permissions: dict[str, tuple[str, ...]] = {}
@@ -230,6 +231,8 @@ class PluginRuntime:
             current = self._factories.get(manifest.plugin_id)
             if current is None:
                 raise KeyError(f"unknown plugin: {manifest.plugin_id}")
+            if manifest.plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
             if manifest.plugin_id in self._active:
                 raise RuntimeError("active plugin must be deactivated before upgrade")
             if current[0].version != expected_version:
@@ -281,6 +284,8 @@ class PluginRuntime:
         approval_refs: tuple[str, ...] = (),
     ) -> PluginAdapter:
         with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
             try:
                 manifest, factory = self._factories[plugin_id]
             except KeyError as exc:
@@ -303,6 +308,8 @@ class PluginRuntime:
                 )
 
         with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
             active = self._active.get(plugin_id)
             if active is not None:
                 if self._effective_permissions[plugin_id] != selected_permissions:
@@ -371,7 +378,20 @@ class PluginRuntime:
 
     def deactivate(self, plugin_id: str) -> None:
         with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is already in progress")
             adapter = self._active.pop(plugin_id, None)
             self._effective_permissions.pop(plugin_id, None)
-        if adapter is not None:
+            if adapter is None:
+                return
+            self._deactivating.add(plugin_id)
+
+        try:
             adapter.close()
+        except Exception:
+            # Teardown was not proven complete. Keep this generation fail-stopped
+            # until the in-memory runtime is reconstructed.
+            raise
+        else:
+            with self._registry_lock:
+                self._deactivating.remove(plugin_id)
