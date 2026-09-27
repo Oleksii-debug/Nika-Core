@@ -226,6 +226,10 @@ class WorkspaceActivationRepository:
                     raise PermissionError("trusted activation authority is required")
                 self._activation_authority.verify(subject, approval_refs)
 
+            # Authority verification is an external boundary. Revalidate the exact
+            # reviewed plugin binding immediately before durable activation.
+            self._validate_current_plugin_binding(candidate)
+
             now = datetime.now(UTC).isoformat()
             conn.execute(
                 "UPDATE workspace_activation_versions SET status = 'retired' "

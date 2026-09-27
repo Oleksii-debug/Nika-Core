@@ -4,6 +4,7 @@ import inspect
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -43,6 +44,21 @@ class _Authority:
         self.calls.append(subject)
         if approval_refs != ("approval://trusted",):
             raise PermissionError("untrusted approval evidence")
+
+
+class _BlockingAuthority:
+    def __init__(self) -> None:
+        self.block = False
+        self.started = Event()
+        self.release = Event()
+
+    def verify(self, subject: ActivationSubject, approval_refs: tuple[str, ...]) -> None:
+        assert subject.kind == "workspace"
+        if approval_refs != ("approval://trusted",):
+            raise PermissionError("untrusted approval evidence")
+        if self.block:
+            self.started.set()
+            assert self.release.wait(timeout=5)
 
 
 class _Adapter:
@@ -257,6 +273,63 @@ def test_workspace_restart_blocks_stale_activation_and_keeps_newer_version(
     assert active is not None
     assert active.generation == second.generation
     assert active.effective_permission_ids == ("workspace.read",)
+
+
+def test_workspace_activation_rechecks_plugin_binding_after_authority_boundary(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "plugin-drift-during-authority.db")
+    store.initialize()
+    authority = _BlockingAuthority()
+    state = {"manifest": _plugin()}
+
+    def plugins() -> dict[str, PluginManifest]:
+        return {"research.plugin": state["manifest"]}
+
+    repository = WorkspaceActivationRepository(
+        store,
+        _workspace_catalog(),
+        plugins,
+        activation_authority=authority,
+    )
+    first = repository.save_candidate(_workspace(version="1.0.0"))
+    repository.activate(
+        first.workspace.workspace_id,
+        first.generation,
+        approval_refs=("approval://trusted",),
+    )
+    second = repository.save_candidate(_workspace(version="2.0.0"))
+    authority.block = True
+    failures: list[Exception] = []
+
+    def activate_second() -> None:
+        try:
+            repository.activate(
+                second.workspace.workspace_id,
+                second.generation,
+                approval_refs=("approval://trusted",),
+            )
+        except Exception as exc:  # noqa: BLE001 - regression records fail-closed result.
+            failures.append(exc)
+
+    thread = Thread(target=activate_second)
+    thread.start()
+    assert authority.started.wait(timeout=5)
+
+    state["manifest"] = _plugin(version="2.0.0")
+    authority.release.set()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], PermissionError)
+    assert "plugin manifest changed" in str(failures[0])
+    stored_first = repository.get(first.workspace.workspace_id, first.generation)
+    stored_second = repository.get(second.workspace.workspace_id, second.generation)
+    assert stored_first is not None
+    assert stored_second is not None
+    assert stored_first.status == "active"
+    assert stored_second.status == "candidate"
 
 
 def test_workspace_activation_rejects_persisted_permission_widening(
