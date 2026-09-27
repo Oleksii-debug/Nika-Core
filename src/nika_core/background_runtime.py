@@ -392,13 +392,20 @@ class BackgroundDispatchGuard:
         work_kind: BackgroundWorkKind,
         presence: OwnerPresence,
     ) -> BackgroundDecision:
+        if presence is not OwnerPresence.AWAY:
+            return decide_background_work(
+                owner_presence=presence,
+                work_kind=work_kind,
+                capacity=None,  # type: ignore[arg-type]
+            )
+
         status = self._resources.status(scope="background_life", owner_id=owner_id)
         decision = decide_background_work(
             owner_presence=presence,
             work_kind=work_kind,
             capacity=status,
         )
-        if presence is OwnerPresence.AWAY and status.budget.owner_id != owner_id:
+        if status.budget.owner_id != owner_id:
             raise ValueError("resource capacity owner_id does not match background owner")
         return decision
 
