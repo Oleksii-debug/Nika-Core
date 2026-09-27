@@ -170,7 +170,7 @@ class BackgroundEffectGuard:
         self._resource_reader = resource_reader
         self._owner_id = _require_nonempty_exact_str(owner_id, "owner_id")
         self._max_presence_age_seconds = _require_presence_age(max_presence_age_seconds)
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
 
     def _read_presence(self) -> tuple[OwnerPresenceObservation, datetime]:
         observation = _snapshot_presence(self._presence_observer.observe())
@@ -220,6 +220,8 @@ class BackgroundEffectGuard:
                 owner_id=self._owner_id,
             )
         )
+        if capacity.budget.owner_id != self._owner_id:
+            raise ValueError("resource capacity owner_id does not match background owner")
         decision = decide_background_work(
             owner_presence=observation.presence,
             work_kind=work_kind,

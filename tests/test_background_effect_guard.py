@@ -21,6 +21,7 @@ NOW = datetime(2026, 9, 27, 18, 0, tzinfo=UTC)
 
 def capacity(
     *,
+    owner_id: str = "living-agent",
     active_count: int = 0,
     cpu_percent: float = 10.0,
     power_plugged: bool | None = True,
@@ -35,7 +36,7 @@ def capacity(
     return ResourceCapacityStatus(
         budget=ResourceBudget(
             scope="background_life",
-            owner_id="living-agent",
+            owner_id=owner_id,
             max_concurrent=max_concurrent,
             max_cpu_percent=max_cpu,
             max_memory_percent=80.0,
@@ -352,3 +353,17 @@ def test_presence_freshness_configuration_is_bounded(value: object) -> None:
             max_presence_age_seconds=value,  # type: ignore[arg-type]
             clock=lambda: NOW,
         )
+
+
+def test_capacity_for_different_owner_cannot_authorize_effect() -> None:
+    resources = ResourceReader(capacity(owner_id="other-owner"))
+    service, _ = guard(observation(), resources)
+    effects: list[str] = []
+
+    with pytest.raises(ValueError, match="owner_id"):
+        service.run(
+            BackgroundWorkKind.READING_RESEARCH,
+            lambda: effects.append("forbidden"),
+        )
+
+    assert effects == []
