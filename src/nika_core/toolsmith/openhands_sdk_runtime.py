@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import hashlib
-import importlib.metadata
 import io
 import json
 import logging
@@ -11,8 +10,12 @@ import pathlib
 import tarfile
 import tempfile
 import threading
+import time
+import uuid
 from collections.abc import Callable
 from typing import Any
+
+import httpx
 
 from nika_core.toolsmith.contracts import CodingJob
 from nika_core.toolsmith.openhands_remote_worker import (
@@ -28,41 +31,46 @@ from nika_core.toolsmith.workspace_security import (
 
 _LOGGER = logging.getLogger(__name__)
 
-_OPENHANDS_SDK_VERSION = "1.49.2"
 _MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
 _MAX_SNAPSHOT_FILES = 2000
 _MAX_SNAPSHOT_MEMBERS = 10_000
+_TERMINAL_FAILURE_STATUSES = frozenset({"error", "stuck"})
+_SESSION_HEADER = "X-Session-API-Key"
 
 
-class OpenHandsSdkCompatibilityError(RuntimeError):
-    """Raised when the installed OpenHands SDK cannot satisfy the pinned adapter contract."""
+class OpenHandsAgentServerCompatibilityError(RuntimeError):
+    """Raised when the remote Agent Server violates Nika's pinned HTTP contract."""
 
 
-class OpenHandsSdkExecutionCancelled(RuntimeError):
-    """Raised inside the SDK thread when Nika requested cancellation before/during a run."""
+class OpenHandsAgentServerExecutionCancelled(RuntimeError):
+    """Raised in the transport thread when Nika requests cancellation."""
 
 
 @dataclasses.dataclass(slots=True)
 class _ActiveExecution:
-    conversation: Any | None = None
+    client: httpx.Client | None = None
+    conversation_id: str | None = None
     cancel_requested: threading.Event = dataclasses.field(default_factory=threading.Event)
     done: threading.Event = dataclasses.field(default_factory=threading.Event)
 
 
-class OpenHandsSdkRemoteRuntime:
-    """Thin OpenHands SDK adapter for an already-provisioned remote sandbox.
+class OpenHandsAgentServerRuntime:
+    """Authenticated HTTP adapter for a separately provisioned OpenHands Agent Server.
 
-    The workspace factory owns endpoint authentication and credential redemption.
-    The agent factory owns Nika's model-route-to-OpenHands-Agent projection.
-    This class deliberately owns neither credential storage nor model routing.
+    OpenHands and its FastMCP/MCP dependency closure live in the remote server
+    environment, never in the Nika process. The client factory owns session-key
+    redemption and returns an already-authenticated client. The profile factory
+    selects a reviewed server-side Agent Profile, so Nika never serializes model
+    credentials or a caller-supplied agent configuration.
     """
 
     def __init__(
         self,
         *,
-        workspace_factory: Callable[[OpenHandsSandboxEndpoint], Any],
-        agent_factory: Callable[[CodingJob, OpenHandsSandboxEndpoint], Any],
+        client_factory: Callable[[OpenHandsSandboxEndpoint], httpx.Client],
+        agent_profile_id_factory: Callable[[CodingJob, OpenHandsSandboxEndpoint], str],
         max_iterations: int = 96,
+        poll_interval_seconds: float = 0.2,
     ) -> None:
         if (
             isinstance(max_iterations, bool)
@@ -70,9 +78,17 @@ class OpenHandsSdkRemoteRuntime:
             or max_iterations < 1
         ):
             raise ValueError("OpenHands max_iterations must be a positive integer")
-        self._workspace_factory = workspace_factory
-        self._agent_factory = agent_factory
+        if (
+            isinstance(poll_interval_seconds, bool)
+            or not isinstance(poll_interval_seconds, (int, float))
+            or poll_interval_seconds <= 0
+            or poll_interval_seconds > 5
+        ):
+            raise ValueError("OpenHands poll interval must be within (0, 5] seconds")
+        self._client_factory = client_factory
+        self._agent_profile_id_factory = agent_profile_id_factory
         self._max_iterations = max_iterations
+        self._poll_interval_seconds = float(poll_interval_seconds)
         self._active: dict[str, _ActiveExecution] = {}
         self._cancelled_done: set[str] = set()
         self._pending_cancel: set[str] = set()
@@ -89,8 +105,8 @@ class OpenHandsSdkRemoteRuntime:
         active = _ActiveExecution()
         with self._active_lock:
             if job.job_id in self._active:
-                raise OpenHandsSdkCompatibilityError(
-                    "OpenHands SDK job identity is already active"
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands Agent Server job identity is already active"
                 )
             if job.job_id in self._pending_cancel:
                 self._pending_cancel.remove(job.job_id)
@@ -117,35 +133,25 @@ class OpenHandsSdkRemoteRuntime:
             if active is None:
                 if job_id in self._cancelled_done:
                     self._cancelled_done.remove(job_id)
-                    # Retain the consumed terminal proof as a pending reservation. A
-                    # repeated cancel is then idempotently false, while any forbidden
-                    # direct reuse of the same runtime job identity still fails before
-                    # workspace acquisition.
                     self._pending_cancel.add(job_id)
                     return True
                 if job_id in self._pending_cancel:
                     return False
-                # A worker may reserve remote dispatch and be cancelled in the tiny
-                # scheduling window before execute() registers _active. Returning a
-                # proven reservation means a later execute for this job must fail
-                # before any external workspace or conversation effect.
                 self._pending_cancel.add(job_id)
                 return True
             active.cancel_requested.set()
-            conversation = active.conversation
+            client = active.client
+            conversation_id = active.conversation_id
 
-        if conversation is not None:
+        if client is not None and conversation_id is not None:
             try:
-                await asyncio.to_thread(conversation.interrupt)
-            except Exception as exc:  # noqa: BLE001 - third-party SDK boundary
+                await asyncio.to_thread(self._interrupt_sync, client, conversation_id)
+            except Exception as exc:  # noqa: BLE001 - remote transport boundary
                 _LOGGER.warning(
-                    "OpenHands interrupt failed; remote stop remains unverified (%s)",
+                    "OpenHands Agent Server interrupt failed; stop remains unverified (%s)",
                     type(exc).__name__,
                 )
 
-        # Cancellation can arrive while source upload/agent creation is still running,
-        # before a Conversation exists. The sync thread observes cancel_requested before
-        # send/run. A stop is proven only when that thread reaches its finalizer.
         for _ in range(50):
             if active.done.is_set():
                 return True
@@ -161,81 +167,137 @@ class OpenHandsSdkRemoteRuntime:
         source_evidence: TreeEvidence,
         active: _ActiveExecution,
     ) -> OpenHandsRunEvidence:
-        conversation = None
+        client: httpx.Client | None = None
         try:
             if active.cancel_requested.is_set():
-                raise OpenHandsSdkExecutionCancelled(
-                    "OpenHands execution cancelled before workspace acquisition"
-                )
-            Conversation = _load_conversation_type()
-            workspace = self._workspace_factory(endpoint)
-            if getattr(workspace, "working_dir", None) != endpoint.working_dir:
-                raise OpenHandsSdkCompatibilityError(
-                    "workspace factory returned a different remote working directory"
-                )
-            if getattr(workspace, "host", "").rstrip("/") != endpoint.host.rstrip("/"):
-                raise OpenHandsSdkCompatibilityError(
-                    "workspace factory returned a different endpoint"
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before HTTP client acquisition"
                 )
 
-            with workspace:
-                self._upload_source(workspace, endpoint, source_root, source_evidence)
-                if active.cancel_requested.is_set():
-                    raise OpenHandsSdkExecutionCancelled(
-                        "OpenHands execution cancelled before agent creation"
-                    )
+            client = self._client_factory(endpoint)
+            self._validate_client(client, endpoint)
+            with self._active_lock:
+                active.client = client
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before source upload"
+                )
 
-                agent = self._agent_factory(job, endpoint)
-                if active.cancel_requested.is_set():
-                    raise OpenHandsSdkExecutionCancelled(
-                        "OpenHands execution cancelled before conversation creation"
-                    )
+            self._upload_source(
+                client,
+                endpoint,
+                source_root,
+                source_evidence,
+                timeout_seconds=job.resource_budget.timeout_seconds,
+            )
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before profile binding"
+                )
 
-                conversation = Conversation(
-                    agent=agent,
-                    workspace=workspace,
-                    max_iteration_per_run=self._max_iterations,
-                    visualizer=None,
-                    delete_on_close=True,
-                    tags={
-                        "nika_job": _bounded_tag(job.job_id),
-                        "nika_task": _bounded_tag(job.task_id),
+            profile_id = _canonical_uuid(
+                self._agent_profile_id_factory(job, endpoint),
+                field="agent profile id",
+            )
+            conversation_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
+                )
+            )
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before conversation creation"
+                )
+
+            created = self._request_json(
+                client,
+                "POST",
+                "/api/conversations",
+                operation="conversation creation",
+                json={
+                    "conversation_id": conversation_id,
+                    "agent_profile_id": profile_id,
+                    "workspace": {
+                        "kind": "LocalWorkspace",
+                        "working_dir": endpoint.working_dir,
                     },
+                    "max_iterations": self._max_iterations,
+                    "stuck_detection": True,
+                    "autotitle": False,
+                    "secrets": {},
+                    "tags": {
+                        "nikajob": _bounded_tag(job.job_id),
+                        "nikatask": _bounded_tag(job.task_id),
+                    },
+                },
+            )
+            if type(created) is not dict:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands conversation response must be a JSON object"
                 )
-                with self._active_lock:
-                    active.conversation = conversation
-                if active.cancel_requested.is_set():
-                    raise OpenHandsSdkExecutionCancelled(
-                        "OpenHands execution cancelled before message dispatch"
-                    )
+            returned_id = _canonical_uuid(
+                created.get("id", created.get("conversation_id")),
+                field="conversation id",
+            )
+            if returned_id != conversation_id:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands conversation identity differs from requested identity"
+                )
+            with self._active_lock:
+                active.conversation_id = conversation_id
 
-                conversation.send_message(prompt, sender="nika-core")
-                if active.cancel_requested.is_set():
-                    raise OpenHandsSdkExecutionCancelled(
-                        "OpenHands execution cancelled before conversation run"
-                    )
-                conversation.run(
-                    blocking=True,
-                    timeout=float(job.resource_budget.timeout_seconds),
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before message dispatch"
                 )
-                if active.cancel_requested.is_set():
-                    raise OpenHandsSdkExecutionCancelled(
-                        "OpenHands execution cancelled before snapshot collection"
-                    )
-                files = _download_snapshot(
-                    workspace,
-                    endpoint,
-                    baseline_paths={item.path for item in source_evidence.files},
-                    timeout_seconds=job.resource_budget.timeout_seconds,
+            self._request_json(
+                client,
+                "POST",
+                f"/api/conversations/{conversation_id}/events",
+                operation="message dispatch",
+                json={
+                    "role": "user",
+                    "content": [{"type": "text", "text": prompt}],
+                    "run": False,
+                },
+            )
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before conversation run"
                 )
-                return OpenHandsRunEvidence(str(conversation.id), files)
+            self._request_json(
+                client,
+                "POST",
+                f"/api/conversations/{conversation_id}/run",
+                operation="conversation run",
+                json={},
+            )
+            self._wait_for_completion(
+                client,
+                conversation_id,
+                active,
+                timeout_seconds=job.resource_budget.timeout_seconds,
+            )
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before snapshot collection"
+                )
+
+            files = _download_snapshot(
+                client,
+                endpoint,
+                baseline_paths={item.path for item in source_evidence.files},
+                timeout_seconds=job.resource_budget.timeout_seconds,
+            )
+            return OpenHandsRunEvidence(conversation_id, files)
         finally:
-            if conversation is not None:
+            if client is not None:
                 try:
-                    conversation.close()
-                except Exception as exc:  # noqa: BLE001 - third-party SDK boundary
+                    client.close()
+                except Exception as exc:  # noqa: BLE001 - transport cleanup boundary
                     _LOGGER.warning(
-                        "OpenHands conversation close requires reconciliation (%s)",
+                        "OpenHands Agent Server client close failed (%s)",
                         type(exc).__name__,
                     )
             active.done.set()
@@ -245,62 +307,187 @@ class OpenHandsSdkRemoteRuntime:
                 if self._active.get(job.job_id) is active:
                     self._active.pop(job.job_id, None)
 
+    def _wait_for_completion(
+        self,
+        client: httpx.Client,
+        conversation_id: str,
+        active: _ActiveExecution,
+        *,
+        timeout_seconds: int,
+    ) -> None:
+        deadline = time.monotonic() + float(timeout_seconds)
+        while True:
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled during conversation run"
+                )
+            info = self._request_json(
+                client,
+                "GET",
+                f"/api/conversations/{conversation_id}",
+                operation="conversation status",
+            )
+            if type(info) is not dict:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands conversation status must be a JSON object"
+                )
+            status = info.get("execution_status")
+            if type(status) is not str:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands conversation status is missing or non-canonical"
+                )
+            if status == "finished":
+                return
+            if status in _TERMINAL_FAILURE_STATUSES:
+                raise OpenHandsAgentServerCompatibilityError(
+                    f"OpenHands conversation terminated with status {status}"
+                )
+            if status not in {
+                "idle",
+                "running",
+                "paused",
+                "waiting_for_confirmation",
+                "deleting",
+            }:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands conversation returned an unknown execution status"
+                )
+            if status in {"paused", "waiting_for_confirmation", "deleting"}:
+                raise OpenHandsAgentServerCompatibilityError(
+                    f"OpenHands conversation cannot complete unattended from status {status}"
+                )
+            if time.monotonic() >= deadline:
+                raise TimeoutError
+            remaining = max(0.0, deadline - time.monotonic())
+            time.sleep(min(self._poll_interval_seconds, remaining))
+
+    @staticmethod
+    def _validate_client(
+        client: httpx.Client,
+        endpoint: OpenHandsSandboxEndpoint,
+    ) -> None:
+        if not isinstance(client, httpx.Client):
+            raise OpenHandsAgentServerCompatibilityError(
+                "OpenHands client factory must return an httpx.Client"
+            )
+        if str(client.base_url).rstrip("/") != endpoint.host.rstrip("/"):
+            raise OpenHandsAgentServerCompatibilityError(
+                "OpenHands HTTP client is bound to a different endpoint"
+            )
+        session_key = client.headers.get(_SESSION_HEADER)
+        if type(session_key) is not str or not session_key.strip():
+            raise OpenHandsAgentServerCompatibilityError(
+                "OpenHands HTTP client lacks session API authentication"
+            )
+
     @staticmethod
     def _upload_source(
-        workspace: Any,
+        client: httpx.Client,
         endpoint: OpenHandsSandboxEndpoint,
         source_root: pathlib.Path,
         evidence: TreeEvidence,
+        *,
+        timeout_seconds: int,
     ) -> None:
-        # The source tree may change after endpoint acquisition. Freeze each uploaded
-        # byte string only after revalidating it against the captured TreeEvidence.
-        with tempfile.TemporaryDirectory(prefix="nika-openhands-source-") as frozen_root_text:
-            frozen_root = pathlib.Path(frozen_root_text)
-            for item in evidence.files:
-                policy = WorkspacePathPolicy((item.path,))
-                source = ensure_path_policy(
-                    source_root,
-                    item.path,
-                    policy,
-                    must_exist=True,
+        for item in evidence.files:
+            policy = WorkspacePathPolicy((item.path,))
+            source = ensure_path_policy(
+                source_root,
+                item.path,
+                policy,
+                must_exist=True,
+            )
+            if not source.is_file():
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands source upload encountered a non-file path"
                 )
-                if not source.is_file():
-                    raise OpenHandsSdkCompatibilityError(
-                        "OpenHands source upload encountered a non-file path"
-                    )
-                data = source.read_bytes()
-                if len(data) != item.size_bytes or hashlib.sha256(data).hexdigest() != item.sha256:
-                    raise OpenHandsSdkCompatibilityError(
-                        "OpenHands source upload no longer matches captured tree evidence"
-                    )
+            data = source.read_bytes()
+            if len(data) != item.size_bytes or hashlib.sha256(data).hexdigest() != item.sha256:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands source upload no longer matches captured tree evidence"
+                )
 
-                relative = pathlib.PurePosixPath(item.path)
-                frozen = frozen_root.joinpath(*relative.parts)
-                frozen.parent.mkdir(parents=True, exist_ok=True)
-                frozen.write_bytes(data)
-                remote = pathlib.PurePosixPath(endpoint.working_dir) / relative
-                result = workspace.file_upload(frozen, remote.as_posix())
-                success = getattr(result, "success", None)
-                if type(success) is not bool or not success:
-                    raise OpenHandsSdkCompatibilityError("OpenHands source upload failed")
+            relative = pathlib.PurePosixPath(item.path)
+            remote = pathlib.PurePosixPath(endpoint.working_dir) / relative
+            response = client.post(
+                "/api/file/upload",
+                params={"path": remote.as_posix()},
+                files={"file": (relative.name, data, "application/octet-stream")},
+                timeout=float(timeout_seconds),
+            )
+            _require_success_status(response, "source upload")
+            try:
+                payload = response.json()
+            except ValueError as exc:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands source upload returned invalid JSON"
+                ) from exc
+            if type(payload) is not dict or type(payload.get("success")) is not bool:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands source upload returned non-canonical success evidence"
+                )
+            if not payload["success"]:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands source upload failed"
+                )
+
+    @staticmethod
+    def _interrupt_sync(client: httpx.Client, conversation_id: str) -> None:
+        response = client.post(
+            f"/api/conversations/{conversation_id}/interrupt",
+            json={},
+            timeout=10.0,
+        )
+        _require_success_status(response, "conversation interrupt")
+
+    @staticmethod
+    def _request_json(
+        client: httpx.Client,
+        method: str,
+        path: str,
+        *,
+        operation: str,
+        json: Any | None = None,
+    ) -> Any:
+        response = client.request(
+            method,
+            path,
+            json=json,
+            timeout=60.0,
+        )
+        _require_success_status(response, operation)
+        try:
+            return response.json()
+        except ValueError as exc:
+            raise OpenHandsAgentServerCompatibilityError(
+                f"OpenHands {operation} returned invalid JSON"
+            ) from exc
 
 
-def _load_conversation_type() -> type[Any]:
-    try:
-        installed = importlib.metadata.version("openhands-sdk")
-    except importlib.metadata.PackageNotFoundError as exc:
-        raise OpenHandsSdkCompatibilityError(
-            "OpenHands coding backend requires the 'coding-openhands' optional dependency"
-        ) from exc
-    if installed != _OPENHANDS_SDK_VERSION:
-        raise OpenHandsSdkCompatibilityError(
-            f"OpenHands SDK version mismatch: expected {_OPENHANDS_SDK_VERSION}, got {installed}"
+def _canonical_uuid(value: object, *, field: str) -> str:
+    if type(value) is not str or value != value.strip():
+        raise OpenHandsAgentServerCompatibilityError(
+            f"OpenHands {field} must be a canonical UUID string"
         )
     try:
-        from openhands.sdk import Conversation
-    except Exception as exc:
-        raise OpenHandsSdkCompatibilityError("OpenHands SDK import failed") from exc
-    return Conversation
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError) as exc:
+        raise OpenHandsAgentServerCompatibilityError(
+            f"OpenHands {field} must be a canonical UUID string"
+        ) from exc
+    canonical = str(parsed)
+    if value.casefold() != canonical:
+        raise OpenHandsAgentServerCompatibilityError(
+            f"OpenHands {field} must use canonical UUID spelling"
+        )
+    return canonical
+
+
+def _require_success_status(response: httpx.Response, operation: str) -> None:
+    if not 200 <= response.status_code < 300:
+        raise OpenHandsAgentServerCompatibilityError(
+            f"OpenHands {operation} failed with HTTP {response.status_code}"
+        )
 
 
 def _bounded_tag(value: str) -> str:
@@ -312,22 +499,17 @@ def _bounded_tag(value: str) -> str:
 
 
 def _download_snapshot(
-    workspace: Any,
+    client: httpx.Client,
     endpoint: OpenHandsSandboxEndpoint,
     *,
     baseline_paths: set[str],
     timeout_seconds: int,
 ) -> tuple[RemoteFile, ...]:
-    api_prefix = getattr(workspace, "api_prefix", None)
-    client = getattr(workspace, "client", None)
-    if not isinstance(api_prefix, str) or client is None:
-        raise OpenHandsSdkCompatibilityError("OpenHands workspace lacks remote archive capability")
-    route = f"{api_prefix.rstrip('/')}/file/archive"
     with tempfile.SpooledTemporaryFile(max_size=16 * 1024 * 1024, mode="w+b") as spool:
         total = 0
         with client.stream(
             "GET",
-            route,
+            "/api/file/archive",
             params={
                 "path": endpoint.working_dir,
                 "format": "tar.gz",
@@ -335,11 +517,11 @@ def _download_snapshot(
             },
             timeout=float(timeout_seconds),
         ) as response:
-            response.raise_for_status()
+            _require_success_status(response, "snapshot archive")
             for chunk in response.iter_bytes():
                 total += len(chunk)
                 if total > _MAX_SNAPSHOT_BYTES:
-                    raise OpenHandsSdkCompatibilityError(
+                    raise OpenHandsAgentServerCompatibilityError(
                         "OpenHands snapshot archive exceeds Nika byte limit"
                     )
                 spool.write(chunk)
@@ -358,7 +540,9 @@ def _read_snapshot_archive(
     baseline_paths: set[str],
 ) -> tuple[RemoteFile, ...]:
     if not expected_root or expected_root in {".", "/"}:
-        raise OpenHandsSdkCompatibilityError("OpenHands working directory has no stable basename")
+        raise OpenHandsAgentServerCompatibilityError(
+            "OpenHands working directory has no stable basename"
+        )
 
     files: dict[str, bytes] = {}
     total_bytes = 0
@@ -367,49 +551,72 @@ def _read_snapshot_archive(
         for member in archive:
             member_count += 1
             if member_count > _MAX_SNAPSHOT_MEMBERS:
-                raise OpenHandsSdkCompatibilityError(
+                raise OpenHandsAgentServerCompatibilityError(
                     "OpenHands snapshot exceeds Nika member-count limit"
                 )
             path = pathlib.PurePosixPath(member.name)
             if path.is_absolute() or ".." in path.parts or not path.parts:
-                raise OpenHandsSdkCompatibilityError("OpenHands snapshot contains an unsafe path")
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands snapshot contains an unsafe path"
+                )
             if path.parts[0] != expected_root:
-                raise OpenHandsSdkCompatibilityError("OpenHands snapshot root identity changed")
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands snapshot root identity changed"
+                )
             if member.isdir():
                 continue
             if not member.isfile() or member.issym() or member.islnk():
-                raise OpenHandsSdkCompatibilityError(
+                raise OpenHandsAgentServerCompatibilityError(
                     "OpenHands snapshot contains a non-regular filesystem entry"
                 )
             if len(path.parts) < 2:
-                raise OpenHandsSdkCompatibilityError(
+                raise OpenHandsAgentServerCompatibilityError(
                     "OpenHands snapshot contains an invalid member"
                 )
             relative = pathlib.PurePosixPath(*path.parts[1:]).as_posix()
             if relative in files:
-                raise OpenHandsSdkCompatibilityError("OpenHands snapshot contains duplicate files")
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands snapshot contains duplicate files"
+                )
             extracted = archive.extractfile(member)
             if extracted is None:
-                raise OpenHandsSdkCompatibilityError("OpenHands snapshot member is unreadable")
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands snapshot member is unreadable"
+                )
             data = extracted.read(_MAX_SNAPSHOT_BYTES + 1)
             if len(data) != member.size:
-                raise OpenHandsSdkCompatibilityError("OpenHands snapshot member size changed")
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands snapshot member size changed"
+                )
             total_bytes += len(data)
             if total_bytes > _MAX_SNAPSHOT_BYTES:
-                raise OpenHandsSdkCompatibilityError("OpenHands snapshot exceeds Nika byte limit")
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands snapshot exceeds Nika byte limit"
+                )
             files[relative] = data
             if len(files) > _MAX_SNAPSHOT_FILES + 1:
-                raise OpenHandsSdkCompatibilityError("OpenHands snapshot exceeds Nika file limit")
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands snapshot exceeds Nika file limit"
+                )
 
     synthetic = files.get("archive_manifest.json")
     if "archive_manifest.json" not in baseline_paths and synthetic is not None:
-        ordinary = {path: data for path, data in files.items() if path != "archive_manifest.json"}
+        ordinary = {
+            path: data
+            for path, data in files.items()
+            if path != "archive_manifest.json"
+        }
         if _is_synthetic_archive_manifest(synthetic, expected_root, ordinary):
             del files["archive_manifest.json"]
 
     if len(files) > _MAX_SNAPSHOT_FILES:
-        raise OpenHandsSdkCompatibilityError("OpenHands snapshot exceeds Nika file limit")
-    return tuple(RemoteFile(path, files[path]) for path in sorted(files, key=str.casefold))
+        raise OpenHandsAgentServerCompatibilityError(
+            "OpenHands snapshot exceeds Nika file limit"
+        )
+    return tuple(
+        RemoteFile(path, files[path])
+        for path in sorted(files, key=str.casefold)
+    )
 
 
 def _is_synthetic_archive_manifest(
@@ -426,6 +633,15 @@ def _is_synthetic_archive_manifest(
         and payload.get("format") == "tar.gz"
         and payload.get("source") == expected_root
         and payload.get("file_count") == len(ordinary_files)
-        and payload.get("total_bytes") == sum(len(value) for value in ordinary_files.values())
+        and payload.get("total_bytes") == sum(
+            len(value) for value in ordinary_files.values()
+        )
         and payload.get("excludes") == []
     )
+
+
+# Compatibility aliases for callers already wired to the #843 module path. These
+# names no longer import or instantiate the OpenHands Python SDK.
+OpenHandsSdkCompatibilityError = OpenHandsAgentServerCompatibilityError
+OpenHandsSdkExecutionCancelled = OpenHandsAgentServerExecutionCancelled
+OpenHandsSdkRemoteRuntime = OpenHandsAgentServerRuntime
