@@ -109,6 +109,29 @@ def test_public_authority_rejects_behavioral_primitive_subclasses_before_use(tmp
             fence=lease.fence,
             lease_seconds=BehavioralInt(120),
         )
+    with pytest.raises(WorkOwnershipError, match="exact positive integer"):
+        service.release(
+            project_id=lease.project_id,
+            work_id=lease.work_id,
+            owner_id=lease.owner_id,
+            fence=BehavioralInt(lease.fence),
+        )
+    with service._store.connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with pytest.raises(WorkOwnershipError, match="exact positive integer"):
+            service.assert_owner_in_transaction(
+                connection,
+                project_id=lease.project_id,
+                work_id=lease.work_id,
+                owner_id=lease.owner_id,
+                fence=BehavioralInt(lease.fence),
+            )
+        connection.rollback()
+
+    assert service.current(
+        project_id=lease.project_id,
+        work_id=lease.work_id,
+    ) == lease
 
 
 def test_clock_rejects_behavioral_datetime_subclass_before_timezone_use(tmp_path) -> None:

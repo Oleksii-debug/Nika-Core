@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+
+import nika_core.product_factory_program_host as program_host_module
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
@@ -30,6 +33,10 @@ from nika_core.product_factory_program_host import (
     ProgramWorkDisposition,
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
+from nika_core.product_factory_work_ownership import (
+    ProductFactoryWorkOwnership,
+    WorkOwnershipError,
+)
 from nika_core.product_project import (
     ProductProjectRepository,
     ProductProjectSpec,
@@ -943,3 +950,278 @@ def test_program_host_dispatches_through_existing_public_coding_worker_adapter(t
         "pytest",
         "tests/component-0",
     )
+
+
+class _MutableOwnershipClock:
+    def __init__(self, instant: datetime) -> None:
+        self.instant = instant
+
+    def __call__(self) -> datetime:
+        return self.instant
+
+    def advance(self, **delta: int) -> None:
+        self.instant += timedelta(**delta)
+
+
+def _seed_running_pending(host, coordinator, binding, task_id):
+    request = coordinator.start("component-0")
+    lease = host._acquire(request)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(lease,),
+        )
+        operation, created = host._reserve_effect(
+            host_task_id=task_id,
+            request=request,
+            lease=lease,
+        )
+        assert created is True
+        assert operation.status is IdempotencyStatus.PENDING
+    finally:
+        host._release_best_effort(lease)
+    return request, lease
+
+
+def test_recovery_wait_cancellation_releases_exact_lease_without_changing_pending(
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(store, worker, owner_id="program-host:first")
+    request, seed_lease = _seed_running_pending(host, coordinator, binding, task_id)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            host._recover_one(
+                semaphore=asyncio.Semaphore(0),
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                record=_record(coordinator, "component-0"),
+            )
+        )
+        for _ in range(100):
+            if host._ownership.current(
+                project_id=request.project_id,
+                work_id=request.work_id,
+            ) is not None:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("recovery lease was not acquired")
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+
+    assert host._ownership.current(
+        project_id=request.project_id,
+        work_id=request.work_id,
+    ) is None
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.PENDING
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+    replacement = ProductFactoryWorkOwnership(store).acquire(
+        project_id=request.project_id,
+        work_id=request.work_id,
+        owner_id="program-host:replacement",
+        lease_seconds=300,
+    )
+    assert replacement.fence > seed_lease.fence
+
+
+def test_recovery_ledger_read_failure_releases_lease_before_any_worker_effect(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.start("component-0")
+
+    class FailingReadLedger(IdempotencyLedger):
+        def get(self, operation_key):
+            raise RuntimeError(f"cannot read {operation_key}")
+
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        idempotency=FailingReadLedger(store),
+        owner_id="program-host:read-failure",
+    )
+
+    with pytest.raises(RuntimeError, match="cannot read"):
+        _run(
+            host._recover_one(
+                semaphore=asyncio.Semaphore(1),
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                record=_record(coordinator, "component-0"),
+            )
+        )
+
+    assert host._ownership.current(
+        project_id=request.project_id,
+        work_id=request.work_id,
+    ) is None
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+
+def test_recovery_pre_effect_renew_failure_releases_lease_without_worker_call(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.start("component-0")
+
+    class FailingRenewOwnership(ProductFactoryWorkOwnership):
+        def renew(self, **kwargs):
+            raise WorkOwnershipError("forced stale authority")
+
+    authority = FailingRenewOwnership(store)
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:renew-failure",
+    )
+
+    with pytest.raises(ProductFactoryProgramError, match="stale Product Factory authority"):
+        _run(
+            host._recover_one(
+                semaphore=asyncio.Semaphore(1),
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                record=_record(coordinator, "component-0"),
+            )
+        )
+
+    assert authority.current(
+        project_id=request.project_id,
+        work_id=request.work_id,
+    ) is None
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+
+def test_long_dispatch_renews_same_fence_before_original_expiry_allows_takeover(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    clock = _MutableOwnershipClock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC))
+    authority = ProductFactoryWorkOwnership(store, clock=clock)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    class BlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            started.set()
+            await finish.wait()
+            return _envelope(request)
+
+    worker = BlockingWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:heartbeat",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.001)
+
+    async def scenario():
+        task = asyncio.create_task(
+            host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_count=1,
+            )
+        )
+        await started.wait()
+        request = _record(coordinator, "component-0").request
+        original = authority.current(
+            project_id=request.project_id,
+            work_id=request.work_id,
+        )
+        assert original is not None
+
+        clock.advance(seconds=2)
+        for _ in range(200):
+            refreshed = authority.current(
+                project_id=request.project_id,
+                work_id=request.work_id,
+            )
+            if refreshed is not None and refreshed.expires_at > original.expires_at:
+                break
+            await asyncio.sleep(0.001)
+        else:
+            raise AssertionError("lease heartbeat did not extend exact fence")
+
+        assert refreshed.fence == original.fence
+        clock.advance(seconds=2)
+        with pytest.raises(WorkOwnershipError, match="active owner"):
+            ProductFactoryWorkOwnership(store, clock=clock).acquire(
+                project_id=request.project_id,
+                work_id=request.work_id,
+                owner_id="program-host:competitor",
+                lease_seconds=3,
+            )
+
+        finish.set()
+        return await task
+
+    outcomes = _run(scenario())
+    assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    assert len(worker.dispatch_calls) == 1
+
+
+def test_result_reconcile_marker_failure_reports_actual_pending_ledger_status(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+
+    class FailAfterReservationOwnership(ProductFactoryWorkOwnership):
+        def __init__(self, target_store):
+            super().__init__(target_store)
+            self.assert_calls = 0
+
+        def assert_owner_in_transaction(self, connection, **kwargs):
+            self.assert_calls += 1
+            if self.assert_calls >= 3:
+                raise WorkOwnershipError("forced post-effect fence loss")
+            return super().assert_owner_in_transaction(connection, **kwargs)
+
+    authority = FailAfterReservationOwnership(store)
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:status-truth",
+    )
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    request = _record(coordinator, "component-0").request
+    durable = IdempotencyLedger(store).require(f"pf-worker:{request.work_id}")
+    assert durable.status is IdempotencyStatus.PENDING
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is IdempotencyStatus.PENDING
+    assert "uncertainty marker failed" in outcomes[0].detail
