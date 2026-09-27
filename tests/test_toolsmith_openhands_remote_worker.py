@@ -573,6 +573,33 @@ def test_remote_worker_rejects_stale_local_tree_before_acquiring_sandbox(tmp_pat
     assert provider.acquired == []
 
 
+def test_remote_result_cannot_clobber_local_change_made_during_remote_execution(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    provider = Provider()
+
+    class ConcurrentMutationRuntime(Runtime):
+        async def execute(self, job, endpoint, prompt, source_root, source_evidence):
+            self.calls.append((job, endpoint, prompt, source_root, source_evidence))
+            source_root.joinpath("src/value.txt").write_bytes(b"concurrent\n")
+            return OpenHandsRunEvidence(
+                "conversation-1",
+                (RemoteFile("src/value.txt", b"remote\n"),),
+            )
+
+    runtime = ConcurrentMutationRuntime()
+
+    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "policy_violation"
+    assert "changed during remote coding execution" in result.failure.message
+    assert root.joinpath("src/value.txt").read_bytes() == b"concurrent\n"
+    assert provider.released == [("job-1", "sandbox-1", False)]
+
+
 def test_acquisition_failure_redacts_untrusted_provider_diagnostics(
     tmp_path: Path,
 ) -> None:
@@ -883,7 +910,7 @@ def test_rollback_evidence_mismatch_escalates_to_manual_reconcile_error(
     job = _job(root)
     before = collect_tree_evidence(root)
     forged = TreeEvidence(before.files, "0" * 64, before.total_bytes)
-    observations = iter((before, forged))
+    observations = iter((before, before, forged))
     monkeypatch.setattr(
         openhands_worker_module,
         "collect_tree_evidence",
