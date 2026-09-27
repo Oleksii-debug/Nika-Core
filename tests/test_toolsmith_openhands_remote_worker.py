@@ -26,6 +26,7 @@ from nika_core.toolsmith.contracts import (
     RecoveryState,
     RepositorySnapshot,
     ResourceBudget,
+    TestEvidence,
     WorkspaceLease,
 )
 from nika_core.toolsmith.openhands_remote_worker import (
@@ -256,7 +257,7 @@ class AcceptanceRuntime:
             exit_code = 7 if "SystemExit(7)" in joined else 0
             output_digest = hashlib.sha256(joined.encode("utf-8")).hexdigest()
             tests.append(
-                openhands_worker_module.TestEvidence(
+                TestEvidence(
                     command.argv,
                     exit_code,
                     output_digest,
@@ -310,6 +311,7 @@ def _worker(
         acceptance_runtime=verifier,
         **kwargs,
     )
+
 
 def _workspace(tmp_path: Path) -> Path:
     root = tmp_path / "worker root"
@@ -1424,6 +1426,58 @@ def test_host_mutation_during_external_acceptance_forces_manual_reconciliation(
     assert result.failure.kind.value == "internal_error"
     assert result.recovery_state == RecoveryState("manual_reconcile_required")
     assert escaped.read_text(encoding="utf-8") == "mutated"
+
+
+class WrongDigestAcceptanceRuntime(AcceptanceRuntime):
+    async def execute(self, job, candidate_files, candidate_evidence):
+        evidence = await super().execute(job, candidate_files, candidate_evidence)
+        return SandboxedAcceptanceEvidence(
+            evidence.isolation_class,
+            "0" * 64,
+            evidence.test_evidence,
+        )
+
+
+class WrongCommandAcceptanceRuntime(AcceptanceRuntime):
+    async def execute(self, job, candidate_files, candidate_evidence):
+        evidence = await super().execute(job, candidate_files, candidate_evidence)
+        tests = tuple(
+            TestEvidence(("python", "-c", "wrong-command"), item.exit_code, item.output_digest)
+            for item in evidence.test_evidence
+        )
+        return SandboxedAcceptanceEvidence(
+            evidence.isolation_class,
+            evidence.candidate_digest,
+            tests,
+        )
+
+
+@pytest.mark.parametrize(
+    "acceptance_runtime",
+    (WrongDigestAcceptanceRuntime(), WrongCommandAcceptanceRuntime()),
+)
+def test_invalid_acceptance_evidence_after_apply_requires_manual_reconciliation(
+    tmp_path: Path,
+    acceptance_runtime,
+) -> None:
+    root = _workspace(tmp_path)
+    worker = _worker(
+        Provider(),
+        Runtime((RemoteFile("src/value.txt", b"after\n"),)),
+        acceptance_runtime=acceptance_runtime,
+    )
+
+    result = _run(worker.execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.failure.retryable is False
+    assert result.failure.message == (
+        "post-apply policy or evidence validation failed; host reconciliation is required"
+    )
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert root.joinpath("src/value.txt").read_bytes() == b"after\n"
 
 
 def test_missing_sandboxed_acceptance_runtime_fails_before_remote_effect(
