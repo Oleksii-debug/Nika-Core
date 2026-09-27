@@ -20,6 +20,7 @@ class WorkerRecoveryDisposition(StrEnum):
     BLOCKED_MISSING_STATE = "blocked_missing_state"
     BLOCKED_INSPECTION_FAILED = "blocked_inspection_failed"
     BLOCKED_RECOVERY_FAILED = "blocked_recovery_failed"
+    BLOCKED_INVALID_EVIDENCE = "blocked_invalid_evidence"
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,7 +101,19 @@ class ProductFactoryWorkerRecovery:
                 record=blocked,
                 recovery_state=state,
             )
-        updated = coordinator.record_result(envelope)
+        try:
+            updated = coordinator.record_result(envelope)
+        except CoordinatorError:
+            blocked = coordinator.block(
+                component_id,
+                "worker recovery evidence is invalid; host reconciliation required",
+            )
+            return WorkerRecoveryOutcome(
+                component_id=component_id,
+                disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
+                record=blocked,
+                recovery_state=state,
+            )
         return WorkerRecoveryOutcome(
             component_id=component_id,
             disposition=WorkerRecoveryDisposition.RECOVERED,
