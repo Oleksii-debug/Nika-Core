@@ -314,6 +314,26 @@ def test_remote_worker_rejects_out_of_scope_change_before_local_mutation(tmp_pat
     assert not root.joinpath("docs/escape.txt").exists()
 
 
+def test_remote_worker_rejects_backslash_path_spelling_without_reinterpretation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime(
+        (
+            RemoteFile("src/value.txt", b"before\n"),
+            RemoteFile("src\\escape.txt", b"not canonical\n"),
+        )
+    )
+
+    result = _run(OpenHandsRemoteCodingWorker(Provider(), runtime).execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "policy_violation"
+    assert "canonical POSIX" in result.failure.message
+    assert not root.joinpath("src", "escape.txt").exists()
+
+
 def test_remote_worker_rejects_deletion_fail_closed(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime(())
@@ -367,6 +387,28 @@ def test_remote_worker_rejects_cleartext_non_loopback_control_plane(tmp_path: Pa
 
     assert not result.succeeded
     assert "HTTPS" in result.failure.message
+
+
+@pytest.mark.parametrize(
+    "working_dir",
+    (
+        "/workspace/../escape",
+        "/workspace//nika-job",
+        "/workspace/./nika-job",
+        "/",
+        "/workspace\\nika-job",
+    ),
+)
+def test_endpoint_rejects_noncanonical_remote_working_directory(working_dir: str) -> None:
+    with pytest.raises(ValueError, match="canonical absolute POSIX"):
+        OpenHandsSandboxEndpoint(
+            endpoint_id="sandbox-path",
+            host="https://agent.example.test",
+            working_dir=working_dir,
+            isolation_class=IsolationClass.REMOTE_SANDBOXED,
+            sandbox_egress_hosts=("model.example.test",),
+            network_policy_enforced=True,
+        )
 
 
 def test_endpoint_requires_explicit_network_enforcement_attestation() -> None:
