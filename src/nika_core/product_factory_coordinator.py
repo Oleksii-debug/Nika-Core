@@ -706,7 +706,7 @@ def _validate_work_request_scalar_authority(request: ComponentWorkRequest) -> No
         raise CoordinatorError("work request identity and goal must not be empty")
     _validate_sha(request.base_sha, "base_sha")
     if type(request.attempt) is not int or request.attempt < 1:
-        raise CoordinatorError("attempt must be an exact positive integer")
+        raise CoordinatorError("attempt must be positive")
 
 
 def _validate_worker_result_scalar_authority(envelope: WorkerResultEnvelope) -> None:
@@ -730,7 +730,7 @@ def _validate_sha(value: object, label: str) -> None:
         or len(value) != 40
         or any(char not in "0123456789abcdef" for char in value.casefold())
     ):
-        raise CoordinatorError(f"{label} must be an exact 40-character hexadecimal SHA")
+        raise CoordinatorError(f"{label} must be a 40-character hexadecimal SHA")
 
 
 def _validate_digest(value: object, label: str) -> None:
@@ -739,4 +739,4 @@ def _validate_digest(value: object, label: str) -> None:
         or len(value) != 64
         or any(char not in "0123456789abcdef" for char in value.casefold())
     ):
-        raise CoordinatorError(f"{label} must be an exact 64-character hexadecimal digest")
+        raise CoordinatorError(f"{label} must be a 64-character hexadecimal digest")
