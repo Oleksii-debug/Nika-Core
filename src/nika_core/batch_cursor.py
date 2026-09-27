@@ -493,7 +493,7 @@ class BatchCursor:
                 and durable.status is IdempotencyStatus.COMPLETED
             ):
                 result, durable_due = _decode_completion_result(durable.result)
-                if target.confirmed_result != result:
+                if not _canonical_json_equal(target.confirmed_result, result):
                     raise BatchCursorStateError(
                         "confirmed cursor result contradicts idempotency evidence"
                     )
@@ -692,11 +692,17 @@ class BatchCursor:
                     "batch cursor persistence outcome is unknown; restore is required"
                 ) from exc
 
-            if persisted == candidate:
+            if _canonical_json_equal(
+                persisted.model_dump(mode="json"),
+                candidate.model_dump(mode="json"),
+            ):
                 self._state = candidate
                 self._durable_state = candidate.model_copy(deep=True)
                 self._persistence_blocked = False
-            elif persisted == prior:
+            elif _canonical_json_equal(
+                persisted.model_dump(mode="json"),
+                prior.model_dump(mode="json"),
+            ):
                 self._state = prior
                 self._durable_state = prior.model_copy(deep=True)
                 self._persistence_blocked = False
@@ -924,6 +930,10 @@ def _canonical_json(value: Any) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _canonical_json_equal(left: Any, right: Any) -> bool:
+    return _canonical_json(left) == _canonical_json(right)
 
 
 def _sha256(value: str) -> str:
