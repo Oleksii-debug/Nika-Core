@@ -168,6 +168,25 @@ def test_inspect_failure_blocks_only_the_affected_component() -> None:
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
 
+def test_inspect_cancellation_propagates_without_reclassifying_running_work() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    worker = FakeRecoveryPort(
+        RecoveryState("running", "unused"),
+        inspect_error=asyncio.CancelledError(),
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    core = next(
+        record for record in coordinator.snapshot().records if record.request.component_id == "core"
+    )
+    assert core.state is WorkState.RUNNING
+    assert core.blocker is None
+    assert worker.recovered == []
+
+
 def test_recover_failure_blocks_only_the_affected_component_and_retains_state() -> None:
     coordinator = _coordinator()
     coordinator.start("core")
