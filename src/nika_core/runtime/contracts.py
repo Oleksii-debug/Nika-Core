@@ -109,9 +109,8 @@ class RuntimeResumeRequest:
     timeout_seconds: float | None = None
 
     def __post_init__(self) -> None:
-        _require_exact_nonempty_text(self.task_id, field_name="task_id")
-        _require_exact_nonempty_text(self.thread_id, field_name="thread_id")
-        _require_exact_nonempty_text(self.resume_token, field_name="resume_token")
+        if not self.task_id.strip() or not self.thread_id.strip() or not self.resume_token.strip():
+            raise ValueError("resume identifiers must not be empty")
         if type(self.mode) is not RuntimeResumeMode:
             raise TypeError("mode must be a RuntimeResumeMode")
         _require_positive_step_count(self.max_steps)
@@ -127,12 +126,13 @@ class RuntimeResumeProbe:
     checkpoint_id: str | None = None
 
     def __post_init__(self) -> None:
-        if type(self.status) is not RuntimeResumeProbeStatus:
-            raise TypeError("status must be a RuntimeResumeProbeStatus")
         if not self.reason.strip():
             raise ValueError("resume probe reason must not be empty")
         if self.checkpoint_id is not None:
-            _require_exact_nonempty_text(self.checkpoint_id, field_name="checkpoint_id")
+            if not isinstance(self.checkpoint_id, str):
+                raise TypeError("checkpoint_id must be a string when provided")
+            if not self.checkpoint_id.strip():
+                raise ValueError("checkpoint_id must not be empty")
             if self.checkpoint_id != self.checkpoint_id.strip():
                 raise ValueError("checkpoint_id must not have surrounding whitespace")
         if self.status == RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
@@ -169,11 +169,9 @@ class RuntimeResult:
     def __post_init__(self) -> None:
         if not isinstance(self.outcome, RuntimeOutcome):
             raise TypeError("outcome must be a RuntimeOutcome")
-        if self.resume_token is not None:
-            _require_exact_nonempty_text(self.resume_token, field_name="resume_token")
         if (
             self.outcome in {RuntimeOutcome.WAITING_APPROVAL, RuntimeOutcome.PAUSED}
-            and self.resume_token is None
+            and (not isinstance(self.resume_token, str) or not self.resume_token.strip())
         ):
             raise ValueError("resumable outcome requires a usable resume token")
         if self.outcome == RuntimeOutcome.FAILED and not self.error:
