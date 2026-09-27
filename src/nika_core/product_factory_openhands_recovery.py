@@ -162,7 +162,7 @@ class ProductFactoryOpenHandsRecoveryProbe:
         if record.status in {IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN}:
             try:
                 binding = self.load(work_id)
-            except Exception:
+            except Exception:  # noqa: BLE001 - durable binding corruption fails closed
                 return RecoveryState(
                     "manual_reconcile_required",
                     "pf-ledger:binding-invalid",
