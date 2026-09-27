@@ -107,6 +107,19 @@ class Provider:
             raise self.release_error
 
 
+class BlockingAcquireProvider(Provider):
+    def __init__(self) -> None:
+        super().__init__()
+        self.acquire_started = asyncio.Event()
+        self.allow_acquire = asyncio.Event()
+
+    async def acquire(self, job):
+        self.acquired.append(job.job_id)
+        self.acquire_started.set()
+        await self.allow_acquire.wait()
+        return self.endpoint
+
+
 class Runtime:
     def __init__(
         self,
@@ -559,6 +572,31 @@ def test_endpoint_rejects_non_authority_url_components(host: str) -> None:
         _endpoint(host)
 
 
+def test_cancel_during_sandbox_acquire_never_dispatches_remote_runtime(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    provider = BlockingAcquireProvider()
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    job = _job(root)
+
+    async def scenario():
+        execution = asyncio.create_task(worker.execute(job))
+        await asyncio.wait_for(provider.acquire_started.wait(), timeout=2)
+        await worker.cancel(job.job_id)
+        provider.allow_acquire.set()
+        return await asyncio.wait_for(execution, timeout=2)
+
+    result = _run(scenario())
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "cancelled"
+    assert result.recovery_state == RecoveryState("cancelled")
+    assert runtime.calls == []
+    assert runtime.cancelled == []
+    assert provider.released == [("job-1", "sandbox-1", False)]
+
+
 def test_cancelled_recovery_is_terminal_and_never_reexecutes(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime()
@@ -889,6 +927,29 @@ def test_sdk_runtime_contract_executes_upload_conversation_and_archive(
     assert conversation.messages == [("do work", "nika-core")]
     assert conversation.runs == [(True, float(job.resource_budget.timeout_seconds))]
     assert conversation.closed is True
+
+
+def test_sdk_cancel_reserved_before_execute_prevents_workspace_acquisition(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    workspace_calls: list[OpenHandsSandboxEndpoint] = []
+    runtime = OpenHandsSdkRemoteRuntime(
+        workspace_factory=lambda supplied: workspace_calls.append(supplied),
+        agent_factory=lambda _job, _endpoint: object(),
+    )
+
+    assert _run(runtime.cancel(job.job_id)) is True
+    with pytest.raises(
+        openhands_sdk_module.OpenHandsSdkExecutionCancelled,
+        match="before workspace acquisition",
+    ):
+        _run(runtime.execute(job, endpoint, "do work", root, evidence))
+
+    assert workspace_calls == []
 
 
 def test_sdk_cancel_covers_pre_conversation_upload_window(
