@@ -100,13 +100,12 @@ class SpeechToTextRequest:
         _bounded_token(self.model, "model")
         if not isinstance(self.audio, SpeechAudio):
             raise TypeError("audio must be SpeechAudio")
-        if self.language is not None:
-            if (
-                type(self.language) is not str
-                or len(self.language) > _MAX_LANGUAGE_CHARS
-                or not _LANGUAGE_RE.fullmatch(self.language)
-            ):
-                raise ValueError("language must be a bounded BCP-47-like tag or None")
+        if self.language is not None and (
+            type(self.language) is not str
+            or len(self.language) > _MAX_LANGUAGE_CHARS
+            or not _LANGUAGE_RE.fullmatch(self.language)
+        ):
+            raise ValueError("language must be a bounded BCP-47-like tag or None")
         if not isinstance(self.privacy, PrivacyClass):
             raise TypeError("privacy must be PrivacyClass")
         if not isinstance(self.policy, SpeechToTextPolicy):
@@ -248,7 +247,7 @@ class SpeechToTextService:
                 retryable=error.retryable,
                 status=status,
             )
-        except Exception:
+        except Exception:  # noqa: BLE001 - adapter execution is an untrusted boundary
             return self._failure(
                 request,
                 code=SpeechToTextFailureCode.PROVIDER_ERROR,
@@ -294,17 +293,16 @@ class SpeechToTextService:
                 code=SpeechToTextFailureCode.RESOURCE_LIMIT,
                 retryable=False,
             )
-        if response.detected_language is not None:
-            if (
-                type(response.detected_language) is not str
-                or len(response.detected_language) > _MAX_LANGUAGE_CHARS
-                or not _LANGUAGE_RE.fullmatch(response.detected_language)
-            ):
-                return self._failure(
-                    request,
-                    code=SpeechToTextFailureCode.PROVIDER_ERROR,
-                    retryable=False,
-                )
+        if response.detected_language is not None and (
+            type(response.detected_language) is not str
+            or len(response.detected_language) > _MAX_LANGUAGE_CHARS
+            or not _LANGUAGE_RE.fullmatch(response.detected_language)
+        ):
+            return self._failure(
+                request,
+                code=SpeechToTextFailureCode.PROVIDER_ERROR,
+                retryable=False,
+            )
         try:
             latency_ms = _validated_latency(response.latency_ms)
         except (TypeError, ValueError):
