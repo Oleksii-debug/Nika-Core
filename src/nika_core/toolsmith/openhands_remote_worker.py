@@ -45,6 +45,10 @@ class OpenHandsWorkspaceMutationError(RuntimeError):
     """Raised when a local staging mutation cannot be proven rolled back."""
 
 
+class OpenHandsSandboxReleaseError(RuntimeError):
+    """Raised when provider-owned remote sandbox cleanup cannot be proven."""
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class OpenHandsSandboxEndpoint:
     """Attested control-plane endpoint for one fresh remote sandbox.
@@ -188,112 +192,144 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         tests: tuple[TestEvidence, ...] = ()
         applied = False
         succeeded = False
+        task_cancelled = False
         try:
-            local_root = _validate_local_workspace(job)
-            source_evidence = collect_tree_evidence(local_root)
-            _validate_source_identity(job, source_evidence)
-            endpoint = await self._sandbox_provider.acquire(job)
-            _validate_endpoint(job, endpoint)
-            prompt = _build_prompt(job)
-            run = await asyncio.wait_for(
-                self._runtime.execute(job, endpoint, prompt, local_root, source_evidence),
-                timeout=job.resource_budget.timeout_seconds,
-            )
-            changed = _validate_and_apply_snapshot(job, local_root, source_evidence, run.files)
-            applied = True
-            candidate_evidence = collect_tree_evidence(local_root)
-            tests = _run_acceptance(job, local_root)
-            post_acceptance_evidence = collect_tree_evidence(local_root)
-            if post_acceptance_evidence != candidate_evidence:
-                raise OpenHandsWorkspaceMutationError(
-                    "acceptance commands mutated the validated candidate"
+            try:
+                local_root = _validate_local_workspace(job)
+                source_evidence = collect_tree_evidence(local_root)
+                _validate_source_identity(job, source_evidence)
+                endpoint = await self._sandbox_provider.acquire(job)
+                _validate_endpoint(job, endpoint)
+                prompt = _build_prompt(job)
+                run = await asyncio.wait_for(
+                    self._runtime.execute(job, endpoint, prompt, local_root, source_evidence),
+                    timeout=job.resource_budget.timeout_seconds,
                 )
-            failed_test = next((evidence for evidence in tests if evidence.exit_code != 0), None)
-            if failed_test is not None:
-                state = RecoveryState("repair_required", run.conversation_id)
+                changed = _validate_and_apply_snapshot(job, local_root, source_evidence, run.files)
+                applied = True
+                candidate_evidence = collect_tree_evidence(local_root)
+                tests = _run_acceptance(job, local_root)
+                post_acceptance_evidence = collect_tree_evidence(local_root)
+                if post_acceptance_evidence != candidate_evidence:
+                    raise OpenHandsWorkspaceMutationError(
+                        "acceptance commands mutated the validated candidate"
+                    )
+                failed_test = next(
+                    (evidence for evidence in tests if evidence.exit_code != 0),
+                    None,
+                )
+                if failed_test is not None:
+                    state = RecoveryState("repair_required", run.conversation_id)
+                    await self._set_state(job.job_id, state)
+                    return CodingResult(
+                        job_id=job.job_id,
+                        changed_files=changed,
+                        test_evidence=tests,
+                        recovery_state=state,
+                        failure=WorkerFailure(
+                            WorkerFailureKind.PROCESS_FAILED,
+                            "one or more Nika acceptance commands failed",
+                            retryable=True,
+                        ),
+                    )
+                succeeded = True
+                state = RecoveryState("completed", run.conversation_id)
                 await self._set_state(job.job_id, state)
                 return CodingResult(
                     job_id=job.job_id,
                     changed_files=changed,
                     test_evidence=tests,
                     recovery_state=state,
-                    failure=WorkerFailure(
-                        WorkerFailureKind.PROCESS_FAILED,
-                        "one or more Nika acceptance commands failed",
-                        retryable=True,
-                    ),
                 )
-            succeeded = True
-            await self._set_state(job.job_id, RecoveryState("completed", run.conversation_id))
-            return CodingResult(
-                job_id=job.job_id,
-                changed_files=changed,
-                test_evidence=tests,
-                recovery_state=RecoveryState("completed", run.conversation_id),
-            )
-        except TimeoutError:
-            stopped = await self._runtime.cancel(job.job_id)
-            state = RecoveryState("interrupted" if stopped else "manual_reconcile_required")
-            await self._set_state(job.job_id, state)
-            return _failure_result(
-                job,
-                WorkerFailureKind.TIMEOUT,
-                "remote coding worker exceeded its Nika resource deadline",
-                retryable=stopped and not applied,
-                state=state,
-                changed_files=changed,
-                test_evidence=tests,
-            )
-        except asyncio.CancelledError:
-            stopped = await self._runtime.cancel(job.job_id)
-            state = RecoveryState("cancelled" if stopped else "manual_reconcile_required")
-            await self._set_state(job.job_id, state)
-            raise
-        except OpenHandsWorkspaceMutationError:
+            except TimeoutError:
+                stopped = await self._runtime.cancel(job.job_id)
+                state = RecoveryState(
+                    "interrupted" if stopped else "manual_reconcile_required"
+                )
+                await self._set_state(job.job_id, state)
+                return _failure_result(
+                    job,
+                    WorkerFailureKind.TIMEOUT,
+                    "remote coding worker exceeded its Nika resource deadline",
+                    retryable=stopped and not applied,
+                    state=state,
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
+            except asyncio.CancelledError:
+                task_cancelled = True
+                stopped = await self._runtime.cancel(job.job_id)
+                state = RecoveryState(
+                    "cancelled" if stopped else "manual_reconcile_required"
+                )
+                await self._set_state(job.job_id, state)
+                raise
+            except OpenHandsWorkspaceMutationError:
+                state = RecoveryState("manual_reconcile_required")
+                await self._set_state(job.job_id, state)
+                return _failure_result(
+                    job,
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "local staging mutation could not be proven rolled back",
+                    retryable=False,
+                    state=state,
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
+            except (WorkspaceSecurityError, ValueError, OpenHandsWorkerError) as exc:
+                state = RecoveryState("blocked")
+                await self._set_state(job.job_id, state)
+                return _failure_result(
+                    job,
+                    WorkerFailureKind.POLICY_VIOLATION,
+                    _safe_message(exc, "remote coding result violated Nika policy"),
+                    retryable=False,
+                    state=state,
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
+            except Exception:  # noqa: BLE001 - untrusted coding-engine boundary
+                state = RecoveryState("interrupted")
+                await self._set_state(job.job_id, state)
+                return _failure_result(
+                    job,
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "remote coding engine failed without trusted diagnostics",
+                    retryable=not applied,
+                    state=state,
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
+            finally:
+                if endpoint is not None:
+                    try:
+                        await self._sandbox_provider.release(
+                            job,
+                            endpoint,
+                            succeeded=succeeded,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
+                        raise OpenHandsSandboxReleaseError(
+                            "remote sandbox cleanup could not be proven"
+                        ) from exc
+        except OpenHandsSandboxReleaseError as exc:
             state = RecoveryState("manual_reconcile_required")
             await self._set_state(job.job_id, state)
+            _LOGGER.error(
+                "OpenHands sandbox release requires provider reconciliation (%s)",
+                type(exc.__cause__).__name__ if exc.__cause__ is not None else "unknown",
+            )
+            if task_cancelled:
+                raise asyncio.CancelledError from exc
             return _failure_result(
                 job,
                 WorkerFailureKind.INTERNAL_ERROR,
-                "local staging mutation could not be proven rolled back",
+                "remote sandbox cleanup could not be proven",
                 retryable=False,
                 state=state,
                 changed_files=changed,
                 test_evidence=tests,
             )
-        except (WorkspaceSecurityError, ValueError, OpenHandsWorkerError) as exc:
-            state = RecoveryState("blocked")
-            await self._set_state(job.job_id, state)
-            return _failure_result(
-                job,
-                WorkerFailureKind.POLICY_VIOLATION,
-                _safe_message(exc, "remote coding result violated Nika policy"),
-                retryable=False,
-                state=state,
-                changed_files=changed,
-                test_evidence=tests,
-            )
-        except Exception:  # noqa: BLE001 - untrusted coding-engine boundary
-            state = RecoveryState("interrupted")
-            await self._set_state(job.job_id, state)
-            return _failure_result(
-                job,
-                WorkerFailureKind.INTERNAL_ERROR,
-                "remote coding engine failed without trusted diagnostics",
-                retryable=not applied,
-                state=state,
-                changed_files=changed,
-                test_evidence=tests,
-            )
-        finally:
-            if endpoint is not None:
-                try:
-                    await self._sandbox_provider.release(job, endpoint, succeeded=succeeded)
-                except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
-                    _LOGGER.warning(
-                        "OpenHands sandbox release requires provider reconciliation (%s)",
-                        type(exc).__name__,
-                    )
 
     async def cancel(self, job_id: str) -> None:
         stopped = await self._runtime.cancel(job_id)
