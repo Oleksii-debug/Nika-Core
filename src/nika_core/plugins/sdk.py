@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from threading import Lock
 from typing import Annotated, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -203,6 +204,8 @@ class PluginRuntime:
         self._core_api = core_api
         self._policy_catalog = policy_catalog or PluginPolicyCatalog()
         self._activation_authority = activation_authority
+        self._registry_lock = Lock()
+        self._deactivating: set[str] = set()
         self._factories: dict[str, tuple[PluginManifest, PluginFactory]] = {}
         self._active: dict[str, PluginAdapter] = {}
         self._effective_permissions: dict[str, tuple[str, ...]] = {}
@@ -210,9 +213,10 @@ class PluginRuntime:
     def register(self, manifest: PluginManifest, factory: PluginFactory) -> None:
         manifest.assert_compatible(self._core_api)
         self._policy_catalog.validate(manifest)
-        if manifest.plugin_id in self._factories:
-            raise ValueError(f"plugin already registered: {manifest.plugin_id}")
-        self._factories[manifest.plugin_id] = (manifest, factory)
+        with self._registry_lock:
+            if manifest.plugin_id in self._factories:
+                raise ValueError(f"plugin already registered: {manifest.plugin_id}")
+            self._factories[manifest.plugin_id] = (manifest, factory)
 
     def upgrade(
         self,
@@ -221,18 +225,23 @@ class PluginRuntime:
         *,
         expected_version: str,
     ) -> None:
-        current = self._factories.get(manifest.plugin_id)
-        if current is None:
-            raise KeyError(f"unknown plugin: {manifest.plugin_id}")
-        if manifest.plugin_id in self._active:
-            raise RuntimeError("active plugin must be deactivated before upgrade")
-        if current[0].version != expected_version:
-            raise ValueError("plugin upgrade expected_version does not match current registration")
-        if manifest.version == expected_version:
-            raise ValueError("plugin upgrade must change the manifest version")
         manifest.assert_compatible(self._core_api)
         self._policy_catalog.validate(manifest)
-        self._factories[manifest.plugin_id] = (manifest, factory)
+        with self._registry_lock:
+            current = self._factories.get(manifest.plugin_id)
+            if current is None:
+                raise KeyError(f"unknown plugin: {manifest.plugin_id}")
+            if manifest.plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
+            if manifest.plugin_id in self._active:
+                raise RuntimeError("active plugin must be deactivated before upgrade")
+            if current[0].version != expected_version:
+                raise ValueError(
+                    "plugin upgrade expected_version does not match current registration"
+                )
+            if manifest.version == expected_version:
+                raise ValueError("plugin upgrade must change the manifest version")
+            self._factories[manifest.plugin_id] = (manifest, factory)
 
     def register_entrypoint(self, entrypoint: EntrypointLoaderPort) -> PluginManifest:
         """Compatibility port for an explicitly selected lazy registration loader."""
@@ -264,7 +273,8 @@ class PluginRuntime:
         return loaded.manifest
 
     def manifests(self) -> Mapping[str, PluginManifest]:
-        return {plugin_id: pair[0] for plugin_id, pair in self._factories.items()}
+        with self._registry_lock:
+            return {plugin_id: pair[0] for plugin_id, pair in self._factories.items()}
 
     def activate(
         self,
@@ -273,10 +283,13 @@ class PluginRuntime:
         permission_ids: tuple[str, ...] | None = None,
         approval_refs: tuple[str, ...] = (),
     ) -> PluginAdapter:
-        try:
-            manifest, factory = self._factories[plugin_id]
-        except KeyError as exc:
-            raise KeyError(f"unknown plugin: {plugin_id}") from exc
+        with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
+            try:
+                manifest, factory = self._factories[plugin_id]
+            except KeyError as exc:
+                raise KeyError(f"unknown plugin: {plugin_id}") from exc
         manifest.assert_compatible(self._core_api)
         self._policy_catalog.validate(manifest)
 
@@ -294,12 +307,16 @@ class PluginRuntime:
                     "plugin activation requests undeclared permissions: " + ", ".join(undeclared)
                 )
 
-        if plugin_id in self._active:
-            if self._effective_permissions[plugin_id] != selected_permissions:
-                raise PermissionError(
-                    "active plugin permission set differs from requested activation"
-                )
-            return self._active[plugin_id]
+        with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
+            active = self._active.get(plugin_id)
+            if active is not None:
+                if self._effective_permissions[plugin_id] != selected_permissions:
+                    raise PermissionError(
+                        "active plugin permission set differs from requested activation"
+                    )
+                return active
 
         high_impact_ids = tuple(
             sorted(
@@ -332,17 +349,58 @@ class PluginRuntime:
             raise PluginCompatibilityError(
                 "runtime plugin manifest differs from registered manifest"
             )
-        self._active[plugin_id] = adapter
-        self._effective_permissions[plugin_id] = selected_permissions
-        return adapter
+
+        publication_error: Exception | None = None
+        existing_active: PluginAdapter | None = None
+        with self._registry_lock:
+            if plugin_id in self._deactivating:
+                publication_error = RuntimeError("plugin deactivation is still in progress")
+            else:
+                current = self._factories.get(plugin_id)
+                if current != (manifest, factory):
+                    publication_error = PluginCompatibilityError(
+                        "plugin registration changed during activation; retry activation"
+                    )
+                else:
+                    active = self._active.get(plugin_id)
+                    if active is not None:
+                        if self._effective_permissions[plugin_id] != selected_permissions:
+                            publication_error = PermissionError(
+                                "active plugin permission set differs from requested activation"
+                            )
+                        else:
+                            existing_active = active
+                    else:
+                        self._active[plugin_id] = adapter
+                        self._effective_permissions[plugin_id] = selected_permissions
+                        return adapter
+
+        # Adapter code is third-party execution and must never run under the registry lock.
+        adapter.close()
+        if publication_error is not None:
+            raise publication_error
+        if existing_active is None:
+            raise RuntimeError("plugin activation publication ended without a result")
+        return existing_active
 
     def effective_permissions(self, plugin_id: str) -> tuple[str, ...]:
-        if plugin_id not in self._active:
-            raise KeyError(f"plugin is not active: {plugin_id}")
-        return self._effective_permissions[plugin_id]
+        with self._registry_lock:
+            if plugin_id not in self._active:
+                raise KeyError(f"plugin is not active: {plugin_id}")
+            return self._effective_permissions[plugin_id]
 
     def deactivate(self, plugin_id: str) -> None:
-        adapter = self._active.pop(plugin_id, None)
-        self._effective_permissions.pop(plugin_id, None)
-        if adapter is not None:
-            adapter.close()
+        with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is already in progress")
+            adapter = self._active.pop(plugin_id, None)
+            self._effective_permissions.pop(plugin_id, None)
+            if adapter is None:
+                return
+            self._deactivating.add(plugin_id)
+
+        # Clear the fail-stop marker only after teardown is proven complete.
+        # If close() raises, this runtime keeps the plugin generation blocked.
+        adapter.close()
+        with self._registry_lock:
+            self._deactivating.remove(plugin_id)
