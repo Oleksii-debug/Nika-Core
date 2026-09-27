@@ -527,6 +527,7 @@ def test_guard_composes_with_canonical_task_runtime_coordinator(tmp_path: Path) 
     assert "runtime.finished" in event_types
     assert "background.dispatch_returned" in event_types
 
+
 def test_presence_observation_requires_exact_utc_carrier() -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
 
