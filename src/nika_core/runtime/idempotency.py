@@ -73,7 +73,7 @@ def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
     if not isinstance(result, Mapping):
         raise TypeError("idempotency result must be a mapping when provided")
     try:
-        return json.dumps(dict(result), ensure_ascii=False, sort_keys=True)
+        return json.dumps(dict(result), ensure_ascii=False, sort_keys=True, allow_nan=False)
     except (TypeError, ValueError) as exc:
         raise ValueError("idempotency result must be JSON serializable") from exc
 
