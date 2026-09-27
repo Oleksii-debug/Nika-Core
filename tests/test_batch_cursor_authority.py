@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -413,7 +414,7 @@ def test_restore_rejects_nonfinite_uncertain_evidence_before_mutation(
     assert isinstance(persisted_uncertain, dict)
     score = persisted_uncertain["score"]
     assert isinstance(score, float)
-    assert score != score
+    assert math.isnan(score)
 
 
 def test_confirm_rejects_nonfinite_json_before_completing_effect(
@@ -746,7 +747,7 @@ def test_post_commit_nonfinite_conflict_fail_stops_live_cursor(
     assert isinstance(durable_result, dict)
     durable_value = durable_result["value"]
     assert isinstance(durable_value, float)
-    assert durable_value != durable_value
+    assert math.isnan(durable_value)
 
 
 def test_unreadable_post_commit_outcome_fail_stops_live_cursor_until_restore(
