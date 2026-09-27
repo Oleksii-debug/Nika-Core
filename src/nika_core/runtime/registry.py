@@ -68,7 +68,10 @@ class RuntimeRegistry:
         )
 
     def get(self, runtime_id: str) -> AgentRuntimePort:
-        canonical_id = _canonical_runtime_id(runtime_id)
+        try:
+            canonical_id = _canonical_runtime_id(runtime_id)
+        except (TypeError, ValueError) as exc:
+            raise KeyError("Unknown runtime identifier") from exc
         try:
             registered = self._runtimes[canonical_id]
         except KeyError as exc:
