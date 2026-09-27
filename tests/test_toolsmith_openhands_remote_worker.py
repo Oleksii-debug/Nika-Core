@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.toolsmith.openhands_remote_worker as openhands_worker_module
 from nika_core.toolsmith.contracts import (
     AcceptanceCommand,
     AllowedPathPolicy,
@@ -17,6 +18,7 @@ from nika_core.toolsmith.contracts import (
     NetworkMode,
     NetworkPolicy,
     ProcessPolicy,
+    RecoveryState,
     RepositorySnapshot,
     ResourceBudget,
     WorkspaceLease,
@@ -94,9 +96,16 @@ class Provider:
 
 
 class Runtime:
-    def __init__(self, files: tuple[RemoteFile, ...] | None = None, error: Exception | None = None):
+    def __init__(
+        self,
+        files: tuple[RemoteFile, ...] | None = None,
+        error: Exception | None = None,
+        *,
+        cancel_verified: bool = True,
+    ):
         self.files = files
         self.error = error
+        self.cancel_verified = cancel_verified
         self.calls = []
         self.cancelled = []
 
@@ -113,6 +122,7 @@ class Runtime:
 
     async def cancel(self, job_id):
         self.cancelled.append(job_id)
+        return self.cancel_verified
 
 
 def _workspace(tmp_path: Path) -> Path:
@@ -376,6 +386,112 @@ def test_remote_worker_enforces_max_changed_files_before_apply(tmp_path: Path) -
     assert not result.succeeded
     assert root.joinpath("src/value.txt").read_bytes() == b"before\n"
     assert not root.joinpath("src/second.txt").exists()
+
+
+
+@pytest.mark.parametrize(
+    "host",
+    (
+        "https://user:secret@agent.example.test",
+        "https://agent.example.test/path",
+        "https://agent.example.test?token=secret",
+        "https://agent.example.test#fragment",
+    ),
+)
+def test_endpoint_rejects_non_authority_url_components(host: str) -> None:
+    with pytest.raises(ValueError, match="authority only"):
+        _endpoint(host)
+
+
+def test_cancelled_recovery_is_terminal_and_never_reexecutes(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+
+    result = _run(worker.recover(_job(root), RecoveryState("cancelled")))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "cancelled"
+    assert result.failure.retryable is False
+    assert runtime.calls == []
+
+
+def test_unverified_cancel_requires_manual_reconciliation(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime(cancel_verified=False)
+    worker = OpenHandsRemoteCodingWorker(Provider(), runtime)
+    job = _job(root)
+
+    _run(worker.cancel(job.job_id))
+    state = _run(worker.inspect(job.job_id))
+    result = _run(worker.recover(job, state))
+
+    assert state == RecoveryState("manual_reconcile_required")
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.retryable is False
+    assert runtime.calls == []
+
+
+def test_post_apply_evidence_mismatch_rolls_back_preimage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    before = collect_tree_evidence(root)
+    monkeypatch.setattr(
+        openhands_worker_module,
+        "collect_tree_evidence",
+        lambda _root: before,
+    )
+
+    with pytest.raises(
+        openhands_worker_module.OpenHandsWorkerError,
+        match="post-apply evidence",
+    ):
+        openhands_worker_module._validate_and_apply_snapshot(
+            job,
+            root,
+            before,
+            (RemoteFile("src/value.txt", b"after\n"),),
+        )
+
+    assert root.joinpath("src/value.txt").read_bytes() == b"before\n"
+
+
+def test_acceptance_mutation_invalidates_candidate_after_test_execution(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    base = _job(root)
+    job = CodingJob(
+        base.job_id,
+        base.task_id,
+        base.goal,
+        base.repository,
+        base.lease,
+        base.allowed_paths,
+        base.process_policy,
+        base.network_policy,
+        base.resource_budget,
+        (
+            AcceptanceCommand(
+                (
+                    sys.executable,
+                    "-c",
+                    "from pathlib import Path; Path('src/acceptance.txt').write_text('mutated')",
+                )
+            ),
+        ),
+        base.permission_ceiling,
+    )
+
+    result = _run(OpenHandsRemoteCodingWorker(Provider(), Runtime()).execute(job))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
 
 
 def _tar_snapshot(files: dict[str, bytes], *, root: str = "nika-job") -> bytes:
