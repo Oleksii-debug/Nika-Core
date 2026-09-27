@@ -22,6 +22,26 @@ def test_registry_rejects_incomplete_runtime_adapter() -> None:
         registry.register(_IncompleteRuntime())
 
 
+def test_registry_rejects_noncallable_effect_members_before_admission() -> None:
+    class _NonCallableRuntime:
+        runtime_id = "noncallable"
+        capabilities = frozenset({RuntimeCapability.DETERMINISTIC_NO_LLM})
+        run = 1
+        resume = 2
+        cancel = 3
+
+    registry = RuntimeRegistry()
+
+    with pytest.raises(TypeError, match="runtime effect must be callable: run"):
+        registry.register(_NonCallableRuntime())
+
+    assert registry.describe() == ()
+    with pytest.raises(KeyError, match="Unknown runtime"):
+        registry.get("noncallable")
+    with pytest.raises(LookupError):
+        registry.select({RuntimeCapability.DETERMINISTIC_NO_LLM})
+
+
 def test_registry_rejects_noncanonical_runtime_id_carriers() -> None:
     registry = RuntimeRegistry()
     runtime = ReferenceRuntime()
