@@ -1,0 +1,440 @@
+from __future__ import annotations
+
+import json
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from enum import StrEnum
+from math import isfinite
+from typing import Protocol
+
+from nika_core.background_life import (
+    BackgroundAction,
+    BackgroundDecision,
+    BackgroundWorkKind,
+    OwnerPresence,
+    decide_background_work,
+)
+from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
+from nika_core.resources.manager import ResourceManager
+
+_MAX_SIGNED_64 = (1 << 63) - 1
+_SOURCE_ENTITY_TYPE = "owner_presence_source"
+_OBSERVED_EVENT = "background.owner_presence_observed"
+
+
+class PresenceEvidencePhase(StrEnum):
+    PREFLIGHT = "preflight"
+    EFFECT_RECHECK = "effect_recheck"
+    EFFECT_COMMIT = "effect_commit"
+
+
+@dataclass(frozen=True, slots=True)
+class OwnerPresenceObservation:
+    """One authoritative, timestamped owner-presence sample."""
+
+    source_id: str
+    sequence: int
+    presence: OwnerPresence
+    observed_at: datetime
+
+    def __post_init__(self) -> None:
+        if type(self.source_id) is not str:
+            raise TypeError("source_id must be exact built-in str")
+        if not self.source_id or self.source_id != self.source_id.strip():
+            raise ValueError("source_id must be non-empty without surrounding whitespace")
+        if type(self.sequence) is not int:
+            raise TypeError("sequence must be exact built-in int")
+        if not 0 <= self.sequence <= _MAX_SIGNED_64:
+            raise ValueError("sequence is outside the supported integer range")
+        if type(self.presence) is not OwnerPresence:
+            raise TypeError("presence must be OwnerPresence")
+        if type(self.observed_at) is not datetime:
+            raise TypeError("observed_at must be exact datetime")
+        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
+            raise ValueError("observed_at must be timezone-aware")
+        if self.observed_at.utcoffset().total_seconds() != 0:
+            raise ValueError("observed_at must use UTC")
+
+
+class OwnerPresenceObserverPort(Protocol):
+    def observe(self) -> OwnerPresenceObservation: ...
+
+
+@dataclass(frozen=True, slots=True)
+class BackgroundDispatchResult:
+    action: BackgroundAction
+    reason: str
+    effect_started: bool
+    effect_result: object | None = None
+
+    @property
+    def executed(self) -> bool:
+        return self.effect_started
+
+
+class OwnerPresenceEvidenceError(RuntimeError):
+    """Presence evidence was unavailable, stale, replayed, malformed or from the wrong source."""
+
+
+class BackgroundDispatchGuard:
+    """Fail-closed dispatch composition over existing Nika runtime authorities.
+
+    This class does not execute a second scheduler/runtime. It gates one caller-supplied effect
+    using the #824 background admission policy, canonical ResourceManager admission, TaskQueue
+    pause/resume state and AuditLog evidence. The effect can be TaskRuntimeCoordinator.start().
+    """
+
+    def __init__(
+        self,
+        *,
+        queue: TaskQueue,
+        audit: AuditLog,
+        resources: ResourceManager,
+        presence: OwnerPresenceObserverPort,
+        source_id: str,
+        max_presence_age_seconds: float = 5.0,
+        max_future_skew_seconds: float = 1.0,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
+        if type(source_id) is not str:
+            raise TypeError("source_id must be exact built-in str")
+        if not source_id or source_id != source_id.strip():
+            raise ValueError("source_id must be non-empty without surrounding whitespace")
+        for name, value, minimum in (
+            ("max_presence_age_seconds", max_presence_age_seconds, 0.0),
+            ("max_future_skew_seconds", max_future_skew_seconds, -1.0),
+        ):
+            if type(value) not in (int, float):
+                raise TypeError(f"{name} must be exact built-in int or float")
+            if type(value) is float and not isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            if value <= minimum:
+                comparator = "greater than zero" if minimum == 0.0 else "non-negative"
+                raise ValueError(f"{name} must be {comparator}")
+        self._queue = queue
+        self._audit = audit
+        self._resources = resources
+        self._presence = presence
+        self._source_id = source_id
+        self._max_age = float(max_presence_age_seconds)
+        self._max_future_skew = float(max_future_skew_seconds)
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    async def dispatch(
+        self,
+        *,
+        task_id: str,
+        work_kind: BackgroundWorkKind,
+        effect: Callable[[], Awaitable[object]],
+        owner_id: str = "living-agent",
+    ) -> BackgroundDispatchResult:
+        """Run one background effect only after fresh preflight and effect-time evidence."""
+
+        self._require_dispatchable_task(task_id)
+        if type(work_kind) is not BackgroundWorkKind:
+            raise TypeError("work_kind must be BackgroundWorkKind")
+        if not callable(effect):
+            raise TypeError("effect must be callable")
+        if type(owner_id) is not str:
+            raise TypeError("owner_id must be exact built-in str")
+        if not owner_id or owner_id != owner_id.strip():
+            raise ValueError("owner_id must be non-empty without surrounding whitespace")
+
+        preflight = self._observe_or_pause(
+            task_id=task_id,
+            phase=PresenceEvidencePhase.PREFLIGHT,
+        )
+        if preflight is None:
+            return BackgroundDispatchResult(
+                action=BackgroundAction.PAUSE,
+                reason="owner_presence_untrusted",
+                effect_started=False,
+            )
+        decision = self._policy(owner_id=owner_id, work_kind=work_kind, presence=preflight.presence)
+        if not decision.allowed:
+            return self._apply_denial(task_id=task_id, decision=decision)
+
+        effect_recheck = self._observe_or_pause(
+            task_id=task_id,
+            phase=PresenceEvidencePhase.EFFECT_RECHECK,
+        )
+        if effect_recheck is None:
+            return BackgroundDispatchResult(
+                action=BackgroundAction.PAUSE,
+                reason="owner_presence_untrusted",
+                effect_started=False,
+            )
+        decision = self._policy(
+            owner_id=owner_id,
+            work_kind=work_kind,
+            presence=effect_recheck.presence,
+        )
+        if not decision.allowed:
+            return self._apply_denial(task_id=task_id, decision=decision)
+
+        request_id = f"background:{task_id}"
+        resource_decision = self._resources.request(
+            scope="background_life",
+            owner_id=owner_id,
+            request_id=request_id,
+        )
+        if not resource_decision.granted:
+            self._audit.append(
+                event_type="background.dispatch_deferred",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "reason": resource_decision.reason,
+                    "work_kind": work_kind.value,
+                    "phase": "resource_commit",
+                },
+            )
+            return BackgroundDispatchResult(
+                action=BackgroundAction.DEFER,
+                reason=resource_decision.reason,
+                effect_started=False,
+            )
+
+        try:
+            effect_commit = self._observe_or_pause(
+                task_id=task_id,
+                phase=PresenceEvidencePhase.EFFECT_COMMIT,
+            )
+            if effect_commit is None:
+                return BackgroundDispatchResult(
+                    action=BackgroundAction.PAUSE,
+                    reason="owner_presence_untrusted",
+                    effect_started=False,
+                )
+            if effect_commit.presence is not OwnerPresence.AWAY:
+                decision = BackgroundDecision(
+                    action=BackgroundAction.PAUSE,
+                    work_kind=work_kind,
+                    reason=(
+                        "owner_active"
+                        if effect_commit.presence is OwnerPresence.ACTIVE
+                        else "owner_presence_unknown"
+                    ),
+                )
+                return self._apply_denial(task_id=task_id, decision=decision)
+
+            self._resume_for_dispatch(task_id=task_id, work_kind=work_kind)
+            result = await effect()
+            self._audit.append(
+                event_type="background.dispatch_returned",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"work_kind": work_kind.value},
+            )
+            return BackgroundDispatchResult(
+                action=BackgroundAction.RUN,
+                reason="owner_away_capacity_available",
+                effect_started=True,
+                effect_result=result,
+            )
+        finally:
+            self._resources.release(
+                scope="background_life",
+                owner_id=owner_id,
+                request_id=request_id,
+            )
+
+    def _policy(
+        self,
+        *,
+        owner_id: str,
+        work_kind: BackgroundWorkKind,
+        presence: OwnerPresence,
+    ) -> BackgroundDecision:
+        return decide_background_work(
+            owner_presence=presence,
+            work_kind=work_kind,
+            capacity=self._resources.status(scope="background_life", owner_id=owner_id),
+        )
+
+    def _observe_or_pause(
+        self,
+        *,
+        task_id: str,
+        phase: PresenceEvidencePhase,
+    ) -> OwnerPresenceObservation | None:
+        try:
+            observation = self._presence.observe()
+            self._accept_observation(task_id=task_id, phase=phase, observation=observation)
+        except Exception as exc:  # noqa: BLE001 - provider/evidence boundary fails closed
+            self._audit.append(
+                event_type="background.owner_presence_rejected",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"phase": phase.value, "error_type": type(exc).__name__},
+            )
+            self._pause_task(
+                task_id=task_id,
+                reason="owner_presence_untrusted",
+                phase=phase.value,
+            )
+            return None
+        return observation
+
+    def _accept_observation(
+        self,
+        *,
+        task_id: str,
+        phase: PresenceEvidencePhase,
+        observation: OwnerPresenceObservation,
+    ) -> None:
+        if type(observation) is not OwnerPresenceObservation:
+            raise OwnerPresenceEvidenceError("presence observer returned a non-canonical carrier")
+        if observation.source_id != self._source_id:
+            raise OwnerPresenceEvidenceError("presence observation came from the wrong source")
+
+        now = self._clock()
+        if type(now) is not datetime or now.tzinfo is None or now.utcoffset() is None:
+            raise OwnerPresenceEvidenceError("presence clock must return timezone-aware datetime")
+        if now.utcoffset().total_seconds() != 0:
+            raise OwnerPresenceEvidenceError("presence clock must use UTC")
+
+        age_seconds = (now - observation.observed_at).total_seconds()
+        if age_seconds > self._max_age:
+            raise OwnerPresenceEvidenceError("presence observation is stale")
+        if age_seconds < -self._max_future_skew:
+            raise OwnerPresenceEvidenceError("presence observation is too far in the future")
+
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT payload_json FROM audit_events "
+                "WHERE entity_type = ? AND entity_id = ? AND event_type = ? "
+                "ORDER BY event_id DESC LIMIT 1",
+                (_SOURCE_ENTITY_TYPE, self._source_id, _OBSERVED_EVENT),
+            ).fetchone()
+            if row is not None:
+                payload = json.loads(row["payload_json"])
+                previous_sequence = payload.get("sequence")
+                previous_observed_at = payload.get("observed_at")
+                if type(previous_sequence) is not int:
+                    raise OwnerPresenceEvidenceError(
+                        "stored presence evidence has invalid sequence"
+                    )
+                if observation.sequence <= previous_sequence:
+                    raise OwnerPresenceEvidenceError(
+                        "presence observation sequence did not advance"
+                    )
+                if type(previous_observed_at) is not str:
+                    raise OwnerPresenceEvidenceError(
+                        "stored presence evidence has invalid timestamp"
+                    )
+                try:
+                    previous_dt = datetime.fromisoformat(previous_observed_at)
+                except ValueError as exc:
+                    raise OwnerPresenceEvidenceError(
+                        "stored presence evidence timestamp is invalid"
+                    ) from exc
+                if previous_dt.tzinfo is None or previous_dt.utcoffset() is None:
+                    raise OwnerPresenceEvidenceError(
+                        "stored presence evidence timestamp lacks timezone"
+                    )
+                if observation.observed_at < previous_dt:
+                    raise OwnerPresenceEvidenceError(
+                        "presence observation timestamp regressed"
+                    )
+
+            self._audit.append_with_connection(
+                conn,
+                event_type=_OBSERVED_EVENT,
+                entity_type=_SOURCE_ENTITY_TYPE,
+                entity_id=self._source_id,
+                payload={
+                    "task_id": task_id,
+                    "phase": phase.value,
+                    "sequence": observation.sequence,
+                    "presence": observation.presence.value,
+                    "observed_at": observation.observed_at.isoformat(),
+                },
+            )
+
+    def _apply_denial(
+        self,
+        *,
+        task_id: str,
+        decision: BackgroundDecision,
+    ) -> BackgroundDispatchResult:
+        if decision.action is BackgroundAction.PAUSE:
+            self._pause_task(
+                task_id=task_id,
+                reason=decision.reason,
+                phase="policy",
+            )
+        else:
+            self._audit.append(
+                event_type="background.dispatch_deferred",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "reason": decision.reason,
+                    "work_kind": decision.work_kind.value,
+                    "phase": "policy",
+                },
+            )
+        return BackgroundDispatchResult(
+            action=decision.action,
+            reason=decision.reason,
+            effect_started=False,
+        )
+
+    def _pause_task(self, *, task_id: str, reason: str, phase: str) -> None:
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = self._task_state_with_connection(conn, task_id)
+            if state is TaskState.READY:
+                self._queue.transition_with_connection(conn, task_id, TaskState.PAUSED)
+            elif state is not TaskState.PAUSED:
+                raise ValueError(
+                    "background dispatch can only pause READY or already-PAUSED tasks"
+                )
+            self._audit.append_with_connection(
+                conn,
+                event_type="background.dispatch_paused",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"reason": reason, "phase": phase},
+            )
+
+    def _resume_for_dispatch(self, *, task_id: str, work_kind: BackgroundWorkKind) -> None:
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            state = self._task_state_with_connection(conn, task_id)
+            resumed = False
+            if state is TaskState.PAUSED:
+                self._queue.transition_with_connection(conn, task_id, TaskState.READY)
+                resumed = True
+            elif state is not TaskState.READY:
+                raise ValueError("background dispatch requires READY or PAUSED task state")
+            self._audit.append_with_connection(
+                conn,
+                event_type="background.dispatch_permitted",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"work_kind": work_kind.value, "resumed": resumed},
+            )
+
+    def _require_dispatchable_task(self, task_id: str) -> None:
+        if type(task_id) is not str:
+            raise TypeError("task_id must be exact built-in str")
+        if not task_id or task_id != task_id.strip():
+            raise ValueError("task_id must be non-empty without surrounding whitespace")
+        state = self._queue.get(task_id).state
+        if state not in {TaskState.READY, TaskState.PAUSED}:
+            raise ValueError(
+                "background dispatch requires a durable READY or PAUSED task"
+            )
+
+    @staticmethod
+    def _task_state_with_connection(conn, task_id: str) -> TaskState:
+        row = conn.execute("SELECT state FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"Unknown task: {task_id}")
+        return TaskState(row["state"])
