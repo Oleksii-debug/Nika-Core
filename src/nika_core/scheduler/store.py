@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, ScheduleIdentity, TriggerKind
+
+IMMUTABLE_JOB_BINDING_KEY = "_nika_immutable_job_binding_v1"
 
 
 class ScheduledJobStore:
@@ -12,97 +16,117 @@ class ScheduledJobStore:
         self._store = store
 
     def upsert(self, job: ScheduledJob) -> None:
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self.upsert_with_connection(conn, job)
+
+    def upsert_with_connection(self, conn: sqlite3.Connection, job: ScheduledJob) -> None:
+        """Upsert one job inside a caller-owned SQLite transaction."""
         _validate_job(job)
         now = _utc_now_iso()
-        with self._store.connection() as conn:
-            existing = conn.execute(
-                """SELECT b.scope, b.owner_id, b.dedup_key, b.product_project_id
-                FROM scheduled_jobs AS j
-                LEFT JOIN scheduled_job_bindings AS b ON b.job_id = j.job_id
-                WHERE j.job_id = ?""",
-                (job.job_id,),
+        immutable_existing = conn.execute(
+            "SELECT payload_json FROM scheduled_jobs WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+        if immutable_existing is not None:
+            incoming_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
+            if incoming_binding is not None:
+                existing_payload = json.loads(immutable_existing["payload_json"])
+                existing_binding = existing_payload.get(IMMUTABLE_JOB_BINDING_KEY)
+                if existing_binding is not None and existing_binding != incoming_binding:
+                    raise ValueError("scheduled job immutable binding conflict")
+        existing = conn.execute(
+            """SELECT b.scope, b.owner_id, b.dedup_key, b.product_project_id
+            FROM scheduled_jobs AS j
+            LEFT JOIN scheduled_job_bindings AS b ON b.job_id = j.job_id
+            WHERE j.job_id = ?""",
+            (job.job_id,),
+        ).fetchone()
+        if existing is not None and existing["scope"] is not None:
+            persisted = ScheduleIdentity(
+                scope=existing["scope"],
+                owner_id=existing["owner_id"],
+                dedup_key=existing["dedup_key"],
+                product_project_id=existing["product_project_id"],
+            )
+            if job.identity is None:
+                raise ValueError("persisted schedule identity cannot be cleared")
+            if job.identity != persisted:
+                raise ValueError("persisted schedule identity cannot be changed")
+        if job.identity is not None:
+            duplicate = conn.execute(
+                """SELECT job_id FROM scheduled_job_bindings
+                WHERE scope = ? AND owner_id = ? AND dedup_key = ? AND job_id != ?""",
+                (
+                    job.identity.scope,
+                    job.identity.owner_id,
+                    job.identity.dedup_key,
+                    job.job_id,
+                ),
             ).fetchone()
-            if existing is not None and existing["scope"] is not None:
-                persisted = ScheduleIdentity(
-                    scope=existing["scope"],
-                    owner_id=existing["owner_id"],
-                    dedup_key=existing["dedup_key"],
-                    product_project_id=existing["product_project_id"],
+            if duplicate is not None:
+                raise ValueError(
+                    "schedule dedup key is already bound to another job for this owner"
                 )
-                if job.identity is None:
-                    raise ValueError("persisted schedule identity cannot be cleared")
-                if job.identity != persisted:
-                    raise ValueError("persisted schedule identity cannot be changed")
-            if job.identity is not None:
-                duplicate = conn.execute(
-                    """SELECT job_id FROM scheduled_job_bindings
-                    WHERE scope = ? AND owner_id = ? AND dedup_key = ? AND job_id != ?""",
-                    (
-                        job.identity.scope,
-                        job.identity.owner_id,
-                        job.identity.dedup_key,
-                        job.job_id,
-                    ),
-                ).fetchone()
-                if duplicate is not None:
-                    raise ValueError(
-                        "schedule dedup key is already bound to another job for this owner"
-                    )
 
-            created_row = conn.execute(
-                "SELECT created_at FROM scheduled_jobs WHERE job_id = ?",
-                (job.job_id,),
-            ).fetchone()
-            created_at = created_row["created_at"] if created_row else now
+        created_row = conn.execute(
+            "SELECT created_at FROM scheduled_jobs WHERE job_id = ?",
+            (job.job_id,),
+        ).fetchone()
+        created_at = created_row["created_at"] if created_row else now
+        conn.execute(
+            """INSERT INTO scheduled_jobs(
+                job_id, action_id, trigger_kind, trigger_json, payload_json, enabled,
+                coalesce, max_instances, misfire_grace_seconds, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(job_id) DO UPDATE SET
+                action_id = excluded.action_id,
+                trigger_kind = excluded.trigger_kind,
+                trigger_json = excluded.trigger_json,
+                payload_json = excluded.payload_json,
+                enabled = excluded.enabled,
+                coalesce = excluded.coalesce,
+                max_instances = excluded.max_instances,
+                misfire_grace_seconds = excluded.misfire_grace_seconds,
+                updated_at = excluded.updated_at
+            """,
+            (
+                job.job_id,
+                job.action_id,
+                job.trigger_kind.value,
+                _canonical_json(job.trigger),
+                _canonical_json(job.payload),
+                int(job.enabled),
+                int(job.coalesce),
+                job.max_instances,
+                job.misfire_grace_seconds,
+                created_at,
+                now,
+            ),
+        )
+        if job.identity is not None:
             conn.execute(
-                """INSERT INTO scheduled_jobs(
-                    job_id, action_id, trigger_kind, trigger_json, payload_json, enabled,
-                    coalesce, max_instances, misfire_grace_seconds, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(job_id) DO UPDATE SET
-                    action_id = excluded.action_id,
-                    trigger_kind = excluded.trigger_kind,
-                    trigger_json = excluded.trigger_json,
-                    payload_json = excluded.payload_json,
-                    enabled = excluded.enabled,
-                    coalesce = excluded.coalesce,
-                    max_instances = excluded.max_instances,
-                    misfire_grace_seconds = excluded.misfire_grace_seconds,
-                    updated_at = excluded.updated_at
-                """,
+                """INSERT INTO scheduled_job_bindings(
+                    job_id, scope, owner_id, dedup_key, product_project_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(job_id) DO NOTHING""",
                 (
                     job.job_id,
-                    job.action_id,
-                    job.trigger_kind.value,
-                    _canonical_json(job.trigger),
-                    _canonical_json(job.payload),
-                    int(job.enabled),
-                    int(job.coalesce),
-                    job.max_instances,
-                    job.misfire_grace_seconds,
-                    created_at,
+                    job.identity.scope,
+                    job.identity.owner_id,
+                    job.identity.dedup_key,
+                    job.identity.product_project_id,
                     now,
                 ),
             )
-            if job.identity is not None:
-                conn.execute(
-                    """INSERT INTO scheduled_job_bindings(
-                        job_id, scope, owner_id, dedup_key, product_project_id, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(job_id) DO NOTHING""",
-                    (
-                        job.job_id,
-                        job.identity.scope,
-                        job.identity.owner_id,
-                        job.identity.dedup_key,
-                        job.identity.product_project_id,
-                        now,
-                    ),
-                )
 
     def get(self, job_id: str) -> ScheduledJob | None:
         with self._store.connection() as conn:
-            row = conn.execute(_JOB_SELECT + " WHERE j.job_id = ?", (job_id,)).fetchone()
+            return self.get_with_connection(conn, job_id)
+
+    def get_with_connection(self, conn: sqlite3.Connection, job_id: str) -> ScheduledJob | None:
+        """Read one job inside a caller-owned SQLite transaction."""
+        row = conn.execute(_JOB_SELECT + " WHERE j.job_id = ?", (job_id,)).fetchone()
         return _from_row(row) if row else None
 
     def list_enabled(self) -> tuple[ScheduledJob, ...]:
@@ -125,16 +149,33 @@ class ScheduledJobStore:
 
     def set_enabled(self, job_id: str, enabled: bool) -> bool:
         with self._store.connection() as conn:
-            cursor = conn.execute(
-                "UPDATE scheduled_jobs SET enabled = ?, updated_at = ? WHERE job_id = ?",
-                (int(enabled), _utc_now_iso(), job_id),
-            )
+            return self.set_enabled_with_connection(conn, job_id, enabled)
+
+    def set_enabled_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        job_id: str,
+        enabled: bool,
+    ) -> bool:
+        """Set durable enabled state inside a caller-owned SQLite transaction."""
+        cursor = conn.execute(
+            "UPDATE scheduled_jobs SET enabled = ?, updated_at = ? WHERE job_id = ?",
+            (int(enabled), _utc_now_iso(), job_id),
+        )
         return cursor.rowcount > 0
 
     def delete(self, job_id: str) -> bool:
         with self._store.connection() as conn:
             cursor = conn.execute("DELETE FROM scheduled_jobs WHERE job_id = ?", (job_id,))
         return cursor.rowcount > 0
+
+    def task_state(self, task_id: str) -> TaskState | None:
+        """Read canonical task authority for scheduler dispatch without mutating it."""
+        with self._store.connection() as conn:
+            row = conn.execute("SELECT state FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+        if row is None:
+            return None
+        return TaskState(str(row["state"]))
 
 
 _JOB_SELECT = """SELECT
@@ -163,6 +204,11 @@ def _validate_job(job: ScheduledJob) -> None:
         raise ValueError("misfire_grace_seconds must be a positive integer or None")
     if not job.trigger:
         raise ValueError("trigger configuration must not be empty")
+    immutable_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
+    if immutable_binding is not None and (
+        not isinstance(immutable_binding, str) or not immutable_binding.strip()
+    ):
+        raise ValueError("scheduled job immutable binding must be a non-empty string")
     _canonical_json(job.trigger)
     _canonical_json(job.payload)
     _validate_time_semantics(job)

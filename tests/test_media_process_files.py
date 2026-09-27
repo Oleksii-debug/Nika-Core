@@ -11,6 +11,7 @@ from nika_core.media import Page
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.files import promote_partial_file
 from nika_core.media.hashing import sha256_bytes
+from nika_core.media.privacy import redact_mapping, redact_text
 from nika_core.media.process import SafeProcessRunner
 
 
@@ -69,6 +70,72 @@ def test_safe_process_runner_rejects_watch_path_outside_cwd(tmp_path: Path) -> N
             max_watched_file_bytes=16,
         )
     assert caught.value.code == MediaErrorCode.PATH_ESCAPE
+
+
+@pytest.mark.parametrize(
+    ("stderr_text", "canary"),
+    (
+        ("api_key=QA53_CANARY_MEDIA_API_KEY_4C17", "QA53_CANARY_MEDIA_API_KEY_4C17"),
+        ("Cookie: sessionid=QA53_CANARY_MEDIA_COOKIE_91A2", "QA53_CANARY_MEDIA_COOKIE_91A2"),
+    ),
+)
+def test_safe_process_runner_redacts_secret_stderr_canaries(
+    tmp_path: Path,
+    stderr_text: str,
+    canary: str,
+) -> None:
+    code = f"import sys; sys.stderr.write({stderr_text!r}); sys.exit(7)"
+    with pytest.raises(MediaError) as caught:
+        SafeProcessRunner(max_output_bytes=4096).run(
+            (sys.executable, "-c", code),
+            cwd=tmp_path,
+            timeout_seconds=10,
+        )
+    assert canary not in str(caught.value)
+    assert "[REDACTED]" in str(caught.value)
+
+
+def test_safe_process_runner_redacts_sensitive_public_argv_evidence(tmp_path: Path) -> None:
+    password_canary = "QA53_CANARY_MEDIA_PASSWORD_8D63"
+    token_canary = "QA53_CANARY_MEDIA_TOKEN_SPLIT_14B7"
+    profile_canary = "QA53_CANARY_BROWSER_PROFILE_6E11"
+    result = SafeProcessRunner(max_output_bytes=4096).run(
+        (
+            sys.executable,
+            "-c",
+            "pass",
+            f"--password={password_canary}",
+            "--token",
+            token_canary,
+            "--cookies-from-browser",
+            profile_canary,
+        ),
+        cwd=tmp_path,
+        timeout_seconds=10,
+    )
+    public_argv = " ".join(result.argv)
+    assert password_canary not in public_argv
+    assert token_canary not in public_argv
+    assert profile_canary not in public_argv
+    assert public_argv.count("[REDACTED]") == 3
+
+
+def test_redaction_preserves_nonsecret_count_metadata() -> None:
+    assert redact_text("token_count=17 cookieCount=2") == "token_count=17 cookieCount=2"
+    redacted = redact_mapping(
+        {
+            "apiKey": "secret-api",
+            "accessToken": "secret-access",
+            "sessionCookie": "secret-cookie",
+            "tokenCount": 17,
+            "cookie_count": 2,
+        }
+    )
+    assert redacted["apiKey"] == "[REDACTED]"
+    assert redacted["accessToken"] == "[REDACTED]"
+    assert redacted["sessionCookie"] == "[REDACTED]"
+    assert redacted["tokenCount"] == 17
+    assert redacted["cookie_count"] == 2
 
 
 def test_partial_promotion_validates_checksum_and_renames_atomically(tmp_path: Path) -> None:

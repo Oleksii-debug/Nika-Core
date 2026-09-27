@@ -10,10 +10,14 @@ class ResourceSnapshot:
     cpu_percent: float
     memory_percent: float
     available_memory_bytes: int
+    logical_cpu_count: int | None = None
+    total_memory_bytes: int | None = None
     disk_percent: float | None = None
     available_disk_bytes: int | None = None
     process_rss_bytes: int | None = None
     gpu_percent: float | None = None
+    battery_percent: float | None = None
+    power_plugged: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +67,24 @@ class ResourceProcessIdentity:
         if not math.isfinite(normalized_started_at) or normalized_started_at <= 0:
             raise ValueError("started_at must be a positive finite timestamp")
         object.__setattr__(self, "started_at", normalized_started_at)
+
+
+@dataclass(frozen=True, slots=True)
+class ResourceCapacityStatus:
+    """Read-only capacity truth derived from the existing ResourceManager authority."""
+
+    budget: ResourceBudget
+    snapshot: ResourceSnapshot
+    active_count: int
+    queued_count: int
+    concurrency_headroom: int
+    cpu_headroom_percent: float | None
+    memory_headroom_percent: float | None
+    pressure_reasons: tuple[str, ...]
+
+    @property
+    def under_pressure(self) -> bool:
+        return bool(self.pressure_reasons)
 
 
 class ResourceObserverPort(Protocol):

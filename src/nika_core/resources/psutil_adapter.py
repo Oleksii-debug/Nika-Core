@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 import psutil
 
@@ -14,26 +15,52 @@ from nika_core.resources.contracts import (
 
 
 class PsutilResourceObserver(ResourceObserverPort, ResourceOwnerProbePort):
-    def __init__(self, *, disk_path: Path | str | None = None) -> None:
+    """Cross-platform read-only telemetry plus restart owner-generation proof."""
+
+    def __init__(
+        self,
+        process: Any | None = None,
+        *,
+        disk_path: Path | str | None = None,
+    ) -> None:
+        self._process = process if process is not None else psutil.Process()
         self._disk_path = Path(disk_path) if disk_path is not None else Path.cwd()
-        self._process = psutil.Process()
-        self._first_snapshot = True
 
     def snapshot(self) -> ResourceSnapshot:
         memory = psutil.virtual_memory()
         disk = psutil.disk_usage(str(self._disk_path))
-        process_memory = self._process.memory_info()
-        interval = 0.1 if self._first_snapshot else None
-        cpu_percent = float(psutil.cpu_percent(interval=interval))
-        self._first_snapshot = False
+
+        process_rss_bytes: int | None
+        try:
+            process_rss_bytes = int(self._process.memory_info().rss)
+        except (AttributeError, OSError, psutil.Error):
+            process_rss_bytes = None
+
+        battery_percent: float | None = None
+        power_plugged: bool | None = None
+        try:
+            battery = psutil.sensors_battery()
+        except (AttributeError, NotImplementedError, OSError, psutil.Error):
+            battery = None
+        if battery is not None:
+            battery_percent = float(battery.percent)
+            power_plugged = bool(battery.power_plugged)
+
+        logical_cpu_count = psutil.cpu_count(logical=True)
         return ResourceSnapshot(
-            cpu_percent=cpu_percent,
+            cpu_percent=float(psutil.cpu_percent(interval=None)),
             memory_percent=float(memory.percent),
             available_memory_bytes=int(memory.available),
+            logical_cpu_count=(
+                int(logical_cpu_count) if logical_cpu_count is not None else None
+            ),
+            total_memory_bytes=int(memory.total),
             disk_percent=float(disk.percent),
             available_disk_bytes=int(disk.free),
-            process_rss_bytes=int(process_memory.rss),
+            process_rss_bytes=process_rss_bytes,
             gpu_percent=None,
+            battery_percent=battery_percent,
+            power_plugged=power_plugged,
         )
 
     def current_process_identity(self) -> ResourceProcessIdentity:
