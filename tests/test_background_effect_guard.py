@@ -430,3 +430,19 @@ def test_deferred_effect_functions_are_rejected_before_authority_reads(kind: str
 
     assert observer.calls == 0
     assert resources.calls == 0
+
+
+def test_sync_wrapper_returning_async_generator_is_rejected_as_deferred() -> None:
+    resources = ResourceReader(capacity())
+    service, _ = guard(observation(), resources)
+
+    async def deferred():
+        yield "later"
+
+    def effect() -> object:
+        return deferred()
+
+    with pytest.raises(TypeError, match="deferred execution"):
+        service.run(BackgroundWorkKind.SELF_TEST, effect)
+
+    assert resources.calls == 1
