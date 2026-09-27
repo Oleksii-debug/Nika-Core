@@ -98,7 +98,7 @@ def _guard(
     return guard, queue, audit, resources
 
 
-def test_three_fresh_away_observations_dispatch_exactly_once(tmp_path: Path) -> None:
+def test_fresh_away_evidence_dispatches_exactly_once(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
     guard, queue, audit, resources = _guard(
@@ -107,6 +107,7 @@ def test_three_fresh_away_observations_dispatch_exactly_once(tmp_path: Path) -> 
             _obs(1, OwnerPresence.AWAY, now=now),
             _obs(2, OwnerPresence.AWAY, now=now),
             _obs(3, OwnerPresence.AWAY, now=now),
+            _obs(4, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -227,6 +228,41 @@ def test_owner_return_at_effect_commit_blocks_dispatch(tmp_path: Path) -> None:
     assert result.action is BackgroundAction.PAUSE
     assert queue.get(task_id).state is TaskState.PAUSED
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+
+
+def test_owner_return_after_resource_grant_is_fenced_and_releases_capacity(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    guard, queue, _audit, resources = _guard(
+        store=store,
+        observations=[
+            _obs(25, OwnerPresence.AWAY, now=now),
+            _obs(26, OwnerPresence.AWAY, now=now),
+            _obs(27, OwnerPresence.AWAY, now=now),
+            _obs(28, OwnerPresence.ACTIVE, now=now),
+        ],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+
+    async def effect() -> object:
+        raise AssertionError("effect must not run")
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.EVIDENCE_VERIFICATION,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.PAUSE
+    assert result.reason == "owner_active"
+    assert queue.get(task_id).state is TaskState.PAUSED
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+    assert resources.queued(scope="background_life", owner_id="living-agent") == ()
 
 
 def test_resource_pressure_race_at_final_admission_defers_without_effect(
@@ -375,6 +411,7 @@ def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
             _obs(61, OwnerPresence.AWAY, now=now),
             _obs(62, OwnerPresence.AWAY, now=now),
             _obs(63, OwnerPresence.AWAY, now=now),
+            _obs(64, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -446,6 +483,7 @@ def test_effect_exception_still_releases_resource_grant(tmp_path: Path) -> None:
             _obs(80, OwnerPresence.AWAY, now=now),
             _obs(81, OwnerPresence.AWAY, now=now),
             _obs(82, OwnerPresence.AWAY, now=now),
+            _obs(83, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
@@ -464,7 +502,6 @@ def test_effect_exception_still_releases_resource_grant(tmp_path: Path) -> None:
         )
 
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
-
 
 
 class CompletingRuntime:
@@ -493,6 +530,7 @@ def test_guard_composes_with_canonical_task_runtime_coordinator(tmp_path: Path) 
             _obs(90, OwnerPresence.AWAY, now=now),
             _obs(91, OwnerPresence.AWAY, now=now),
             _obs(92, OwnerPresence.AWAY, now=now),
+            _obs(93, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
