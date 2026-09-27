@@ -42,15 +42,15 @@ class SpeechRequest:
     volume: int = 100
 
     def __post_init__(self) -> None:
-        if not isinstance(self.text, str):
+        if type(self.text) is not str:
             raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech text must be a string")
-        if not self.text.strip():
-            raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech text must not be empty")
         if len(self.text) > MAX_SPEECH_TEXT_CHARS:
             raise SpeechError(
                 SpeechErrorCode.INVALID_REQUEST,
                 f"speech text exceeds {MAX_SPEECH_TEXT_CHARS} characters",
             )
+        if not self.text.strip():
+            raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech text must not be empty")
         if "\x00" in self.text:
             raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech text must not contain NUL")
         if type(self.rate) is not int or not -10 <= self.rate <= 10:
@@ -58,7 +58,7 @@ class SpeechRequest:
         if type(self.volume) is not int or not 0 <= self.volume <= 100:
             raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech volume must be 0..100")
         if self.voice_id is not None:
-            if not isinstance(self.voice_id, str) or not self.voice_id.strip():
+            if type(self.voice_id) is not str:
                 raise SpeechError(
                     SpeechErrorCode.INVALID_REQUEST,
                     "voice_id must be a non-empty string when supplied",
@@ -67,6 +67,11 @@ class SpeechRequest:
                 raise SpeechError(
                     SpeechErrorCode.INVALID_REQUEST,
                     f"voice_id exceeds {MAX_VOICE_ID_CHARS} characters",
+                )
+            if not self.voice_id.strip():
+                raise SpeechError(
+                    SpeechErrorCode.INVALID_REQUEST,
+                    "voice_id must be a non-empty string when supplied",
                 )
             if any(ord(char) < 32 for char in self.voice_id):
                 raise SpeechError(

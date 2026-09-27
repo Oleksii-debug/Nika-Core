@@ -51,6 +51,20 @@ class FakeBackend:
         return self.speak_payload  # type: ignore[return-value]
 
 
+class _HostileSpeechText(str):
+    def __len__(self) -> int:
+        raise AssertionError("hostile text behavior must not execute")
+
+    def strip(self, chars: str | None = None) -> str:
+        del chars
+        raise AssertionError("hostile text behavior must not execute")
+
+
+class _HostileTimeout(float):
+    def __float__(self) -> float:
+        raise AssertionError("hostile numeric behavior must not execute")
+
+
 class FalseyBackend(FakeBackend):
     def __bool__(self) -> bool:
         return False
@@ -127,6 +141,74 @@ def test_speech_request_rejects_invalid_input(kwargs: dict[str, object]) -> None
     with pytest.raises(SpeechError) as error:
         SpeechRequest(**kwargs)  # type: ignore[arg-type]
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"text": _HostileSpeechText("hello")},
+        {"text": "hello", "voice_id": _HostileSpeechText("Microsoft Test")},
+    ],
+)
+def test_speech_request_rejects_behavioral_text_subclasses_without_invoking_them(
+    kwargs: dict[str, object],
+) -> None:
+    with pytest.raises(SpeechError) as error:
+        SpeechRequest(**kwargs)  # type: ignore[arg-type]
+
+    assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+
+
+def test_adapter_revalidates_constructor_bypassed_request_before_backend_effect() -> None:
+    forged = object.__new__(SpeechRequest)
+    object.__setattr__(forged, "text", "")
+    object.__setattr__(forged, "voice_id", None)
+    object.__setattr__(forged, "rate", 0)
+    object.__setattr__(forged, "volume", 100)
+    backend = FakeBackend()
+    adapter = WindowsSystemSpeechAdapter(backend)
+
+    with pytest.raises(SpeechError) as error:
+        adapter.speak(forged)
+
+    assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+    assert backend.spoken_payloads == []
+
+
+def test_adapter_snapshots_request_before_backend_mutation() -> None:
+    request = SpeechRequest("hello", voice_id="Microsoft Test", rate=2, volume=80)
+
+    class MutatingBackend(FakeBackend):
+        def speak(
+            self,
+            payload: bytes,
+            *,
+            timeout_seconds: float,
+            cancel_event: threading.Event | None,
+        ) -> bytes:
+            object.__setattr__(request, "rate", 9)
+            object.__setattr__(request, "volume", 1)
+            return super().speak(
+                payload,
+                timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
+            )
+
+    backend = MutatingBackend()
+    receipt = WindowsSystemSpeechAdapter(backend).speak(request)
+
+    assert backend.spoken_payloads == [
+        {
+            "text": "hello",
+            "voice_id": "Microsoft Test",
+            "rate": 2,
+            "volume": 80,
+        }
+    ]
+    assert receipt.rate == 2
+    assert receipt.volume == 80
+    assert request.rate == 9
+    assert request.volume == 1
 
 
 def test_falsey_injected_backend_does_not_fall_through_to_platform_discovery() -> None:
@@ -291,7 +373,17 @@ def test_adapter_rejects_overlapping_speech_without_second_effect() -> None:
 
 @pytest.mark.parametrize(
     "timeout",
-    [0, -1, 3600.1, True, "1", math.nan, math.inf, 1 << 100_000],
+    [
+        0,
+        -1,
+        3600.1,
+        True,
+        "1",
+        math.nan,
+        math.inf,
+        1 << 100_000,
+        _HostileTimeout(1.0),
+    ],
 )
 def test_adapter_rejects_invalid_timeout(timeout: object) -> None:
     backend = FakeBackend()

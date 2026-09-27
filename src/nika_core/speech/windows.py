@@ -296,6 +296,12 @@ class WindowsSystemSpeechAdapter:
                 SpeechErrorCode.INVALID_REQUEST,
                 "request must be a SpeechRequest",
             )
+        request = SpeechRequest(
+            text=request.text,
+            voice_id=request.voice_id,
+            rate=request.rate,
+            volume=request.volume,
+        )
         timeout = _validate_timeout(timeout_seconds)
         if cancel_event is not None and cancel_event.is_set():
             raise SpeechError(SpeechErrorCode.PROCESS_CANCELLED, "speech output was cancelled")
@@ -412,7 +418,7 @@ def _optional_string(value: Any) -> str | None:
 
 
 def _validate_timeout(timeout_seconds: object) -> float:
-    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
+    if type(timeout_seconds) not in (int, float):
         raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech timeout must be numeric")
     try:
         timeout = float(timeout_seconds)
