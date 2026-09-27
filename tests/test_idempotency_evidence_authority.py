@@ -184,6 +184,10 @@ def test_blob_task_id_alias_cannot_disappear_from_task_inventory(tmp_path) -> No
     _reserve(ledger, task_id)
 
     with store.connection() as conn:
+        # Simulate out-of-band/tampered durable storage. Normal SQLiteStore
+        # connections enable foreign_keys, so the corruption injection must
+        # explicitly bypass the relational guard before testing ledger recovery.
+        conn.execute("PRAGMA foreign_keys = OFF")
         conn.execute(
             """
             UPDATE idempotency_records
