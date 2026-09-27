@@ -56,9 +56,15 @@ _ALLOWED: dict[TaskState, frozenset[TaskState]] = {
 
 
 def can_transition(current: TaskState, target: TaskState) -> bool:
+    if type(current) is not TaskState or type(target) is not TaskState:
+        return False
     return target in _ALLOWED[current]
 
 
 def require_transition(current: TaskState, target: TaskState) -> None:
-    if not can_transition(current, target):
+    if type(current) is not TaskState:
+        raise TypeError("current must be an exact TaskState")
+    if type(target) is not TaskState:
+        raise TypeError("target must be an exact TaskState")
+    if target not in _ALLOWED[current]:
         raise ValueError(f"Invalid task transition: {current} -> {target}")
