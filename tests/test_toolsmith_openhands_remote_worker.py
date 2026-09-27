@@ -779,6 +779,65 @@ def test_cancelled_recovery_is_terminal_and_never_reexecutes(tmp_path: Path) -> 
     assert runtime.calls == []
 
 
+def test_unknown_process_cancel_probe_failure_becomes_manual_reconciliation() -> None:
+    class FailingProbe:
+        async def inspect(self, _job_id):
+            raise RuntimeError("database diagnostic must not escape")
+
+    worker = OpenHandsRemoteCodingWorker(
+        Provider(),
+        Runtime(),
+        recovery_probe=FailingProbe(),
+    )
+
+    _run(worker.cancel("lost-job"))
+
+    assert _run(worker.inspect("lost-job")) == RecoveryState("manual_reconcile_required")
+
+
+def test_cancelled_unknown_process_probe_does_not_leave_transient_state() -> None:
+    class BlockingProbe:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def inspect(self, _job_id):
+            self.started.set()
+            await self.release.wait()
+            return None
+
+    async def scenario():
+        probe = BlockingProbe()
+        worker = OpenHandsRemoteCodingWorker(
+            Provider(),
+            Runtime(),
+            recovery_probe=probe,
+        )
+        cancellation = asyncio.create_task(worker.cancel("lost-job"))
+        await asyncio.wait_for(probe.started.wait(), timeout=2)
+        cancellation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await cancellation
+        return await worker.inspect("lost-job")
+
+    state = _run(scenario())
+
+    assert state == RecoveryState("manual_reconcile_required")
+
+
+def test_cancel_probe_pending_recovery_is_manual_reconciliation(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    worker = OpenHandsRemoteCodingWorker(Provider(), Runtime())
+
+    result = _run(worker.recover(_job(root), RecoveryState("cancel_probe_pending")))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.failure.retryable is False
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+
+
 def test_unverified_cancel_requires_manual_reconciliation(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime(cancel_verified=False)
