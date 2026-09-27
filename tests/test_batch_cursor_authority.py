@@ -470,6 +470,94 @@ def test_confirm_rejects_completed_ledger_without_durable_result(
     assert _state_value(memory, "task") == in_flight_state
 
 
+def test_confirm_revalidates_already_confirmed_durable_status_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    confirmed_state = _state_value(memory, "task")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET status = ?, result_json = NULL
+            WHERE operation_key = ?
+            """,
+            (IdempotencyStatus.PENDING.value, grant.operation_key),
+        )
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed cursor target contradicts idempotency evidence",
+    ):
+        cursor.confirm("target-0", {"ok": True})
+
+    record = ledger.require(grant.operation_key)
+    assert record.status is IdempotencyStatus.PENDING
+    assert record.result is None
+    assert cursor.state.targets[0].attempt_state is AttemptState.CONFIRMED
+    assert _state_value(memory, "task") == confirmed_state
+
+
+def test_begin_effect_revalidates_already_confirmed_durable_result_without_mutation(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    confirmed_state = _state_value(memory, "task")
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET result_json = ?
+            WHERE operation_key = ?
+            """,
+            (
+                json.dumps(
+                    {
+                        "__nika_batch_cursor_completion_v1__": {
+                            "result": {"ok": False},
+                            "next_batch_not_before": None,
+                        }
+                    }
+                ),
+                grant.operation_key,
+            ),
+        )
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed cursor result contradicts idempotency evidence",
+    ):
+        cursor.begin_effect("target-0")
+
+    record = ledger.require(grant.operation_key)
+    assert record.status is IdempotencyStatus.COMPLETED
+    assert record.result is not None
+    assert cursor.state.targets[0].attempt_state is AttemptState.CONFIRMED
+    assert _state_value(memory, "task") == confirmed_state
+
+
 def test_restore_rejects_nonfinite_uncertain_evidence_before_mutation(
     tmp_path: Path,
 ) -> None:

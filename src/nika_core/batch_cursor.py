@@ -360,6 +360,7 @@ class BatchCursor:
         self._require_persistence_authority()
         target = self._find(target_id)
         if target.attempt_state is AttemptState.CONFIRMED:
+            self._require_confirmed_durable_consistency(target)
             return EffectGrant(
                 execute=False,
                 operation_key=target.operation_key,
@@ -409,6 +410,7 @@ class BatchCursor:
         self._require_persistence_authority()
         target = self._find(target_id)
         if target.attempt_state is AttemptState.CONFIRMED:
+            self._require_confirmed_durable_consistency(target)
             return
         if target.attempt_state is not AttemptState.IN_FLIGHT:
             raise BatchCursorBlockedError("only an in-flight target may be confirmed")
@@ -431,15 +433,7 @@ class BatchCursor:
         target = self._find(target_id)
         record = self._ledger.require(target.operation_key)
         if target.attempt_state is AttemptState.CONFIRMED:
-            if record.status is not IdempotencyStatus.COMPLETED:
-                raise BatchCursorStateError(
-                    "confirmed cursor target contradicts idempotency evidence"
-                )
-            durable_result, _ = _decode_completion_result(record.result)
-            if not _canonical_json_equal(target.confirmed_result, durable_result):
-                raise BatchCursorStateError(
-                    "confirmed cursor result contradicts idempotency evidence"
-                )
+            self._require_confirmed_durable_consistency(target, record=record)
             return
         if record.status is IdempotencyStatus.COMPLETED:
             durable_result, durable_due = _decode_completion_result(record.result)
@@ -626,6 +620,23 @@ class BatchCursor:
             )
         else:
             self._state.next_scheduled_intent = _target_intent(next_target)
+
+    def _require_confirmed_durable_consistency(
+        self,
+        target: TargetCursor,
+        *,
+        record: Any | None = None,
+    ) -> None:
+        durable = record if record is not None else self._ledger.require(target.operation_key)
+        if durable.status is not IdempotencyStatus.COMPLETED:
+            raise BatchCursorStateError(
+                "confirmed cursor target contradicts idempotency evidence"
+            )
+        durable_result, _ = _decode_completion_result(durable.result)
+        if not _canonical_json_equal(target.confirmed_result, durable_result):
+            raise BatchCursorStateError(
+                "confirmed cursor result contradicts idempotency evidence"
+            )
 
     def _confirm_from_durable(self, target: TargetCursor, result: dict[str, Any]) -> None:
         target.attempt_state = AttemptState.CONFIRMED
