@@ -31,6 +31,7 @@ _LOGGER = logging.getLogger(__name__)
 _OPENHANDS_SDK_VERSION = "1.49.2"
 _MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
 _MAX_SNAPSHOT_FILES = 2000
+_MAX_SNAPSHOT_MEMBERS = 10_000
 
 
 class OpenHandsSdkCompatibilityError(RuntimeError):
@@ -279,7 +280,8 @@ class OpenHandsSdkRemoteRuntime:
                 frozen.write_bytes(data)
                 remote = pathlib.PurePosixPath(endpoint.working_dir) / relative
                 result = workspace.file_upload(frozen, remote.as_posix())
-                if not getattr(result, "success", False):
+                success = getattr(result, "success", None)
+                if type(success) is not bool or not success:
                     raise OpenHandsSdkCompatibilityError("OpenHands source upload failed")
 
 
@@ -360,8 +362,14 @@ def _read_snapshot_archive(
 
     files: dict[str, bytes] = {}
     total_bytes = 0
+    member_count = 0
     with tarfile.open(fileobj=fileobj, mode="r:gz") as archive:
         for member in archive:
+            member_count += 1
+            if member_count > _MAX_SNAPSHOT_MEMBERS:
+                raise OpenHandsSdkCompatibilityError(
+                    "OpenHands snapshot exceeds Nika member-count limit"
+                )
             path = pathlib.PurePosixPath(member.name)
             if path.is_absolute() or ".." in path.parts or not path.parts:
                 raise OpenHandsSdkCompatibilityError("OpenHands snapshot contains an unsafe path")

@@ -1645,6 +1645,25 @@ def test_sdk_task_cancellation_preserves_one_shot_stop_proof(
     assert FakeConversation.instances == []
 
 
+def test_sdk_upload_requires_exact_boolean_success_carrier(tmp_path: Path) -> None:
+    root = _workspace(tmp_path)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+
+    class TruthyUploadWorkspace(FakeRemoteWorkspace):
+        def file_upload(self, local_path, remote_path):
+            self.uploads.append((Path(local_path).read_bytes(), remote_path))
+            return type("UploadResult", (), {"success": 1})()
+
+    workspace = TruthyUploadWorkspace(
+        endpoint,
+        _tar_snapshot({"src/value.txt": b"unused\n"}),
+    )
+
+    with pytest.raises(OpenHandsSdkCompatibilityError, match="source upload failed"):
+        OpenHandsSdkRemoteRuntime._upload_source(workspace, endpoint, root, evidence)
+
+
 def test_sdk_upload_rejects_source_bytes_changed_after_captured_evidence(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     evidence = collect_tree_evidence(root)
@@ -1693,6 +1712,23 @@ def test_sdk_snapshot_reader_preserves_authored_archive_manifest() -> None:
     )
 
     assert files == (RemoteFile("archive_manifest.json", b"authored\n"),)
+
+
+def test_sdk_snapshot_reader_rejects_member_count_exhaustion() -> None:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
+        for index in range(openhands_sdk_module._MAX_SNAPSHOT_MEMBERS + 1):
+            member = tarfile.TarInfo(f"nika-job/dirs/{index}")
+            member.type = tarfile.DIRTYPE
+            archive.addfile(member)
+    buffer.seek(0)
+
+    with pytest.raises(OpenHandsSdkCompatibilityError, match="member-count"):
+        _read_snapshot_archive(
+            buffer,
+            expected_root="nika-job",
+            baseline_paths=set(),
+        )
 
 
 def test_sdk_snapshot_reader_rejects_symlink_member() -> None:
