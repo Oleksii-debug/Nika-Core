@@ -854,7 +854,7 @@ def _scope_hashes(scope: _ScopeRecord) -> tuple[str, ...]:
 
 def _permission_id(value: str) -> None:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or _SAFE_ID_RE.fullmatch(value) is None
         or value.casefold() in _BROAD
     ):
@@ -862,21 +862,21 @@ def _permission_id(value: str) -> None:
 
 
 def _action(value: str) -> None:
-    if not isinstance(value, str) or _ACTION_RE.fullmatch(value) is None:
+    if type(value) is not str or _ACTION_RE.fullmatch(value) is None:
         raise ValueError("action class must be one exact canonical class")
     if value.casefold() in _BROAD:
         raise ValueError("action class cannot contain broad or wildcard authority")
 
 
 def _identity(value: str, label: str) -> None:
-    if not isinstance(value, str) or not value or value != value.strip() or len(value) > 512:
+    if type(value) is not str or not value or value != value.strip() or len(value) > 512:
         raise ValueError(f"{label} must be a non-empty canonical identity")
     if value.casefold() in _BROAD or "*" in value or any(ord(char) < 32 for char in value):
         raise ValueError(f"{label} cannot contain broad or wildcard authority")
 
 
 def _ids(values: tuple[str, ...], label: str, *, required: bool) -> tuple[str, ...]:
-    if not isinstance(values, tuple) or (required and not values):
+    if type(values) is not tuple or (required and not values):
         raise ValueError(f"{label} scope must be an explicit non-empty tuple")
     for value in values:
         _identity(value, label)
@@ -892,13 +892,13 @@ def _site(value: str) -> str:
 
 
 def _sites(values: tuple[str, ...]) -> tuple[str, ...]:
-    if not isinstance(values, tuple):
+    if type(values) is not tuple:
         raise TypeError("site scope must be an explicit tuple")
     return tuple(sorted({_site(value) for value in values}))
 
 
 def _utc(value: datetime, label: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must be timezone-aware")
     return value.astimezone(UTC)
 
