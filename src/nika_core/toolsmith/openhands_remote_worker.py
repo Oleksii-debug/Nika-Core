@@ -530,6 +530,11 @@ def _validate_and_apply_snapshot(
                         destination.chmod(previous_mode)
             except OSError:
                 rollback_failed = True
+        if not rollback_failed:
+            try:
+                rollback_failed = collect_tree_evidence(local_root) != before
+            except (OSError, WorkspaceSecurityError):
+                rollback_failed = True
         if rollback_failed:
             raise OpenHandsWorkspaceMutationError(
                 "local staging mutation could not be proven rolled back"
