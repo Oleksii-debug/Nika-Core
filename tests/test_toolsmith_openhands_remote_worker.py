@@ -804,7 +804,7 @@ def test_cancelled_unknown_process_probe_does_not_leave_transient_state() -> Non
         async def inspect(self, _job_id):
             self.started.set()
             await self.release.wait()
-            return None
+
 
     async def scenario():
         probe = BlockingProbe()
@@ -1123,7 +1123,7 @@ class BlockingUploadWorkspace(FakeRemoteWorkspace):
 
 
 class FakeConversation:
-    instances: ClassVar[list["FakeConversation"]] = []
+    instances: ClassVar[list[FakeConversation]] = []
 
     def __init__(self, *, agent, workspace, max_iteration_per_run, visualizer, delete_on_close, tags):
         self.agent = agent
