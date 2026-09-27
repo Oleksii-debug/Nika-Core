@@ -447,10 +447,10 @@ def test_unexpected_post_apply_failure_requires_manual_reconciliation(
 
 def test_worker_visible_git_metadata_is_rejected_before_remote_execution(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
+    job = _job(root)
     root.joinpath(".git").mkdir()
     provider = Provider()
     runtime = Runtime()
-    job = _job(root)
 
     result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(job))
 
