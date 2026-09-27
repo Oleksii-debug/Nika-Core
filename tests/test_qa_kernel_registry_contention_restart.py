@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import concurrent.futures
+import functools
 import sqlite3
 from collections.abc import Callable
-from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
 
@@ -16,14 +17,14 @@ from nika_core.kernel.workspace_registry import WorkspaceDefinition, WorkspaceRe
 RegisterCall = Callable[[], None]
 
 
-def _run_together(calls: list[RegisterCall]) -> list[Future[None]]:
+def _run_together(calls: list[RegisterCall]) -> list[concurrent.futures.Future[None]]:
     barrier = Barrier(len(calls))
 
     def invoke(call: RegisterCall) -> None:
         barrier.wait(timeout=5)
         call()
 
-    executor = ThreadPoolExecutor(max_workers=len(calls))
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=len(calls))
     try:
         futures = [executor.submit(invoke, call) for call in calls]
         for future in futures:
@@ -38,7 +39,7 @@ def _run_together(calls: list[RegisterCall]) -> list[Future[None]]:
         executor.shutdown(wait=True)
 
 
-def _count_successes(futures: list[Future[None]]) -> int:
+def _count_successes(futures: list[concurrent.futures.Future[None]]) -> int:
     successes = 0
     for future in futures:
         try:
@@ -59,7 +60,7 @@ def test_agent_registry_duplicate_contention_is_contract_safe_and_restart_durabl
 
     definition = AgentDefinition("worker", "Worker", 2, "Updated")
     calls = [
-        (lambda registry=AgentRegistry(store): registry.register(definition))
+        functools.partial(AgentRegistry(store).register, definition)
         for _ in range(8)
     ]
 
@@ -80,7 +81,7 @@ def test_workspace_registry_duplicate_contention_is_contract_safe_and_restart_du
 
     definition = WorkspaceDefinition("research", "Research", 2, "Updated")
     calls = [
-        (lambda registry=WorkspaceRegistry(store): registry.register(definition))
+        functools.partial(WorkspaceRegistry(store).register, definition)
         for _ in range(8)
     ]
 
@@ -104,11 +105,7 @@ def test_agent_registry_mixed_versions_converge_to_highest_after_restart(
         for version in (2, 7, 3, 6, 4, 5)
     ]
     calls = [
-        (
-            lambda definition=definition, registry=AgentRegistry(store): registry.register(
-                definition
-            )
-        )
+        functools.partial(AgentRegistry(store).register, definition)
         for definition in definitions
     ]
 
@@ -139,11 +136,7 @@ def test_workspace_registry_mixed_versions_converge_to_highest_after_restart(
         for version in (2, 7, 3, 6, 4, 5)
     ]
     calls = [
-        (
-            lambda definition=definition, registry=WorkspaceRegistry(store): registry.register(
-                definition
-            )
-        )
+        functools.partial(WorkspaceRegistry(store).register, definition)
         for definition in definitions
     ]
 
