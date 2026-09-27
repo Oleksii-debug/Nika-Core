@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from math import isfinite
 from typing import Any, Protocol, runtime_checkable
 
 
@@ -62,6 +63,26 @@ def _require_exact_nonempty_text(value: object, *, field_name: str) -> None:
         raise ValueError(f"{field_name} must not be empty")
 
 
+def _require_positive_step_count(value: object) -> None:
+    if type(value) is not int:
+        raise TypeError("max_steps must be an exact integer")
+    if value < 1:
+        raise ValueError("max_steps must be positive")
+
+
+def _require_optional_positive_finite_timeout(value: object) -> None:
+    if value is None:
+        return
+    if type(value) not in (int, float):
+        raise TypeError("timeout_seconds must be numeric")
+    try:
+        finite = isfinite(float(value))
+    except OverflowError:
+        finite = False
+    if not finite or value <= 0:
+        raise ValueError("timeout_seconds must be finite and positive")
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimeRequest:
     task_id: str
@@ -73,10 +94,8 @@ class RuntimeRequest:
     def __post_init__(self) -> None:
         _require_exact_nonempty_text(self.task_id, field_name="task_id")
         _require_exact_nonempty_text(self.thread_id, field_name="thread_id")
-        if self.max_steps < 1:
-            raise ValueError("max_steps must be positive")
-        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive when provided")
+        _require_positive_step_count(self.max_steps)
+        _require_optional_positive_finite_timeout(self.timeout_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,10 +114,8 @@ class RuntimeResumeRequest:
         _require_exact_nonempty_text(self.resume_token, field_name="resume_token")
         if type(self.mode) is not RuntimeResumeMode:
             raise TypeError("mode must be a RuntimeResumeMode")
-        if self.max_steps < 1:
-            raise ValueError("max_steps must be positive")
-        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive when provided")
+        _require_positive_step_count(self.max_steps)
+        _require_optional_positive_finite_timeout(self.timeout_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,6 +150,8 @@ class RuntimeEvent:
     payload: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        if type(self.sequence) is not int:
+            raise TypeError("sequence must be an exact integer")
         if self.sequence < 0:
             raise ValueError("sequence must not be negative")
         _require_exact_nonempty_text(self.event_type, field_name="event_type")
