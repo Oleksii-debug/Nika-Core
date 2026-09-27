@@ -13,9 +13,13 @@ from nika_core.research.models import (
     SourceKind,
 )
 from nika_core.research.review import (
+    AccessibleResearchReport,
+    ResearchCard,
     ResearchCardService,
+    ResearchReview,
     ResearchReviewRepository,
     ResearchReviewState,
+    render_accessible_report_text,
 )
 
 _PUBLIC_SOURCE_1 = (
@@ -294,3 +298,105 @@ def test_report_order_is_result_order_not_review_update_order(tmp_path: Path) ->
     assert report.text.index("Result 1: Українська можливість") < report.text.index(
         "Result 2: Second"
     )
+
+def test_accessible_report_rejects_behavioral_result_text_before_render(
+    tmp_path: Path,
+) -> None:
+    class BehavioralTitle(str):
+        def __format__(self, format_spec: str) -> str:
+            return "FORGED_TITLE"
+
+    base = _result_set()
+    item = base.items[0]
+    hostile_item = ResearchResultItem(
+        ordinal=item.ordinal,
+        document_id=item.document_id,
+        title=BehavioralTitle(item.title),
+        snippet=item.snippet,
+        rank=item.rank,
+        why_matched=item.why_matched,
+        evidence=item.evidence,
+    )
+    hostile = ResearchResultSet(
+        result_set_id=base.result_set_id,
+        workspace_id=base.workspace_id,
+        query=base.query,
+        items=(hostile_item,),
+        created_at=base.created_at,
+    )
+
+    service = ResearchCardService(ResearchReviewRepository(_store(tmp_path)))
+    with pytest.raises(TypeError, match=r"result_set\.items\[0\]\.title must be an exact str"):
+        service.accessible_report(hostile)
+
+
+def test_accessible_report_rejects_behavioral_source_identity_before_hashing(
+    tmp_path: Path,
+) -> None:
+    class BehavioralSourceId(str):
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            return b"forged-public-source"
+
+    base = _result_set()
+    item = base.items[0]
+    evidence = item.evidence[0]
+    hostile_evidence = ResearchEvidence(
+        source_id=BehavioralSourceId(evidence.source_id),
+        source_kind=evidence.source_kind,
+        locator=evidence.locator,
+        observed_at=evidence.observed_at,
+        freshness=evidence.freshness,
+    )
+    hostile_item = ResearchResultItem(
+        ordinal=item.ordinal,
+        document_id=item.document_id,
+        title=item.title,
+        snippet=item.snippet,
+        rank=item.rank,
+        why_matched=item.why_matched,
+        evidence=(hostile_evidence,),
+    )
+    hostile = ResearchResultSet(
+        result_set_id=base.result_set_id,
+        workspace_id=base.workspace_id,
+        query=base.query,
+        items=(hostile_item,),
+        created_at=base.created_at,
+    )
+
+    service = ResearchCardService(ResearchReviewRepository(_store(tmp_path)))
+    with pytest.raises(
+        TypeError,
+        match=r"result_set\.items\[0\]\.evidence\[0\]\.source_id must be an exact str",
+    ):
+        service.accessible_report(hostile)
+
+
+def test_direct_text_renderer_rejects_forged_nested_report_carrier() -> None:
+    base = ResearchReview(
+        workspace_id="ws",
+        document_id="doc-1",
+        state=ResearchReviewState.SAVED,
+    )
+    card = ResearchCard(
+        ordinal=0,
+        document_id="doc-1",
+        title="Title",
+        snippet="Snippet",
+        rank=float("nan"),
+        why_matched="literal",
+        evidence=(),
+        review=base,
+    )
+    report = AccessibleResearchReport(
+        result_set_id="results-1",
+        workspace_id="ws",
+        query="query",
+        created_at="2026-08-20T01:00:00+00:00",
+        cards=(card,),
+        text="stale",
+    )
+
+    with pytest.raises(ValueError, match=r"report\.cards\[0\]\.rank must be finite"):
+        render_accessible_report_text(report)
+

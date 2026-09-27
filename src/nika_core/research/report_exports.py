@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import hashlib
 import html
-import math
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -14,12 +13,10 @@ from zipfile import ZIP_DEFLATED, ZipFile, ZipInfo
 from docx import Document
 from openpyxl import Workbook
 
-from nika_core.research.models import FreshnessState, ResearchEvidence, SourceKind
 from nika_core.research.review import (
     AccessibleResearchReport,
     ResearchCard,
-    ResearchReview,
-    ResearchReviewState,
+    canonical_accessible_report,
     render_accessible_report_text,
     safe_evidence_locator,
     safe_evidence_source_reference,
@@ -61,7 +58,7 @@ class ResearchReportExporter:
         *,
         language_tag: str | None = None,
     ) -> RenderedResearchReport:
-        report = _canonical_report(report)
+        report = canonical_accessible_report(report)
         if type(report_format) is not ResearchReportFormat:
             raise TypeError("report_format must be an exact ResearchReportFormat")
 
@@ -265,99 +262,6 @@ class ResearchReportExporter:
         output = BytesIO()
         workbook.save(output)
         return _canonicalize_office_package(output.getvalue(), timestamp)
-
-
-def _exact_text(value: object, field_name: str) -> str:
-    if type(value) is not str:
-        raise TypeError(f"{field_name} must be an exact str")
-    return value
-
-
-def _canonical_evidence(evidence: object, field_name: str) -> ResearchEvidence:
-    if type(evidence) is not ResearchEvidence:
-        raise TypeError(f"{field_name} must be an exact ResearchEvidence")
-    if type(evidence.source_kind) is not SourceKind:
-        raise TypeError(f"{field_name}.source_kind must be an exact SourceKind")
-    if evidence.freshness is not None and type(evidence.freshness) is not FreshnessState:
-        raise TypeError(f"{field_name}.freshness must be an exact FreshnessState or None")
-    return ResearchEvidence(
-        source_id=_exact_text(evidence.source_id, f"{field_name}.source_id"),
-        source_kind=evidence.source_kind,
-        locator=_exact_text(evidence.locator, f"{field_name}.locator"),
-        observed_at=_exact_text(evidence.observed_at, f"{field_name}.observed_at"),
-        freshness=evidence.freshness,
-    )
-
-
-def _canonical_review(review: object, field_name: str) -> ResearchReview:
-    if type(review) is not ResearchReview:
-        raise TypeError(f"{field_name} must be an exact ResearchReview")
-    if type(review.state) is not ResearchReviewState:
-        raise TypeError(f"{field_name}.state must be an exact ResearchReviewState")
-    updated_at = review.updated_at
-    if updated_at is not None:
-        updated_at = _exact_text(updated_at, f"{field_name}.updated_at")
-    return ResearchReview(
-        workspace_id=_exact_text(review.workspace_id, f"{field_name}.workspace_id"),
-        document_id=_exact_text(review.document_id, f"{field_name}.document_id"),
-        state=review.state,
-        note=_exact_text(review.note, f"{field_name}.note"),
-        updated_at=updated_at,
-    )
-
-
-def _canonical_card(card: object, field_name: str) -> ResearchCard:
-    if type(card) is not ResearchCard:
-        raise TypeError(f"{field_name} must be an exact ResearchCard")
-    if type(card.ordinal) is not int:
-        raise TypeError(f"{field_name}.ordinal must be an exact int")
-    if card.ordinal < 0:
-        raise ValueError(f"{field_name}.ordinal must be non-negative")
-    if type(card.rank) is not float:
-        raise TypeError(f"{field_name}.rank must be an exact float")
-    if not math.isfinite(card.rank):
-        raise ValueError(f"{field_name}.rank must be finite")
-    if type(card.evidence) is not tuple:
-        raise TypeError(f"{field_name}.evidence must be an exact tuple")
-    evidence = tuple(
-        _canonical_evidence(item, f"{field_name}.evidence[{index}]")
-        for index, item in enumerate(card.evidence)
-    )
-    return ResearchCard(
-        ordinal=card.ordinal,
-        document_id=_exact_text(card.document_id, f"{field_name}.document_id"),
-        title=_exact_text(card.title, f"{field_name}.title"),
-        snippet=_exact_text(card.snippet, f"{field_name}.snippet"),
-        rank=card.rank,
-        why_matched=_exact_text(card.why_matched, f"{field_name}.why_matched"),
-        evidence=evidence,
-        review=_canonical_review(card.review, f"{field_name}.review"),
-    )
-
-
-def _canonical_report(report: object) -> AccessibleResearchReport:
-    if type(report) is not AccessibleResearchReport:
-        raise TypeError("report must be an exact AccessibleResearchReport")
-    if type(report.cards) is not tuple:
-        raise TypeError("report.cards must be an exact tuple")
-    cards = tuple(
-        _canonical_card(card, f"report.cards[{index}]")
-        for index, card in enumerate(report.cards)
-    )
-    workspace_id = _exact_text(report.workspace_id, "report.workspace_id")
-    for index, card in enumerate(cards):
-        if card.review.workspace_id != workspace_id:
-            raise ValueError(f"report.cards[{index}].review workspace mismatch")
-        if card.review.document_id != card.document_id:
-            raise ValueError(f"report.cards[{index}].review document mismatch")
-    return AccessibleResearchReport(
-        result_set_id=_exact_text(report.result_set_id, "report.result_set_id"),
-        workspace_id=workspace_id,
-        query=_exact_text(report.query, "report.query"),
-        created_at=_exact_text(report.created_at, "report.created_at"),
-        cards=cards,
-        text=_exact_text(report.text, "report.text"),
-    )
 
 
 def _add_labeled_paragraph(document: Document, label: str, value: str) -> None:

@@ -2,12 +2,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.research.models import ResearchEvidence, ResearchResultSet, SourceKind
+from nika_core.research.models import (
+    FreshnessState,
+    ResearchEvidence,
+    ResearchResultItem,
+    ResearchResultSet,
+    SourceKind,
+)
 
 _MAX_NOTE_LENGTH = 4000
 _EVENT_TYPE = "research.review.changed"
@@ -67,6 +74,144 @@ class AccessibleResearchReport:
     text: str
 
 
+def _exact_text(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be an exact str")
+    return value
+
+
+def _canonical_evidence(evidence: object, field_name: str) -> ResearchEvidence:
+    if type(evidence) is not ResearchEvidence:
+        raise TypeError(f"{field_name} must be an exact ResearchEvidence")
+    if type(evidence.source_kind) is not SourceKind:
+        raise TypeError(f"{field_name}.source_kind must be an exact SourceKind")
+    if evidence.freshness is not None and type(evidence.freshness) is not FreshnessState:
+        raise TypeError(f"{field_name}.freshness must be an exact FreshnessState or None")
+    return ResearchEvidence(
+        source_id=_exact_text(evidence.source_id, f"{field_name}.source_id"),
+        source_kind=evidence.source_kind,
+        locator=_exact_text(evidence.locator, f"{field_name}.locator"),
+        observed_at=_exact_text(evidence.observed_at, f"{field_name}.observed_at"),
+        freshness=evidence.freshness,
+    )
+
+
+def _canonical_review(review: object, field_name: str) -> ResearchReview:
+    if type(review) is not ResearchReview:
+        raise TypeError(f"{field_name} must be an exact ResearchReview")
+    if type(review.state) is not ResearchReviewState:
+        raise TypeError(f"{field_name}.state must be an exact ResearchReviewState")
+    updated_at = review.updated_at
+    if updated_at is not None:
+        updated_at = _exact_text(updated_at, f"{field_name}.updated_at")
+    return ResearchReview(
+        workspace_id=_exact_text(review.workspace_id, f"{field_name}.workspace_id"),
+        document_id=_exact_text(review.document_id, f"{field_name}.document_id"),
+        state=review.state,
+        note=_exact_text(review.note, f"{field_name}.note"),
+        updated_at=updated_at,
+    )
+
+
+def _canonical_rank(value: object, field_name: str) -> float:
+    if type(value) is not float:
+        raise TypeError(f"{field_name} must be an exact float")
+    if not math.isfinite(value):
+        raise ValueError(f"{field_name} must be finite")
+    return value
+
+
+def _canonical_evidence_tuple(value: object, field_name: str) -> tuple[ResearchEvidence, ...]:
+    if type(value) is not tuple:
+        raise TypeError(f"{field_name} must be an exact tuple")
+    return tuple(
+        _canonical_evidence(item, f"{field_name}[{index}]")
+        for index, item in enumerate(value)
+    )
+
+
+def _canonical_card(card: object, field_name: str) -> ResearchCard:
+    if type(card) is not ResearchCard:
+        raise TypeError(f"{field_name} must be an exact ResearchCard")
+    if type(card.ordinal) is not int:
+        raise TypeError(f"{field_name}.ordinal must be an exact int")
+    if card.ordinal < 0:
+        raise ValueError(f"{field_name}.ordinal must be non-negative")
+    return ResearchCard(
+        ordinal=card.ordinal,
+        document_id=_exact_text(card.document_id, f"{field_name}.document_id"),
+        title=_exact_text(card.title, f"{field_name}.title"),
+        snippet=_exact_text(card.snippet, f"{field_name}.snippet"),
+        rank=_canonical_rank(card.rank, f"{field_name}.rank"),
+        why_matched=_exact_text(card.why_matched, f"{field_name}.why_matched"),
+        evidence=_canonical_evidence_tuple(card.evidence, f"{field_name}.evidence"),
+        review=_canonical_review(card.review, f"{field_name}.review"),
+    )
+
+
+def canonical_accessible_report(report: object) -> AccessibleResearchReport:
+    """Reconstruct one public report into detached canonical runtime carriers."""
+
+    if type(report) is not AccessibleResearchReport:
+        raise TypeError("report must be an exact AccessibleResearchReport")
+    if type(report.cards) is not tuple:
+        raise TypeError("report.cards must be an exact tuple")
+    cards = tuple(
+        _canonical_card(card, f"report.cards[{index}]")
+        for index, card in enumerate(report.cards)
+    )
+    workspace_id = _exact_text(report.workspace_id, "report.workspace_id")
+    for index, card in enumerate(cards):
+        if card.review.workspace_id != workspace_id:
+            raise ValueError(f"report.cards[{index}].review workspace mismatch")
+        if card.review.document_id != card.document_id:
+            raise ValueError(f"report.cards[{index}].review document mismatch")
+    return AccessibleResearchReport(
+        result_set_id=_exact_text(report.result_set_id, "report.result_set_id"),
+        workspace_id=workspace_id,
+        query=_exact_text(report.query, "report.query"),
+        created_at=_exact_text(report.created_at, "report.created_at"),
+        cards=cards,
+        text=_exact_text(report.text, "report.text"),
+    )
+
+
+def _canonical_result_item(item: object, field_name: str) -> ResearchResultItem:
+    if type(item) is not ResearchResultItem:
+        raise TypeError(f"{field_name} must be an exact ResearchResultItem")
+    if type(item.ordinal) is not int:
+        raise TypeError(f"{field_name}.ordinal must be an exact int")
+    if item.ordinal < 0:
+        raise ValueError(f"{field_name}.ordinal must be non-negative")
+    return ResearchResultItem(
+        ordinal=item.ordinal,
+        document_id=_exact_text(item.document_id, f"{field_name}.document_id"),
+        title=_exact_text(item.title, f"{field_name}.title"),
+        snippet=_exact_text(item.snippet, f"{field_name}.snippet"),
+        rank=_canonical_rank(item.rank, f"{field_name}.rank"),
+        why_matched=_exact_text(item.why_matched, f"{field_name}.why_matched"),
+        evidence=_canonical_evidence_tuple(item.evidence, f"{field_name}.evidence"),
+    )
+
+
+def _canonical_result_set(result_set: object) -> ResearchResultSet:
+    if type(result_set) is not ResearchResultSet:
+        raise TypeError("result_set must be an exact ResearchResultSet")
+    if type(result_set.items) is not tuple:
+        raise TypeError("result_set.items must be an exact tuple")
+    items = tuple(
+        _canonical_result_item(item, f"result_set.items[{index}]")
+        for index, item in enumerate(result_set.items)
+    )
+    return ResearchResultSet(
+        result_set_id=_exact_text(result_set.result_set_id, "result_set.result_set_id"),
+        workspace_id=_exact_text(result_set.workspace_id, "result_set.workspace_id"),
+        query=_exact_text(result_set.query, "result_set.query"),
+        items=items,
+        created_at=_exact_text(result_set.created_at, "result_set.created_at"),
+    )
+
+
 def safe_evidence_source_reference(evidence: ResearchEvidence) -> str:
     """Return a bounded deterministic public token for an internal source identity.
 
@@ -76,8 +221,7 @@ def safe_evidence_source_reference(evidence: ResearchEvidence) -> str:
     path, credential, or token bytes from the internal identifier.
     """
 
-    if not isinstance(evidence, ResearchEvidence):
-        raise TypeError("evidence must be a ResearchEvidence")
+    evidence = _canonical_evidence(evidence, "evidence")
     digest = hashlib.sha256(evidence.source_id.encode("utf-8")).hexdigest()
     return f"source-sha256:{digest}"
 
@@ -91,8 +235,7 @@ def safe_evidence_locator(evidence: ResearchEvidence) -> str:
     fragments, or private local filesystem paths.
     """
 
-    if not isinstance(evidence, ResearchEvidence):
-        raise TypeError("evidence must be a ResearchEvidence")
+    evidence = _canonical_evidence(evidence, "evidence")
     if evidence.source_kind is SourceKind.HTTP:
         return "http-source"
     if evidence.source_kind is SourceKind.LOCAL_FILE:
@@ -148,8 +291,7 @@ def _render_accessible_report_text(
 def render_accessible_report_text(report: AccessibleResearchReport) -> str:
     """Render the canonical public plain-text representation from structured cards."""
 
-    if not isinstance(report, AccessibleResearchReport):
-        raise TypeError("report must be an AccessibleResearchReport")
+    report = canonical_accessible_report(report)
     return _render_accessible_report_text(
         query=report.query,
         created_at=report.created_at,
@@ -260,9 +402,16 @@ class ResearchCardService:
     def __init__(self, reviews: ResearchReviewRepository) -> None:
         self._reviews = reviews
 
-    def cards_for(self, result_set: ResearchResultSet) -> tuple[ResearchCard, ...]:
+    def _cards_for_canonical(self, result_set: ResearchResultSet) -> tuple[ResearchCard, ...]:
         cards: list[ResearchCard] = []
-        for item in result_set.items:
+        for index, item in enumerate(result_set.items):
+            review = _canonical_review(
+                self._reviews.get_review(
+                    workspace_id=result_set.workspace_id,
+                    document_id=item.document_id,
+                ),
+                f"result_set.items[{index}].review",
+            )
             cards.append(
                 ResearchCard(
                     ordinal=item.ordinal,
@@ -272,25 +421,28 @@ class ResearchCardService:
                     rank=item.rank,
                     why_matched=item.why_matched,
                     evidence=item.evidence,
-                    review=self._reviews.get_review(
-                        workspace_id=result_set.workspace_id,
-                        document_id=item.document_id,
-                    ),
+                    review=review,
                 )
             )
         return tuple(cards)
 
+    def cards_for(self, result_set: ResearchResultSet) -> tuple[ResearchCard, ...]:
+        canonical = _canonical_result_set(result_set)
+        return self._cards_for_canonical(canonical)
+
     def accessible_report(self, result_set: ResearchResultSet) -> AccessibleResearchReport:
-        cards = self.cards_for(result_set)
-        return AccessibleResearchReport(
-            result_set_id=result_set.result_set_id,
-            workspace_id=result_set.workspace_id,
-            query=result_set.query,
-            created_at=result_set.created_at,
+        canonical = _canonical_result_set(result_set)
+        cards = self._cards_for_canonical(canonical)
+        report = AccessibleResearchReport(
+            result_set_id=canonical.result_set_id,
+            workspace_id=canonical.workspace_id,
+            query=canonical.query,
+            created_at=canonical.created_at,
             cards=cards,
             text=_render_accessible_report_text(
-                query=result_set.query,
-                created_at=result_set.created_at,
+                query=canonical.query,
+                created_at=canonical.created_at,
                 cards=cards,
             ),
         )
+        return canonical_accessible_report(report)
