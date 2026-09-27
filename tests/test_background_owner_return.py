@@ -134,7 +134,6 @@ def test_fresh_away_leaves_running_background_task_untouched(tmp_path: Path) -> 
     assert presence.observe().presence is OwnerPresence.ACTIVE
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=presence,
         clock=lambda: now,
@@ -147,7 +146,6 @@ def test_fresh_away_leaves_running_background_task_untouched(tmp_path: Path) -> 
     assert result.action is RunningBackgroundAction.CONTINUE
     assert result.reason == "owner_away"
     assert result.pause_applied is False
-    assert result.background_pause_owned is False
     assert runtime.cancel_calls == []
     assert queue.get(task_id).state is TaskState.RUNNING
     assert coordinator.sessions.get(task_id).is_active is True
@@ -159,7 +157,6 @@ def test_active_owner_delegates_durable_pause_to_canonical_coordinator(tmp_path:
     runtime = PausableRuntime()
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
         clock=lambda: now,
@@ -172,7 +169,6 @@ def test_active_owner_delegates_durable_pause_to_canonical_coordinator(tmp_path:
     assert result.action is RunningBackgroundAction.PAUSED
     assert result.reason == "owner_active"
     assert result.pause_applied is True
-    assert result.background_pause_owned is True
     assert runtime.cancel_calls == [(task_id, thread_id)]
     assert queue.get(task_id).state is TaskState.PAUSED
     session = coordinator.sessions.get(task_id)
@@ -189,7 +185,6 @@ def test_stale_presence_fails_closed_by_pausing_running_background_work(
     runtime = PausableRuntime()
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=_presence(
             audit,
@@ -206,7 +201,6 @@ def test_stale_presence_fails_closed_by_pausing_running_background_work(
 
     assert result.action is RunningBackgroundAction.PAUSED
     assert result.reason == "owner_presence_untrusted"
-    assert result.background_pause_owned is True
     assert queue.get(task_id).state is TaskState.PAUSED
     assert runtime.cancel_calls == [(task_id, thread_id)]
 
@@ -223,7 +217,6 @@ def test_physical_presence_api_failure_fails_closed_by_pausing(tmp_path: Path) -
     )
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=observer,
         clock=lambda: now,
@@ -251,7 +244,6 @@ def test_task_advancing_before_pause_is_not_overwritten(tmp_path: Path) -> None:
     runtime = PausableRuntime()
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
         clock=lambda: now,
@@ -272,7 +264,6 @@ def test_wrong_thread_identity_does_not_reach_runtime_cancel(tmp_path: Path) -> 
     runtime = PausableRuntime()
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
         clock=lambda: now,
@@ -299,7 +290,6 @@ def test_runtime_rejecting_pause_leaves_running_state_and_returns_not_active(
     runtime = PausableRuntime(accepted=False)
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
         clock=lambda: now,
@@ -311,7 +301,6 @@ def test_runtime_rejecting_pause_leaves_running_state_and_returns_not_active(
 
     assert result.action is RunningBackgroundAction.NOT_ACTIVE
     assert result.pause_applied is False
-    assert result.background_pause_owned is False
     assert queue.get(task_id).state is TaskState.RUNNING
     assert runtime.cancel_calls == [(task_id, thread_id)]
 
@@ -333,12 +322,11 @@ def test_presence_freshness_configuration_is_bounded(
     error_type: type[Exception],
 ) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
-    queue, audit, coordinator, _task_id, _thread_id = _running_runtime_state(tmp_path)
+    _queue, audit, coordinator, _task_id, _thread_id = _running_runtime_state(tmp_path)
 
     with pytest.raises(error_type):
         WindowsBackgroundOwnerReturnController(
             coordinator=coordinator,
-            queue=queue,
             audit=audit,
             presence=_presence(audit, presence=OwnerPresence.AWAY, observed_at=now),
             max_presence_age_seconds=max_age,  # type: ignore[arg-type]
@@ -369,7 +357,6 @@ def test_foreground_running_task_without_background_provenance_is_never_paused(
     runtime = PausableRuntime()
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
         clock=lambda: now,
@@ -409,7 +396,6 @@ def test_presence_from_different_audit_store_cannot_authorize_continue(
     with pytest.raises(ValueError, match="canonical AuditLog"):
         WindowsBackgroundOwnerReturnController(
             coordinator=coordinator,
-            queue=queue,
             audit=audit,
             presence=foreign_presence,
             clock=lambda: now,
@@ -453,7 +439,6 @@ def test_runtime_start_before_background_permission_cannot_prove_background_orig
     runtime = PausableRuntime()
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
         clock=lambda: now,
@@ -510,7 +495,6 @@ def test_foreign_runtime_start_after_permission_cannot_prove_background_origin(
     runtime = PausableRuntime()
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
-        queue=queue,
         audit=audit,
         presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
         clock=lambda: now,
@@ -527,116 +511,3 @@ def test_foreign_runtime_start_after_permission_cannot_prove_background_origin(
 
     assert queue.get(task.task_id).state is TaskState.RUNNING
     assert runtime.cancel_calls == []
-
-
-def test_owner_return_pause_marker_binds_exact_task_event(tmp_path: Path) -> None:
-    now = datetime(2030, 1, 1, tzinfo=UTC)
-    queue, audit, coordinator, task_id, thread_id = _running_runtime_state(tmp_path)
-    runtime = PausableRuntime()
-    controller = WindowsBackgroundOwnerReturnController(
-        coordinator=coordinator,
-        queue=queue,
-        audit=audit,
-        presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
-        clock=lambda: now,
-    )
-
-    result = asyncio.run(
-        controller.reconcile(runtime=runtime, task_id=task_id, thread_id=thread_id)
-    )
-
-    assert result.background_pause_owned is True
-    with queue.store.connection() as conn:
-        row = conn.execute(
-            "SELECT event_id, previous_state, new_state FROM task_events "
-            "WHERE task_id = ? ORDER BY event_id DESC LIMIT 1",
-            (task_id,),
-        ).fetchone()
-    assert row is not None
-    markers = [
-        event
-        for event in audit.list_for(entity_type="task", entity_id=task_id)
-        if event.event_type == "background.dispatch_paused"
-    ]
-    assert len(markers) == 1
-    assert markers[0].payload == {
-        "phase": "owner_return",
-        "reason": "owner_active",
-        "task_event_id": int(row["event_id"]),
-    }
-    assert row["previous_state"] == TaskState.RUNNING.value
-    assert row["new_state"] == TaskState.PAUSED.value
-
-
-class InterveningRePauseCoordinator(TaskRuntimeCoordinator):
-    async def pause(self, runtime, *, task_id: str, thread_id: str) -> bool:
-        applied = await super().pause(
-            runtime,
-            task_id=task_id,
-            thread_id=thread_id,
-        )
-        if applied:
-            self._queue.transition(task_id, TaskState.READY)
-            self._queue.transition(task_id, TaskState.PAUSED)
-        return applied
-
-
-def test_intervening_repause_is_not_claimed_as_background_owned(tmp_path: Path) -> None:
-    now = datetime(2030, 1, 1, tzinfo=UTC)
-    store = SQLiteStore(tmp_path / "repaused.db")
-    store.initialize()
-    queue = TaskQueue(store)
-    audit = AuditLog(store)
-    coordinator = InterveningRePauseCoordinator(
-        queue,
-        audit,
-        recovery_owner_id="repaused-test",
-    )
-    task = queue.create(workspace_id="living", agent_id="nika")
-    queue.transition(task.task_id, TaskState.READY)
-    queue.transition(task.task_id, TaskState.RUNNING)
-    thread_id = f"background-{task.task_id}"
-    coordinator.sessions.record_active(
-        task_id=task.task_id,
-        runtime_id=PausableRuntime.runtime_id,
-        thread_id=thread_id,
-        resume_token="resume-token",
-    )
-    audit.append(
-        event_type="background.dispatch_permitted",
-        entity_type="task",
-        entity_id=task.task_id,
-        payload={"work_kind": "reading_research", "resumed": False},
-    )
-    audit.append(
-        event_type="runtime.started",
-        entity_type="task",
-        entity_id=task.task_id,
-        payload={"runtime_id": PausableRuntime.runtime_id, "thread_id": thread_id},
-    )
-    runtime = PausableRuntime()
-    controller = WindowsBackgroundOwnerReturnController(
-        coordinator=coordinator,
-        queue=queue,
-        audit=audit,
-        presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
-        clock=lambda: now,
-    )
-
-    result = asyncio.run(
-        controller.reconcile(
-            runtime=runtime,
-            task_id=task.task_id,
-            thread_id=thread_id,
-        )
-    )
-
-    assert result.pause_applied is True
-    assert result.background_pause_owned is False
-    assert queue.get(task.task_id).state is TaskState.PAUSED
-    markers = [
-        event
-        for event in audit.list_for(entity_type="task", entity_id=task.task_id)
-        if event.event_type == "background.dispatch_paused"
-    ]
-    assert markers == []
