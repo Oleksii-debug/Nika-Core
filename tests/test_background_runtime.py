@@ -1,15 +1,13 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+import asyncio
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
 
 from nika_core.background_life import BackgroundAction, BackgroundWorkKind, OwnerPresence
-from nika_core.background_runtime import (
-    BackgroundDispatchGuard,
-    OwnerPresenceObservation,
-)
+from nika_core.background_runtime import BackgroundDispatchGuard, OwnerPresenceObservation
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
@@ -98,8 +96,7 @@ def _guard(
     return guard, queue, audit, resources
 
 
-@pytest.mark.asyncio
-async def test_three_fresh_away_observations_dispatch_exactly_once(tmp_path: Path) -> None:
+def test_three_fresh_away_observations_dispatch_exactly_once(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
     guard, queue, audit, resources = _guard(
@@ -118,10 +115,12 @@ async def test_three_fresh_away_observations_dispatch_exactly_once(tmp_path: Pat
         calls.append("run")
         return {"ok": True}
 
-    result = await guard.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.READING_RESEARCH,
-        effect=effect,
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.READING_RESEARCH,
+            effect=effect,
+        )
     )
 
     assert result.action is BackgroundAction.RUN
@@ -137,8 +136,7 @@ async def test_three_fresh_away_observations_dispatch_exactly_once(tmp_path: Pat
     ]
 
 
-@pytest.mark.asyncio
-async def test_owner_active_preflight_durably_pauses_without_effect(tmp_path: Path) -> None:
+def test_owner_active_preflight_durably_pauses_without_effect(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
     guard, queue, _audit, _resources = _guard(
@@ -154,10 +152,12 @@ async def test_owner_active_preflight_durably_pauses_without_effect(tmp_path: Pa
         called = True
         return None
 
-    result = await guard.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.SELF_TEST,
-        effect=effect,
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            effect=effect,
+        )
     )
 
     assert result.action is BackgroundAction.PAUSE
@@ -166,8 +166,7 @@ async def test_owner_active_preflight_durably_pauses_without_effect(tmp_path: Pa
     assert queue.get(task_id).state is TaskState.PAUSED
 
 
-@pytest.mark.asyncio
-async def test_owner_return_between_preflight_and_effect_recheck_blocks_dispatch(
+def test_owner_return_between_preflight_and_effect_recheck_blocks_dispatch(
     tmp_path: Path,
 ) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
@@ -185,10 +184,12 @@ async def test_owner_return_between_preflight_and_effect_recheck_blocks_dispatch
     async def effect() -> object:
         raise AssertionError("effect must not run")
 
-    result = await guard.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.UNFINISHED_WORK,
-        effect=effect,
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.UNFINISHED_WORK,
+            effect=effect,
+        )
     )
 
     assert result.action is BackgroundAction.PAUSE
@@ -196,10 +197,7 @@ async def test_owner_return_between_preflight_and_effect_recheck_blocks_dispatch
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
 
 
-@pytest.mark.asyncio
-async def test_owner_return_after_resource_grant_releases_capacity_and_pauses(
-    tmp_path: Path,
-) -> None:
+def test_owner_return_at_effect_commit_blocks_dispatch(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
     guard, queue, _audit, resources = _guard(
@@ -216,10 +214,12 @@ async def test_owner_return_after_resource_grant_releases_capacity_and_pauses(
     async def effect() -> object:
         raise AssertionError("effect must not run")
 
-    result = await guard.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.EVIDENCE_VERIFICATION,
-        effect=effect,
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.EVIDENCE_VERIFICATION,
+            effect=effect,
+        )
     )
 
     assert result.action is BackgroundAction.PAUSE
@@ -227,31 +227,33 @@ async def test_owner_return_after_resource_grant_releases_capacity_and_pauses(
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
 
 
-@pytest.mark.asyncio
-async def test_resource_pressure_race_at_final_admission_defers_without_effect(
+def test_resource_pressure_race_at_final_admission_defers_without_effect(
     tmp_path: Path,
 ) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
-    resources = SequenceResourceObserver([10.0, 10.0, 95.0])
+    resource_observer = SequenceResourceObserver([10.0, 10.0, 10.0, 95.0])
     guard, queue, _audit, manager = _guard(
         store=store,
         observations=[
             _obs(30, OwnerPresence.AWAY, now=now),
             _obs(31, OwnerPresence.AWAY, now=now),
+            _obs(32, OwnerPresence.AWAY, now=now),
         ],
         now=now,
-        resource_observer=resources,
+        resource_observer=resource_observer,
     )
     task_id = _ready_task(queue)
 
     async def effect() -> object:
         raise AssertionError("effect must not run")
 
-    result = await guard.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.READING_RESEARCH,
-        effect=effect,
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.READING_RESEARCH,
+            effect=effect,
+        )
     )
 
     assert result.action is BackgroundAction.DEFER
@@ -260,8 +262,7 @@ async def test_resource_pressure_race_at_final_admission_defers_without_effect(
     assert manager.active_count(scope="background_life", owner_id="living-agent") == 0
 
 
-@pytest.mark.asyncio
-async def test_stale_presence_fails_closed_and_records_only_error_type(tmp_path: Path) -> None:
+def test_stale_presence_fails_closed_and_records_only_error_type(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
     guard, queue, audit, _resources = _guard(
@@ -274,10 +275,12 @@ async def test_stale_presence_fails_closed_and_records_only_error_type(tmp_path:
     async def effect() -> object:
         raise AssertionError("effect must not run")
 
-    result = await guard.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.SELF_TEST,
-        effect=effect,
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            effect=effect,
+        )
     )
 
     assert result.reason == "owner_presence_untrusted"
@@ -291,8 +294,7 @@ async def test_stale_presence_fails_closed_and_records_only_error_type(tmp_path:
     assert "error" not in rejected[-1].payload
 
 
-@pytest.mark.asyncio
-async def test_wrong_presence_source_fails_closed(tmp_path: Path) -> None:
+def test_wrong_presence_source_fails_closed(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
     guard, queue, _audit, _resources = _guard(
@@ -312,18 +314,19 @@ async def test_wrong_presence_source_fails_closed(tmp_path: Path) -> None:
     async def effect() -> object:
         raise AssertionError("effect must not run")
 
-    result = await guard.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.SELF_TEST,
-        effect=effect,
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            effect=effect,
+        )
     )
 
     assert result.action is BackgroundAction.PAUSE
     assert queue.get(task_id).state is TaskState.PAUSED
 
 
-@pytest.mark.asyncio
-async def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
+def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
     tmp_path: Path,
 ) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
@@ -338,10 +341,12 @@ async def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
     async def never() -> object:
         raise AssertionError("effect must not run")
 
-    first_result = await first.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
-        effect=never,
+    first_result = asyncio.run(
+        first.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
+            effect=never,
+        )
     )
     assert first_result.action is BackgroundAction.PAUSE
     assert queue.get(task_id).state is TaskState.PAUSED
@@ -351,10 +356,12 @@ async def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
         observations=[_obs(60, OwnerPresence.AWAY, now=now)],
         now=now,
     )
-    replay_result = await replay.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
-        effect=never,
+    replay_result = asyncio.run(
+        replay.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
+            effect=never,
+        )
     )
     assert replay_result.reason == "owner_presence_untrusted"
     assert queue.get(task_id).state is TaskState.PAUSED
@@ -374,10 +381,12 @@ async def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
         calls.append("resumed")
         return "ok"
 
-    resumed_result = await resumed.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
-        effect=effect,
+    resumed_result = asyncio.run(
+        resumed.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
+            effect=effect,
+        )
     )
 
     assert resumed_result.executed is True
@@ -385,8 +394,7 @@ async def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
     assert queue.get(task_id).state is TaskState.READY
 
 
-@pytest.mark.asyncio
-async def test_timestamp_regression_is_rejected_even_when_sequence_advances(
+def test_timestamp_regression_is_rejected_even_when_sequence_advances(
     tmp_path: Path,
 ) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
@@ -401,10 +409,12 @@ async def test_timestamp_regression_is_rejected_even_when_sequence_advances(
     async def never() -> object:
         raise AssertionError("effect must not run")
 
-    await first.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.SELF_TEST,
-        effect=never,
+    asyncio.run(
+        first.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            effect=never,
+        )
     )
 
     regressed, _, _, _ = _guard(
@@ -412,18 +422,19 @@ async def test_timestamp_regression_is_rejected_even_when_sequence_advances(
         observations=[_obs(71, OwnerPresence.AWAY, now=now, age_seconds=2.0)],
         now=now,
     )
-    result = await regressed.dispatch(
-        task_id=task_id,
-        work_kind=BackgroundWorkKind.SELF_TEST,
-        effect=never,
+    result = asyncio.run(
+        regressed.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.SELF_TEST,
+            effect=never,
+        )
     )
 
     assert result.reason == "owner_presence_untrusted"
     assert queue.get(task_id).state is TaskState.PAUSED
 
 
-@pytest.mark.asyncio
-async def test_effect_exception_still_releases_resource_grant(tmp_path: Path) -> None:
+def test_effect_exception_still_releases_resource_grant(tmp_path: Path) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
     store = _store(tmp_path)
     guard, queue, _audit, resources = _guard(
@@ -441,10 +452,12 @@ async def test_effect_exception_still_releases_resource_grant(tmp_path: Path) ->
         raise RuntimeError("boom")
 
     with pytest.raises(RuntimeError, match="boom"):
-        await guard.dispatch(
-            task_id=task_id,
-            work_kind=BackgroundWorkKind.EVIDENCE_VERIFICATION,
-            effect=effect,
+        asyncio.run(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.EVIDENCE_VERIFICATION,
+                effect=effect,
+            )
         )
 
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
@@ -466,5 +479,18 @@ def test_presence_observation_requires_exact_utc_carrier() -> None:
             source_id="source",
             sequence=1,
             presence=OwnerPresence.AWAY,
-            observed_at=datetime(2030, 1, 1).astimezone(),
+            observed_at=datetime(2030, 1, 1, tzinfo=timezone(timedelta(hours=1))),
+        )
+
+
+def test_guard_rejects_negative_future_skew(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with pytest.raises(ValueError, match="non-negative"):
+        BackgroundDispatchGuard(
+            queue=TaskQueue(store),
+            audit=AuditLog(store),
+            resources=ResourceManager(store, SequenceResourceObserver()),
+            presence=SequencePresence([]),
+            source_id="win32-owner-presence",
+            max_future_skew_seconds=-0.1,
         )
