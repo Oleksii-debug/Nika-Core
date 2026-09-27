@@ -18,6 +18,8 @@ from nika_core.toolsmith.contracts import RecoveryState
 class WorkerRecoveryDisposition(StrEnum):
     RECOVERED = "recovered"
     BLOCKED_MISSING_STATE = "blocked_missing_state"
+    BLOCKED_INSPECTION_FAILED = "blocked_inspection_failed"
+    BLOCKED_RECOVERY_FAILED = "blocked_recovery_failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,7 +62,19 @@ class ProductFactoryWorkerRecovery:
                 f"component {component_id} must be running before worker recovery"
             )
 
-        state = await self.worker.inspect(record.request.work_id)
+        try:
+            state = await self.worker.inspect(record.request.work_id)
+        except Exception:  # noqa: BLE001 - isolate one external worker boundary failure
+            blocked = coordinator.block(
+                component_id,
+                "worker recovery inspection failed; host reconciliation required",
+            )
+            return WorkerRecoveryOutcome(
+                component_id=component_id,
+                disposition=WorkerRecoveryDisposition.BLOCKED_INSPECTION_FAILED,
+                record=blocked,
+                recovery_state=None,
+            )
         if state is None:
             blocked = coordinator.block(
                 component_id,
@@ -73,7 +87,19 @@ class ProductFactoryWorkerRecovery:
                 recovery_state=None,
             )
 
-        envelope = await self.worker.recover(record.request, state)
+        try:
+            envelope = await self.worker.recover(record.request, state)
+        except Exception:  # noqa: BLE001 - isolate one external worker boundary failure
+            blocked = coordinator.block(
+                component_id,
+                "worker recovery attempt failed; host reconciliation required",
+            )
+            return WorkerRecoveryOutcome(
+                component_id=component_id,
+                disposition=WorkerRecoveryDisposition.BLOCKED_RECOVERY_FAILED,
+                record=blocked,
+                recovery_state=state,
+            )
         updated = coordinator.record_result(envelope)
         return WorkerRecoveryOutcome(
             component_id=component_id,
