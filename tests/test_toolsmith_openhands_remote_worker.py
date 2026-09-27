@@ -90,15 +90,19 @@ class Provider:
         self,
         endpoint: OpenHandsSandboxEndpoint | None = None,
         *,
+        acquire_error: Exception | None = None,
         release_error: Exception | None = None,
     ) -> None:
         self.endpoint = endpoint or _endpoint()
+        self.acquire_error = acquire_error
         self.release_error = release_error
         self.acquired = []
         self.released = []
 
     async def acquire(self, job):
         self.acquired.append(job.job_id)
+        if self.acquire_error is not None:
+            raise self.acquire_error
         return self.endpoint
 
     async def release(self, job, endpoint, *, succeeded: bool):
@@ -477,6 +481,28 @@ def test_remote_worker_rejects_stale_local_tree_before_acquiring_sandbox(tmp_pat
     assert not result.succeeded
     assert "tree evidence" in result.failure.message
     assert provider.acquired == []
+
+
+def test_acquisition_failure_redacts_untrusted_provider_diagnostics(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    provider = Provider(
+        acquire_error=ValueError("password=must-not-surface endpoint=https://private.invalid"),
+    )
+
+    result = _run(OpenHandsRemoteCodingWorker(provider, Runtime()).execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.failure.retryable is True
+    assert result.failure.message == (
+        "remote sandbox acquisition failed without trusted diagnostics"
+    )
+    assert "password" not in result.failure.message
+    assert result.recovery_state == RecoveryState("interrupted")
+    assert provider.released == []
 
 
 def test_release_failure_overrides_success_and_requires_manual_reconciliation(
