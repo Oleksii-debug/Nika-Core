@@ -109,17 +109,13 @@ class ProductFactoryProgramHost:
 
     def __post_init__(self) -> None:
         if (
-            not isinstance(self.owner_id, str)
-            or not self.owner_id.strip()
+            type(self.owner_id) is not str
+            or not self.owner_id
             or self.owner_id != self.owner_id.strip()
         ):
-            raise ValueError("owner_id must be canonical non-empty text")
-        if (
-            isinstance(self.lease_seconds, bool)
-            or not isinstance(self.lease_seconds, int)
-            or self.lease_seconds <= 0
-        ):
-            raise ValueError("lease_seconds must be a positive integer")
+            raise ValueError("owner_id must be exact canonical non-empty text")
+        if type(self.lease_seconds) is not int or self.lease_seconds <= 0:
+            raise ValueError("lease_seconds must be an exact positive integer")
         self._checkpoints = ProductFactoryCheckpointHost(self.store)
         self._ledger = self.idempotency or IdempotencyLedger(self.store)
         self._ownership = self.ownership or ProductFactoryWorkOwnership(self.store)
@@ -429,15 +425,11 @@ class ProductFactoryProgramHost:
         request = record.request
         operation_key = _operation_key(request)
         lease = self._acquire(request)
-        operation = self._ledger.get(operation_key)
+        try:
+            operation = self._ledger.get(operation_key)
 
-        if operation is None:
-            try:
+            if operation is None:
                 await semaphore.acquire()
-            except asyncio.CancelledError:
-                self._release_best_effort(lease)
-                raise
-            try:
                 try:
                     lease = self._reestablish_effect_authority(request, lease)
                     operation, created = self._reserve_effect(
@@ -445,30 +437,139 @@ class ProductFactoryProgramHost:
                         request=request,
                         lease=lease,
                     )
-                except Exception:
-                    self._release_best_effort(lease)
-                    raise
-                if not created:
-                    self._release_best_effort(lease)
-                    return _existing_operation_outcome(request, operation)
+                    if not created:
+                        return _existing_operation_outcome(request, operation)
+                    try:
+                        envelope = await self.worker.dispatch(request)
+                    except asyncio.CancelledError:
+                        self._mark_uncertain_with_status(operation_key, lease)
+                        raise
+                    except Exception as exc:  # noqa: BLE001
+                        durable_status, marker_detail = self._mark_uncertain_with_status(
+                            operation_key,
+                            lease,
+                        )
+                        return _outcome(
+                            request,
+                            coordinator,
+                            ProgramWorkDisposition.UNCERTAIN,
+                            durable_status,
+                            (
+                                "worker dispatch did not return trusted evidence: "
+                                f"{type(exc).__name__}{marker_detail}"
+                            ),
+                        )
+                finally:
+                    semaphore.release()
+                return self._record_worker_result(
+                    host_task_id=host_task_id,
+                    binding=binding,
+                    coordinator=coordinator,
+                    request=request,
+                    operation_key=operation_key,
+                    envelope=envelope,
+                    was_uncertain=False,
+                    lease=lease,
+                    release_lease=False,
+                )
+
+            if operation.task_id != host_task_id or operation.operation_type != _OPERATION_TYPE:
+                return _outcome(
+                    request,
+                    coordinator,
+                    ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                    operation.status,
+                    "worker operation belongs to a different Product Factory host task",
+                )
+            if operation.input_fingerprint != _request_fingerprint(request):
+                return _outcome(
+                    request,
+                    coordinator,
+                    ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                    operation.status,
+                    "worker operation fingerprint does not match durable request",
+                )
+            if operation.status is IdempotencyStatus.COMPLETED:
+                return _outcome(
+                    request,
+                    coordinator,
+                    ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                    operation.status,
+                    "completed worker operation is inconsistent with RUNNING coordinator state",
+                )
+
+            await semaphore.acquire()
+            try:
+                lease = self._reestablish_effect_authority(request, lease)
                 try:
-                    envelope = await self.worker.dispatch(request)
+                    state = await self.worker.inspect(request.work_id)
                 except asyncio.CancelledError:
-                    self._mark_uncertain_fenced(operation_key, lease)
-                    self._release_best_effort(lease)
+                    self._mark_uncertain_with_status(operation_key, lease)
                     raise
-                except Exception as exc:  # noqa: BLE001
-                    self._mark_uncertain_fenced(operation_key, lease)
-                    self._release_best_effort(lease)
+                except Exception as exc:  # noqa: BLE001 - isolate one external inspect failure
+                    durable_status, marker_detail = self._mark_uncertain_with_status(
+                        operation_key,
+                        lease,
+                    )
                     return _outcome(
                         request,
                         coordinator,
                         ProgramWorkDisposition.UNCERTAIN,
-                        IdempotencyStatus.UNCERTAIN,
-                        f"worker dispatch did not return trusted evidence: {type(exc).__name__}",
+                        durable_status,
+                        (
+                            "worker inspection did not return trusted state: "
+                            f"{type(exc).__name__}{marker_detail}"
+                        ),
+                    )
+                if state is None:
+                    before = coordinator.snapshot()
+                    blocked = coordinator.block(
+                        request.component_id,
+                        "worker recovery state is unavailable; explicit reconciliation required",
+                    )
+                    try:
+                        self._save_and_mark_uncertain(
+                            host_task_id=host_task_id,
+                            binding=binding,
+                            coordinator=coordinator,
+                            operation_key=operation_key,
+                            lease=lease,
+                        )
+                    except Exception:
+                        coordinator.restore(before)
+                        raise
+                    return ProgramWorkOutcome(
+                        component_id=request.component_id,
+                        work_id=request.work_id,
+                        disposition=ProgramWorkDisposition.BLOCKED_MISSING_WORKER_STATE,
+                        state=blocked.state,
+                        operation_status=self._durable_operation_status(operation_key),
+                        detail="worker state is missing; duplicate execution is forbidden",
+                    )
+                lease = self._reestablish_effect_authority(request, lease)
+                try:
+                    envelope = await self.worker.recover(request, state)
+                except asyncio.CancelledError:
+                    self._mark_uncertain_with_status(operation_key, lease)
+                    raise
+                except Exception as exc:  # noqa: BLE001 - isolate one external recovery failure
+                    durable_status, marker_detail = self._mark_uncertain_with_status(
+                        operation_key,
+                        lease,
+                    )
+                    return _outcome(
+                        request,
+                        coordinator,
+                        ProgramWorkDisposition.UNCERTAIN,
+                        durable_status,
+                        (
+                            "worker recovery did not return trusted evidence: "
+                            f"{type(exc).__name__}{marker_detail}"
+                        ),
                     )
             finally:
                 semaphore.release()
+
             return self._record_worker_result(
                 host_task_id=host_task_id,
                 binding=binding,
@@ -476,111 +577,12 @@ class ProductFactoryProgramHost:
                 request=request,
                 operation_key=operation_key,
                 envelope=envelope,
-                was_uncertain=False,
+                was_uncertain=operation.status is IdempotencyStatus.UNCERTAIN,
                 lease=lease,
+                release_lease=False,
             )
-
-        if operation.task_id != host_task_id or operation.operation_type != _OPERATION_TYPE:
+        finally:
             self._release_best_effort(lease)
-            return _outcome(
-                request,
-                coordinator,
-                ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                operation.status,
-                "worker operation belongs to a different Product Factory host task",
-            )
-        if operation.input_fingerprint != _request_fingerprint(request):
-            self._release_best_effort(lease)
-            return _outcome(
-                request,
-                coordinator,
-                ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                operation.status,
-                "worker operation fingerprint does not match durable request",
-            )
-        if operation.status is IdempotencyStatus.COMPLETED:
-            self._release_best_effort(lease)
-            return _outcome(
-                request,
-                coordinator,
-                ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                operation.status,
-                "completed worker operation is inconsistent with RUNNING coordinator state",
-            )
-
-        async with semaphore:
-            lease = self._reestablish_effect_authority(request, lease)
-            try:
-                state = await self.worker.inspect(request.work_id)
-            except asyncio.CancelledError:
-                self._mark_uncertain_fenced(operation_key, lease)
-                self._release_best_effort(lease)
-                raise
-            except Exception as exc:  # noqa: BLE001 - isolate one external inspect failure
-                self._mark_uncertain_fenced(operation_key, lease)
-                self._release_best_effort(lease)
-                return _outcome(
-                    request,
-                    coordinator,
-                    ProgramWorkDisposition.UNCERTAIN,
-                    IdempotencyStatus.UNCERTAIN,
-                    f"worker inspection did not return trusted state: {type(exc).__name__}",
-                )
-            if state is None:
-                before = coordinator.snapshot()
-                blocked = coordinator.block(
-                    request.component_id,
-                    "worker recovery state is unavailable; explicit reconciliation required",
-                )
-                try:
-                    self._save_and_mark_uncertain(
-                        host_task_id=host_task_id,
-                        binding=binding,
-                        coordinator=coordinator,
-                        operation_key=operation_key,
-                        lease=lease,
-                    )
-                except Exception:
-                    coordinator.restore(before)
-                    self._release_best_effort(lease)
-                    raise
-                self._release_best_effort(lease)
-                return ProgramWorkOutcome(
-                    component_id=request.component_id,
-                    work_id=request.work_id,
-                    disposition=ProgramWorkDisposition.BLOCKED_MISSING_WORKER_STATE,
-                    state=blocked.state,
-                    operation_status=IdempotencyStatus.UNCERTAIN,
-                    detail="worker state is missing; duplicate execution is forbidden",
-                )
-            lease = self._reestablish_effect_authority(request, lease)
-            try:
-                envelope = await self.worker.recover(request, state)
-            except asyncio.CancelledError:
-                self._mark_uncertain_fenced(operation_key, lease)
-                self._release_best_effort(lease)
-                raise
-            except Exception as exc:  # noqa: BLE001 - isolate one external recovery failure
-                self._mark_uncertain_fenced(operation_key, lease)
-                self._release_best_effort(lease)
-                return _outcome(
-                    request,
-                    coordinator,
-                    ProgramWorkDisposition.UNCERTAIN,
-                    IdempotencyStatus.UNCERTAIN,
-                    f"worker recovery did not return trusted evidence: {type(exc).__name__}",
-                )
-
-        return self._record_worker_result(
-            host_task_id=host_task_id,
-            binding=binding,
-            coordinator=coordinator,
-            request=request,
-            operation_key=operation_key,
-            envelope=envelope,
-            was_uncertain=operation.status is IdempotencyStatus.UNCERTAIN,
-            lease=lease,
-        )
 
     def _record_worker_result(
         self,
@@ -593,6 +595,7 @@ class ProductFactoryProgramHost:
         envelope: WorkerResultEnvelope,
         was_uncertain: bool,
         lease: WorkOwnershipLease,
+        release_lease: bool = True,
     ) -> ProgramWorkOutcome:
         before = coordinator.snapshot()
         try:
@@ -623,24 +626,25 @@ class ProductFactoryProgramHost:
                     )
         except Exception as exc:  # noqa: BLE001 - external effect must become uncertain
             coordinator.restore(before)
-            marker_detail = ""
-            try:
-                self._mark_uncertain_fenced(operation_key, lease)
-            except Exception as marker_exc:  # noqa: BLE001 - PENDING remains replay-blocking
-                marker_detail = f"; uncertainty marker failed: {type(marker_exc).__name__}"
-            self._release_best_effort(lease)
+            durable_status, marker_detail = self._mark_uncertain_with_status(
+                operation_key,
+                lease,
+            )
+            if release_lease:
+                self._release_best_effort(lease)
             return _outcome(
                 request,
                 coordinator,
                 ProgramWorkDisposition.UNCERTAIN,
-                IdempotencyStatus.UNCERTAIN,
+                durable_status,
                 (
                     "worker evidence could not be durably reconciled: "
                     f"{type(exc).__name__}{marker_detail}"
                 ),
             )
 
-        self._release_best_effort(lease)
+        if release_lease:
+            self._release_best_effort(lease)
         disposition = (
             ProgramWorkDisposition.REVIEW_REQUIRED
             if updated.state is WorkState.REVIEW_REQUIRED
@@ -760,6 +764,28 @@ class ProductFactoryProgramHost:
             current = self._ledger._require_with_connection(connection, operation_key)
             if current.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain_with_connection(connection, operation_key)
+
+    def _durable_operation_status(
+        self,
+        operation_key: str,
+    ) -> IdempotencyStatus | None:
+        try:
+            current = self._ledger.get(operation_key)
+        except Exception:  # noqa: BLE001 - status must not be fabricated on read failure
+            return None
+        return current.status if current is not None else None
+
+    def _mark_uncertain_with_status(
+        self,
+        operation_key: str,
+        lease: WorkOwnershipLease,
+    ) -> tuple[IdempotencyStatus | None, str]:
+        marker_detail = ""
+        try:
+            self._mark_uncertain_fenced(operation_key, lease)
+        except Exception as exc:  # noqa: BLE001 - PENDING remains replay-blocking
+            marker_detail = f"; uncertainty marker failed: {type(exc).__name__}"
+        return self._durable_operation_status(operation_key), marker_detail
 
     def _acquire(self, request: ComponentWorkRequest) -> WorkOwnershipLease:
         try:
