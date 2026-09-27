@@ -1891,6 +1891,53 @@ def test_agent_server_rejects_terminal_failure_without_snapshot(
     assert "/api/file/archive" not in paths
 
 
+def test_agent_server_run_transport_failure_is_ambiguous_and_not_retried(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    endpoint = _endpoint()
+    run_attempts = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal run_attempts
+        if request.url.path == "/api/file/upload":
+            return httpx.Response(200, json={"success": True})
+        if request.url.path == "/api/conversations" and request.method == "POST":
+            payload = json.loads(request.content)
+            return httpx.Response(201, json={"id": payload["conversation_id"]})
+        if request.url.path.endswith("/events"):
+            return httpx.Response(200, json={"success": True})
+        if request.url.path.endswith("/run"):
+            run_attempts += 1
+            raise httpx.ReadTimeout("run response lost", request=request)
+        raise AssertionError(f"unexpected request {request.method} {request.url}")
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+        poll_interval_seconds=0.01,
+    )
+    worker = OpenHandsRemoteCodingWorker(
+        Provider(endpoint),
+        runtime,
+        acceptance_runtime=AcceptanceRuntime(),
+    )
+
+    result = _run(worker.execute(job))
+
+    assert run_attempts == 1
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.retryable is False
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert _run(runtime.cancel(job.job_id)) is False
+
+    recovered = _run(worker.recover(job, result.recovery_state))
+    assert recovered == result
+    assert run_attempts == 1
+
+
 def test_agent_server_post_run_status_failure_is_manual_reconcile_and_not_replayed(
     tmp_path: Path,
 ) -> None:
