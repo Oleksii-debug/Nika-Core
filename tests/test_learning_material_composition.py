@@ -120,7 +120,10 @@ def test_verified_receipt_freezes_exact_material_and_binds_receipt_digest() -> N
 
     package = _freeze(receipt, shards=shards)
 
-    assert package.verification_sha256 == receipt.verification_sha256
+    assert package.verification_sha256 == receipt.trusted_verification_sha256(
+        expected_verification_policy_sha256=K,
+        expected_required_checkers=(("integrity", I),),
+    )
     assert package.selection_policy_sha256 == H
     assert package.shards == tuple(sorted(shards, key=lambda item: item.split.value))
     assert (
@@ -275,7 +278,8 @@ def test_spoofable_receipt_sha_string_is_rejected_before_comparison() -> None:
         def __ne__(self, other: object) -> bool:
             return False
 
-    receipt = _receipt(_ForgedString(A))
+    receipt = _receipt(A)
+    object.__setattr__(receipt, "candidate_material_sha256", _ForgedString(A))
 
     with pytest.raises(
         LearningMaterialCompositionError,

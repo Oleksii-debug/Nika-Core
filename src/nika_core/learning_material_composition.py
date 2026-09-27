@@ -305,7 +305,10 @@ def freeze_verified_learning_package(
             "verification receipt candidate material does not match frozen material"
         )
 
-    verification_sha256 = canonical_verification.verification_sha256
+    verification_sha256 = canonical_verification.trusted_verification_sha256(
+        expected_verification_policy_sha256=expected_verification_policy_sha256,
+        expected_required_checkers=expected_required_checkers,
+    )
     return FrozenLearningPackage.freeze(
         package_id=package_id,
         package_version=package_version,
