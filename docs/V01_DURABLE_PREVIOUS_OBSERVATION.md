@@ -16,6 +16,13 @@ The loader intentionally has no process-local previous-observation field or cach
 can create a new `SQLiteStore`, `ResearchProfileRepository`, `NetworkResearchRepository`, and
 loader against the same database and recover the same result-set ID and result items.
 
+The received `PreviousObservationExpectation` is itself an authority-bearing input. `load()`
+requires the exact expectation carrier and reconstructs it through the canonical constructor
+before any SQLite lookup. Series/workspace/profile/source-set identities must be exact built-in
+strings, and profile/source-set versions must be exact positive built-in integers. Behavioral
+primitive subclasses and constructor-bypassed exact-type objects therefore cannot participate in
+identity equality or durable version comparisons.
+
 ## Fail-closed cases
 
 The loader raises `PreviousObservationError` with a stable code instead of supplying an empty
@@ -23,7 +30,8 @@ baseline that could be misclassified as `changed`:
 
 - `missing_baseline`: no durable history exists for the series.
 - `corrupt_baseline`: persisted definitions/result data cannot be decoded or violate structural
-  invariants.
+  invariants. Durable history profile/source-set versions must retain exact positive SQLite/Python
+  integer semantics; fractional REAL values are never coerced into trusted versions.
 - `identity_mismatch`: profile, source-set, task/series, source evidence, query, or workspace
   binding does not match the declared monitor identity.
 - `stale_version`: the latest durable observation belongs to another profile/source-set version.
@@ -50,8 +58,10 @@ values are persisted or rendered by this slice.
 
 Focused tests cover restart with an unchanged or changed source, missing baseline, malformed
 persisted evidence, wrong source identity, stale profile/source-set version, ambiguous duplicate
-latest observations, and cross-workspace result-set substitution. HUMAN_TESTED and NVDA_VERIFIED
-remain false; this backend slice does not claim human accessibility evidence.
+latest observations, cross-workspace result-set substitution, fractional durable version storage,
+behavioral identity/version primitive subclasses, and exact-type constructor-bypassed expectation
+objects. HUMAN_TESTED and NVDA_VERIFIED remain false; this backend slice does not claim human
+accessibility evidence.
 
 
 ## Source-definition and canonical task authority
@@ -61,12 +71,13 @@ completed `research.profile.run` TaskQueue record in the expected workspace and 
 pins the exact profile/source-set IDs and versions named by history and the caller.
 
 Source identity is also validated beyond source ID/kind. Local-file evidence locator must equal the
-current canonical local source locator. HTTP evidence may carry a redirect/final URL, so it is not
-compared blindly to the current final URL; instead the loader requires existing durable
-`research_http_attempts` provenance proving that the evidence locator was a final URL reached from
-the *current declared URL* before the baseline result was created. Retargeting the same HTTP
-source_id to another declared URL therefore invalidates the old baseline, while legitimate
-historical redirects for an unchanged declared URL remain valid.
+current canonical local source locator. HTTP evidence must first match the canonical
+`corpus_http_origins` / snapshot authority for the concrete result `document_id`; this prevents
+same-task A/B final-URL substitution between different documents. The loader additionally requires
+durable `research_http_attempts` provenance proving that this exact evidence locator was a
+successful final URL reached from the *current declared URL* before the baseline result was
+created. Retargeting the same HTTP source_id to another declared URL therefore invalidates the old
+baseline, while legitimate historical redirects for an unchanged declared URL remain valid.
 
 These checks reuse TaskQueue and Research repositories/tables. They add no cache, source registry,
 scheduler, change detector, or monitoring state authority.
