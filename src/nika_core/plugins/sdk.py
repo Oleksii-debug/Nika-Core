@@ -350,25 +350,35 @@ class PluginRuntime:
                 "runtime plugin manifest differs from registered manifest"
             )
 
+        publication_error: Exception | None = None
+        existing_active: PluginAdapter | None = None
         with self._registry_lock:
             current = self._factories.get(plugin_id)
             if current != (manifest, factory):
-                adapter.close()
-                raise PluginCompatibilityError(
+                publication_error = PluginCompatibilityError(
                     "plugin registration changed during activation; retry activation"
                 )
-            active = self._active.get(plugin_id)
-            if active is not None:
-                if self._effective_permissions[plugin_id] != selected_permissions:
-                    adapter.close()
-                    raise PermissionError(
-                        "active plugin permission set differs from requested activation"
-                    )
-                adapter.close()
-                return active
-            self._active[plugin_id] = adapter
-            self._effective_permissions[plugin_id] = selected_permissions
-            return adapter
+            else:
+                active = self._active.get(plugin_id)
+                if active is not None:
+                    if self._effective_permissions[plugin_id] != selected_permissions:
+                        publication_error = PermissionError(
+                            "active plugin permission set differs from requested activation"
+                        )
+                    else:
+                        existing_active = active
+                else:
+                    self._active[plugin_id] = adapter
+                    self._effective_permissions[plugin_id] = selected_permissions
+                    return adapter
+
+        # Adapter code is third-party execution and must never run under the registry lock.
+        adapter.close()
+        if publication_error is not None:
+            raise publication_error
+        if existing_active is None:
+            raise RuntimeError("plugin activation publication ended without a result")
+        return existing_active
 
     def effective_permissions(self, plugin_id: str) -> tuple[str, ...]:
         with self._registry_lock:
