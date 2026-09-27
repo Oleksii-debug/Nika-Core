@@ -101,7 +101,12 @@ class RuntimeRegistry:
 
     @staticmethod
     def _verified_runtime(registered: _RegisteredRuntime) -> AgentRuntimePort:
-        current = _snapshot_runtime(registered.runtime)
+        try:
+            current = _snapshot_runtime(registered.runtime)
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError(
+                "registered runtime identity or capabilities became invalid"
+            ) from exc
         if current != registered.descriptor:
             raise RuntimeError("registered runtime identity or capabilities changed")
         return registered.runtime
