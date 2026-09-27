@@ -24,10 +24,12 @@ from nika_core.toolsmith.contracts import (
     ProcessPolicy,
     RecoveryState,
     ResourceBudget,
-    TestEvidence as WorkerTestEvidence,
     WorkerFailure,
     WorkerFailureKind,
     WorkspaceLease,
+)
+from nika_core.toolsmith.contracts import (
+    TestEvidence as WorkerTestEvidence,
 )
 from nika_core.toolsmith.openhands_remote_worker import OpenHandsRemoteCodingWorker
 
