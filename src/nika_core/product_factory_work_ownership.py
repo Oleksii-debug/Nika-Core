@@ -231,14 +231,22 @@ def _load(
     ).fetchone()
     if row is None or row[0] is None:
         return None
+    owner_id = row[0]
     issued_at = _optional_time(row[2])
     expires_at = _optional_time(row[3])
-    if issued_at is None or expires_at is None or expires_at <= issued_at:
+    if (
+        type(owner_id) is not str
+        or not owner_id
+        or owner_id != owner_id.strip()
+        or issued_at is None
+        or expires_at is None
+        or expires_at <= issued_at
+    ):
         raise WorkOwnershipError("corrupt work ownership record")
     return WorkOwnershipLease(
         project_id,
         work_id,
-        str(row[0]),
+        owner_id,
         _strict_fence(row[1]),
         issued_at,
         expires_at,

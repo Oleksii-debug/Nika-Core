@@ -316,6 +316,35 @@ def test_acquire_fails_closed_without_overwriting_corrupt_active_row(
     assert row == ("worker-a", 7, issued_at, expires_at)
 
 
+def test_loaded_blob_owner_identity_fails_closed_instead_of_stringifying(tmp_path) -> None:
+    service, _ = _service(tmp_path)
+    database = tmp_path / "nika.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO product_factory_work_ownership "
+            "(project_id, work_id, owner_id, fence, issued_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "project-1",
+                "work-1",
+                sqlite3.Binary(b"worker-a"),
+                7,
+                "2026-09-11T12:00:00+00:00",
+                "2026-09-11T12:01:00+00:00",
+            ),
+        )
+
+    with pytest.raises(WorkOwnershipError, match="corrupt"):
+        service.current(project_id="project-1", work_id="work-1")
+    with pytest.raises(WorkOwnershipError, match="corrupt"):
+        service.assert_owner(
+            project_id="project-1",
+            work_id="work-1",
+            owner_id="b'worker-a'",
+            fence=7,
+        )
+
+
 def test_backward_clock_observation_and_assertion_fail_closed_without_mutation(tmp_path) -> None:
     service, clock = _service(tmp_path)
     lease = _acquire(service)
