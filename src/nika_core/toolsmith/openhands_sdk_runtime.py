@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.metadata
 import io
 import json
+import logging
 import pathlib
 import tarfile
 import tempfile
@@ -17,7 +19,13 @@ from nika_core.toolsmith.openhands_remote_worker import (
     OpenHandsSandboxEndpoint,
     RemoteFile,
 )
-from nika_core.toolsmith.workspace_security import TreeEvidence
+from nika_core.toolsmith.workspace_security import (
+    TreeEvidence,
+    WorkspacePathPolicy,
+    ensure_path_policy,
+)
+
+_LOGGER = logging.getLogger(__name__)
 
 _OPENHANDS_SDK_VERSION = "1.49.2"
 _MAX_SNAPSHOT_BYTES = 256 * 1024 * 1024
@@ -76,16 +84,28 @@ class OpenHandsSdkRemoteRuntime:
             await self.cancel(job.job_id)
             raise
 
-    async def cancel(self, job_id: str) -> None:
+    async def cancel(self, job_id: str) -> bool:
         with self._active_lock:
             conversation = self._active.get(job_id)
         if conversation is None:
-            return
+            return False
         try:
             await asyncio.to_thread(conversation.interrupt)
-        except Exception:
-            # Sandbox teardown by the provider is the outer cancellation fallback.
-            return
+        except Exception as exc:  # noqa: BLE001 - third-party SDK boundary
+            _LOGGER.warning(
+                "OpenHands interrupt failed; remote stop remains unverified (%s)",
+                type(exc).__name__,
+            )
+            return False
+
+        # interrupt() is only a request. A stop is considered proven only when the
+        # blocking SDK execution has unwound and removed its active conversation.
+        for _ in range(50):
+            await asyncio.sleep(0.1)
+            with self._active_lock:
+                if job_id not in self._active:
+                    return True
+        return False
 
     def _execute_sync(
         self,
@@ -140,8 +160,11 @@ class OpenHandsSdkRemoteRuntime:
             if conversation is not None:
                 try:
                     conversation.close()
-                except Exception:
-                    pass
+                except Exception as exc:  # noqa: BLE001 - third-party SDK boundary
+                    _LOGGER.warning(
+                        "OpenHands conversation close requires reconciliation (%s)",
+                        type(exc).__name__,
+                    )
 
     @staticmethod
     def _upload_source(
@@ -150,13 +173,36 @@ class OpenHandsSdkRemoteRuntime:
         source_root: pathlib.Path,
         evidence: TreeEvidence,
     ) -> None:
-        for item in evidence.files:
-            remote = pathlib.PurePosixPath(endpoint.working_dir) / pathlib.PurePosixPath(item.path)
-            result = workspace.file_upload(
-                source_root / pathlib.PurePosixPath(item.path), remote.as_posix()
-            )
-            if not getattr(result, "success", False):
-                raise OpenHandsSdkCompatibilityError("OpenHands source upload failed")
+        # The source tree may change after endpoint acquisition. Freeze each uploaded
+        # byte string only after revalidating it against the captured TreeEvidence.
+        with tempfile.TemporaryDirectory(prefix="nika-openhands-source-") as frozen_root_text:
+            frozen_root = pathlib.Path(frozen_root_text)
+            for item in evidence.files:
+                policy = WorkspacePathPolicy((item.path,))
+                source = ensure_path_policy(
+                    source_root,
+                    item.path,
+                    policy,
+                    must_exist=True,
+                )
+                if not source.is_file():
+                    raise OpenHandsSdkCompatibilityError(
+                        "OpenHands source upload encountered a non-file path"
+                    )
+                data = source.read_bytes()
+                if len(data) != item.size_bytes or hashlib.sha256(data).hexdigest() != item.sha256:
+                    raise OpenHandsSdkCompatibilityError(
+                        "OpenHands source upload no longer matches captured tree evidence"
+                    )
+
+                relative = pathlib.PurePosixPath(item.path)
+                frozen = frozen_root.joinpath(*relative.parts)
+                frozen.parent.mkdir(parents=True, exist_ok=True)
+                frozen.write_bytes(data)
+                remote = pathlib.PurePosixPath(endpoint.working_dir) / relative
+                result = workspace.file_upload(frozen, remote.as_posix())
+                if not getattr(result, "success", False):
+                    raise OpenHandsSdkCompatibilityError("OpenHands source upload failed")
 
 
 def _load_conversation_type() -> type[Any]:
@@ -172,7 +218,7 @@ def _load_conversation_type() -> type[Any]:
         )
     try:
         from openhands.sdk import Conversation
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - pinned optional dependency import boundary
         raise OpenHandsSdkCompatibilityError("OpenHands SDK import failed") from exc
     return Conversation
 
