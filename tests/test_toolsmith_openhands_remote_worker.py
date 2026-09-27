@@ -84,8 +84,14 @@ def _job(
 
 
 class Provider:
-    def __init__(self, endpoint: OpenHandsSandboxEndpoint | None = None) -> None:
+    def __init__(
+        self,
+        endpoint: OpenHandsSandboxEndpoint | None = None,
+        *,
+        release_error: Exception | None = None,
+    ) -> None:
         self.endpoint = endpoint or _endpoint()
+        self.release_error = release_error
         self.acquired = []
         self.released = []
 
@@ -95,6 +101,8 @@ class Provider:
 
     async def release(self, job, endpoint, *, succeeded: bool):
         self.released.append((job.job_id, endpoint.endpoint_id, succeeded))
+        if self.release_error is not None:
+            raise self.release_error
 
 
 class Runtime:
@@ -332,6 +340,28 @@ def test_remote_worker_rejects_stale_local_tree_before_acquiring_sandbox(tmp_pat
     assert not result.succeeded
     assert "tree evidence" in result.failure.message
     assert provider.acquired == []
+
+
+def test_release_failure_overrides_success_and_requires_manual_reconciliation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    provider = Provider(
+        release_error=RuntimeError("secret cleanup_token=must-not-surface"),
+    )
+    worker = OpenHandsRemoteCodingWorker(provider, Runtime())
+
+    result = _run(worker.execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.failure.retryable is False
+    assert "cleanup_token" not in result.failure.message
+    assert result.failure.message == "remote sandbox cleanup could not be proven"
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert _run(worker.inspect("job-1")) == RecoveryState("manual_reconcile_required")
+    assert provider.released == [("job-1", "sandbox-1", True)]
 
 
 def test_remote_worker_redacts_untrusted_engine_exception(tmp_path: Path) -> None:
