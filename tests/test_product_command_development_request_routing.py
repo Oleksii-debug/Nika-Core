@@ -49,6 +49,11 @@ def test_repository_development_intent_routes_to_product_factory(command: str) -
         "fix https://github.example.com/Oleksii-debug/Nika-Core/issues/654",
         "fix https://github.com.evil.example/Oleksii-debug/Nika-Core/issues/654",
         "fix https://github.com/Oleksii-debug/Nika-Core/issues/not-a-number",
+        "fix https://github.com/Oleksii-debug/Nika-Core/issues/654/delete",
+        "fix https://github.com/Oleksii-debug/Nika-Core/issues/654.evil",
+        "fix https://github.com/Oleksii-debug/Nika-Core/issues/654%2Fdelete",
+        "fix https://github.com/Oleksii-debug/Nika-Core/issues/654?delete=true",
+        "fix https://github.com/Oleksii-debug/Nika-Core/issues/654#fragment",
     ),
 )
 def test_incomplete_or_read_only_repository_intent_stays_agent_task(command: str) -> None:
