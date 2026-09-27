@@ -11,6 +11,17 @@ class _TextSubclass(str):
     pass
 
 
+def test_registry_rejects_incomplete_runtime_adapter() -> None:
+    class _IncompleteRuntime:
+        runtime_id = "incomplete"
+        capabilities = frozenset({RuntimeCapability.DETERMINISTIC_NO_LLM})
+
+    registry = RuntimeRegistry()
+
+    with pytest.raises(TypeError, match="AgentRuntimePort"):
+        registry.register(_IncompleteRuntime())  # type: ignore[arg-type]
+
+
 def test_registry_rejects_noncanonical_runtime_id_carriers() -> None:
     registry = RuntimeRegistry()
     runtime = ReferenceRuntime()
