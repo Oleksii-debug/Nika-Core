@@ -12,6 +12,7 @@ from nika_core.security.standing_permission import (
     PermissionContext,
     StandingPermissionBinding,
     StandingPermissionIntegrityError,
+    StandingPermissionPolicy,
     StandingPermissionScope,
     StandingPermissionStore,
     StandingPermissionUse,
@@ -57,6 +58,14 @@ class _IntentCarrier:
     risk = ToolRisk.READ_ONLY
 
 
+class _ProxyCarrier:
+    def __init__(self, value) -> None:
+        self._value = value
+
+    def __getattr__(self, name):
+        return getattr(self._value, name)
+
+
 def _forged_read_only_risk() -> _ForgedRisk:
     return _ForgedRisk(ToolRisk.READ_ONLY.value)
 
@@ -89,6 +98,98 @@ def _grant_with_forged_risk(permissions: StandingPermissionStore) -> None:
         permission_id="forged-risk",
         scope=_scope(risk_ceiling=_forged_read_only_risk()),  # type: ignore[arg-type]
     )
+
+
+def test_grant_rejects_duck_typed_scope_before_durable_write(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "duck-grant.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    scope = _scope(risk_ceiling=ToolRisk.READ_ONLY)
+
+    with pytest.raises(TypeError, match="exact StandingPermissionScope"):
+        permissions.grant(
+            permission_id="duck-scope",
+            scope=_ProxyCarrier(scope),  # type: ignore[arg-type]
+        )
+
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) AS count FROM standing_permissions"
+        ).fetchone()["count"] == 0
+
+
+def test_delegate_rejects_duck_typed_scope_before_child_write(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "duck-delegate.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    parent = _scope(risk_ceiling=ToolRisk.READ_ONLY)
+    permissions.grant(permission_id="perm-parent", scope=parent)
+
+    child = StandingPermissionScope(
+        subject_id="agent-child",
+        context=parent.context,
+        action_class=parent.action_class,
+        targets=parent.targets,
+        sites=parent.sites,
+        resources=parent.resources,
+        risk_ceiling=parent.risk_ceiling,
+        granted_at=parent.granted_at + timedelta(seconds=1),
+        expires_at=parent.expires_at,
+    )
+    with pytest.raises(TypeError, match="exact StandingPermissionScope"):
+        permissions.delegate(
+            parent_permission_id="perm-parent",
+            permission_id="perm-child",
+            scope=_ProxyCarrier(child),  # type: ignore[arg-type]
+            delegated_by_subject_id="agent-1",
+        )
+    assert permissions.get("perm-child") is None
+
+
+def test_authorize_rejects_duck_typed_use_carrier(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "duck-use.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    scope = _scope(risk_ceiling=ToolRisk.READ_ONLY)
+    permissions.grant(permission_id="perm-use", scope=scope)
+    use = StandingPermissionUse(
+        subject_id="agent-1",
+        context=scope.context,
+        intent=ActionIntent(
+            action_id="call-1",
+            tool_id="safe.read",
+            risk=ToolRisk.READ_ONLY,
+            target="target-1",
+        ),
+        resource_id="resource-1",
+    )
+
+    with pytest.raises(TypeError, match="exact StandingPermissionUse"):
+        permissions.authorize(
+            "perm-use",
+            _ProxyCarrier(use),  # type: ignore[arg-type]
+            now=scope.granted_at + timedelta(seconds=1),
+        )
+
+
+def test_policy_rejects_duck_typed_binding_carrier(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "duck-binding.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    binding = StandingPermissionBinding(
+        permission_id="perm-1",
+        subject_id="agent-1",
+        context=PermissionContext("user-1", "project-1", "task-1"),
+        target="target-1",
+        resource_id="resource-1",
+        network_host=None,
+    )
+
+    with pytest.raises(TypeError, match="exact StandingPermissionBinding"):
+        StandingPermissionPolicy(
+            permissions,
+            _ProxyCarrier(binding),  # type: ignore[arg-type]
+        )
 
 
 def test_hash_rebinding_text_cannot_enter_permission_context() -> None:
