@@ -48,6 +48,15 @@ class _CountingTransport:
     async def __call__(self, request: httpx.Request) -> httpx.Response:
         self.calls += 1
         self.tasks.append(asyncio.current_task())
+        if request.url.path == "/api/chat":
+            return httpx.Response(
+                200,
+                request=request,
+                json={
+                    "model": "qwen3:8b",
+                    "message": {"role": "assistant", "content": "authorized local result"},
+                },
+            )
         return httpx.Response(
             200,
             request=request,
@@ -90,6 +99,25 @@ def _settings(store: SQLiteStore) -> V01ModelSettings:
             "base_url": "https://api.example.test/v1",
             "credential_ref": "env:NIKA_PACKAGED_CLOUD_KEY",
             "private_data_allowed": True,
+            "timeout_seconds": 10,
+            "revision": 0,
+        }
+    )
+    assert result.status == "completed"
+    return settings
+
+
+def _local_settings(store: SQLiteStore) -> V01ModelSettings:
+    settings = V01ModelSettings(store)
+    result = settings.configure(
+        {
+            "schema_version": 1,
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": False,
             "timeout_seconds": 10,
             "revision": 0,
         }
@@ -354,10 +382,6 @@ def test_revoked_authority_fails_before_credentials_or_transport(
         task_id=task_id,
         now=now,
     )
-    permissions.revoke(
-        binding.permission_id,
-        revoked_at=now + timedelta(minutes=1),
-    )
     authorizer = StandingPermissionCloudEffectAuthorizer(
         permissions,
         lambda candidate: binding if candidate == authority else None,
@@ -378,6 +402,10 @@ def test_revoked_authority_fails_before_credentials_or_transport(
     ).for_task(task_id)
     assert runtime is not None
 
+    permissions.revoke(
+        binding.permission_id,
+        revoked_at=now + timedelta(minutes=1),
+    )
     result = asyncio.run(runtime.run(_runtime_request(task_id)))
 
     assert result.outcome is RuntimeOutcome.FAILED
@@ -425,3 +453,45 @@ def test_task_a_authority_cannot_authorize_task_b_runtime_request(
     assert result.output["model_error_code"] == "invalid_request"
     assert resolver.references == []
     assert transport.calls == 0
+
+
+def test_local_route_never_consults_cloud_authority_resolver(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _local_settings(store)
+    definitions = _definitions(store)
+    task_id = _task(store, settings)
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    authorizer = StandingPermissionCloudEffectAuthorizer(
+        permissions,
+        lambda _authority: None,
+    )
+    authority_calls: list[str] = []
+
+    def unexpected_authority(task: str) -> None:
+        authority_calls.append(task)
+        raise AssertionError("local route must not resolve cloud authority")
+
+    resolver = _CountingCredentialResolver()
+    transport = _CountingTransport()
+    runtime = _factory(
+        store=store,
+        settings=settings,
+        definitions=definitions,
+        resolver=resolver,
+        transport=transport,
+        authorizer=authorizer,
+        authority_resolver=unexpected_authority,
+    ).for_task(task_id)
+    assert runtime is not None
+
+    result = asyncio.run(runtime.run(_runtime_request(task_id)))
+
+    assert result.outcome is RuntimeOutcome.COMPLETED
+    assert result.output["provider_id"] == "ollama"
+    assert result.output["model"] == "qwen3:8b"
+    assert authority_calls == []
+    assert resolver.references == []
+    assert transport.calls == 1
