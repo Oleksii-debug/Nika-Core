@@ -6,9 +6,9 @@ import pytest
 from nika_core.product_factory_coding_worker_adapter import (
     CodingWorkerAdapterError,
     CodingWorkerComponentAdapter,
-    ComponentWorkerDisposition,
     CodingWorkerDispatchContext,
     CodingWorkerExecutionEvidence,
+    ComponentWorkerDisposition,
 )
 from nika_core.product_factory_coordinator import ProductFactoryCoordinator, WorkState
 from nika_core.product_factory_orchestration import (
@@ -16,7 +16,6 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
-from nika_core.toolsmith.openhands_remote_worker import OpenHandsRemoteCodingWorker
 from nika_core.toolsmith.contracts import (
     ChangedFile,
     CodingResult,
@@ -25,13 +24,12 @@ from nika_core.toolsmith.contracts import (
     ProcessPolicy,
     RecoveryState,
     ResourceBudget,
+    TestEvidence as WorkerTestEvidence,
     WorkerFailure,
     WorkerFailureKind,
     WorkspaceLease,
 )
-from nika_core.toolsmith.contracts import (
-    TestEvidence as WorkerTestEvidence,
-)
+from nika_core.toolsmith.openhands_remote_worker import OpenHandsRemoteCodingWorker
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
