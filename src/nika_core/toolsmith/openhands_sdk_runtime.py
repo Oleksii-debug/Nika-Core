@@ -116,7 +116,14 @@ class OpenHandsSdkRemoteRuntime:
             if active is None:
                 if job_id in self._cancelled_done:
                     self._cancelled_done.remove(job_id)
+                    # Retain the consumed terminal proof as a pending reservation. A
+                    # repeated cancel is then idempotently false, while any forbidden
+                    # direct reuse of the same runtime job identity still fails before
+                    # workspace acquisition.
+                    self._pending_cancel.add(job_id)
                     return True
+                if job_id in self._pending_cancel:
+                    return False
                 # A worker may reserve remote dispatch and be cancelled in the tiny
                 # scheduling window before execute() registers _active. Returning a
                 # proven reservation means a later execute for this job must fail
