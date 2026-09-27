@@ -558,6 +558,90 @@ def test_begin_effect_revalidates_already_confirmed_durable_result_without_mutat
     assert _state_value(memory, "task") == confirmed_state
 
 
+@pytest.mark.parametrize("entrypoint", ["begin_effect", "confirm"])
+def test_confirmed_entrypoints_revalidate_completion_deadline_without_mutation(
+    tmp_path: Path,
+    entrypoint: str,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    tampered_due = due + timedelta(hours=1)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True}, next_batch_not_before=due)
+    confirmed_state = _state_value(memory, "task")
+    tampered_result = {
+        "__nika_batch_cursor_completion_v1__": {
+            "result": {"ok": True},
+            "next_batch_not_before": tampered_due.isoformat(),
+        }
+    }
+
+    with store.connection() as conn:
+        conn.execute(
+            """
+            UPDATE idempotency_records
+            SET result_json = ?
+            WHERE operation_key = ?
+            """,
+            (json.dumps(tampered_result, sort_keys=True), grant.operation_key),
+        )
+
+    with pytest.raises(
+        BatchCursorStateError,
+        match="confirmed cursor deadline contradicts idempotency evidence",
+    ):
+        if entrypoint == "begin_effect":
+            cursor.begin_effect("target-0")
+        else:
+            cursor.confirm("target-0", {"ok": True}, next_batch_not_before=due)
+
+    record = ledger.require(grant.operation_key)
+    assert record.status is IdempotencyStatus.COMPLETED
+    assert record.result == tampered_result
+    assert _state_value(memory, "task") == confirmed_state
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.deadline_source == "completion"
+    assert intent.not_before == due.isoformat()
+
+
+def test_confirmed_entrypoint_preserves_later_scheduler_deadline_authority(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    scheduler_due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    cursor.schedule_inter_batch_wait(scheduler_due)
+
+    replay = cursor.begin_effect("target-0")
+
+    assert replay.execute is False
+    assert replay.reason == "already_confirmed"
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.deadline_source == "scheduler"
+    assert intent.not_before == scheduler_due.isoformat()
+
+
 def test_restore_rejects_nonfinite_uncertain_evidence_before_mutation(
     tmp_path: Path,
 ) -> None:

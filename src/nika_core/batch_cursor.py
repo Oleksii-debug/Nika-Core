@@ -493,38 +493,13 @@ class BatchCursor:
                 or durable.input_fingerprint != target.input_fingerprint
             ):
                 raise BatchCursorStateError("idempotency evidence belongs to different input")
-            if (
-                target.attempt_state is AttemptState.CONFIRMED
-                and durable.status is not IdempotencyStatus.COMPLETED
-            ):
-                raise BatchCursorStateError(
-                    "confirmed cursor target contradicts idempotency evidence"
+            if target.attempt_state is AttemptState.CONFIRMED:
+                self._require_confirmed_durable_consistency(
+                    target,
+                    record=durable,
+                    target_index=index,
+                    frontier_index=frontier_index,
                 )
-            if (
-                target.attempt_state is AttemptState.CONFIRMED
-                and durable.status is IdempotencyStatus.COMPLETED
-            ):
-                result, durable_due = _decode_completion_result(durable.result)
-                if not _canonical_json_equal(target.confirmed_result, result):
-                    raise BatchCursorStateError(
-                        "confirmed cursor result contradicts idempotency evidence"
-                    )
-                intent = self._state.next_scheduled_intent
-                if (
-                    index == frontier_index - 1
-                    and intent is not None
-                    and intent.kind is IntentKind.INTER_BATCH_WAIT
-                    and intent.deadline_source != "scheduler"
-                ):
-                    durable_not_before = (
-                        _as_utc(durable_due).isoformat()
-                        if durable_due is not None
-                        else None
-                    )
-                    if intent.not_before != durable_not_before:
-                        raise BatchCursorStateError(
-                            "confirmed cursor deadline contradicts idempotency evidence"
-                        )
             if index > frontier_index:
                 raise BatchCursorStateError(
                     "idempotency evidence exists beyond cursor execution frontier"
@@ -626,17 +601,51 @@ class BatchCursor:
         target: TargetCursor,
         *,
         record: Any | None = None,
+        target_index: int | None = None,
+        frontier_index: int | None = None,
     ) -> None:
         durable = record if record is not None else self._ledger.require(target.operation_key)
         if durable.status is not IdempotencyStatus.COMPLETED:
             raise BatchCursorStateError(
                 "confirmed cursor target contradicts idempotency evidence"
             )
-        durable_result, _ = _decode_completion_result(durable.result)
+        durable_result, durable_due = _decode_completion_result(durable.result)
         if not _canonical_json_equal(target.confirmed_result, durable_result):
             raise BatchCursorStateError(
                 "confirmed cursor result contradicts idempotency evidence"
             )
+
+        if target_index is None:
+            target_index = next(
+                index
+                for index, item in enumerate(self._state.targets)
+                if item is target
+            )
+        if frontier_index is None:
+            frontier_index = next(
+                (
+                    index
+                    for index, item in enumerate(self._state.targets)
+                    if item.attempt_state is not AttemptState.CONFIRMED
+                ),
+                len(self._state.targets),
+            )
+        intent = self._state.next_scheduled_intent
+        if (
+            target_index == frontier_index - 1
+            and intent is not None
+            and intent.kind is IntentKind.INTER_BATCH_WAIT
+            and intent.deadline_source != "scheduler"
+        ):
+            durable_not_before = (
+                _as_utc(durable_due).isoformat()
+                if durable_due is not None
+                else None
+            )
+            if intent.not_before != durable_not_before:
+                raise BatchCursorStateError(
+                    "confirmed cursor deadline contradicts idempotency evidence"
+                )
 
     def _confirm_from_durable(self, target: TargetCursor, result: dict[str, Any]) -> None:
         target.attempt_state = AttemptState.CONFIRMED
