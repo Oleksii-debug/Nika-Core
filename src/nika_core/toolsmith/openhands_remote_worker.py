@@ -372,7 +372,8 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                                 )
             except TimeoutError:
                 cancel_event.set()
-                stopped = await self._runtime.cancel(job.job_id)
+                stopped, stop_cancelled = await self._runtime_stop_proof(job.job_id)
+                task_cancelled = task_cancelled or stop_cancelled
                 state = RecoveryState(
                     "interrupted" if stopped and not applied else "manual_reconcile_required"
                 )
@@ -388,7 +389,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             except asyncio.CancelledError:
                 task_cancelled = True
                 cancel_event.set()
-                stopped = await self._runtime.cancel(job.job_id)
+                stopped, _ = await self._runtime_stop_proof(job.job_id)
                 state = RecoveryState(
                     "cancelled"
                     if stopped and not applied and not sandbox_acquisition_unresolved
@@ -611,7 +612,7 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     self._states[job_id] = RecoveryState("manual_reconcile_required")
             return
 
-        stopped = await self._runtime.cancel(job_id)
+        stopped, stop_cancelled = await self._runtime_stop_proof(job_id)
         async with self._lock:
             current = self._states.get(job_id)
             if current is None or current.phase != "cancel_requested":
@@ -619,6 +620,24 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             self._states[job_id] = RecoveryState(
                 "cancelled" if stopped else "manual_reconcile_required"
             )
+        if stop_cancelled:
+            raise asyncio.CancelledError
+
+    async def _runtime_stop_proof(self, job_id: str) -> tuple[bool, bool]:
+        try:
+            stopped = await self._runtime.cancel(job_id)
+        except asyncio.CancelledError:
+            return False, True
+        except Exception as exc:  # noqa: BLE001 - untrusted runtime boundary
+            _LOGGER.error(
+                "OpenHands runtime cancellation proof failed (%s)",
+                type(exc).__name__,
+            )
+            return False, False
+        if type(stopped) is not bool:
+            _LOGGER.error("OpenHands runtime returned a non-boolean cancellation proof")
+            return False, False
+        return stopped, False
 
     async def inspect(self, job_id: str) -> RecoveryState | None:
         async with self._lock:

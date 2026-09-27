@@ -147,11 +147,13 @@ class Runtime:
         files: tuple[RemoteFile, ...] | None = None,
         error: Exception | None = None,
         *,
-        cancel_verified: bool = True,
+        cancel_verified: object = True,
+        cancel_error: Exception | None = None,
     ):
         self.files = files
         self.error = error
         self.cancel_verified = cancel_verified
+        self.cancel_error = cancel_error
         self.calls = []
         self.cancelled = []
 
@@ -168,12 +170,22 @@ class Runtime:
 
     async def cancel(self, job_id):
         self.cancelled.append(job_id)
+        if self.cancel_error is not None:
+            raise self.cancel_error
         return self.cancel_verified
 
 
 class BlockingRuntime(Runtime):
-    def __init__(self) -> None:
-        super().__init__()
+    def __init__(
+        self,
+        *,
+        cancel_verified: object = True,
+        cancel_error: Exception | None = None,
+    ) -> None:
+        super().__init__(
+            cancel_verified=cancel_verified,
+            cancel_error=cancel_error,
+        )
         self.started = asyncio.Event()
         self.release = asyncio.Event()
 
@@ -1050,6 +1062,76 @@ def test_acceptance_cancel_pending_recovery_is_manual_reconciliation(
     assert result.failure.kind.value == "internal_error"
     assert result.failure.retryable is False
     assert result.recovery_state == RecoveryState("manual_reconcile_required")
+
+
+def test_runtime_cancel_exception_is_fail_closed_and_redacted(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime(
+        error=TimeoutError(),
+        cancel_error=RuntimeError("secret cancellation_token=must-not-surface"),
+    )
+    provider = Provider()
+
+    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "timeout"
+    assert result.failure.retryable is False
+    assert "cancellation_token" not in result.failure.message
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert runtime.cancelled == ["job-1"]
+    assert provider.released == [("job-1", "sandbox-1", False)]
+
+
+def test_non_boolean_runtime_cancel_proof_is_not_trusted(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    runtime = Runtime(error=TimeoutError(), cancel_verified=1)
+    provider = Provider()
+
+    result = _run(OpenHandsRemoteCodingWorker(provider, runtime).execute(_job(root)))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "timeout"
+    assert result.failure.retryable is False
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert provider.released == [("job-1", "sandbox-1", False)]
+
+
+def test_direct_cancel_runtime_failure_becomes_manual_reconciliation(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    runtime = BlockingRuntime(
+        cancel_error=RuntimeError("secret stop_token=must-not-surface"),
+    )
+    provider = Provider()
+    worker = OpenHandsRemoteCodingWorker(provider, runtime)
+    job = _job(root)
+
+    async def scenario():
+        execution = asyncio.create_task(worker.execute(job))
+        await asyncio.wait_for(runtime.started.wait(), timeout=2)
+        await worker.cancel(job.job_id)
+        state = await worker.inspect(job.job_id)
+        runtime.release.set()
+        result = await asyncio.wait_for(execution, timeout=2)
+        return state, result
+
+    state, result = _run(scenario())
+
+    assert state == RecoveryState("manual_reconcile_required")
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.failure.retryable is False
+    assert runtime.cancelled == ["job-1"]
+    assert provider.released == [("job-1", "sandbox-1", False)]
 
 
 def test_unverified_cancel_requires_manual_reconciliation(tmp_path: Path) -> None:
