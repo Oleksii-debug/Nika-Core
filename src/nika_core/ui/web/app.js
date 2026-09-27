@@ -598,18 +598,39 @@
 
   function applyModelRouteControls(disabled = false) {
     const route = modelInputs.route_kind?.value;
-    const local = route === "ollama";
+    const deterministic = route === "deterministic";
+    const foundry = route === "foundry_local";
+    const ollama = route === "ollama";
+    const api = route === "openai_compatible";
     if (modelInputs.route_kind) modelInputs.route_kind.disabled = disabled;
-    if (modelInputs.model) modelInputs.model.disabled = disabled;
-    if (modelInputs.base_url) modelInputs.base_url.disabled = disabled;
+    if (modelInputs.model) modelInputs.model.disabled = disabled || deterministic;
+    if (modelInputs.base_url) {
+      modelInputs.base_url.disabled = disabled || deterministic || foundry;
+    }
     if (modelInputs.timeout_seconds) modelInputs.timeout_seconds.disabled = disabled;
-    if (modelInputs.provider_id) modelInputs.provider_id.disabled = disabled || local;
-    if (modelInputs.credential_ref) modelInputs.credential_ref.disabled = disabled || local;
+    if (modelInputs.provider_id) {
+      modelInputs.provider_id.disabled = disabled || deterministic || foundry || ollama;
+    }
+    if (modelInputs.credential_ref) {
+      modelInputs.credential_ref.disabled = disabled || !api;
+    }
     if (modelInputs.private_data_allowed) {
-      modelInputs.private_data_allowed.disabled = disabled || local;
+      modelInputs.private_data_allowed.disabled = disabled || !api;
     }
     if (modelSave) modelSave.disabled = disabled;
-    if (local && !disabled) {
+    if (disabled) return;
+    if (deterministic) {
+      if (modelInputs.provider_id) modelInputs.provider_id.value = "";
+      if (modelInputs.model) modelInputs.model.value = "";
+      if (modelInputs.base_url) modelInputs.base_url.value = "";
+      if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
+      if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
+    } else if (foundry) {
+      if (modelInputs.provider_id) modelInputs.provider_id.value = "foundry-local";
+      if (modelInputs.base_url) modelInputs.base_url.value = "";
+      if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
+      if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
+    } else if (ollama) {
       if (modelInputs.provider_id) modelInputs.provider_id.value = "ollama";
       if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
       if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
@@ -624,10 +645,9 @@
     }
     if (snapshot.status !== "ready") return false;
     if (!Number.isSafeInteger(snapshot.revision) || snapshot.revision < 1) return false;
-    if (!["ollama", "openai_compatible"].includes(snapshot.route_kind)) return false;
-    if (typeof snapshot.provider_id !== "string" || !snapshot.provider_id.trim()) return false;
-    if (typeof snapshot.model !== "string" || !snapshot.model.trim()) return false;
-    if (typeof snapshot.base_url !== "string" || !snapshot.base_url.trim()) return false;
+    if (!["deterministic", "foundry_local", "ollama", "openai_compatible"].includes(snapshot.route_kind)) {
+      return false;
+    }
     if (
       typeof snapshot.timeout_seconds !== "number"
       || !Number.isFinite(snapshot.timeout_seconds)
@@ -636,12 +656,38 @@
     ) return false;
     if (typeof snapshot.private_data_allowed !== "boolean") return false;
     if (typeof snapshot.credential_configured !== "boolean") return false;
-    if (snapshot.route_kind === "ollama") {
-      return snapshot.provider_id === "ollama"
+    const text = (value) => typeof value === "string" && Boolean(value.trim());
+    if (snapshot.route_kind === "deterministic") {
+      return snapshot.provider_id === null
+        && snapshot.provider_kind === null
+        && snapshot.model === null
+        && snapshot.base_url === null
         && snapshot.credential_configured === false
         && snapshot.private_data_allowed === true;
     }
-    return snapshot.provider_id !== "ollama" && snapshot.credential_configured === true;
+    if (snapshot.route_kind === "foundry_local") {
+      return snapshot.provider_id === "foundry-local"
+        && snapshot.provider_kind === "local"
+        && text(snapshot.model)
+        && snapshot.base_url === null
+        && snapshot.credential_configured === false
+        && snapshot.private_data_allowed === true;
+    }
+    if (snapshot.route_kind === "ollama") {
+      return snapshot.provider_id === "ollama"
+        && snapshot.provider_kind === "local"
+        && text(snapshot.model)
+        && text(snapshot.base_url)
+        && snapshot.credential_configured === false
+        && snapshot.private_data_allowed === true;
+    }
+    return text(snapshot.provider_id)
+      && snapshot.provider_id !== "ollama"
+      && snapshot.provider_id !== "foundry-local"
+      && snapshot.provider_kind === "cloud"
+      && text(snapshot.model)
+      && text(snapshot.base_url)
+      && snapshot.credential_configured === true;
   }
 
   function defaultModelDraft() {
@@ -689,9 +735,9 @@
     if (!modelDirty) {
       modelRevision = snapshot.revision;
       modelInputs.route_kind.value = snapshot.route_kind;
-      modelInputs.provider_id.value = snapshot.provider_id;
-      modelInputs.model.value = snapshot.model;
-      modelInputs.base_url.value = snapshot.base_url;
+      modelInputs.provider_id.value = snapshot.provider_id ?? "";
+      modelInputs.model.value = snapshot.model ?? "";
+      modelInputs.base_url.value = snapshot.base_url ?? "";
       modelInputs.credential_ref.value = "";
       modelInputs.private_data_allowed.checked = snapshot.private_data_allowed;
       modelInputs.timeout_seconds.value = String(snapshot.timeout_seconds);
@@ -700,14 +746,33 @@
     const credentialNote = snapshot.route_kind === "openai_compatible"
       ? " Посилання на змінну середовища налаштовано, але навмисно не показується; для зміни API-маршруту введіть env:НАЗВА знову."
       : "";
+    let savedDescription;
+    if (snapshot.route_kind === "deterministic") {
+      savedDescription = "Детермінований режим без LLM.";
+    } else if (snapshot.route_kind === "foundry_local") {
+      savedDescription = `Foundry Local, ${snapshot.model}.`;
+    } else {
+      savedDescription = `${snapshot.provider_id}, ${snapshot.model}.`;
+    }
     modelStatus.textContent = modelDirty
       ? "Модель змінено, але ще не збережено."
-      : `Модель збережено для нових завдань: ${snapshot.provider_id}, ${snapshot.model}.${credentialNote}`;
+      : `Модель збережено для нових завдань: ${savedDescription}${credentialNote}`;
   }
 
   function updateModelRouteDraft() {
     const route = modelInputs.route_kind?.value;
-    if (route === "ollama") {
+    if (route === "deterministic") {
+      if (modelInputs.provider_id) modelInputs.provider_id.value = "";
+      if (modelInputs.model) modelInputs.model.value = "";
+      if (modelInputs.base_url) modelInputs.base_url.value = "";
+      if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
+      if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
+    } else if (route === "foundry_local") {
+      if (modelInputs.provider_id) modelInputs.provider_id.value = "foundry-local";
+      if (modelInputs.base_url) modelInputs.base_url.value = "";
+      if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
+      if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
+    } else if (route === "ollama") {
       if (modelInputs.provider_id) modelInputs.provider_id.value = "ollama";
       if (modelInputs.credential_ref) modelInputs.credential_ref.value = "";
       if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = true;
@@ -715,7 +780,9 @@
         modelInputs.base_url.value = "http://localhost:11434";
       }
     } else if (route === "openai_compatible") {
-      if (modelInputs.provider_id?.value === "ollama") modelInputs.provider_id.value = "";
+      if (["ollama", "foundry-local"].includes(modelInputs.provider_id?.value)) {
+        modelInputs.provider_id.value = "";
+      }
       if (modelInputs.base_url?.value === "http://localhost:11434") modelInputs.base_url.value = "";
       if (modelInputs.private_data_allowed) modelInputs.private_data_allowed.checked = false;
     }
@@ -740,14 +807,38 @@
     const model = modelInputs.model?.value.trim() || "";
     const baseUrl = modelInputs.base_url?.value.trim() || "";
     const timeout = Number(modelInputs.timeout_seconds?.value);
-    if (!["ollama", "openai_compatible"].includes(route)) {
+    if (!["deterministic", "foundry_local", "ollama", "openai_compatible"].includes(route)) {
       throw new Error("Виберіть тип маршруту моделі.");
     }
-    if (!model) throw new Error("Введіть назву моделі.");
-    if (!baseUrl) throw new Error("Введіть базову адресу постачальника.");
     if (!Number.isFinite(timeout) || timeout <= 0 || timeout > 600) {
       throw new Error("Тайм-аут моделі має бути числом від 1 до 600 секунд.");
     }
+    if (route === "deterministic") {
+      return {
+        revision: modelRevision,
+        route_kind: "deterministic",
+        provider_id: null,
+        model: null,
+        base_url: null,
+        credential_ref: null,
+        private_data_allowed: true,
+        timeout_seconds: timeout,
+      };
+    }
+    if (!model) throw new Error("Введіть назву моделі.");
+    if (route === "foundry_local") {
+      return {
+        revision: modelRevision,
+        route_kind: "foundry_local",
+        provider_id: "foundry-local",
+        model,
+        base_url: null,
+        credential_ref: null,
+        private_data_allowed: true,
+        timeout_seconds: timeout,
+      };
+    }
+    if (!baseUrl) throw new Error("Введіть базову адресу постачальника.");
     if (route === "ollama") {
       return {
         revision: modelRevision,
@@ -762,7 +853,7 @@
     }
     const provider = modelInputs.provider_id?.value.trim() || "";
     const credentialRef = modelInputs.credential_ref?.value.trim() || "";
-    if (!provider || provider === "ollama") {
+    if (!provider || ["ollama", "foundry-local"].includes(provider)) {
       throw new Error("Введіть окремий ідентифікатор постачальника API.");
     }
     if (!/^env:[A-Za-z_][A-Za-z0-9_]*$/.test(credentialRef)) {
