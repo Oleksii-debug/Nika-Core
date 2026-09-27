@@ -186,6 +186,7 @@ class StandingPermissionStore:
                 "CREATE TABLE IF NOT EXISTS standing_permission_schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            self._validate_schema_shape(conn, require_permissions=False)
             row = conn.execute(
                 "SELECT MAX(version) AS version, "
                 "typeof(MAX(version)) AS version_type "
@@ -232,29 +233,68 @@ class StandingPermissionStore:
             self._validate_schema_shape(conn)
 
     @staticmethod
-    def _validate_schema_shape(conn: sqlite3.Connection) -> None:
+    def _validate_schema_shape(
+        conn: sqlite3.Connection,
+        *,
+        require_permissions: bool = True,
+    ) -> None:
         expected = {
             "standing_permission_schema_migrations": (
-                ("version", "INTEGER", 1),
-                ("applied_at", "TEXT", 0),
-            ),
-            "standing_permissions": (
-                ("permission_id", "TEXT", 1),
-                ("parent_permission_id", "TEXT", 0),
-                ("scope_json", "TEXT", 0),
-                ("scope_fingerprint", "TEXT", 0),
-                ("revoked_at", "TEXT", 0),
+                ("version", "INTEGER", 0, 1),
+                ("applied_at", "TEXT", 1, 0),
             ),
         }
+        if require_permissions:
+            expected["standing_permissions"] = (
+                ("permission_id", "TEXT", 0, 1),
+                ("parent_permission_id", "TEXT", 0, 0),
+                ("scope_json", "TEXT", 1, 0),
+                ("scope_fingerprint", "TEXT", 1, 0),
+                ("revoked_at", "TEXT", 0, 0),
+            )
         for table_name, expected_columns in expected.items():
             rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
             actual = tuple(
-                (row["name"], str(row["type"]).upper(), int(row["pk"]))
+                (
+                    row["name"],
+                    str(row["type"]).upper(),
+                    int(row["notnull"]),
+                    int(row["pk"]),
+                )
                 for row in rows
             )
             if actual != expected_columns:
                 raise StandingPermissionIntegrityError(
                     f"standing permission schema shape is invalid for {table_name}"
+                )
+        if require_permissions:
+            foreign_keys = conn.execute(
+                "PRAGMA foreign_key_list(standing_permissions)"
+            ).fetchall()
+            actual_foreign_keys = tuple(
+                (
+                    row["table"],
+                    row["from"],
+                    row["to"],
+                    row["on_update"],
+                    row["on_delete"],
+                    row["match"],
+                )
+                for row in foreign_keys
+            )
+            expected_foreign_keys = (
+                (
+                    "standing_permissions",
+                    "parent_permission_id",
+                    "permission_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            )
+            if actual_foreign_keys != expected_foreign_keys:
+                raise StandingPermissionIntegrityError(
+                    "standing permission parent authority foreign key is invalid"
                 )
 
     def grant(
