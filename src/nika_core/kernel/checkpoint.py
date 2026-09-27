@@ -58,6 +58,7 @@ class CheckpointService:
     def save(self, *, task_id: str, stage: str, payload: dict[str, object]) -> Checkpoint:
         body = _canonical_json(payload)
         checksum = hashlib.sha256(body.encode("utf-8")).hexdigest()
+        public_payload = _decode_payload(body, checksum)
         checkpoint_id = str(uuid.uuid4())
         now = datetime.now(UTC).isoformat()
         with self.store.connection() as conn:
@@ -73,7 +74,7 @@ class CheckpointService:
                 """,
                 (checkpoint_id, task_id, stage, body, checksum, now),
             )
-        return Checkpoint(checkpoint_id, task_id, stage, dict(payload), checksum)
+        return Checkpoint(checkpoint_id, task_id, stage, public_payload, checksum)
 
     def latest(self, task_id: str) -> Checkpoint | None:
         with self.store.connection() as conn:

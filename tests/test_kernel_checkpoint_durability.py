@@ -179,3 +179,26 @@ def test_unicode_nested_payload_round_trips_after_restart(tmp_path: Path) -> Non
     assert loaded is not None
     assert loaded.checkpoint_id == saved.checkpoint_id
     assert loaded.payload == payload
+
+
+def test_save_return_matches_durable_canonical_payload_and_detaches_caller(
+    tmp_path: Path,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    nested = {"items": [1, 2]}
+    payload: dict[str, object] = {
+        "nested": nested,
+        "sequence": (1, 2),
+    }
+
+    saved = checkpoints.save(task_id=task_id, stage="snapshot", payload=payload)
+    nested["items"].append(3)
+
+    assert saved.payload == {
+        "nested": {"items": [1, 2]},
+        "sequence": [1, 2],
+    }
+    loaded = CheckpointService(store).latest(task_id)
+    assert loaded is not None
+    assert loaded.payload == saved.payload
+    assert loaded.checksum_sha256 == saved.checksum_sha256
