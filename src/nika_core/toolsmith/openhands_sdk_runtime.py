@@ -135,6 +135,8 @@ class OpenHandsAgentServerRuntime:
             )
         except asyncio.CancelledError:
             await self.cancel(job.job_id)
+            if not active.done.is_set():
+                await asyncio.to_thread(active.done.wait)
             raise
 
     async def cancel(self, job_id: str) -> bool:
