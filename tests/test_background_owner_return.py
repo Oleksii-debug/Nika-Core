@@ -26,15 +26,15 @@ from nika_core.windows_owner_presence import WindowsOwnerPresenceObserver
 
 
 class FakeLastInputApi:
-    def __init__(self, *, last_ticks: list[int], current_tick: int) -> None:
+    def __init__(self, *, last_ticks: list[int], current_ticks: list[int]) -> None:
         self._last_ticks = list(last_ticks)
-        self._current_tick = current_tick
+        self._current_ticks = list(current_ticks)
 
     def get_last_input_tick_ms(self) -> int:
         return self._last_ticks.pop(0)
 
     def get_tick_count64_ms(self) -> int:
-        return self._current_tick
+        return self._current_ticks.pop(0)
 
 
 class ExplodingLastInputApi:
@@ -109,9 +109,15 @@ def _presence(
     observed_at: datetime,
 ) -> WindowsOwnerPresenceObserver:
     if presence is OwnerPresence.AWAY:
-        api = FakeLastInputApi(last_ticks=[1_000, 1_000], current_tick=100_000)
+        api = FakeLastInputApi(
+            last_ticks=[1_000, 1_000, 1_000, 1_000],
+            current_ticks=[40_000, 100_000],
+        )
     else:
-        api = FakeLastInputApi(last_ticks=[99_500, 99_500], current_tick=100_000)
+        api = FakeLastInputApi(
+            last_ticks=[99_500, 99_500],
+            current_ticks=[100_000],
+        )
     return WindowsOwnerPresenceObserver(
         audit,
         away_after_seconds=60,
@@ -124,10 +130,12 @@ def test_fresh_away_leaves_running_background_task_untouched(tmp_path: Path) -> 
     now = datetime(2030, 1, 1, tzinfo=UTC)
     queue, audit, coordinator, task_id, thread_id = _running_runtime_state(tmp_path)
     runtime = PausableRuntime()
+    presence = _presence(audit, presence=OwnerPresence.AWAY, observed_at=now)
+    assert presence.observe().presence is OwnerPresence.ACTIVE
     controller = WindowsBackgroundOwnerReturnController(
         coordinator=coordinator,
         audit=audit,
-        presence=_presence(audit, presence=OwnerPresence.AWAY, observed_at=now),
+        presence=presence,
         clock=lambda: now,
     )
 
@@ -385,18 +393,13 @@ def test_presence_from_different_audit_store_cannot_authorize_continue(
         observed_at=now,
     )
     runtime = PausableRuntime()
-    controller = WindowsBackgroundOwnerReturnController(
-        coordinator=coordinator,
-        audit=audit,
-        presence=foreign_presence,
-        clock=lambda: now,
-    )
+    with pytest.raises(ValueError, match="canonical AuditLog"):
+        WindowsBackgroundOwnerReturnController(
+            coordinator=coordinator,
+            audit=audit,
+            presence=foreign_presence,
+            clock=lambda: now,
+        )
 
-    result = asyncio.run(
-        controller.reconcile(runtime=runtime, task_id=task_id, thread_id=thread_id)
-    )
-
-    assert result.action is RunningBackgroundAction.PAUSED
-    assert result.reason == "owner_presence_untrusted"
-    assert queue.get(task_id).state is TaskState.PAUSED
-    assert runtime.cancel_calls == [(task_id, thread_id)]
+    assert queue.get(task_id).state is TaskState.RUNNING
+    assert runtime.cancel_calls == []
