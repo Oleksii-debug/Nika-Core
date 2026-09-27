@@ -56,6 +56,7 @@ def _job(root: Path, work_id: str) -> CodingJob:
         process_policy=ProcessPolicy(("python",)),
         network_policy=NetworkPolicy(),
         resource_budget=ResourceBudget(30, 1024 * 1024, 8),
+        acceptance_commands=(),
         permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
     )
 
