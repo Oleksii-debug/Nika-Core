@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
@@ -9,6 +10,7 @@ from nika_core.product_factory_credentials import (
     CredentialBroker,
     CredentialBrokerError,
     SecretRef,
+    credential_authority_fingerprint,
 )
 from nika_core.product_factory_windows_credentials import (
     ProtectedCredentialStoreError,
@@ -47,12 +49,22 @@ def secret(generation: int = 1) -> SecretRef:
     )
 
 
+def _enroll(store: WindowsCredentialStore, reference: SecretRef) -> None:
+    store.bind_authority(
+        secret_ref=reference.secret_ref,
+        generation=reference.generation,
+        authority_fingerprint=credential_authority_fingerprint(reference),
+    )
+
+
 def test_windows_store_satisfies_broker_handle_and_revocation_contract() -> None:
     backend = FakePersistentWinVault()
     store = WindowsCredentialStore(backend)
     store.provision_secret("secret-a", 1, RAW_SECRET)
+    reference = secret()
+    _enroll(store, reference)
     broker = CredentialBroker(store)
-    broker.register_secret(secret(), now=NOW)
+    broker.register_secret(reference, now=NOW)
 
     lease = broker.issue_lease(
         project_id=PROJECT,
@@ -99,8 +111,10 @@ def test_broker_rotation_uses_preprovisioned_windows_generation_and_invalidates_
     store = WindowsCredentialStore(backend)
     store.provision_secret("secret-a", 1, RAW_SECRET)
     store.provision_secret("secret-a", 2, "rotated-integration-secret")
+    reference = secret()
+    _enroll(store, reference)
     broker = CredentialBroker(store)
-    broker.register_secret(secret(), now=NOW)
+    broker.register_secret(reference, now=NOW)
     old_lease = broker.issue_lease(
         project_id=PROJECT,
         secret_ref="secret-a",
@@ -148,8 +162,10 @@ def test_broker_and_windows_store_restart_preserve_reference_not_lease() -> None
     backend = FakePersistentWinVault()
     first_store = WindowsCredentialStore(backend)
     first_store.provision_secret("secret-a", 1, RAW_SECRET)
+    reference = secret()
+    _enroll(first_store, reference)
     first_broker = CredentialBroker(first_store)
-    first_broker.register_secret(secret(), now=NOW)
+    first_broker.register_secret(reference, now=NOW)
     old_lease = first_broker.issue_lease(
         project_id=PROJECT,
         secret_ref="secret-a",
@@ -196,3 +212,119 @@ def test_broker_and_windows_store_restart_preserve_reference_not_lease() -> None
     ).generation == 1
     assert RAW_SECRET not in repr(snapshot)
     assert restarted_store.delete_secret("secret-a", 1) is True
+
+
+def test_windows_authority_binding_is_durable_conflict_safe_and_retirable() -> None:
+    backend = FakePersistentWinVault()
+    store = WindowsCredentialStore(backend)
+    store.provision_secret("secret-a", 1, RAW_SECRET)
+    active_authority = hashlib.sha256(b"project-a-authority-active").hexdigest()
+    retired_authority = hashlib.sha256(b"project-a-authority-revoked").hexdigest()
+    conflicting = hashlib.sha256(b"project-b-authority-active").hexdigest()
+
+    store.bind_authority(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=active_authority,
+    )
+    restarted = WindowsCredentialStore(backend)
+
+    assert restarted.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=active_authority,
+    )
+    assert not restarted.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=conflicting,
+    )
+    with pytest.raises(ProtectedCredentialStoreError, match="authority binding conflicts"):
+        restarted.bind_authority(
+            secret_ref="secret-a",
+            generation=1,
+            authority_fingerprint=conflicting,
+        )
+
+    restarted.retire_authority(
+        secret_ref="secret-a",
+        generation=1,
+        current_authority_fingerprint=active_authority,
+        retired_authority_fingerprint=retired_authority,
+    )
+    restarted.retire_authority(
+        secret_ref="secret-a",
+        generation=1,
+        current_authority_fingerprint=active_authority,
+        retired_authority_fingerprint=retired_authority,
+    )
+    after_retirement_restart = WindowsCredentialStore(backend)
+    assert not after_retirement_restart.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=active_authority,
+    )
+    assert after_retirement_restart.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=retired_authority,
+    )
+    with pytest.raises(ProtectedCredentialStoreError, match="retirement conflicts"):
+        after_retirement_restart.retire_authority(
+            secret_ref="secret-a",
+            generation=1,
+            current_authority_fingerprint=conflicting,
+            retired_authority_fingerprint=active_authority,
+        )
+    with pytest.raises(ProtectedCredentialStoreError, match="cannot be retired"):
+        after_retirement_restart.delete_authority("secret-a", 1)
+
+    assert after_retirement_restart.delete_secret("secret-a", 1) is True
+    assert after_retirement_restart.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=retired_authority,
+    )
+    assert after_retirement_restart.delete_authority("secret-a", 1) is True
+    assert not after_retirement_restart.authority_matches(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=retired_authority,
+    )
+
+
+def test_windows_handle_operation_is_idempotent_and_reconcilable() -> None:
+    backend = FakePersistentWinVault()
+    store = WindowsCredentialStore(backend)
+    store.provision_secret("secret-a", 1, RAW_SECRET)
+    active_authority = hashlib.sha256(b"handle-operation-active-authority").hexdigest()
+    store.bind_authority(
+        secret_ref="secret-a",
+        generation=1,
+        authority_fingerprint=active_authority,
+    )
+    expires_at = NOW + timedelta(minutes=5)
+    request = {
+        "operation_id": "credential-lease-00000001",
+        "secret_ref": "secret-a",
+        "generation": 1,
+        "project_id": PROJECT,
+        "audience": "github-api",
+        "scopes": frozenset({"repo:read"}),
+        "expires_at": expires_at,
+    }
+
+    first = store.issue_handle(**request)
+    second = store.issue_handle(**request)
+    reconciled = store.reconcile_handle(**request)
+
+    assert second == first
+    assert reconciled == first
+    assert len(store._handles) == 1
+    with pytest.raises(ProtectedCredentialStoreError, match="operation identity conflicts"):
+        store.issue_handle(
+            **{**request, "scopes": frozenset({"checks:read"})}
+        )
+
+    store.revoke_handles("secret-a", 1)
+    assert store.reconcile_handle(**request) is None
