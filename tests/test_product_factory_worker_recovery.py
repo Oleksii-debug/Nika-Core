@@ -79,7 +79,7 @@ class FakeRecoveryPort:
         inspect_error: Exception | None = None,
         recover_error: Exception | None = None,
         component_id_override: str | None = None,
-        envelope_override: WorkerResultEnvelope | None = None,
+        envelope_override: object | None = None,
     ) -> None:
         self.state = state
         self.failure = failure
@@ -226,6 +226,57 @@ def test_invalid_recovery_evidence_blocks_only_the_affected_component() -> None:
     assert outcome.recovery_state == state
     assert "host reconciliation required" in (outcome.record.blocker or "")
     assert "foreign-component" not in (outcome.record.blocker or "")
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_malformed_inspection_state_is_contained_before_recover_call() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    worker = FakeRecoveryPort(object())  # type: ignore[arg-type]
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state is None
+    assert worker.recovered == []
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_non_envelope_recovery_result_is_contained_without_coordinator_mutation() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    worker = FakeRecoveryPort(state, envelope_override=object())
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state == state
+    assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
+def test_envelope_with_non_coding_result_is_contained() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    state = RecoveryState("interrupted", "resume-token")
+    malformed = WorkerResultEnvelope(
+        work_id=request.work_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        base_sha=request.base_sha,
+        result_sha=SHA_B,
+        diff_digest=DIGEST,
+        coding_result=object(),  # type: ignore[arg-type]
+    )
+    worker = FakeRecoveryPort(state, envelope_override=malformed)
+
+    outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
+
+    assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE
+    assert outcome.record.state is WorkState.BLOCKED
+    assert outcome.recovery_state == state
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
 

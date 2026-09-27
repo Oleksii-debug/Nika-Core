@@ -12,7 +12,7 @@ from nika_core.product_factory_coordinator import (
     WorkRecord,
     WorkState,
 )
-from nika_core.toolsmith.contracts import RecoveryState
+from nika_core.toolsmith.contracts import CodingResult, RecoveryState
 
 
 class WorkerRecoveryDisposition(StrEnum):
@@ -87,6 +87,17 @@ class ProductFactoryWorkerRecovery:
                 record=blocked,
                 recovery_state=None,
             )
+        if type(state) is not RecoveryState:
+            blocked = coordinator.block(
+                component_id,
+                "worker recovery evidence is invalid; host reconciliation required",
+            )
+            return WorkerRecoveryOutcome(
+                component_id=component_id,
+                disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
+                record=blocked,
+                recovery_state=None,
+            )
 
         try:
             envelope = await self.worker.recover(record.request, state)
@@ -98,6 +109,20 @@ class ProductFactoryWorkerRecovery:
             return WorkerRecoveryOutcome(
                 component_id=component_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_RECOVERY_FAILED,
+                record=blocked,
+                recovery_state=state,
+            )
+        if (
+            type(envelope) is not WorkerResultEnvelope
+            or type(envelope.coding_result) is not CodingResult
+        ):
+            blocked = coordinator.block(
+                component_id,
+                "worker recovery evidence is invalid; host reconciliation required",
+            )
+            return WorkerRecoveryOutcome(
+                component_id=component_id,
+                disposition=WorkerRecoveryDisposition.BLOCKED_INVALID_EVIDENCE,
                 record=blocked,
                 recovery_state=state,
             )
