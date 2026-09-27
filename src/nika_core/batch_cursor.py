@@ -658,7 +658,7 @@ class BatchCursor:
                         "persisted batch cursor disappeared after failed write"
                     )
                 persisted = BatchCursorState.model_validate(record.value)
-            except Exception:
+            except Exception:  # noqa: BLE001 - ambiguous durable reread must fail-stop
                 self._state = prior
                 self._persistence_blocked = True
                 raise BatchCursorStateError(
