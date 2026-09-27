@@ -15,7 +15,25 @@ from scripts.m12_release_evidence import (
     _require_durable_project_continuity,
 )
 
+ROOT = Path(__file__).resolve().parents[1]
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
+
+
+def test_m11_runs_for_packaged_installer_and_binding_regression_changes() -> None:
+    workflow = (ROOT / ".github/workflows/m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    required_triggers = (
+        '      - "scripts/install_nika_core.ps1"',
+        '      - "tests/test_m12_packaged_installer_bundle.py"',
+    )
+    pull_request_block, remainder = workflow.split("  push:\n", 1)
+    push_block, _ = remainder.split("  workflow_dispatch:\n", 1)
+
+    for trigger in required_triggers:
+        assert workflow.count(trigger) == 2
+        assert trigger in pull_request_block
+        assert trigger in push_block
 
 
 def test_canonical_installer_is_staged_and_manifest_bound(tmp_path: Path) -> None:
