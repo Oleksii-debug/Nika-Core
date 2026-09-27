@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -457,3 +458,34 @@ def test_api_is_sampled_last_current_last_in_that_order(tmp_path: Path) -> None:
     observer.observe()
 
     assert calls == ["last", "current", "last"]
+
+
+def test_concurrent_observers_allocate_unique_durable_sequences(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "concurrent.db")
+    store.initialize()
+    audit = AuditLog(store)
+
+    def sample(index: int) -> int:
+        observer = WindowsOwnerPresenceObserver(
+            audit,
+            away_after_seconds=60,
+            api=FakeLastInputApi(
+                last_ticks=[index, index],
+                current_ticks=[100_000 + index],
+            ),
+            clock=lambda: datetime(2030, 1, 1, tzinfo=UTC),
+        )
+        return observer.observe().sequence
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        sequences = list(pool.map(sample, range(8)))
+
+    assert len(set(sequences)) == 8
+    assert sorted(sequences) == list(range(min(sequences), min(sequences) + 8))
+
+    events = audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id="win32-owner-presence",
+    )
+    assert len(events) == 8
+    assert {event.event_id for event in events} == set(sequences)
