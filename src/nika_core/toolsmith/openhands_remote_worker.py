@@ -69,6 +69,14 @@ class OpenHandsSandboxEndpoint:
     fresh_workspace: bool = True
 
     def __post_init__(self) -> None:
+        if any(type(value) is not str for value in (self.endpoint_id, self.host, self.working_dir)):
+            raise ValueError("OpenHands endpoint identity, host and working_dir must be exact strings")
+        if type(self.sandbox_egress_hosts) is not tuple or any(
+            type(host) is not str for host in self.sandbox_egress_hosts
+        ):
+            raise ValueError("OpenHands sandbox egress hosts must be an immutable string tuple")
+        if type(self.network_policy_enforced) is not bool or type(self.fresh_workspace) is not bool:
+            raise ValueError("OpenHands sandbox attestations must use exact booleans")
         if not self.endpoint_id.strip() or not self.host.strip() or not self.working_dir.strip():
             raise ValueError("OpenHands endpoint identity, host and working_dir are required")
         parsed = urlparse(self.host)
@@ -121,6 +129,10 @@ class RemoteFile:
     path: str
     data: bytes
 
+    def __post_init__(self) -> None:
+        if type(self.path) is not str or type(self.data) is not bytes:
+            raise ValueError("OpenHands remote files require exact immutable path/data carriers")
+
 
 @dataclasses.dataclass(frozen=True, slots=True)
 class OpenHandsRunEvidence:
@@ -128,6 +140,10 @@ class OpenHandsRunEvidence:
     files: tuple[RemoteFile, ...]
 
     def __post_init__(self) -> None:
+        if type(self.conversation_id) is not str:
+            raise ValueError("OpenHands run evidence conversation id must be an exact string")
+        if type(self.files) is not tuple or any(type(item) is not RemoteFile for item in self.files):
+            raise ValueError("OpenHands run evidence files must be an immutable RemoteFile tuple")
         if not self.conversation_id.strip():
             raise ValueError("OpenHands run evidence requires a conversation id")
 
@@ -260,6 +276,10 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                             ),
                             timeout=job.resource_budget.timeout_seconds,
                         )
+                        if type(run) is not OpenHandsRunEvidence:
+                            raise OpenHandsWorkerError(
+                                "remote runtime returned non-canonical run evidence"
+                            )
                     finally:
                         # Event-loop tasks cannot interleave between the completed await
                         # and this synchronous discard. cancel() therefore never mistakes
@@ -640,15 +660,6 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
 
 
 def _validate_source_identity(job: CodingJob, evidence: TreeEvidence) -> None:
-    if any(
-        part.casefold() == ".git"
-        for item in evidence.files
-        for part in pathlib.PurePosixPath(item.path).parts
-    ):
-        raise OpenHandsWorkerError(
-            "worker-visible staging workspace must not expose nested .git metadata"
-        )
-
     expected = job.repository.tree_digest.casefold()
     if len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
         raise OpenHandsWorkerError(
@@ -687,6 +698,8 @@ def _normalize_host(value: str) -> str:
 
 
 def _validate_endpoint(job: CodingJob, endpoint: OpenHandsSandboxEndpoint) -> None:
+    if type(endpoint) is not OpenHandsSandboxEndpoint:
+        raise OpenHandsWorkerError("sandbox provider returned a non-canonical endpoint attestation")
     if job.network_policy.mode is not NetworkMode.APPROVED_HOSTS:
         raise OpenHandsWorkerError("remote coding requires explicit approved-host network policy")
     approved = {_normalize_host(host) for host in job.network_policy.approved_hosts}
@@ -718,7 +731,18 @@ def _validate_and_apply_snapshot(
     remote_files: tuple[RemoteFile, ...],
 ) -> tuple[ChangedFile, ...]:
     before_map = {item.path: item for item in before.files}
+    before_casefold: dict[str, str] = {}
+    for path in before_map:
+        folded = path.casefold()
+        previous = before_casefold.get(folded)
+        if previous is not None and previous != path:
+            raise OpenHandsWorkerError(
+                "local staging tree contains Windows-ambiguous case-colliding paths"
+            )
+        before_casefold[folded] = path
+
     staged: dict[str, RemoteFile] = {}
+    staged_casefold: dict[str, str] = {}
     total_bytes = 0
     for item in remote_files:
         try:
@@ -731,6 +755,13 @@ def _validate_and_apply_snapshot(
             )
         if path in staged:
             raise OpenHandsWorkerError("remote snapshot contains duplicate file paths")
+        folded = path.casefold()
+        previous = staged_casefold.get(folded)
+        if previous is not None and previous != path:
+            raise OpenHandsWorkerError(
+                "remote snapshot contains Windows-ambiguous case-colliding file paths"
+            )
+        staged_casefold[folded] = path
         staged[path] = RemoteFile(path, item.data)
         total_bytes += len(item.data)
         if total_bytes > 256 * 1024 * 1024:
