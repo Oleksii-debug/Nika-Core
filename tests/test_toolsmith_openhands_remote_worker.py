@@ -326,6 +326,34 @@ def test_late_cancel_of_finalized_interruption_never_restarts_job(tmp_path: Path
     assert len(runtime.calls) == 1
 
 
+def test_fresh_worker_recovery_probe_failure_is_redacted_manual_reconciliation(
+    tmp_path: Path,
+) -> None:
+    class FailingProbe:
+        async def inspect(self, _job_id):
+            raise RuntimeError("database=/secret/path diagnostic must not escape")
+
+    root = _workspace(tmp_path)
+    provider = Provider()
+    runtime = Runtime()
+    worker = OpenHandsRemoteCodingWorker(
+        provider,
+        runtime,
+        recovery_probe=FailingProbe(),
+    )
+
+    result = _run(worker.recover(_job(root), RecoveryState("interrupted")))
+
+    assert not result.succeeded
+    assert result.failure is not None
+    assert result.failure.kind.value == "internal_error"
+    assert result.failure.retryable is False
+    assert result.failure.message == "durable worker recovery state could not be inspected"
+    assert result.recovery_state == RecoveryState("manual_reconcile_required")
+    assert provider.acquired == []
+    assert runtime.calls == []
+
+
 def test_unfinalized_interrupted_state_can_resume_exact_job_once(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     runtime = Runtime()
