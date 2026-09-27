@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -117,7 +118,7 @@ def _policy() -> IntelligenceModePolicy:
 
 def _client_factory(
     transport: _CountingTransport,
-):
+) -> Callable[..., httpx.AsyncClient]:
     mock = httpx.MockTransport(transport)
 
     def factory(**kwargs: object) -> httpx.AsyncClient:
@@ -192,7 +193,9 @@ def _factory(
     resolver: _CountingCredentialResolver,
     transport: _CountingTransport,
     authorizer: StandingPermissionCloudEffectAuthorizer | None = None,
-    authority_resolver=None,
+    authority_resolver: (
+        Callable[[str], StandingPermissionExecutionAuthority | None] | None
+    ) = None,
 ) -> V01BoundModelRuntimeFactory:
     return V01BoundModelRuntimeFactory(
         store=store,
@@ -415,7 +418,7 @@ def test_task_a_authority_cannot_authorize_task_b_runtime_request(
     ).for_task(task_a)
     assert runtime is not None
 
-    result = asyncio.run(runtime.run(_runtime_request("different-task")))
+    result = asyncio.run(runtime.run(_runtime_request(f"{task_a}:forged-child")))
 
     assert result.outcome is RuntimeOutcome.FAILED
     assert result.output["model_error_code"] == "invalid_request"
