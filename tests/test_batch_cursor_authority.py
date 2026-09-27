@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -511,6 +511,96 @@ def test_failed_second_begin_checkpoint_rolls_back_to_last_durable_prepared_stat
     replay = cursor.begin_effect("target-0")
     assert replay.execute is False
     assert replay.reason == "effect_already_reserved"
+
+def test_post_commit_put_exception_reconciles_authoritative_future_wait(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    due = datetime.now(UTC) + timedelta(hours=1)
+    original_put = memory.put
+
+    def commit_then_raise(**kwargs: object):
+        record = original_put(**kwargs)
+        assert record is not None
+        raise RuntimeError("synthetic lost acknowledgement")
+
+    monkeypatch.setattr(memory, "put", commit_then_raise)
+    with pytest.raises(RuntimeError, match="synthetic lost acknowledgement"):
+        cursor.schedule_inter_batch_wait(due)
+
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.kind is IntentKind.INTER_BATCH_WAIT
+    assert intent.not_before == due.isoformat()
+
+    with pytest.raises(BatchCursorBlockedError, match="deadline has not been reached"):
+        cursor.release_inter_batch_wait(now=due - timedelta(minutes=1))
+
+    durable = MemoryService(store).get(
+        scope=MemoryScope.TASK,
+        owner_id="task",
+        namespace="v01.batch_cursor",
+        key="cursor",
+    )
+    assert durable is not None
+    durable_intent = durable.value["next_scheduled_intent"]
+    assert isinstance(durable_intent, dict)
+    assert durable_intent["not_before"] == due.isoformat()
+
+
+def test_unreadable_post_commit_outcome_fail_stops_live_cursor_until_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    due = datetime.now(UTC) + timedelta(hours=1)
+
+    def fail_read(**_kwargs: object):
+        raise RuntimeError("synthetic post-commit read outage")
+
+    monkeypatch.setattr(memory, "get", fail_read)
+    with pytest.raises(BatchCursorStateError, match="persistence outcome is unknown"):
+        cursor.schedule_inter_batch_wait(due)
+
+    with pytest.raises(BatchCursorBlockedError, match="restore is required"):
+        cursor.release_inter_batch_wait(now=due + timedelta(hours=1))
+    with pytest.raises(BatchCursorBlockedError, match="restore is required"):
+        cursor.next_target()
+    with pytest.raises(BatchCursorBlockedError, match="restore is required"):
+        cursor.begin_effect("target-1")
+
+    durable = MemoryService(store).get(
+        scope=MemoryScope.TASK,
+        owner_id="task",
+        namespace="v01.batch_cursor",
+        key="cursor",
+    )
+    assert durable is not None
+    durable_intent = durable.value["next_scheduled_intent"]
+    assert isinstance(durable_intent, dict)
+    assert durable_intent["not_before"] == due.isoformat()
+
 
 @pytest.mark.parametrize("restart_after", tuple(range(1, 21)))
 def test_twenty_target_plan_restores_exactly_after_every_target(
