@@ -35,6 +35,8 @@ class _FakeProvider:
         kind: ProviderKind,
         text: str = "teacher answer",
         model: str = "teacher-model",
+        input_tokens: int | None = 3,
+        output_tokens: int | None = 4,
         total_tokens: int | None = 7,
         supports_private_data: bool = True,
         error: ModelGatewayError | None = None,
@@ -49,6 +51,8 @@ class _FakeProvider:
         )
         self.text = text
         self.model = model
+        self.input_tokens = input_tokens
+        self.output_tokens = output_tokens
         self.total_tokens = total_tokens
         self.error = error
         self.response_request_id = response_request_id
@@ -71,8 +75,8 @@ class _FakeProvider:
             provider_kind=self.response_kind or self.capabilities.kind,
             model=self.model,
             usage=ModelUsage(
-                input_tokens=3,
-                output_tokens=4,
+                input_tokens=self.input_tokens,
+                output_tokens=self.output_tokens,
                 total_tokens=self.total_tokens,
             ),
             latency_ms=12.5,
@@ -190,6 +194,16 @@ def test_private_consultation_fails_before_provider_without_private_data_support
     assert provider.requests == []
 
 
+@pytest.mark.parametrize(
+    "kind",
+    ["local", "cloud", object()],
+    ids=["raw-local", "raw-cloud", "wrong-object"],
+)
+def test_provider_kind_requires_typed_enum(kind: object) -> None:
+    with pytest.raises(TypeError, match="ProviderKind"):
+        _spec(kind=kind)
+
+
 def test_request_bound_fails_before_gateway_call() -> None:
     with pytest.raises(ValueError, match="max_request_chars"):
         _spec(
@@ -223,20 +237,24 @@ def test_oversized_response_is_not_returned_to_cognition() -> None:
 
 
 @pytest.mark.parametrize(
-    ("total_tokens", "expected"),
+    ("input_tokens", "output_tokens", "total_tokens", "expected"),
     [
-        (7, TeacherBudgetStatus.WITHIN),
-        (11, TeacherBudgetStatus.EXCEEDED),
-        (None, TeacherBudgetStatus.UNKNOWN),
+        (3, 4, 7, TeacherBudgetStatus.WITHIN),
+        (5, 6, 11, TeacherBudgetStatus.EXCEEDED),
+        (3, 4, None, TeacherBudgetStatus.UNKNOWN),
     ],
 )
 def test_observed_token_budget_is_truthful_not_inferred(
+    input_tokens: int | None,
+    output_tokens: int | None,
     total_tokens: int | None,
     expected: TeacherBudgetStatus,
 ) -> None:
     provider = _FakeProvider(
         provider_id="teacher-local",
         kind=ProviderKind.LOCAL,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
         total_tokens=total_tokens,
     )
     gateway = ModelGateway()
@@ -253,6 +271,32 @@ def test_observed_token_budget_is_truthful_not_inferred(
     assert result.evidence.status is TeacherConsultationStatus.SUCCEEDED
     assert result.evidence.budget_status is expected
     assert result.evidence.total_tokens == total_tokens
+
+
+def test_inconsistent_complete_usage_fails_closed_without_budget_success() -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        input_tokens=100,
+        output_tokens=100,
+        total_tokens=1,
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=100,
+        max_observed_total_tokens=10,
+    )
+
+    result = asyncio.run(service.consult(_spec(policy=policy)))
+
+    assert result.text is None
+    assert result.evidence.status is TeacherConsultationStatus.FAILED
+    assert result.evidence.error_code is ModelErrorCode.PROVIDER_ERROR
+    assert result.evidence.total_tokens is None
+    assert result.evidence.budget_status is TeacherBudgetStatus.UNKNOWN
 
 
 def test_mismatched_teacher_response_identity_fails_closed() -> None:

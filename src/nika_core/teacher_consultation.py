@@ -5,6 +5,7 @@ import math
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from nika_core.model_gateway import gateway as model_gateway
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
@@ -15,7 +16,6 @@ from nika_core.model_gateway.contracts import (
     PrivacyClass,
     ProviderKind,
 )
-from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
 
 
 _MAX_ID_UTF8_BYTES = 256
@@ -77,6 +77,8 @@ class TeacherConsultationSpec:
         _bounded_identity(self.consultation_id, "consultation_id")
         _bounded_identity(self.provider_id, "provider_id")
         _bounded_identity(self.model, "model")
+        if type(self.provider_kind) is not ProviderKind:
+            raise TypeError("provider_kind must be a ProviderKind")
         if self.provider_kind not in {ProviderKind.LOCAL, ProviderKind.CLOUD}:
             raise ValueError("teacher provider_kind must be local or cloud")
         if not isinstance(self.privacy, PrivacyClass):
@@ -150,7 +152,7 @@ class TeacherConsultationService:
     is the content-free record intended for durable accounting/reporting.
     """
 
-    def __init__(self, gateway: ModelGateway) -> None:
+    def __init__(self, gateway: model_gateway.ModelGateway) -> None:
         self._gateway = gateway
 
     async def consult(
@@ -261,7 +263,7 @@ class TeacherConsultationService:
             consultation_id=spec.consultation_id,
             provider_id=spec.provider_id,
             provider_kind=spec.provider_kind,
-            requested_model_fingerprint=model_identity_fingerprint(spec.model),
+            requested_model_fingerprint=model_gateway.model_identity_fingerprint(spec.model),
             request_fingerprint=request_fingerprint,
             status=TeacherConsultationStatus.SUCCEEDED,
             privacy=spec.privacy,
@@ -325,6 +327,14 @@ def _validated_usage(response: ModelResponse) -> tuple[int | None, int | None, i
     for value in values:
         if value is not None and (type(value) is not int or value < 0):
             raise ValueError("model usage counters must be non-negative integers or None")
+    input_tokens, output_tokens, total_tokens = values
+    if (
+        input_tokens is not None
+        and output_tokens is not None
+        and total_tokens is not None
+        and total_tokens != input_tokens + output_tokens
+    ):
+        raise ValueError("model usage total_tokens contradicts observed token counters")
     return values
 
 
@@ -377,7 +387,7 @@ def _failure_evidence(
         consultation_id=spec.consultation_id,
         provider_id=spec.provider_id,
         provider_kind=spec.provider_kind,
-        requested_model_fingerprint=model_identity_fingerprint(spec.model),
+        requested_model_fingerprint=model_gateway.model_identity_fingerprint(spec.model),
         request_fingerprint=request_fingerprint,
         status=status,
         privacy=spec.privacy,
