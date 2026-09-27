@@ -381,3 +381,37 @@ def test_same_route_result_updates_and_terminal_result_deletes_normally(tmp_path
         result=RuntimeResult(outcome=RuntimeOutcome.COMPLETED),
     )
     assert sessions.get(task_id) is None
+
+def test_recovery_inventory_keeps_corrupt_resume_token_unusable_without_rewrite(
+    tmp_path,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime",
+        thread_id="thread",
+        resume_token="resume",
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE runtime_sessions SET resume_token = CAST(? AS BLOB) WHERE task_id = ?",
+            ("corrupt-resume", task_id),
+        )
+
+    with pytest.raises(RuntimeError, match=r"resume_token.*SQLite storage class"):
+        sessions.get(task_id)
+
+    inventory = sessions.list_resumable()
+    assert len(inventory) == 1
+    record = inventory[0]
+    assert record.task_id == task_id
+    assert record.runtime_id == "runtime"
+    assert record.thread_id == "thread"
+    assert record.resume_token == ""
+
+    raw = _raw_session(store, task_id)
+    assert raw is not None
+    assert raw["resume_token"] == b"corrupt-resume"
+

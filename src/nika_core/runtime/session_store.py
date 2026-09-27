@@ -89,11 +89,26 @@ class RuntimeSessionStore:
         self._store = store
 
     @staticmethod
-    def _record_from_row(row: sqlite3.Row) -> RuntimeSessionRecord:
+    def _record_from_row(
+        row: sqlite3.Row,
+        *,
+        recovery_inventory: bool = False,
+    ) -> RuntimeSessionRecord:
         task_id = _stored_text(row, "task_id")
         runtime_id = _stored_text(row, "runtime_id")
         thread_id = _stored_text(row, "thread_id")
-        resume_token = _stored_text(row, "resume_token")
+        if recovery_inventory:
+            # Startup inventory must isolate an unusable/corrupt resume token as a
+            # non-resumable candidate instead of aborting classification for every
+            # persisted session. Never coerce BLOB/blank storage into usable authority.
+            raw_resume_token = row["resume_token"]
+            resume_token = (
+                raw_resume_token
+                if type(raw_resume_token) is str and raw_resume_token.strip()
+                else ""
+            )
+        else:
+            resume_token = _stored_text(row, "resume_token")
         raw_outcome = _stored_text(row, "outcome")
         if raw_outcome == _ACTIVE_MARKER:
             outcome = None
@@ -176,7 +191,9 @@ class RuntimeSessionStore:
                 ORDER BY updated_at, task_id
                 """
             ).fetchall()
-        return tuple(self._record_from_row(row) for row in rows)
+        return tuple(
+            self._record_from_row(row, recovery_inventory=True) for row in rows
+        )
 
     def record_active(
         self,
