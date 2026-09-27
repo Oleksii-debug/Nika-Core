@@ -151,7 +151,10 @@ class BackgroundRecurrenceBridge:
             deadline_at=deadline_at,
         )
 
-    def resolve(self, action_id: str):
+    def resolve(
+        self,
+        action_id: str,
+    ) -> Callable[[RecurrenceInvocation], RecurrenceDecision]:
         action_key = _required_identity(action_id, "action_id")
         if action_key != self.ACTION_ID:
             raise KeyError(f"unknown background recurrence action: {action_key}")
