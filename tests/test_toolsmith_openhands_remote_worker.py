@@ -31,6 +31,7 @@ from nika_core.toolsmith.contracts import (
     WorkspaceLease,
 )
 from nika_core.toolsmith.openhands_remote_worker import (
+    OpenHandsRecoveryBinding,
     OpenHandsRemoteCodingWorker,
     OpenHandsRunEvidence,
     OpenHandsSandboxEndpoint,
@@ -180,6 +181,38 @@ class Runtime:
         if self.cancel_error is not None:
             raise self.cancel_error
         return self.cancel_verified
+
+
+class RecoveryAuthority:
+    def __init__(self, binding: OpenHandsRecoveryBinding) -> None:
+        self.binding = binding
+
+    async def inspect(self, job_id):
+        assert job_id == self.binding.job_id
+        return RecoveryState(
+            "remote_reconcile_required",
+            self.binding.opaque_token,
+        )
+
+    def bind(self, *_args):
+        raise AssertionError("recovery must not create a new durable binding")
+
+    def load(self, job_id):
+        assert job_id == self.binding.job_id
+        return self.binding
+
+
+class ReconcilingRuntime(Runtime):
+    def __init__(self, files: tuple[RemoteFile, ...]) -> None:
+        super().__init__(files)
+        self.reconcile_calls = []
+
+    async def execute(self, *_args):
+        raise AssertionError("restart recovery must not dispatch a new remote execution")
+
+    async def reconcile(self, job, binding, source_evidence):
+        self.reconcile_calls.append((job, binding, source_evidence))
+        return OpenHandsRunEvidence(binding.conversation_id, self.files)
 
 
 class BlockingRuntime(Runtime):
@@ -1539,6 +1572,52 @@ def test_invalid_acceptance_evidence_after_apply_requires_manual_reconciliation(
     assert root.joinpath("src/value.txt").read_bytes() == b"after\n"
 
 
+def test_fresh_worker_reconciles_bound_remote_conversation_without_replay(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    endpoint = _endpoint()
+    conversation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
+        )
+    )
+    binding = OpenHandsRecoveryBinding(
+        job.job_id,
+        endpoint,
+        conversation_id,
+        "11111111-1111-4111-8111-111111111111",
+    )
+    authority = RecoveryAuthority(binding)
+
+    class RecoveryProvider(Provider):
+        async def acquire(self, _job):
+            raise AssertionError("recovery must not acquire a fresh sandbox")
+
+    provider = RecoveryProvider(endpoint)
+    runtime = ReconcilingRuntime(
+        (RemoteFile("src/value.txt", b"after-recovery\n"),)
+    )
+    worker = OpenHandsRemoteCodingWorker(
+        provider,
+        runtime,
+        acceptance_runtime=AcceptanceRuntime(),
+        recovery_probe=authority,
+        recovery_binding_store=authority,
+    )
+
+    state = _run(worker.inspect(job.job_id))
+    result = _run(worker.recover(job, state))
+
+    assert result.succeeded
+    assert root.joinpath("src/value.txt").read_bytes() == b"after-recovery\n"
+    assert len(runtime.reconcile_calls) == 1
+    assert provider.acquired == []
+    assert provider.released == [(job.job_id, endpoint.endpoint_id, True)]
+
+
 def test_missing_sandboxed_acceptance_runtime_fails_before_remote_effect(
     tmp_path: Path,
 ) -> None:
@@ -1597,11 +1676,27 @@ def test_agent_server_runtime_uses_authenticated_profile_only_contract(
     requests: list[httpx.Request] = []
     create_payload: dict[str, object] = {}
     message_payload: dict[str, object] = {}
+    binding_calls: list[OpenHandsRecoveryBinding] = []
+
+    class BindingStore:
+        def bind(self, supplied_job, supplied_endpoint, conversation_id, profile_id):
+            binding = OpenHandsRecoveryBinding(
+                supplied_job.job_id,
+                supplied_endpoint,
+                conversation_id,
+                profile_id,
+            )
+            binding_calls.append(binding)
+            return binding
+
+        def load(self, _job_id):
+            return None
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         assert request.headers["X-Session-API-Key"] == SESSION_KEY
         if request.url.path == "/api/file/upload":
+            assert binding_calls
             assert request.method == "POST"
             assert request.url.params["path"] == "/workspace/nika-job/src/value.txt"
             assert b"before\n" in request.content
@@ -1650,6 +1745,7 @@ def test_agent_server_runtime_uses_authenticated_profile_only_contract(
     runtime = OpenHandsAgentServerRuntime(
         client_factory=lambda supplied: _agent_server_client(supplied, handler),
         agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+        recovery_binding_store=BindingStore(),
         max_iterations=7,
         poll_interval_seconds=0.01,
     )
@@ -1668,6 +1764,8 @@ def test_agent_server_runtime_uses_authenticated_profile_only_contract(
     assert create_payload["max_iterations"] == 7
     assert create_payload["autotitle"] is False
     assert message_payload["role"] == "user"
+    assert len(binding_calls) == 1
+    assert binding_calls[0].conversation_id == expected_conversation_id
     assert [request.url.path for request in requests] == [
         "/api/file/upload",
         "/api/conversations",
@@ -1675,6 +1773,59 @@ def test_agent_server_runtime_uses_authenticated_profile_only_contract(
         f"/api/conversations/{expected_conversation_id}/run",
         f"/api/conversations/{expected_conversation_id}",
         "/api/file/archive",
+    ]
+
+
+def test_agent_server_reconcile_uses_only_existing_conversation_and_snapshot(
+    tmp_path: Path,
+) -> None:
+    root = _workspace(tmp_path)
+    job = _job(root)
+    evidence = collect_tree_evidence(root)
+    endpoint = _endpoint()
+    conversation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
+        )
+    )
+    binding = OpenHandsRecoveryBinding(
+        job.job_id,
+        endpoint,
+        conversation_id,
+        PROFILE_ID,
+    )
+    archive = _tar_snapshot({"src/value.txt": b"after-reconcile\n"})
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if (
+            request.method == "GET"
+            and request.url.path == f"/api/conversations/{conversation_id}"
+        ):
+            return httpx.Response(200, json={"execution_status": "finished"})
+        if request.method == "GET" and request.url.path == "/api/file/archive":
+            return httpx.Response(200, content=archive)
+        raise AssertionError(
+            f"recovery must not dispatch remote effects: {request.method} {request.url}"
+        )
+
+    runtime = OpenHandsAgentServerRuntime(
+        client_factory=lambda supplied: _agent_server_client(supplied, handler),
+        agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+        poll_interval_seconds=0.01,
+    )
+
+    result = _run(runtime.reconcile(job, binding, evidence))
+
+    assert result == OpenHandsRunEvidence(
+        conversation_id,
+        (RemoteFile("src/value.txt", b"after-reconcile\n"),),
+    )
+    assert [(request.method, request.url.path) for request in requests] == [
+        ("GET", f"/api/conversations/{conversation_id}"),
+        ("GET", "/api/file/archive"),
     ]
 
 

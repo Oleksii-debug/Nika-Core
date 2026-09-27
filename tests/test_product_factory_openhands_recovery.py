@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import uuid
 from pathlib import Path
+
+import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_openhands_recovery import ProductFactoryOpenHandsRecoveryProbe
-from nika_core.runtime.idempotency import IdempotencyLedger
+from nika_core.runtime.idempotency import IdempotencyConflictError, IdempotencyLedger
 from nika_core.toolsmith.contracts import (
     AllowedPathPolicy,
     CodingJob,
@@ -18,7 +22,10 @@ from nika_core.toolsmith.contracts import (
     ResourceBudget,
     WorkspaceLease,
 )
-from nika_core.toolsmith.openhands_remote_worker import OpenHandsRemoteCodingWorker
+from nika_core.toolsmith.openhands_remote_worker import (
+    OpenHandsRemoteCodingWorker,
+    OpenHandsSandboxEndpoint,
+)
 
 
 class NeverAcquireProvider:
@@ -157,3 +164,117 @@ def test_missing_durable_operation_remains_unknown_after_restart(tmp_path: Path)
     )
 
     assert asyncio.run(worker.inspect("never-dispatched")) is None
+
+
+def _endpoint() -> OpenHandsSandboxEndpoint:
+    return OpenHandsSandboxEndpoint(
+        endpoint_id="sandbox-recovery-1",
+        host="http://127.0.0.1:30000",
+        working_dir="/workspace/nika-job",
+        isolation_class=IsolationClass.REMOTE_SANDBOXED,
+        sandbox_egress_hosts=("localhost",),
+        network_policy_enforced=True,
+    )
+
+
+def test_probe_persists_secret_free_remote_binding_before_recovery(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-1",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    work_id = "work-binding-1"
+    ledger = IdempotencyLedger(store)
+    ledger.reserve(
+        operation_key=f"pf-worker:{work_id}",
+        task_id=task.task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint="a" * 64,
+    )
+    probe = ProductFactoryOpenHandsRecoveryProbe(ledger)
+    endpoint = _endpoint()
+    conversation_id = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{endpoint.endpoint_id}:{work_id}",
+        )
+    )
+    profile_id = "11111111-1111-4111-8111-111111111111"
+
+    binding = probe.bind(
+        _job(tmp_path / "worker", work_id),
+        endpoint,
+        conversation_id,
+        profile_id,
+    )
+
+    assert probe.load(work_id) == binding
+    assert asyncio.run(probe.inspect(work_id)) == RecoveryState(
+        "remote_reconcile_required",
+        binding.opaque_token,
+    )
+    record = ledger.get(f"pf-openhands-binding:{work_id}")
+    assert record is not None
+    assert record.result is not None
+    serialized = json.dumps(dict(record.result), sort_keys=True).casefold()
+    assert "session" not in serialized
+    assert "api_key" not in serialized
+    assert "secret" not in serialized
+
+
+def test_probe_rejects_rebinding_remote_identity(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="ws-1",
+        agent_id="product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    work_id = "work-binding-conflict"
+    ledger = IdempotencyLedger(store)
+    ledger.reserve(
+        operation_key=f"pf-worker:{work_id}",
+        task_id=task.task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint="b" * 64,
+    )
+    probe = ProductFactoryOpenHandsRecoveryProbe(ledger)
+    first = _endpoint()
+    first_conversation = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{first.endpoint_id}:{work_id}",
+        )
+    )
+    probe.bind(
+        _job(tmp_path / "worker", work_id),
+        first,
+        first_conversation,
+        "11111111-1111-4111-8111-111111111111",
+    )
+    second = OpenHandsSandboxEndpoint(
+        endpoint_id="sandbox-recovery-2",
+        host=first.host,
+        working_dir=first.working_dir,
+        isolation_class=IsolationClass.REMOTE_SANDBOXED,
+        sandbox_egress_hosts=first.sandbox_egress_hosts,
+        network_policy_enforced=True,
+    )
+    second_conversation = str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"nika-core:openhands:{second.endpoint_id}:{work_id}",
+        )
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        probe.bind(
+            _job(tmp_path / "worker", work_id),
+            second,
+            second_conversation,
+            "11111111-1111-4111-8111-111111111111",
+        )

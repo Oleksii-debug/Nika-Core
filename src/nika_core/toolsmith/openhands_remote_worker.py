@@ -8,6 +8,7 @@ import os
 import pathlib
 import tempfile
 import threading
+import uuid
 from datetime import UTC, datetime
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlparse
@@ -129,6 +130,69 @@ class OpenHandsSandboxEndpoint:
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
+class OpenHandsRecoveryBinding:
+    """Secret-free durable identity for one already-provisioned remote conversation."""
+
+    job_id: str
+    endpoint: OpenHandsSandboxEndpoint
+    conversation_id: str
+    agent_profile_id: str
+
+    def __post_init__(self) -> None:
+        if type(self.job_id) is not str or not self.job_id.strip():
+            raise ValueError("OpenHands recovery binding requires a canonical job id")
+        if self.job_id != self.job_id.strip():
+            raise ValueError("OpenHands recovery binding job id must not contain whitespace")
+        if type(self.endpoint) is not OpenHandsSandboxEndpoint:
+            raise ValueError("OpenHands recovery binding requires an exact endpoint attestation")
+        for value, label in (
+            (self.conversation_id, "conversation id"),
+            (self.agent_profile_id, "agent profile id"),
+        ):
+            if type(value) is not str or value != value.strip():
+                raise ValueError(f"OpenHands recovery {label} must be a canonical UUID")
+            try:
+                canonical = str(uuid.UUID(value))
+            except (ValueError, AttributeError) as exc:
+                raise ValueError(
+                    f"OpenHands recovery {label} must be a canonical UUID"
+                ) from exc
+            if value != canonical:
+                raise ValueError(f"OpenHands recovery {label} must use canonical UUID spelling")
+        expected_conversation_id = str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"nika-core:openhands:{self.endpoint.endpoint_id}:{self.job_id}",
+            )
+        )
+        if self.conversation_id != expected_conversation_id:
+            raise ValueError(
+                "OpenHands recovery conversation id does not match endpoint/job identity"
+            )
+
+    @property
+    def opaque_token(self) -> str:
+        digest = hashlib.sha256()
+        values = (
+            self.job_id,
+            self.endpoint.endpoint_id,
+            self.endpoint.host,
+            self.endpoint.working_dir,
+            self.endpoint.isolation_class.value,
+            *self.endpoint.sandbox_egress_hosts,
+            str(self.endpoint.network_policy_enforced),
+            str(self.endpoint.fresh_workspace),
+            self.conversation_id,
+            self.agent_profile_id,
+        )
+        for value in values:
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+        return f"openhands-binding:{digest.hexdigest()}"
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
 class RemoteFile:
     path: str
     data: bytes
@@ -202,6 +266,21 @@ class OpenHandsRecoveryStateProbePort(Protocol):
 
 
 @runtime_checkable
+class OpenHandsRecoveryBindingStorePort(Protocol):
+    """Durable secret-free binding authority shared by dispatch and restart recovery."""
+
+    def bind(
+        self,
+        job: CodingJob,
+        endpoint: OpenHandsSandboxEndpoint,
+        conversation_id: str,
+        agent_profile_id: str,
+    ) -> OpenHandsRecoveryBinding: ...
+
+    def load(self, job_id: str) -> OpenHandsRecoveryBinding | None: ...
+
+
+@runtime_checkable
 class OpenHandsRemoteRuntimePort(Protocol):
     async def execute(
         self,
@@ -209,6 +288,13 @@ class OpenHandsRemoteRuntimePort(Protocol):
         endpoint: OpenHandsSandboxEndpoint,
         prompt: str,
         source_root: pathlib.Path,
+        source_evidence: TreeEvidence,
+    ) -> OpenHandsRunEvidence: ...
+
+    async def reconcile(
+        self,
+        job: CodingJob,
+        binding: OpenHandsRecoveryBinding,
         source_evidence: TreeEvidence,
     ) -> OpenHandsRunEvidence: ...
 
@@ -244,11 +330,19 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         *,
         acceptance_runtime: SandboxedAcceptanceRuntimePort | None = None,
         recovery_probe: OpenHandsRecoveryStateProbePort | None = None,
+        recovery_binding_store: OpenHandsRecoveryBindingStorePort | None = None,
     ) -> None:
         self._sandbox_provider = sandbox_provider
         self._runtime = runtime
         self._acceptance_runtime = acceptance_runtime
         self._recovery_probe = recovery_probe
+        if (
+            recovery_binding_store is None
+            and recovery_probe is not None
+            and isinstance(recovery_probe, OpenHandsRecoveryBindingStorePort)
+        ):
+            recovery_binding_store = recovery_probe
+        self._recovery_binding_store = recovery_binding_store
         self._states: dict[str, RecoveryState] = {}
         self._cancel_events: dict[str, threading.Event] = {}
         self._finalized_results: dict[str, CodingResult] = {}
@@ -745,6 +839,9 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
         if finalized is not None and finalized.recovery_state == state:
             return finalized
 
+        if state.phase == "remote_reconcile_required":
+            return await self._recover_remote(job, state)
+
         if state.phase == "completed":
             return _failure_result(
                 job,
@@ -833,6 +930,341 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
             self._cancel_events.pop(job.job_id, None)
             self._finalized_results.pop(job.job_id, None)
         return await self.execute(job)
+
+    async def _recover_remote(
+        self,
+        job: CodingJob,
+        state: RecoveryState,
+    ) -> CodingResult:
+        probe = self._recovery_probe
+        binding_store = self._recovery_binding_store
+        if probe is None or binding_store is None:
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "remote worker recovery binding is unavailable",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required"),
+            )
+
+        try:
+            durable_state = await probe.inspect(job.job_id)
+            binding = binding_store.load(job.job_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - durable recovery authority boundary
+            _LOGGER.error(
+                "OpenHands durable recovery binding failed (%s)",
+                type(exc).__name__,
+            )
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "durable remote recovery identity could not be reconstructed",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required"),
+            )
+
+        if durable_state != state:
+            return _failure_result(
+                job,
+                WorkerFailureKind.INVALID_REQUEST,
+                "recovery state does not match durable worker identity",
+                retryable=False,
+                state=durable_state or RecoveryState("manual_reconcile_required"),
+            )
+        if binding is None or binding.job_id != job.job_id:
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "durable remote recovery binding is missing",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required"),
+            )
+        if binding.opaque_token != state.opaque_token:
+            return _failure_result(
+                job,
+                WorkerFailureKind.INVALID_REQUEST,
+                "recovery state does not match durable remote binding",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required"),
+            )
+
+        reconcile = getattr(self._runtime, "reconcile", None)
+        if not callable(reconcile):
+            return _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "remote runtime does not support durable reconciliation",
+                retryable=False,
+                state=RecoveryState("manual_reconcile_required", binding.opaque_token),
+            )
+
+        changed: tuple[ChangedFile, ...] = ()
+        tests: tuple[TestEvidence, ...] = ()
+        applied = False
+        snapshot_collected = False
+        task_cancelled = False
+        release_proven = False
+        endpoint_reserved = False
+        endpoint = binding.endpoint
+        result: CodingResult
+
+        try:
+            local_root = _validate_local_workspace(job)
+            source_evidence = collect_tree_evidence(local_root)
+            _validate_source_identity(job, source_evidence)
+            _validate_endpoint(job, endpoint)
+            if job.acceptance_commands and self._acceptance_runtime is None:
+                raise OpenHandsWorkerError(
+                    "acceptance commands require an OS/remote sandboxed Nika verifier"
+                )
+
+            async with self._lock:
+                current = self._states.get(job.job_id)
+                if current is not None:
+                    raise OpenHandsWorkerError(
+                        "coding job identity already has process-local recovery state"
+                    )
+                if endpoint.endpoint_id in self._active_endpoint_ids:
+                    raise OpenHandsEndpointCollisionError(
+                        "remote recovery endpoint is already active in this process"
+                    )
+                cancel_event = threading.Event()
+                self._states[job.job_id] = RecoveryState(
+                    "running",
+                    binding.opaque_token,
+                )
+                self._cancel_events[job.job_id] = cancel_event
+                self._active_endpoint_ids.add(endpoint.endpoint_id)
+                endpoint_reserved = True
+                self._runtime_inflight.add(job.job_id)
+
+            try:
+                run = await asyncio.wait_for(
+                    reconcile(job, binding, source_evidence),
+                    timeout=job.resource_budget.timeout_seconds,
+                )
+            finally:
+                self._runtime_inflight.discard(job.job_id)
+
+            if type(run) is not OpenHandsRunEvidence:
+                raise OpenHandsWorkerError(
+                    "remote reconciliation returned non-canonical run evidence"
+                )
+            if run.conversation_id != binding.conversation_id:
+                raise OpenHandsWorkerError(
+                    "remote reconciliation returned the wrong conversation identity"
+                )
+            snapshot_collected = True
+
+            cancelled = await self._current_cancellation_result(
+                job,
+                changed_files=changed,
+                test_evidence=tests,
+            )
+            if cancelled is not None:
+                result = cancelled
+            else:
+                _validate_workspace_lease(job)
+                changed = _validate_and_apply_snapshot(
+                    job,
+                    local_root,
+                    source_evidence,
+                    run.files,
+                )
+                applied = True
+                _validate_workspace_lease(job)
+                candidate_evidence = collect_tree_evidence(local_root)
+                tests = await self._run_guarded_acceptance(
+                    job,
+                    local_root,
+                    candidate_evidence,
+                    cancel_event,
+                )
+                _validate_workspace_lease(job)
+                post_acceptance_evidence = collect_tree_evidence(local_root)
+                if post_acceptance_evidence != candidate_evidence:
+                    raise OpenHandsWorkspaceMutationError(
+                        "acceptance commands mutated the validated candidate"
+                    )
+
+                cancelled = await self._current_cancellation_result(
+                    job,
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
+                if cancelled is not None:
+                    result = cancelled
+                else:
+                    _validate_workspace_lease(job)
+                    failed_test = next(
+                        (item for item in tests if item.exit_code != 0),
+                        None,
+                    )
+                    if failed_test is not None:
+                        result = CodingResult(
+                            job_id=job.job_id,
+                            changed_files=changed,
+                            test_evidence=tests,
+                            recovery_state=RecoveryState(
+                                "repair_required",
+                                run.conversation_id,
+                            ),
+                            failure=WorkerFailure(
+                                WorkerFailureKind.PROCESS_FAILED,
+                                "one or more Nika acceptance commands failed",
+                                retryable=True,
+                            ),
+                        )
+                    else:
+                        result = CodingResult(
+                            job_id=job.job_id,
+                            changed_files=changed,
+                            test_evidence=tests,
+                            recovery_state=RecoveryState(
+                                "completed",
+                                run.conversation_id,
+                            ),
+                        )
+        except TimeoutError:
+            cancel_event = self._cancel_events.get(job.job_id)
+            if cancel_event is not None:
+                cancel_event.set()
+            await self._runtime_stop_proof(job.job_id)
+            result = _failure_result(
+                job,
+                WorkerFailureKind.TIMEOUT,
+                "remote recovery exceeded its Nika resource deadline",
+                retryable=False,
+                state=RecoveryState(
+                    "manual_reconcile_required",
+                    binding.opaque_token,
+                ),
+                changed_files=changed,
+                test_evidence=tests,
+            )
+        except asyncio.CancelledError:
+            task_cancelled = True
+            cancel_event = self._cancel_events.get(job.job_id)
+            if cancel_event is not None:
+                cancel_event.set()
+            stopped, _ = await self._runtime_stop_proof(job.job_id)
+            if stopped and not applied:
+                result = _failure_result(
+                    job,
+                    WorkerFailureKind.CANCELLED,
+                    "remote recovery cancellation was confirmed",
+                    retryable=False,
+                    state=RecoveryState("cancelled", binding.opaque_token),
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
+            else:
+                result = _failure_result(
+                    job,
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "remote recovery stop could not be proven",
+                    retryable=False,
+                    state=RecoveryState(
+                        "manual_reconcile_required",
+                        binding.opaque_token,
+                    ),
+                    changed_files=changed,
+                    test_evidence=tests,
+                )
+        except OpenHandsWorkspaceMutationError:
+            result = _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "local staging mutation could not be proven rolled back",
+                retryable=False,
+                state=RecoveryState(
+                    "manual_reconcile_required",
+                    binding.opaque_token,
+                ),
+                changed_files=changed,
+                test_evidence=tests,
+            )
+        except (WorkspaceSecurityError, ValueError, OpenHandsWorkerError):
+            result = _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "remote recovery validation failed; host reconciliation is required",
+                retryable=False,
+                state=RecoveryState(
+                    "manual_reconcile_required",
+                    binding.opaque_token,
+                ),
+                changed_files=changed,
+                test_evidence=tests,
+            )
+        except Exception as exc:  # noqa: BLE001 - remote recovery transport boundary
+            _LOGGER.error(
+                "OpenHands remote reconciliation failed (%s)",
+                type(exc).__name__,
+            )
+            result = _failure_result(
+                job,
+                WorkerFailureKind.INTERNAL_ERROR,
+                "remote reconciliation failed without trusted diagnostics",
+                retryable=False,
+                state=RecoveryState(
+                    "manual_reconcile_required",
+                    binding.opaque_token,
+                ),
+                changed_files=changed,
+                test_evidence=tests,
+            )
+        finally:
+            if snapshot_collected and endpoint_reserved:
+                release_succeeded = result.succeeded if "result" in locals() else False
+                try:
+                    await self._sandbox_provider.release(
+                        job,
+                        endpoint,
+                        succeeded=release_succeeded,
+                    )
+                    release_proven = True
+                except asyncio.CancelledError:
+                    task_cancelled = True
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.INTERNAL_ERROR,
+                        "recovered sandbox cleanup could not be proven",
+                        retryable=False,
+                        state=RecoveryState(
+                            "manual_reconcile_required",
+                            binding.opaque_token,
+                        ),
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
+                except Exception as exc:  # noqa: BLE001 - sandbox provider boundary
+                    _LOGGER.error(
+                        "Recovered OpenHands sandbox release failed (%s)",
+                        type(exc).__name__,
+                    )
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.INTERNAL_ERROR,
+                        "recovered sandbox cleanup could not be proven",
+                        retryable=False,
+                        state=RecoveryState(
+                            "manual_reconcile_required",
+                            binding.opaque_token,
+                        ),
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
+            if endpoint_reserved and release_proven:
+                async with self._lock:
+                    self._active_endpoint_ids.discard(endpoint.endpoint_id)
+
+        result = await self._finalize_result(job, result)
+        if task_cancelled:
+            raise asyncio.CancelledError
+        return result
 
     async def _run_guarded_acceptance(
         self,

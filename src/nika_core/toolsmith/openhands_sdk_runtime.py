@@ -19,6 +19,8 @@ import httpx
 
 from nika_core.toolsmith.contracts import CodingJob
 from nika_core.toolsmith.openhands_remote_worker import (
+    OpenHandsRecoveryBinding,
+    OpenHandsRecoveryBindingStorePort,
     OpenHandsRunEvidence,
     OpenHandsSandboxEndpoint,
     RemoteFile,
@@ -72,6 +74,7 @@ class OpenHandsAgentServerRuntime:
         *,
         client_factory: Callable[[OpenHandsSandboxEndpoint], httpx.Client],
         agent_profile_id_factory: Callable[[CodingJob, OpenHandsSandboxEndpoint], str],
+        recovery_binding_store: OpenHandsRecoveryBindingStorePort | None = None,
         max_iterations: int = 96,
         poll_interval_seconds: float = 0.2,
     ) -> None:
@@ -90,6 +93,7 @@ class OpenHandsAgentServerRuntime:
             raise ValueError("OpenHands poll interval must be within (0, 5] seconds")
         self._client_factory = client_factory
         self._agent_profile_id_factory = agent_profile_id_factory
+        self._recovery_binding_store = recovery_binding_store
         self._max_iterations = max_iterations
         self._poll_interval_seconds = float(poll_interval_seconds)
         self._active: dict[str, _ActiveExecution] = {}
@@ -138,6 +142,126 @@ class OpenHandsAgentServerRuntime:
             if not active.done.is_set():
                 await asyncio.to_thread(active.done.wait)
             raise
+
+    async def reconcile(
+        self,
+        job: CodingJob,
+        binding: OpenHandsRecoveryBinding,
+        source_evidence: TreeEvidence,
+    ) -> OpenHandsRunEvidence:
+        if type(binding) is not OpenHandsRecoveryBinding or binding.job_id != job.job_id:
+            raise OpenHandsAgentServerCompatibilityError(
+                "OpenHands recovery binding does not match the coding job"
+            )
+
+        active = _ActiveExecution(
+            conversation_id=binding.conversation_id,
+            effect_possible=True,
+        )
+        with self._active_lock:
+            if job.job_id in self._active:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands Agent Server job identity is already active"
+                )
+            if job.job_id in self._pending_cancel:
+                self._pending_cancel.remove(job.job_id)
+                active.cancel_requested.set()
+            self._cancelled_done.discard(job.job_id)
+            self._stopped_done.discard(job.job_id)
+            self._ambiguous_effects.discard(job.job_id)
+            self._active[job.job_id] = active
+
+        try:
+            return await asyncio.to_thread(
+                self._reconcile_sync,
+                job,
+                binding,
+                source_evidence,
+                active,
+            )
+        except asyncio.CancelledError:
+            await self.cancel(job.job_id)
+            if not active.done.is_set():
+                await asyncio.to_thread(active.done.wait)
+            raise
+
+    def _reconcile_sync(
+        self,
+        job: CodingJob,
+        binding: OpenHandsRecoveryBinding,
+        source_evidence: TreeEvidence,
+        active: _ActiveExecution,
+    ) -> OpenHandsRunEvidence:
+        endpoint = binding.endpoint
+        client: httpx.Client | None = None
+        try:
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands recovery cancelled before HTTP client acquisition"
+                )
+            client = self._client_factory(endpoint)
+            self._validate_client(client, endpoint)
+            with self._active_lock:
+                active.client = client
+
+            profile_id = _canonical_uuid(
+                self._agent_profile_id_factory(job, endpoint),
+                field="agent profile id",
+            )
+            if profile_id != binding.agent_profile_id:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands recovery profile identity changed"
+                )
+            expected_conversation_id = str(
+                uuid.uuid5(
+                    uuid.NAMESPACE_URL,
+                    f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
+                )
+            )
+            if binding.conversation_id != expected_conversation_id:
+                raise OpenHandsAgentServerCompatibilityError(
+                    "OpenHands recovery conversation identity changed"
+                )
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands recovery cancelled before status inspection"
+                )
+
+            self._wait_for_completion(
+                client,
+                binding.conversation_id,
+                active,
+                timeout_seconds=job.resource_budget.timeout_seconds,
+            )
+            files = _download_snapshot(
+                client,
+                endpoint,
+                baseline_paths={item.path for item in source_evidence.files},
+                timeout_seconds=job.resource_budget.timeout_seconds,
+                cancellation_event=active.cancel_requested,
+            )
+            return OpenHandsRunEvidence(binding.conversation_id, files)
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception as exc:  # noqa: BLE001 - transport cleanup boundary
+                    _LOGGER.warning(
+                        "OpenHands recovery client close failed (%s)",
+                        type(exc).__name__,
+                    )
+            active.done.set()
+            with self._active_lock:
+                if active.effect_possible and not active.stop_proven:
+                    self._ambiguous_effects.add(job.job_id)
+                else:
+                    self._ambiguous_effects.discard(job.job_id)
+                    if active.cancel_requested.is_set():
+                        self._cancelled_done.add(job.job_id)
+                    else:
+                        self._stopped_done.add(job.job_id)
+                if self._active.get(job.job_id) is active:
+                    self._active.pop(job.job_id, None)
 
     async def cancel(self, job_id: str) -> bool:
         with self._active_lock:
@@ -211,6 +335,36 @@ class OpenHandsAgentServerRuntime:
                     f"nika-core:openhands:{endpoint.endpoint_id}:{job.job_id}",
                 )
             )
+            if active.cancel_requested.is_set():
+                raise OpenHandsAgentServerExecutionCancelled(
+                    "OpenHands execution cancelled before recovery binding"
+                )
+            binding_store = self._recovery_binding_store
+            if binding_store is not None:
+                try:
+                    binding = binding_store.bind(
+                        job,
+                        endpoint,
+                        conversation_id,
+                        profile_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - durable host boundary
+                    _LOGGER.error(
+                        "OpenHands recovery binding persistence failed (%s)",
+                        type(exc).__name__,
+                    )
+                    raise OpenHandsAgentServerCompatibilityError(
+                        "OpenHands durable recovery binding could not be persisted"
+                    ) from None
+                if (
+                    binding.job_id != job.job_id
+                    or binding.endpoint != endpoint
+                    or binding.conversation_id != conversation_id
+                    or binding.agent_profile_id != profile_id
+                ):
+                    raise OpenHandsAgentServerCompatibilityError(
+                        "OpenHands durable recovery binding changed dispatch identity"
+                    )
             if active.cancel_requested.is_set():
                 raise OpenHandsAgentServerExecutionCancelled(
                     "OpenHands execution cancelled before source upload"
