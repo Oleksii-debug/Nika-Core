@@ -58,15 +58,15 @@ def _run_checked(command: list[str], *, env: dict[str, str], label: str) -> None
         raise RuntimeError(f"{label} failed with exit {completed.returncode}: {detail}")
 
 
-def _run_installer(
+def _installer_command(
     shell: str,
     installer: Path,
     *,
     mode: str,
     destination: Path,
-    env: dict[str, str],
     bundle: Path | None = None,
-) -> None:
+    rollback_operation_id: str | None = None,
+) -> list[str]:
     command = [
         shell,
         "-NoProfile",
@@ -82,7 +82,145 @@ def _run_installer(
     ]
     if bundle is not None:
         command.extend(["-BundlePath", str(bundle)])
-    _run_checked(command, env=env, label=f"packaged installer {mode}")
+    if rollback_operation_id is not None:
+        if mode != "Rollback":
+            raise ValueError("RollbackOperationId is only valid for Rollback mode")
+        if (
+            type(rollback_operation_id) is not str
+            or len(rollback_operation_id) != 32
+            or any(character not in "0123456789abcdef" for character in rollback_operation_id)
+        ):
+            raise ValueError(
+                "RollbackOperationId must be exactly 32 lowercase hexadecimal characters"
+            )
+        command.extend(["-RollbackOperationId", rollback_operation_id])
+    return command
+
+
+def _run_installer(
+    shell: str,
+    installer: Path,
+    *,
+    mode: str,
+    destination: Path,
+    env: dict[str, str],
+    bundle: Path | None = None,
+    rollback_operation_id: str | None = None,
+) -> None:
+    _run_checked(
+        _installer_command(
+            shell,
+            installer,
+            mode=mode,
+            destination=destination,
+            bundle=bundle,
+            rollback_operation_id=rollback_operation_id,
+        ),
+        env=env,
+        label=f"packaged installer {mode}",
+    )
+
+
+def _run_installer_expect_process_failure(
+    shell: str,
+    installer: Path,
+    *,
+    destination: Path,
+    env: dict[str, str],
+    rollback_operation_id: str,
+) -> None:
+    completed = subprocess.run(
+        _installer_command(
+            shell,
+            installer,
+            mode="Rollback",
+            destination=destination,
+            rollback_operation_id=rollback_operation_id,
+        ),
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="backslashreplace",
+        env=env,
+        timeout=120,
+    )
+    if completed.returncode == 0:
+        raise RuntimeError("fault-injected packaged rollback unexpectedly completed successfully")
+
+
+def _rollback_operation_id(
+    source_manifest_sha: str,
+    target_manifest_sha: str,
+    *,
+    label: str,
+) -> str:
+    material = "\0".join(
+        (
+            "nika-m12-packaged-rollback-v1",
+            source_manifest_sha,
+            target_manifest_sha,
+            label,
+        )
+    ).encode("ascii")
+    return hashlib.sha256(material).hexdigest()[:32]
+
+
+def _build_fault_injected_rollback_installer(source: Path, target: Path) -> Path:
+    try:
+        with source.open("r", encoding="utf-8-sig", newline="") as handle:
+            script = handle.read()
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError("packaged rollback installer is unreadable") from exc
+
+    newline = "\r\n" if "\r\n" in script else "\n"
+    final_swap = (
+        '        [System.IO.Directory]::Move($swapPath, $rollbackPath)'
+        + newline
+        + '        $rollbackPhase = "complete"'
+    )
+    if script.count(final_swap) != 1:
+        raise RuntimeError("packaged installer rollback final-swap anchor is not unique")
+    crash_line = (
+        '        [System.Environment]::FailFast('
+        '"M12 injected crash after rollback final swap")'
+    )
+    injected = (
+        '        [System.IO.Directory]::Move($swapPath, $rollbackPath)'
+        + newline
+        + crash_line
+        + newline
+        + '        $rollbackPhase = "complete"'
+    )
+    try:
+        with target.open("w", encoding="utf-8", newline="") as handle:
+            handle.write(script.replace(final_swap, injected))
+    except (OSError, UnicodeError) as exc:
+        raise RuntimeError(
+            "fault-injected packaged rollback installer could not be written"
+        ) from exc
+    return target
+
+
+def _require_rollback_operation_marker(
+    marker_path: Path,
+    *,
+    operation_id: str,
+    source_digest: str,
+    target_digest: str,
+) -> None:
+    try:
+        payload = json.loads(marker_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("packaged rollback did not preserve a valid operation marker") from exc
+    expected = {
+        "marker_version": 1,
+        "operation_id": operation_id,
+        "source_digest": source_digest,
+        "target_digest": target_digest,
+    }
+    if type(payload) is not dict or payload != expected:
+        raise RuntimeError("packaged rollback operation marker does not match exact image authority")
 
 
 def _run_installed_pf11(executable: Path, output: Path, *, env: dict[str, str]) -> dict[str, object]:
@@ -286,23 +424,64 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
         installed_installer = destination / _INSTALLER_NAME
         if not installed_installer.is_file():
             raise RuntimeError("installed release does not retain the packaged installer")
+
+        rollback_marker = destination.parent / f".{destination.name}.rollback-operation.json"
+        rollback_swap = destination.parent / f".{destination.name}.rollback-swap"
+        rollback_operation_id = _rollback_operation_id(
+            upgrade_manifest_sha,
+            exact_manifest_sha,
+            label="crash-retry",
+        )
+        fault_installer = _build_fault_injected_rollback_installer(
+            installed_installer,
+            root / "install_nika_core.rollback-crash.ps1",
+        )
+        _run_installer_expect_process_failure(
+            shell,
+            fault_installer,
+            destination=destination,
+            env=environment,
+            rollback_operation_id=rollback_operation_id,
+        )
+
+        if rollback_swap.exists():
+            raise RuntimeError("fault-injected rollback left an unresolved swap image")
+        if not rollback.is_dir():
+            raise RuntimeError("fault-injected rollback did not preserve the replaced image")
+        if _sha256(destination / "release-manifest.json") != exact_manifest_sha:
+            raise RuntimeError("fault-injected rollback did not reach the committed target image")
+        if _sha256(rollback / "release-manifest.json") != upgrade_manifest_sha:
+            raise RuntimeError("fault-injected rollback did not retain the committed source image")
+        _require_rollback_operation_marker(
+            rollback_marker,
+            operation_id=rollback_operation_id,
+            source_digest=upgrade_manifest_sha,
+            target_digest=exact_manifest_sha,
+        )
+
         _run_installer(
             shell,
-            installed_installer,
+            destination / _INSTALLER_NAME,
             mode="Rollback",
             destination=destination,
             env=environment,
+            rollback_operation_id=rollback_operation_id,
         )
-        if not rollback.is_dir():
-            raise RuntimeError("Rollback did not preserve the replaced image for recovery")
         if _sha256(destination / "release-manifest.json") != exact_manifest_sha:
-            raise RuntimeError("Rollback did not restore exact original package identity")
+            raise RuntimeError("same-ID rollback retry performed a second image swap")
         if _sha256(rollback / "release-manifest.json") != upgrade_manifest_sha:
-            raise RuntimeError("Rollback did not retain the replaced upgrade package identity")
+            raise RuntimeError("same-ID rollback retry changed the retained source image")
         if (destination / upgrade_probe.name).exists():
             raise RuntimeError("Rollback left the upgrade proof marker in the active image")
         if not (rollback / upgrade_probe.name).is_file():
             raise RuntimeError("Rollback image did not retain the replaced upgrade proof marker")
+        _require_rollback_operation_marker(
+            rollback_marker,
+            operation_id=rollback_operation_id,
+            source_digest=upgrade_manifest_sha,
+            target_digest=exact_manifest_sha,
+        )
+
         rollback_proof = _run_installed_pf11(
             destination / "NikaCore.exe",
             root / "pf11-rollback.json",
@@ -315,12 +494,57 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
             phase="Rollback",
         )
 
+        reverse_operation_id = _rollback_operation_id(
+            exact_manifest_sha,
+            upgrade_manifest_sha,
+            label="distinct-reverse",
+        )
+        if reverse_operation_id == rollback_operation_id:
+            raise RuntimeError("distinct rollback proof operation IDs collided")
+        _run_installer(
+            shell,
+            destination / _INSTALLER_NAME,
+            mode="Rollback",
+            destination=destination,
+            env=environment,
+            rollback_operation_id=reverse_operation_id,
+        )
+        if _sha256(destination / "release-manifest.json") != upgrade_manifest_sha:
+            raise RuntimeError("distinct rollback operation did not perform exactly one reverse")
+        if _sha256(rollback / "release-manifest.json") != exact_manifest_sha:
+            raise RuntimeError("distinct rollback operation did not retain the prior active image")
+        if not (destination / upgrade_probe.name).is_file():
+            raise RuntimeError("distinct rollback operation did not reactivate the upgrade marker")
+        if (rollback / upgrade_probe.name).exists():
+            raise RuntimeError("distinct rollback operation left the upgrade marker in both images")
+        _require_rollback_operation_marker(
+            rollback_marker,
+            operation_id=reverse_operation_id,
+            source_digest=exact_manifest_sha,
+            target_digest=upgrade_manifest_sha,
+        )
+        reverse_proof = _run_installed_pf11(
+            destination / "NikaCore.exe",
+            root / "pf11-distinct-reverse.json",
+            env=environment,
+        )
+        _require_durable_project_continuity(
+            install_witness,
+            data_path,
+            reverse_proof,
+            phase="Distinct rollback reverse",
+        )
+
         stable_identity = {
             "route": install_proof.get("route"),
             "project_id": install_proof.get("project_id"),
             "spec_version": install_proof.get("spec_version"),
         }
-        for label, proof in (("update", update_proof), ("rollback", rollback_proof)):
+        for label, proof in (
+            ("update", update_proof),
+            ("rollback", rollback_proof),
+            ("distinct rollback reverse", reverse_proof),
+        ):
             candidate = {
                 "route": proof.get("route"),
                 "project_id": proof.get("project_id"),

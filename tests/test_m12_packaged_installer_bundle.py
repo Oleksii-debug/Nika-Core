@@ -11,8 +11,12 @@ from nika_core.packaging.release import build_release_manifest, verify_release_m
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from scripts.m11_release import _stage_canonical_installer
 from scripts.m12_release_evidence import (
+    _build_fault_injected_rollback_installer,
+    _installer_command,
     _read_durable_project_witness,
     _require_durable_project_continuity,
+    _require_rollback_operation_marker,
+    _rollback_operation_id,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -141,4 +145,99 @@ def test_durable_project_continuity_rejects_recreated_database(
             data_path,
             proof,
             phase="Update",
+        )
+
+
+def test_rollback_operation_id_is_stable_direction_bound_and_exact() -> None:
+    source = "a" * 64
+    target = "b" * 64
+
+    first = _rollback_operation_id(source, target, label="crash-retry")
+    repeated = _rollback_operation_id(source, target, label="crash-retry")
+    reversed_id = _rollback_operation_id(target, source, label="distinct-reverse")
+
+    assert first == repeated
+    assert len(first) == 32
+    assert all(character in "0123456789abcdef" for character in first)
+    assert reversed_id != first
+
+
+def test_installer_command_binds_explicit_rollback_operation_id() -> None:
+    operation_id = "a" * 32
+    command = _installer_command(
+        "pwsh",
+        Path("install_nika_core.ps1"),
+        mode="Rollback",
+        destination=Path("C:/NikaCore"),
+        rollback_operation_id=operation_id,
+    )
+
+    assert command[-2:] == ["-RollbackOperationId", operation_id]
+
+    with pytest.raises(ValueError, match="only valid for Rollback"):
+        _installer_command(
+            "pwsh",
+            Path("install_nika_core.ps1"),
+            mode="Update",
+            destination=Path("C:/NikaCore"),
+            rollback_operation_id=operation_id,
+        )
+
+
+def test_fault_injected_rollback_installer_adds_only_post_swap_failfast(
+    tmp_path: Path,
+) -> None:
+    source = ROOT / "scripts" / "install_nika_core.ps1"
+    target = tmp_path / "fault-injected.ps1"
+
+    _build_fault_injected_rollback_installer(source, target)
+
+    source_lines = source.read_text(encoding="utf-8-sig").splitlines()
+    injected_lines = target.read_text(encoding="utf-8").splitlines()
+    failfast = (
+        '        [System.Environment]::FailFast('
+        '"M12 injected crash after rollback final swap")'
+    )
+    assert injected_lines.count(failfast) == 1
+    injected_lines.remove(failfast)
+    assert injected_lines == source_lines
+
+    final_swap = "        [System.IO.Directory]::Move($swapPath, $rollbackPath)"
+    crash_lines = target.read_text(encoding="utf-8").splitlines()
+    crash_index = crash_lines.index(failfast)
+    assert injected_lines.count(final_swap) == 1
+    assert crash_lines[crash_index - 1] == final_swap
+
+
+def test_rollback_marker_evidence_requires_exact_operation_and_image_pair(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / ".Nika Core.rollback-operation.json"
+    operation_id = "c" * 32
+    source_digest = "a" * 64
+    target_digest = "b" * 64
+    marker.write_text(
+        '{"marker_version":1,"operation_id":"'
+        + operation_id
+        + '","source_digest":"'
+        + source_digest
+        + '","target_digest":"'
+        + target_digest
+        + '"}',
+        encoding="utf-8",
+    )
+
+    _require_rollback_operation_marker(
+        marker,
+        operation_id=operation_id,
+        source_digest=source_digest,
+        target_digest=target_digest,
+    )
+
+    with pytest.raises(RuntimeError, match="does not match exact image authority"):
+        _require_rollback_operation_marker(
+            marker,
+            operation_id="d" * 32,
+            source_digest=source_digest,
+            target_digest=target_digest,
         )
