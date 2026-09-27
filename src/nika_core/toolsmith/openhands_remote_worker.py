@@ -494,16 +494,28 @@ class OpenHandsRemoteCodingWorker(CodingWorkerPort):
                     test_evidence=tests,
                 )
             except (WorkspaceSecurityError, ValueError, OpenHandsWorkerError) as exc:
-                state = RecoveryState("blocked")
-                result = _failure_result(
-                    job,
-                    WorkerFailureKind.POLICY_VIOLATION,
-                    _safe_message(exc, "remote coding result violated Nika policy"),
-                    retryable=False,
-                    state=state,
-                    changed_files=changed,
-                    test_evidence=tests,
-                )
+                if applied:
+                    state = RecoveryState("manual_reconcile_required")
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.INTERNAL_ERROR,
+                        "post-apply policy or evidence validation failed; host reconciliation is required",
+                        retryable=False,
+                        state=state,
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
+                else:
+                    state = RecoveryState("blocked")
+                    result = _failure_result(
+                        job,
+                        WorkerFailureKind.POLICY_VIOLATION,
+                        _safe_message(exc, "remote coding result violated Nika policy"),
+                        retryable=False,
+                        state=state,
+                        changed_files=changed,
+                        test_evidence=tests,
+                    )
             except Exception:  # noqa: BLE001 - untrusted coding-engine boundary
                 state = RecoveryState(
                     "manual_reconcile_required" if applied else "interrupted"
