@@ -577,7 +577,6 @@ class ProductFactoryCoordinator:
         self._revision += 1
 
 
-
 def _canonical_worker_result_envelope(value: object) -> WorkerResultEnvelope:
     if type(value) is not WorkerResultEnvelope:
         raise CoordinatorError("worker result must be exact WorkerResultEnvelope")
@@ -692,6 +691,7 @@ def _canonical_worker_failure(value: object) -> WorkerFailure:
         return WorkerFailure(value.kind, value.message, value.retryable)
     except (TypeError, ValueError) as exc:
         raise CoordinatorError("worker result contains invalid failure evidence") from exc
+
 
 def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
     if not plan:

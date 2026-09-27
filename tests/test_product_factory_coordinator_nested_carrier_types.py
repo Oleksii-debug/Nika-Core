@@ -96,6 +96,7 @@ def test_worker_result_rejects_coding_result_subclass_success_override() -> None
     with pytest.raises(CoordinatorError, match="coding_result must be exact CodingResult"):
         _envelope(coding_result=forged)
 
+
 def _running_coordinator():
     graph = ProductRepositoryGraph(
         project_id="project-1",
