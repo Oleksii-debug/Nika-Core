@@ -399,7 +399,6 @@ def test_remote_worker_requires_manual_reconcile_when_lease_expires_during_accep
     assert provider.released == [(job.job_id, "sandbox-1", False)]
 
 
-
 def test_remote_worker_does_not_disclose_acceptance_arguments_to_engine(tmp_path: Path) -> None:
     root = _workspace(tmp_path)
     job = _job(root)
