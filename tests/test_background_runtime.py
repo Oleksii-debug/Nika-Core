@@ -488,6 +488,90 @@ def test_wrong_presence_source_fails_closed(tmp_path: Path) -> None:
     assert queue.get(task_id).state is TaskState.PAUSED
 
 
+def test_externally_paused_task_cannot_be_auto_resumed(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    guard, queue, _audit, resources = _guard(
+        store=store,
+        observations=[],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+    queue.transition(task_id, TaskState.PAUSED)
+
+    async def effect() -> object:
+        raise AssertionError("externally paused work must not run")
+
+    with pytest.raises(ValueError, match="does not own"):
+        asyncio.run(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
+                effect=effect,
+            )
+        )
+
+    assert queue.get(task_id).state is TaskState.PAUSED
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+    assert IdempotencyLedger(store).list_for_task(task_id) == ()
+
+
+def test_later_external_pause_invalidates_old_background_pause_ownership(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    first, queue, audit, _resources = _guard(
+        store=store,
+        observations=[_obs(58, OwnerPresence.ACTIVE, now=now)],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+
+    async def never() -> object:
+        raise AssertionError("paused work must not run")
+
+    paused = asyncio.run(
+        first.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
+            effect=never,
+        )
+    )
+    assert paused.action is BackgroundAction.PAUSE
+
+    pause_markers = [
+        event
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+        if event.event_type == "background.dispatch_paused"
+    ]
+    assert len(pause_markers) == 1
+    marker_event_id = pause_markers[0].payload["task_event_id"]
+    assert type(marker_event_id) is int
+
+    queue.transition(task_id, TaskState.READY)
+    queue.transition(task_id, TaskState.PAUSED)
+
+    second, _, _, resources = _guard(
+        store=store,
+        observations=[],
+        now=now,
+    )
+    with pytest.raises(ValueError, match="does not own"):
+        asyncio.run(
+            second.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.MEMORY_CONSOLIDATION,
+                effect=never,
+            )
+        )
+
+    assert queue.get(task_id).state is TaskState.PAUSED
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+
+
 def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
     tmp_path: Path,
 ) -> None:
@@ -512,6 +596,19 @@ def test_restart_rejects_replayed_presence_then_new_evidence_resumes(
     )
     assert first_result.action is BackgroundAction.PAUSE
     assert queue.get(task_id).state is TaskState.PAUSED
+    pause_marker = next(
+        event
+        for event in _audit.list_for(entity_type="task", entity_id=task_id)
+        if event.event_type == "background.dispatch_paused"
+    )
+    with store.connection() as conn:
+        latest_task_event = conn.execute(
+            "SELECT event_id FROM task_events WHERE task_id = ? "
+            "ORDER BY event_id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    assert latest_task_event is not None
+    assert pause_marker.payload["task_event_id"] == int(latest_task_event["event_id"])
 
     replay, _, _, _ = _guard(
         store=store,
