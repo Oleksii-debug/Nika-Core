@@ -172,19 +172,21 @@ def test_persisted_blob_identity_fails_closed_without_normalization(tmp_path) ->
     assert raw["input_fingerprint"] == b"sha256:forged"
 
 
-def test_noncompleted_record_cannot_carry_result_evidence(tmp_path) -> None:
+def test_pending_canonical_metadata_remains_readable_for_recovery_claims(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
     _reserve(ledger, task_id)
+    metadata = '{"claim_id": "c-1", "schema": "recovery-v1"}'
 
     with store.connection() as conn:
         conn.execute(
             "UPDATE idempotency_records SET result_json = ? WHERE operation_key = ?",
-            ('{"forged": true}', "effect:1"),
+            (metadata, "effect:1"),
         )
 
-    with pytest.raises(RuntimeError, match="must not carry result evidence"):
-        ledger.require("effect:1")
+    record = ledger.require("effect:1")
+    assert record.status is IdempotencyStatus.PENDING
+    assert record.result == {"claim_id": "c-1", "schema": "recovery-v1"}
 
 
 def test_noncanonical_completed_result_json_is_rejected_without_rewrite(tmp_path) -> None:
