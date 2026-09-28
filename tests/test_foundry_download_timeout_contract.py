@@ -76,3 +76,46 @@ def test_download_timeout_rejects_non_finite_or_non_positive_before_manager(
         )
 
     assert calls == []
+
+class _BehavioralInt(int):
+    def __float__(self) -> float:
+        raise AssertionError("timeout subclass __float__ must not execute")
+
+    def __le__(self, other: object) -> bool:
+        raise AssertionError("timeout subclass comparison must not execute")
+
+    def __radd__(self, other: object) -> float:
+        raise AssertionError("timeout subclass arithmetic must not execute")
+
+
+class _BehavioralFloat(float):
+    def __float__(self) -> float:
+        raise AssertionError("timeout subclass __float__ must not execute")
+
+    def __le__(self, other: object) -> bool:
+        raise AssertionError("timeout subclass comparison must not execute")
+
+    def __radd__(self, other: object) -> float:
+        raise AssertionError("timeout subclass arithmetic must not execute")
+
+
+@pytest.mark.parametrize(
+    "value",
+    (_BehavioralInt(30), _BehavioralFloat(30.0)),
+    ids=("int-subclass", "float-subclass"),
+)
+def test_download_timeout_rejects_behavioral_numeric_subclass_before_manager(
+    value: object,
+) -> None:
+    provider, calls = _provider_with_forbidden_manager()
+
+    with pytest.raises(TypeError, match="timeout_seconds must be numeric"):
+        asyncio.run(
+            provider.download_model(
+                _authorization(),
+                timeout_seconds=value,  # type: ignore[arg-type]
+            )
+        )
+
+    assert calls == []
+

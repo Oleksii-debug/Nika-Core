@@ -212,15 +212,13 @@ class FoundryLocalProvider:
             raise ValueError(
                 "download authorization provider does not match Foundry Local provider"
             )
-        if isinstance(timeout_seconds, bool) or not isinstance(
-            timeout_seconds, (int, float)
-        ):
+        if type(timeout_seconds) not in (int, float):
             raise TypeError("timeout_seconds must be numeric")
         try:
-            finite_timeout = isfinite(float(timeout_seconds))
+            bounded_timeout = float(timeout_seconds)
         except OverflowError:
-            finite_timeout = False
-        if not finite_timeout or timeout_seconds <= 0:
+            bounded_timeout = float("inf")
+        if not isfinite(bounded_timeout) or bounded_timeout <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
         if (
             self._expected_model_id is not None
@@ -235,7 +233,7 @@ class FoundryLocalProvider:
             )
 
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + timeout_seconds
+        deadline = loop.time() + bounded_timeout
         management_acquired = False
         inference_acquired = False
         worker: asyncio.Task[None] | None = None
