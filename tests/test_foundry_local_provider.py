@@ -187,6 +187,74 @@ def test_legacy_provider_download_flag_is_rejected_fail_closed() -> None:
         FoundryLocalProvider(default_model="test-model", allow_download=True)
 
 
+def test_foundry_provider_rejects_behavioral_model_identity_carriers() -> None:
+    class BehavioralText(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("behavioral string methods must not execute")
+
+    with pytest.raises(TypeError, match="default_model must be text"):
+        FoundryLocalProvider(default_model=BehavioralText("test-model"))
+
+    with pytest.raises(TypeError, match="expected_model_id must be text"):
+        FoundryLocalProvider(
+            default_model="test-model",
+            expected_model_id=BehavioralText("test-model-id"),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("default_model", "test\tmodel"),
+        ("expected_model_id", "model\x00id"),
+    ),
+)
+def test_foundry_provider_rejects_control_characters_in_model_identity(
+    field: str,
+    value: str,
+) -> None:
+    kwargs: dict[str, object] = {"default_model": "test-model"}
+    kwargs[field] = value
+    with pytest.raises(ValueError, match="control characters"):
+        FoundryLocalProvider(**kwargs)  # type: ignore[arg-type]
+
+
+def test_foundry_inspect_rejects_explicit_empty_alias_without_default_fallback() -> None:
+    model = FakeFoundryModel()
+    manager = FakeManager(model)
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: manager,
+    )
+
+    with pytest.raises(ValueError, match="model_alias must not be empty"):
+        provider.inspect_model("")
+
+    assert manager.catalog.requested_aliases == []
+
+
+def test_foundry_inspect_rejects_behavioral_alias_before_manager() -> None:
+    calls: list[str] = []
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached for invalid model_alias")
+
+    class BehavioralText(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("behavioral string methods must not execute")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=manager_factory,
+    )
+
+    with pytest.raises(TypeError, match="model_alias must be text"):
+        provider.inspect_model(BehavioralText("other-model"))
+
+    assert calls == []
+
+
 def test_explicit_download_action_requires_exact_authorization_then_allows_inference() -> None:
     model = FakeFoundryModel(cached=False)
     provider = FoundryLocalProvider(
