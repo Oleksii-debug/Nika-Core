@@ -86,7 +86,7 @@ class WindowsOwnerPresenceObserver:
         self,
         audit: AuditLog,
         *,
-        away_after_seconds: int | float,
+        away_after_seconds: float,
         source_id: str = _DEFAULT_SOURCE_ID,
         api: WindowsLastInputApi | None = None,
         clock: Callable[[], datetime] | None = None,
