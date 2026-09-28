@@ -315,6 +315,136 @@ def test_external_worker_failure_is_uncertain_and_does_not_cancel_independent_wo
     assert _record(restored, "component-2").state is WorkState.REVIEW_REQUIRED
 
 
+def test_uncontained_batch_failure_cancels_and_settles_admitted_sibling_before_return(
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    class BlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+
+    class OneChildFailsHost(ProductFactoryProgramHost):
+        async def _dispatch_one(self, **kwargs):
+            request = kwargs["request"]
+            if request.component_id == "component-0":
+                await sibling_started.wait()
+                self._release_best_effort(kwargs["lease"])
+                raise ProductFactoryProgramError("forced uncontained batch child failure")
+            return await super()._dispatch_one(**kwargs)
+
+    worker = BlockingWorker()
+    host = OneChildFailsHost(
+        store,
+        worker,
+        owner_id="program-host:batch-settlement",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(ProductFactoryProgramError, match="uncontained batch child failure"):
+            await host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=2,
+                max_count=2,
+            )
+        assert sibling_cancelled.is_set()
+
+    _run(scenario())
+
+    sibling = _record(coordinator, "component-1").request
+    failed = _record(coordinator, "component-0").request
+    ledger = IdempotencyLedger(store)
+    assert [item.component_id for item in worker.dispatch_calls] == ["component-1"]
+    assert ledger.get(f"pf-worker:{failed.work_id}") is None
+    assert (
+        ledger.require(f"pf-worker:{sibling.work_id}").status
+        is IdempotencyStatus.UNCERTAIN
+    )
+    assert host._ownership.current(
+        project_id=failed.project_id,
+        work_id=failed.work_id,
+    ) is None
+    assert host._ownership.current(
+        project_id=sibling.project_id,
+        work_id=sibling.work_id,
+    ) is None
+
+
+def test_uncontained_recovery_batch_failure_settles_sibling_before_return(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    coordinator.start("component-0")
+    coordinator.start("component-1")
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    class BlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+
+    class OneRecoveryChildFailsHost(ProductFactoryProgramHost):
+        async def _recover_one(self, **kwargs):
+            record = kwargs["record"]
+            if record.request.component_id == "component-0":
+                await sibling_started.wait()
+                raise ProductFactoryProgramError("forced uncontained recovery child failure")
+            return await super()._recover_one(**kwargs)
+
+    worker = BlockingWorker()
+    host = OneRecoveryChildFailsHost(
+        store,
+        worker,
+        owner_id="program-host:recovery-batch-settlement",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(ProductFactoryProgramError, match="uncontained recovery child failure"):
+            await host.recover_running(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=2,
+            )
+        assert sibling_cancelled.is_set()
+
+    _run(scenario())
+
+    sibling = _record(coordinator, "component-1").request
+    ledger = IdempotencyLedger(store)
+    assert [item.component_id for item in worker.dispatch_calls] == ["component-1"]
+    assert (
+        ledger.require(f"pf-worker:{sibling.work_id}").status
+        is IdempotencyStatus.UNCERTAIN
+    )
+    assert host._ownership.current(
+        project_id=sibling.project_id,
+        work_id=sibling.work_id,
+    ) is None
+
+
 def test_running_checkpoint_without_ledger_is_proven_pre_dispatch_and_can_start_once(
     tmp_path,
 ) -> None:

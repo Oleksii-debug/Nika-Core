@@ -183,8 +183,8 @@ class ProductFactoryProgramHost:
 
         lease_by_work = {lease.work_id: lease for lease in leases}
         semaphore = asyncio.Semaphore(max_parallel)
-        outcomes = await asyncio.gather(
-            *(
+        outcomes = await _settle_work_batch(
+            tuple(
                 self._dispatch_one(
                     semaphore=semaphore,
                     host_task_id=host_task_id,
@@ -219,8 +219,8 @@ class ProductFactoryProgramHost:
             return ()
 
         semaphore = asyncio.Semaphore(max_parallel)
-        outcomes = await asyncio.gather(
-            *(
+        outcomes = await _settle_work_batch(
+            tuple(
                 self._recover_one(
                     semaphore=semaphore,
                     host_task_id=host_task_id,
@@ -897,6 +897,49 @@ class ProductFactoryProgramHost:
             )
         except WorkOwnershipError:
             return
+
+
+async def _settle_work_batch(
+    operations: tuple[Awaitable[ProgramWorkOutcome], ...],
+) -> tuple[ProgramWorkOutcome, ...]:
+    """Cancel and settle sibling work before propagating an uncontained batch failure."""
+
+    tasks = tuple(asyncio.ensure_future(operation) for operation in operations)
+    if not tasks:
+        return ()
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+    except asyncio.CancelledError:
+        await _cancel_work_batch_tasks(tasks)
+        raise
+
+    first_error: BaseException | None = None
+    for task in tasks:
+        if task not in done:
+            continue
+        if task.cancelled():
+            if first_error is None:
+                first_error = asyncio.CancelledError()
+            continue
+        error = task.exception()
+        if error is not None and first_error is None:
+            first_error = error
+
+    if first_error is not None:
+        await _cancel_work_batch_tasks(tuple(pending))
+        raise first_error
+
+    return tuple(task.result() for task in tasks)
+
+
+async def _cancel_work_batch_tasks(
+    tasks: tuple[asyncio.Future[ProgramWorkOutcome], ...],
+) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    if tasks:
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class _BorrowedSQLiteStore:
