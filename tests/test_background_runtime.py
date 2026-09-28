@@ -1366,7 +1366,7 @@ def test_resume_paused_requires_canonical_ready_running_prefix(tmp_path: Path) -
     ]
     assert len(records) == 1
     assert records[0].status is IdempotencyStatus.COMPLETED
-    assert records[0].input_hash
+    assert records[0].input_fingerprint
     assert queue.get(task_id).state is TaskState.RUNNING
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
     events = audit.list_for(entity_type="task", entity_id=task_id)
@@ -1386,6 +1386,9 @@ def test_resume_paused_noop_effect_becomes_uncertain_not_pending(tmp_path: Path)
             _obs(312, OwnerPresence.AWAY, now=now),
             _obs(313, OwnerPresence.AWAY, now=now),
             _obs(314, OwnerPresence.AWAY, now=now),
+            _obs(315, OwnerPresence.AWAY, now=now),
+            _obs(316, OwnerPresence.AWAY, now=now),
+            _obs(317, OwnerPresence.AWAY, now=now),
         ],
         now=now,
     )
