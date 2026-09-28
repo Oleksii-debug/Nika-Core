@@ -117,6 +117,68 @@ def test_success_without_test_evidence_is_rejected() -> None:
         coordinator.record_result(envelope)
 
 
+class _FakePassingEvidence:
+    command = ("python", "-m", "pytest", "tests/core")
+    exit_code = 0
+    output_digest = "forged"
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("entry", _FakePassingEvidence(), "exact TestEvidence"),
+        ("exit_code", False, "exact integer"),
+        ("command", ["python", "-m", "pytest", "tests/core"], "exact non-empty argv"),
+    ),
+)
+def test_success_evidence_requires_exact_nested_authority_before_state_effect(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    valid = TestEvidence(
+        ("python", "-m", "pytest", "tests/core"),
+        0,
+        "ok",
+    )
+    if field == "entry":
+        evidence: object = (value,)
+    else:
+        forged = object.__new__(TestEvidence)
+        object.__setattr__(
+            forged,
+            "command",
+            value if field == "command" else valid.command,
+        )
+        object.__setattr__(
+            forged,
+            "exit_code",
+            value if field == "exit_code" else valid.exit_code,
+        )
+        object.__setattr__(forged, "output_digest", valid.output_digest)
+        evidence = (forged,)
+
+    result = CodingResult(job_id=request.work_id, test_evidence=(valid,))
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        result,
+    )
+    object.__setattr__(result, "test_evidence", evidence)
+    before = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match=message):
+        coordinator.record_result(envelope)
+
+    assert coordinator.snapshot() == before
+
+
 def test_worker_failure_transitions_to_repair_and_new_attempt_is_deterministic() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")

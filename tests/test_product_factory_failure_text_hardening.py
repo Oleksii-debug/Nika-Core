@@ -17,6 +17,34 @@ class _HostileText(str):
     pass
 
 
+class _HostileFailure:
+    @property
+    def message(self) -> str:
+        raise AssertionError("failure carrier behavior must not execute")
+
+
+def test_worker_failure_requires_exact_carrier_before_message_access() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    result = CodingResult(job_id=request.work_id)
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        result,
+    )
+    object.__setattr__(result, "failure", _HostileFailure())
+    before = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match="exact WorkerFailure"):
+        coordinator.record_result(envelope)
+
+    assert coordinator.snapshot() == before
+
+
 def _failed_result(request, message: str) -> WorkerResultEnvelope:
     return WorkerResultEnvelope(
         work_id=request.work_id,

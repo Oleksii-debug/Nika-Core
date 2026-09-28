@@ -11,7 +11,12 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
-from nika_core.toolsmith.contracts import CodingResult, TestEvidence
+from nika_core.toolsmith.contracts import (
+    CodingResult,
+    TestEvidence,
+    WorkerFailure,
+    WorkerFailureKind,
+)
 
 _MAX_DURABLE_TEXT_UTF8_BYTES = 4096
 _MAX_EVIDENCE_REF_UTF8_BYTES = 4096
@@ -459,7 +464,11 @@ class ProductFactoryCoordinator:
             raise CoordinatorError("coding result job id does not match Product Factory work id")
 
     @staticmethod
-    def _validate_success_evidence(request: ComponentWorkRequest, evidence: tuple[TestEvidence, ...]) -> None:
+    def _validate_success_evidence(
+        request: ComponentWorkRequest,
+        evidence: tuple[TestEvidence, ...],
+    ) -> None:
+        _validate_test_evidence_carrier(evidence)
         if not evidence or any(item.exit_code != 0 for item in evidence):
             raise CoordinatorError("successful worker result requires passing test evidence")
         remaining = list(evidence)
@@ -649,6 +658,7 @@ def _canonical_worker_failure_message_from_result(
     failure = result.failure
     if failure is None:
         raise CoordinatorError(missing_error)
+    _validate_worker_failure_carrier(failure)
     return _canonical_worker_failure_message(failure.message)
 
 
@@ -755,6 +765,40 @@ def _validate_worker_result_scalar_authority(envelope: WorkerResultEnvelope) -> 
         raise CoordinatorError("worker result coding result must be an exact CodingResult")
     if type(envelope.coding_result.job_id) is not str or not envelope.coding_result.job_id.strip():
         raise CoordinatorError("coding result job id must be an exact non-empty string")
+    _validate_test_evidence_carrier(envelope.coding_result.test_evidence)
+    if envelope.coding_result.failure is not None:
+        _validate_worker_failure_carrier(envelope.coding_result.failure)
+
+
+def _validate_test_evidence_carrier(evidence: object) -> None:
+    if type(evidence) is not tuple:
+        raise CoordinatorError("test evidence must be an exact tuple")
+    for item in evidence:
+        if type(item) is not TestEvidence:
+            raise CoordinatorError("test evidence entries must be exact TestEvidence")
+        if (
+            type(item.command) is not tuple
+            or not item.command
+            or any(type(part) is not str or not part for part in item.command)
+        ):
+            raise CoordinatorError(
+                "test evidence command must be an exact non-empty argv tuple"
+            )
+        if type(item.exit_code) is not int:
+            raise CoordinatorError("test evidence exit code must be an exact integer")
+        if type(item.output_digest) is not str or not item.output_digest.strip():
+            raise CoordinatorError(
+                "test evidence output digest must be an exact non-empty string"
+            )
+
+
+def _validate_worker_failure_carrier(failure: object) -> None:
+    if type(failure) is not WorkerFailure:
+        raise CoordinatorError("worker failure must be an exact WorkerFailure")
+    if type(failure.kind) is not WorkerFailureKind:
+        raise CoordinatorError("worker failure kind must be an exact WorkerFailureKind")
+    if type(failure.retryable) is not bool:
+        raise CoordinatorError("worker failure retryable must be an exact boolean")
 
 
 def _validate_sha(value: object, label: str) -> None:
