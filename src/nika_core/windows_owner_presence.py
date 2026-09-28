@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import ctypes
 import os
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
 from math import ceil, isfinite
 from threading import Lock
 from typing import Protocol
-import unicodedata
 
 from nika_core.background_life import OwnerPresence
 from nika_core.background_runtime import OwnerPresenceObservation
