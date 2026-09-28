@@ -39,6 +39,8 @@ REQUIRED_TRUE_FIELDS = (
     "manifest_verified",
     "third_party_notices_verified",
     "packaged_uia_keyboard_focus",
+    "machine_readable_sbom_verified",
+    "supply_chain_provenance_verified",
 )
 REQUIRED_FALSE_FIELDS = (
     "physical_windows_foundry_inference_proven",
@@ -59,7 +61,7 @@ def _prehuman_evidence(tmp_path: Path, artifact: Path) -> Path:
     path.write_text(
         json.dumps(
             {
-                "schema_version": 3,
+                "schema_version": 4,
                 "product_version": PRODUCT_VERSION,
                 "commit_sha": SOURCE_SHA,
                 "distributable_zip_path": ARTIFACT_REFERENCE,
