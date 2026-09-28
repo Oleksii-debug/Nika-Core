@@ -155,13 +155,8 @@ def _rollback_operation_id(
     *,
     label: str,
 ) -> str:
-    material = "\0".join(
-        (
-            "nika-m12-packaged-rollback-v1",
-            source_manifest_sha,
-            target_manifest_sha,
-            label,
-        )
+    material = (
+        f"nika-m12-packaged-rollback-v1\0{source_manifest_sha}\0{target_manifest_sha}\0{label}"
     ).encode("ascii")
     return hashlib.sha256(material).hexdigest()[:32]
 
