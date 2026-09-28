@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from math import isfinite
 from nika_core.background_life import OwnerPresence
 from nika_core.background_runtime import OwnerPresenceObservation
 from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.task_state import TaskState
 from nika_core.runtime.contracts import AgentRuntimePort
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.windows_owner_presence import WindowsOwnerPresenceObserver
@@ -42,8 +44,8 @@ class WindowsBackgroundOwnerReturnController:
         coordinator: TaskRuntimeCoordinator,
         audit: AuditLog,
         presence: WindowsOwnerPresenceObserver,
-        max_presence_age_seconds: int | float = 5.0,
-        max_future_skew_seconds: int | float = 1.0,
+        max_presence_age_seconds: float = 5.0,
+        max_future_skew_seconds: float = 1.0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if type(coordinator) is not TaskRuntimeCoordinator:
@@ -72,6 +74,7 @@ class WindowsBackgroundOwnerReturnController:
         if self._max_future_skew > self._max_age:
             raise ValueError("max_future_skew_seconds cannot exceed max_presence_age_seconds")
         self._coordinator = coordinator
+        self._queue = coordinator_queue
         self._audit = audit
         self._presence = presence
         self._source_id = presence.source_id
@@ -123,6 +126,7 @@ class WindowsBackgroundOwnerReturnController:
                 else "owner_presence_unknown"
             )
 
+        pause_fence = self._capture_running_pause_fence(task_id)
         try:
             applied = await self._coordinator.pause(
                 runtime,
@@ -151,17 +155,125 @@ class WindowsBackgroundOwnerReturnController:
                 pause_applied=False,
             )
 
-        self._audit.append(
-            event_type="background.running_paused_for_owner",
-            entity_type="task",
-            entity_id=task_id,
-            payload={"reason": reason, "source_id": self._source_id},
+        self._record_owner_return_pause(
+            task_id=task_id,
+            reason=reason,
+            task_event_fence=pause_fence[0],
+            audit_event_fence=pause_fence[1],
         )
         return RunningBackgroundReconcileResult(
             action=RunningBackgroundAction.PAUSED,
             reason=reason,
             pause_applied=True,
         )
+
+    def _capture_running_pause_fence(self, task_id: str) -> tuple[int, int]:
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            task_row = conn.execute(
+                "SELECT state FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise KeyError(f"Unknown task: {task_id}")
+            if task_row["state"] != TaskState.RUNNING.value:
+                raise ValueError("background owner-return pause requires a RUNNING task")
+            event_row = conn.execute(
+                "SELECT event_id, new_state FROM task_events "
+                "WHERE task_id = ? ORDER BY event_id DESC LIMIT 1",
+                (task_id,),
+            ).fetchone()
+            if event_row is None or event_row["new_state"] != TaskState.RUNNING.value:
+                raise RuntimeError("RUNNING task lacks matching durable task event")
+            audit_row = conn.execute(
+                "SELECT COALESCE(MAX(event_id), 0) AS event_id FROM audit_events "
+                "WHERE entity_type = ? AND entity_id = ?",
+                ("task", task_id),
+            ).fetchone()
+            assert audit_row is not None
+            return int(event_row["event_id"]), int(audit_row["event_id"])
+
+    def _record_owner_return_pause(
+        self,
+        *,
+        task_id: str,
+        reason: str,
+        task_event_fence: int,
+        audit_event_fence: int,
+    ) -> None:
+        with self._queue.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            task_row = conn.execute(
+                "SELECT state FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise KeyError(f"Unknown task: {task_id}")
+            rows = conn.execute(
+                "SELECT event_id, previous_state, new_state FROM task_events "
+                "WHERE task_id = ? AND event_id > ? ORDER BY event_id",
+                (task_id, task_event_fence),
+            ).fetchall()
+            if (
+                task_row["state"] != TaskState.PAUSED.value
+                or len(rows) != 1
+                or rows[0]["previous_state"] != TaskState.RUNNING.value
+                or rows[0]["new_state"] != TaskState.PAUSED.value
+            ):
+                raise RuntimeError(
+                    "owner-return pause did not produce one exact RUNNING -> PAUSED epoch"
+                )
+            pause_event_id = int(rows[0]["event_id"])
+
+            authority_rows = conn.execute(
+                "SELECT event_type, payload_json FROM audit_events "
+                "WHERE entity_type = ? AND entity_id = ? AND event_id > ? "
+                "AND event_type IN (?, ?, ?) ORDER BY event_id",
+                (
+                    "task",
+                    task_id,
+                    audit_event_fence,
+                    "runtime.pause_requested",
+                    "runtime.pause_confirmed",
+                    "runtime.pause_reaffirmed",
+                ),
+            ).fetchall()
+            if (
+                len(authority_rows) != 2
+                or authority_rows[0]["event_type"] != "runtime.pause_requested"
+                or authority_rows[1]["event_type"] != "runtime.pause_confirmed"
+            ):
+                raise RuntimeError(
+                    "owner-return pause lacks one fresh canonical pause authority pair"
+                )
+            try:
+                requested_payload = json.loads(authority_rows[0]["payload_json"])
+                confirmed_payload = json.loads(authority_rows[1]["payload_json"])
+            except (TypeError, json.JSONDecodeError) as exc:
+                raise RuntimeError("canonical pause authority payload is malformed") from exc
+            if type(requested_payload) is not dict or type(confirmed_payload) is not dict:
+                raise RuntimeError("canonical pause authority payload is malformed")
+            requested_key = requested_payload.get("operation_key")
+            confirmed_key = confirmed_payload.get("operation_key")
+            if (
+                type(requested_key) is not str
+                or not requested_key
+                or requested_key != confirmed_key
+            ):
+                raise RuntimeError("canonical pause authority operation key is inconsistent")
+
+            self._audit.append_with_connection(
+                conn,
+                event_type="background.running_paused_for_owner",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "reason": reason,
+                    "source_id": self._source_id,
+                    "task_event_id": pause_event_id,
+                    "pause_operation_key": requested_key,
+                },
+            )
 
     def _require_background_runtime_provenance(
         self,

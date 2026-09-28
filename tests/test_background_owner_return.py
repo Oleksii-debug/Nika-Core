@@ -18,8 +18,8 @@ from nika_core.kernel.task_state import TaskState
 from nika_core.runtime.contracts import (
     RuntimeCapability,
     RuntimeRequest,
-    RuntimeResumeRequest,
     RuntimeResult,
+    RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.windows_owner_presence import WindowsOwnerPresenceObserver
@@ -175,6 +175,54 @@ def test_active_owner_delegates_durable_pause_to_canonical_coordinator(tmp_path:
     assert session is not None
     assert session.outcome.value == "paused"
     assert session.resume_token == "resume-token"
+    pause_events = [
+        event
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+        if event.event_type == "background.running_paused_for_owner"
+    ]
+    assert len(pause_events) == 1
+    marker = pause_events[0]
+    with queue.store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_id, previous_state, new_state FROM task_events "
+            "WHERE task_id = ? ORDER BY event_id DESC LIMIT 1",
+            (task_id,),
+        ).fetchone()
+    assert row is not None
+    assert marker.payload["task_event_id"] == int(row["event_id"])
+    assert row["previous_state"] == TaskState.RUNNING.value
+    assert row["new_state"] == TaskState.PAUSED.value
+    assert type(marker.payload["pause_operation_key"]) is str
+
+
+def test_preexisting_paused_task_cannot_be_relabelled_owner_return(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    queue, audit, coordinator, task_id, thread_id = _running_runtime_state(tmp_path)
+    runtime = PausableRuntime()
+    assert asyncio.run(
+        coordinator.pause(runtime, task_id=task_id, thread_id=thread_id)
+    ) is True
+    assert queue.get(task_id).state is TaskState.PAUSED
+
+    controller = WindowsBackgroundOwnerReturnController(
+        coordinator=coordinator,
+        audit=audit,
+        presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
+        clock=lambda: now,
+    )
+
+    with pytest.raises(ValueError, match="requires a RUNNING task"):
+        asyncio.run(
+            controller.reconcile(runtime=runtime, task_id=task_id, thread_id=thread_id)
+        )
+
+    assert runtime.cancel_calls == [(task_id, thread_id)]
+    assert not any(
+        event.event_type == "background.running_paused_for_owner"
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+    )
 
 
 def test_stale_presence_fails_closed_by_pausing_running_background_work(
@@ -383,7 +431,7 @@ def test_presence_from_different_audit_store_cannot_authorize_continue(
     tmp_path: Path,
 ) -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
-    queue, audit, coordinator, task_id, thread_id = _running_runtime_state(tmp_path)
+    queue, audit, coordinator, task_id, _thread_id = _running_runtime_state(tmp_path)
     foreign_store = SQLiteStore(tmp_path / "foreign-presence.db")
     foreign_store.initialize()
     foreign_audit = AuditLog(foreign_store)
