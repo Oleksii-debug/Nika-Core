@@ -20,6 +20,14 @@ def _services(tmp_path):
     return path, tasks, StudyQueue(tasks)
 
 
+class _BehavioralDigest(str):
+    def __len__(self) -> int:
+        raise AssertionError("digest length executed before exact-type validation")
+
+    def lower(self) -> str:
+        raise AssertionError("digest lower executed before exact-type validation")
+
+
 def _material(**overrides) -> StudyMaterial:
     values = {
         "material_id": "book-uk-001",
@@ -426,6 +434,36 @@ def test_material_requires_an_immutable_source_identity() -> None:
 
     assert _material(content_sha256=None).source_version == "edition-1"
     assert _material(source_version=None).content_sha256 == "a" * 64
+
+
+def test_material_requires_exact_sha256_carrier_before_digest_operations() -> None:
+    digest = _BehavioralDigest("a" * 64)
+
+    with pytest.raises(TypeError, match="content_sha256 must be text"):
+        _material(content_sha256=digest)
+
+
+def test_enqueue_revalidates_mutated_sha256_before_durable_write(tmp_path) -> None:
+    _, tasks, queue = _services(tmp_path)
+    material = _material(material_id="mutated-digest")
+    object.__setattr__(material, "content_sha256", _BehavioralDigest("a" * 64))
+
+    with pytest.raises(TypeError, match="content_sha256 must be text"):
+        queue.enqueue(
+            workspace_id="study",
+            agent_id="reader",
+            material=material,
+        )
+
+    with tasks.store.connection() as conn:
+        task_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM tasks"
+        ).fetchone()["count"]
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events"
+        ).fetchone()["count"]
+    assert task_count == 0
+    assert event_count == 0
 
 
 @pytest.mark.parametrize(
