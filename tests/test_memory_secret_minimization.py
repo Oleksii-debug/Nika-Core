@@ -18,6 +18,9 @@ _MAPPING_BEARER = "mapping-key-bearer-secret"
 _POSIX_KEY = "/home/alice/private-result.json"
 _WINDOWS_BACKSLASH_KEY = r"C:\Users\Alice Smith\Private Data\result.txt"
 _WINDOWS_SLASH_KEY = "C:/Users/Alice Smith/Private Data/result.txt"
+_URL_USERINFO_USER = "private-memory-user"
+_URL_USERINFO_SECRET = "userinfo-password-secret"
+_URL_USERINFO_KEY_SECRET = "userinfo-key-secret"
 
 
 def _store(path: Path) -> SQLiteStore:
@@ -48,6 +51,14 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         f"signature={_MAPPING_SIGNATURE}&expires=1700000000&page=1"
     )
     authorization_key = f"Authorization: Bearer {_MAPPING_BEARER}"
+    userinfo_url = (
+        f"https://{_URL_USERINFO_USER}:{_URL_USERINFO_SECRET}"
+        "@example.test/private?view=1"
+    )
+    userinfo_key = (
+        f"https://cache-user:{_URL_USERINFO_KEY_SECRET}"
+        "@example.test/cache"
+    )
     value = {
         "model_output": {
             "api_key": _API_TOKEN,
@@ -60,6 +71,7 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
                 f"{_SIGNED_SECRET}&expires=1700000000&page=1"
             ),
             "local_path": _LOCAL_PATH,
+            "credential_url": userinfo_url,
         },
         "dynamic_keys": {
             "posix": {_POSIX_KEY: "posix"},
@@ -67,6 +79,7 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
             "windows_slash": {_WINDOWS_SLASH_KEY: "windows-slash"},
             "signed_url": {signed_key: "cached"},
             "authorization": {authorization_key: "upstream"},
+            "userinfo_url": {userinfo_key: "cached"},
         },
         "benign": {
             "status": "ok",
@@ -74,6 +87,7 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
             "public_url": "https://example.test/docs?page=2",
             "relative_path": "docs/guide.md",
             "message": "password policy enabled",
+            "email": "alice@example.test",
         },
     }
 
@@ -97,6 +111,9 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         _POSIX_KEY,
         _WINDOWS_BACKSLASH_KEY,
         _WINDOWS_SLASH_KEY,
+        _URL_USERINFO_USER,
+        _URL_USERINFO_SECRET,
+        _URL_USERINFO_KEY_SECRET,
     )
     for secret in sensitive_fragments:
         assert secret not in raw_before_restart
@@ -113,6 +130,7 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
             "&expires=[REDACTED]&page=1"
         ),
         "local_path": "[LOCAL_PATH]",
+        "credential_url": "https://[REDACTED]@example.test/private?view=1",
     }
     assert durable["dynamic_keys"] == {
         "posix": {"[LOCAL_PATH]": "posix"},
@@ -123,6 +141,7 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
             "&expires=[REDACTED]&page=1": "cached"
         },
         "authorization": {"Authorization: [REDACTED]": "[REDACTED]"},
+        "userinfo_url": {"https://[REDACTED]@example.test/cache": "cached"},
     }
     assert durable["benign"] == value["benign"]
 
@@ -235,5 +254,40 @@ def test_memory_persistence_fails_closed_on_redacted_mapping_key_collision(
             "SELECT value_json FROM memory_records WHERE scope=? AND owner_id=? "
             "AND namespace=? AND memory_key=?",
             ("workspace", "research", "inference", "collision"),
+        ).fetchone()
+    assert row is None
+
+
+def test_memory_persistence_fails_closed_on_url_userinfo_key_collision(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "nika.db"
+    store = _store(db_path)
+    memory = MemoryService(store)
+    first_secret = "userinfo-collision-first"
+    second_secret = "userinfo-collision-second"
+
+    with pytest.raises(ValueError) as exc_info:
+        memory.put(
+            scope=MemoryScope.WORKSPACE,
+            owner_id="research",
+            namespace="inference",
+            key="userinfo-collision",
+            value={
+                f"https://alice:{first_secret}@example.test/cache": "first",
+                f"https://bob:{second_secret}@example.test/cache": "second",
+            },
+        )
+
+    assert str(exc_info.value) == "memory persistence key collision after minimization"
+    assert first_secret not in str(exc_info.value)
+    assert second_secret not in str(exc_info.value)
+
+    restarted_store = _store(db_path)
+    with restarted_store.connection() as conn:
+        row = conn.execute(
+            "SELECT value_json FROM memory_records WHERE scope=? AND owner_id=? "
+            "AND namespace=? AND memory_key=?",
+            ("workspace", "research", "inference", "userinfo-collision"),
         ).fetchone()
     assert row is None
