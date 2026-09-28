@@ -158,7 +158,7 @@ def test_recovery_refuses_task_that_left_created_after_scan(
 
     monkeypatch.setattr(queue, "_matching_task_ids", raced_match)
 
-    with pytest.raises(ValueError, match="state changed before recovery transition"):
+    with pytest.raises(ValueError, match="state changed before transition"):
         queue.recover_created(limit=1)
 
     assert tasks.get(interrupted.task_id).state is TaskState.FAILED
@@ -202,7 +202,7 @@ def test_resume_refuses_task_that_changed_after_observation(
 
     monkeypatch.setattr(queue, "get", raced_get)
 
-    with pytest.raises(ValueError, match="state changed before recovery transition"):
+    with pytest.raises(ValueError, match="state changed before transition"):
         queue.resume(task.task_id)
 
     assert tasks.get(task.task_id).state is TaskState.FAILED
