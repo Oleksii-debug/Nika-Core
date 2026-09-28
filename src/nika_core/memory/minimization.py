@@ -30,15 +30,15 @@ _WINDOWS_LOCAL_USER_PATH_FULL = re.compile(
     r"(?i)[A-Z]:[\\/]Users[\\/][^\\/\r\n\"'<>]+(?:[\\/][^\r\n\"'<>]*)?"
 )
 _URL_USERINFO = re.compile(
-    r"(?i)\\b([a-z][a-z0-9+.-]*://)([^/\\s?#@]*@)"
+    r"(?i)\b([a-z][a-z0-9+.-]*://)([^/\s?#@]*@)"
 )
 _PROVIDER_SIGNED_QUERY = re.compile(
     r"(?i)([?&](?:x-amz-(?:credential|signature|security-token)|"
-    r"x-goog-(?:credential|signature))=)([^&#\\s]+)"
+    r"x-goog-(?:credential|signature))=)([^&#\s]+)"
 )
 _SENSITIVE_FRAGMENT_CREDENTIAL = re.compile(
     r"(?i)(#(?:token|access_token|refresh_token|api_key|auth|key|password|"
-    r"secret|signature|sig)=)([^&#\\s]+)"
+    r"secret|signature|sig)=)([^&#\s]+)"
 )
 _KEY_COLLISION_ERROR = "memory persistence key collision after minimization"
 
