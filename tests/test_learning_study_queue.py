@@ -316,6 +316,70 @@ def test_tampered_created_study_task_is_not_transitioned_during_recovery(tmp_pat
     assert after == before
 
 
+def test_extra_durable_content_fails_before_recovery_mutation(tmp_path) -> None:
+    path, tasks, queue = _services(tmp_path)
+    task = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="extra-content"),
+    )
+    with tasks.store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload["prompt"] = "sensitive prompt must never be durable study evidence"
+        conn.execute(
+            "UPDATE tasks SET state = ?, payload_json = ? WHERE task_id = ?",
+            (
+                TaskState.CREATED.value,
+                json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                task.task_id,
+            ),
+        )
+
+    fresh_store = SQLiteStore(path)
+    fresh_store.initialize()
+    fresh_tasks = TaskQueue(fresh_store)
+    fresh = StudyQueue(fresh_tasks)
+
+    with pytest.raises(ValueError, match="invalid durable study task payload"):
+        fresh.recover_created(limit=1)
+
+    assert fresh_tasks.get(task.task_id).state is TaskState.CREATED
+    with fresh_store.connection() as conn:
+        ready_events = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events "
+            "WHERE task_id = ? AND previous_state = ? AND new_state = ?",
+            (task.task_id, TaskState.CREATED.value, TaskState.READY.value),
+        ).fetchone()["count"]
+    assert ready_events == 1  # only the original enqueue transition, never recovery
+
+
+def test_explicit_null_optional_field_is_not_canonical_durable_evidence(tmp_path) -> None:
+    _, tasks, queue = _services(tmp_path)
+    task = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="null-shape", source_version=None),
+    )
+    with tasks.store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload["source_version"] = None
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), task.task_id),
+        )
+
+    with pytest.raises(ValueError, match="invalid durable study task payload"):
+        queue.get(task.task_id)
+
+
 def test_material_requires_an_immutable_source_identity() -> None:
     with pytest.raises(ValueError, match="immutable study identity"):
         _material(source_version=None, content_sha256=None)
