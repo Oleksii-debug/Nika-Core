@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import pathlib
 import tarfile
 import tempfile
@@ -87,6 +88,7 @@ class OpenHandsAgentServerRuntime:
         if (
             isinstance(poll_interval_seconds, bool)
             or not isinstance(poll_interval_seconds, (int, float))
+            or not math.isfinite(float(poll_interval_seconds))
             or poll_interval_seconds <= 0
             or poll_interval_seconds > 5
         ):
