@@ -8,6 +8,8 @@ from datetime import datetime
 
 from nika_core.background_life import BackgroundAction, BackgroundWorkKind
 from nika_core.background_runtime import BackgroundDispatchGuard, BackgroundDispatchResult
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.recurrence import (
     DurableRecurrenceService,
     RecurrenceDecision,
@@ -120,7 +122,11 @@ class BackgroundRecurrenceBridge:
             raise TypeError("guard must be exact BackgroundDispatchGuard")
         if not callable(effect_resolver):
             raise TypeError("effect_resolver must be callable")
+        queue = getattr(guard, "_queue", None)
+        if type(queue) is not TaskQueue:
+            raise TypeError("guard must retain the canonical TaskQueue authority")
         self._guard = guard
+        self._queue = queue
         self._effect_resolver = effect_resolver
 
     def create(
@@ -185,6 +191,12 @@ class BackgroundRecurrenceBridge:
         binding = BackgroundRecurrenceBinding.from_payload(invocation.payload)
         if binding.recurrence_id != invocation.recurrence_id:
             raise ValueError("background recurrence identity mismatch")
+        if self._queue.get(binding.task_id).state in {
+            TaskState.COMPLETED,
+            TaskState.CANCELLED,
+            TaskState.ARCHIVED,
+        }:
+            return RecurrenceDecision.STOP
 
         async def guarded_effect() -> object:
             effect = self._effect_resolver(binding.effect_action_id)
