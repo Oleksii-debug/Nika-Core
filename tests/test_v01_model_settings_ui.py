@@ -266,6 +266,13 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     assert "Physical Ollama/model inference remains unverified." in wrapper
 
     invocation = "-WindowTitle $WindowTitle -VerifySourceSetup"
+    canary_assignment = wrapper.index(
+        "$env:NIKA_UIA_MODEL_RESULT_CANARY = $resultCanary"
+    )
+    server_start = wrapper.index(
+        "$qaServer = Start-Process",
+        canary_assignment,
+    )
     first_generic = wrapper.index(invocation)
     retry_generic = wrapper.index(invocation, first_generic + len(invocation))
     reset_log = wrapper.index(
@@ -274,4 +281,10 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     )
     transport_assertion = wrapper.index("Assert-SelectedModelRequests", retry_generic)
     first_enable = wrapper.index("-AutostartPhase Enable", transport_assertion)
+    restore_canary = wrapper.index(
+        "$previousResultCanary,",
+        first_enable,
+    )
+    assert canary_assignment < server_start < first_generic
     assert first_generic < reset_log < retry_generic < transport_assertion < first_enable
+    assert first_enable < restore_canary
