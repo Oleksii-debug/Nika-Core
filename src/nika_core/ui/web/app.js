@@ -180,6 +180,7 @@
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let teamStateSignature = null;
+  let teamModelResultAvailable = null;
 
   function announce(message, assertive = false) {
     statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite");
@@ -361,6 +362,7 @@
     teamTaskSummary.hidden = true;
     clearTeamTaskFields();
     teamStateSignature = "unavailable";
+    teamModelResultAvailable = null;
   }
 
   function validTeamMember(member) {
@@ -584,6 +586,7 @@
       const nextSignature = "none";
       const changed = teamStateSignature !== null && teamStateSignature !== nextSignature;
       teamStateSignature = nextSignature;
+      teamModelResultAvailable = null;
       teamTaskEmpty.textContent = "Реального командного завдання ще немає.";
       teamTaskEmpty.hidden = false;
       teamTaskSummary.hidden = true;
@@ -608,7 +611,10 @@
 
     const nextSignature = teamProjectionSignature(projection);
     const changed = teamStateSignature !== null && teamStateSignature !== nextSignature;
+    const modelResultAvailable = Boolean(projection.final_result?.comparison?.model_result);
+    const modelResultBecameAvailable = teamModelResultAvailable === false && modelResultAvailable;
     teamStateSignature = nextSignature;
+    teamModelResultAvailable = modelResultAvailable;
     const { task, team, members, events, final_result: finalResult } = projection;
     teamTaskFields.task_id.textContent = task.task_id;
     teamTaskFields.command.textContent = task.command || "Команда не збережена у bounded projection.";
@@ -651,7 +657,7 @@
 
     teamTaskEmpty.hidden = true;
     teamTaskSummary.hidden = false;
-    return { ok: true, changed };
+    return { ok: true, changed, modelResultBecameAvailable };
   }
 
   function validStartupRecovery(snapshot) {
@@ -1203,7 +1209,11 @@
     if (announceTeamTransitions && recoveryRender.changed) {
       announce(recoveryRender.message, recoveryRender.assertive);
     } else if (announceTeamTransitions && teamRender.changed) {
-      announce("Стан командного завдання оновлено.");
+      announce(
+        teamRender.modelResultBecameAvailable
+          ? "Перевірена відповідь моделі доступна в підсумку командного завдання."
+          : "Стан командного завдання оновлено.",
+      );
     }
     return true;
   }
