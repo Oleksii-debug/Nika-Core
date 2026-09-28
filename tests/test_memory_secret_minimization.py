@@ -26,6 +26,7 @@ _AWS_SIGNATURE = "aws-signature-secret"
 _AWS_SECURITY_TOKEN = "aws-security-token-secret"
 _GOOG_CREDENTIAL = "service@example.test/20260929/auto/storage/goog4_request"
 _GOOG_SIGNATURE = "goog-signature-secret"
+_FRAGMENT_ACCESS_TOKEN = "fragment-access-token-secret"
 
 
 def _store(path: Path) -> SQLiteStore:
@@ -74,6 +75,10 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         f"X-Goog-Credential={_GOOG_CREDENTIAL}&X-Goog-Signature={_GOOG_SIGNATURE}"
         "&generation=1"
     )
+    fragment_url = (
+        "https://auth.example.test/callback#access_token="
+        f"{_FRAGMENT_ACCESS_TOKEN}&state=stable"
+    )
     value = {
         "model_output": {
             "api_key": _API_TOKEN,
@@ -89,6 +94,7 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
             "credential_url": userinfo_url,
             "aws_signed_url": aws_signed_url,
             "goog_signed_url": goog_signed_url,
+            "fragment_url": fragment_url,
         },
         "dynamic_keys": {
             "posix": {_POSIX_KEY: "posix"},
@@ -136,6 +142,7 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         _AWS_SECURITY_TOKEN,
         _GOOG_CREDENTIAL,
         _GOOG_SIGNATURE,
+        _FRAGMENT_ACCESS_TOKEN,
     )
     for secret in sensitive_fragments:
         assert secret not in raw_before_restart
@@ -162,6 +169,9 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
             "https://storage.example.test/object?"
             "X-Goog-Credential=[REDACTED]&X-Goog-Signature=[REDACTED]"
             "&generation=1"
+        ),
+        "fragment_url": (
+            "https://auth.example.test/callback#access_token=[REDACTED]&state=stable"
         ),
     }
     assert durable["dynamic_keys"] == {
