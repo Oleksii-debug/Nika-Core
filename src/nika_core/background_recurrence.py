@@ -151,6 +151,9 @@ class BackgroundRecurrenceBridge:
             effect_action_id=effect_action_id,
             owner_id=owner_id,
         )
+        task = self._queue.get(binding.task_id)
+        if self._is_irreversibly_terminal(task.state):
+            raise ValueError("background recurrence cannot bind an irreversibly terminal task")
         return recurrence.create(
             recurrence_id=binding.recurrence_id,
             task_id=binding.task_id,
@@ -191,11 +194,7 @@ class BackgroundRecurrenceBridge:
         binding = BackgroundRecurrenceBinding.from_payload(invocation.payload)
         if binding.recurrence_id != invocation.recurrence_id:
             raise ValueError("background recurrence identity mismatch")
-        if self._queue.get(binding.task_id).state in {
-            TaskState.COMPLETED,
-            TaskState.CANCELLED,
-            TaskState.ARCHIVED,
-        }:
+        if self._is_irreversibly_terminal(self._queue.get(binding.task_id).state):
             return RecurrenceDecision.STOP
 
         async def guarded_effect() -> object:
@@ -214,6 +213,14 @@ class BackgroundRecurrenceBridge:
             owner_id=binding.owner_id,
         )
         return self._decision_from_dispatch(result)
+
+    @staticmethod
+    def _is_irreversibly_terminal(state: object) -> bool:
+        return state in {
+            TaskState.COMPLETED,
+            TaskState.CANCELLED,
+            TaskState.ARCHIVED,
+        }
 
     @staticmethod
     def _snapshot_invocation(raw: object) -> RecurrenceInvocation:
