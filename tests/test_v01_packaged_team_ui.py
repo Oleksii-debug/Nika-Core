@@ -502,6 +502,31 @@ def test_renderer_rejects_model_result_with_unknown_authority_fields() -> None:
     assert "MODEL_RESULT_SECRET_CANARY" not in str(rejected["rendered"])
 
 
+@pytest.mark.parametrize(
+    "invalid_text",
+    [
+        " leading boundary whitespace",
+        "trailing boundary whitespace ",
+        "contains\\x00nul",
+        "x" * 2001,
+    ],
+)
+def test_renderer_rejects_noncanonical_model_text(invalid_text: str) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    model_result = comparison["model_result"]
+    assert isinstance(model_result, dict)
+    model_result["text"] = invalid_text
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
 def test_renderer_uses_explicit_no_model_fallback_for_deterministic_result() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
