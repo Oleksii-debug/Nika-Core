@@ -164,6 +164,63 @@ def test_foundry_local_runs_through_existing_gateway_without_cloud() -> None:
     assert provider.capabilities.supports_hard_cancellation is False
 
 
+def test_foundry_complete_revalidates_forged_request_before_manager() -> None:
+    calls: list[str] = []
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached for invalid request")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=manager_factory,
+    )
+    forged = request()
+    object.__setattr__(
+        forged,
+        "messages",
+        [ModelMessage(role="user", content="mutated")],
+    )
+
+    with pytest.raises(TypeError, match="request messages must be a canonical tuple"):
+        asyncio.run(provider.complete(forged))
+
+    assert calls == []
+
+
+def test_foundry_complete_snapshots_request_before_waiting() -> None:
+    async def scenario() -> None:
+        model = FakeFoundryModel()
+        manager = FakeManager(model)
+        provider = FoundryLocalProvider(
+            default_model="test-model",
+            manager_factory=lambda: manager,
+        )
+        supplied = request(model="test-model", timeout_seconds=1.0)
+
+        await provider._inference_lock.acquire()
+        task = asyncio.create_task(provider.complete(supplied))
+        try:
+            await asyncio.sleep(0)
+            assert not task.done()
+            object.__setattr__(supplied, "model", "retargeted-model")
+            object.__setattr__(
+                supplied,
+                "messages",
+                (ModelMessage(role="user", content="retargeted"),),
+            )
+            object.__setattr__(supplied, "timeout_seconds", 0.000001)
+        finally:
+            provider._inference_lock.release()
+
+        response = await task
+        assert response.model == "test-model"
+        assert manager.catalog.requested_aliases == ["test-model"]
+        assert model.last_messages == [{"role": "user", "content": "hello"}]
+
+    asyncio.run(scenario())
+
+
 def test_foundry_local_inference_never_downloads_uncached_model() -> None:
     model = FakeFoundryModel(cached=False)
     provider = FoundryLocalProvider(
