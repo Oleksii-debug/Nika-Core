@@ -7,6 +7,13 @@ import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 
+from nika_core.learning_cognition import (
+    CognitionCandidate,
+    CognitionVerification,
+    CognitionVerificationDecision,
+    CognitionVerificationRequirement,
+)
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MACHINE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
 _MAX_SCOPE_ID_CHARS = 256
@@ -113,7 +120,7 @@ class LearningUpdateEvidence:
             _require_sha256(self.expected_revision_sha256, "expected_revision_sha256")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class LearningUpdateIntent:
     """Evidence-bound Loop-B update intent with no mutation authority."""
 
@@ -152,32 +159,49 @@ class LearningUpdateIntent:
         cls,
         *,
         intent_id: str,
-        workspace_id: str,
-        agent_id: str,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
         target: LearningUpdateTarget,
         target_ref_sha256: str,
-        candidate_sha256: str,
-        verification_sha256: str,
         update_schema: str,
         payload: bytes,
         expected_revision_sha256: str | None = None,
     ) -> LearningUpdateIntent:
-        """Bind transient canonical payload bytes without retaining those bytes."""
+        """Bind update bytes only to a canonical VERIFIED Loop-B cognition receipt."""
 
-        raw = _require_payload(payload)
-        return cls(
-            intent_id=intent_id,
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            target=target,
-            target_ref_sha256=target_ref_sha256,
-            candidate_sha256=candidate_sha256,
-            verification_sha256=verification_sha256,
-            update_schema=update_schema,
-            payload_sha256=hashlib.sha256(raw).hexdigest(),
-            payload_bytes=len(raw),
-            expected_revision_sha256=expected_revision_sha256,
+        if cls is not LearningUpdateIntent:
+            raise TypeError("learning update factory must produce the canonical type")
+        canonical_candidate = CognitionCandidate.revalidate(candidate)
+        canonical_verification = CognitionVerification.revalidate(
+            verification,
+            candidate=canonical_candidate,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
         )
+        if canonical_verification.decision is not CognitionVerificationDecision.VERIFIED:
+            raise ValueError("learning update requires VERIFIED cognition evidence")
+        raw = _require_payload(payload)
+
+        instance = object.__new__(cls)
+        values = {
+            "intent_id": intent_id,
+            "workspace_id": canonical_candidate.workspace_id,
+            "agent_id": canonical_candidate.agent_id,
+            "target": target,
+            "target_ref_sha256": target_ref_sha256,
+            "candidate_sha256": canonical_candidate.candidate_sha256,
+            "verification_sha256": canonical_verification.verification_sha256,
+            "update_schema": update_schema,
+            "payload_sha256": hashlib.sha256(raw).hexdigest(),
+            "payload_bytes": len(raw),
+            "expected_revision_sha256": expected_revision_sha256,
+        }
+        for name, value in values.items():
+            object.__setattr__(instance, name, value)
+        instance.__post_init__()
+        return instance
 
     def assert_payload_matches(self, payload: bytes) -> None:
         """Fail closed if transient application bytes differ from the bound intent."""
