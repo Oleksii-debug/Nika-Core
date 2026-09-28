@@ -135,6 +135,8 @@ class ExperienceLedger:
             raise ValueError(f"{name} must be finite and non-negative")
         if type(value) is int and int(number) != value:
             raise ValueError(f"{name} must be finite, non-negative, and exactly representable")
+        if number == 0.0:
+            return 0.0
         return number
 
     @staticmethod
