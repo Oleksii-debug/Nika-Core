@@ -224,6 +224,7 @@ class ProductFactoryCoordinator:
         return updated
 
     def review(self, component_id: str, decision: ReviewDecision) -> WorkRecord:
+        _validate_review_decision(decision)
         record = self._record(component_id)
         if record.state is not WorkState.REVIEW_REQUIRED or record.result is None:
             raise CoordinatorError("component is not awaiting independent review")
@@ -302,6 +303,7 @@ class ProductFactoryCoordinator:
         return CoordinatorSnapshot(self.graph.project_id, self._revision, tuple(self._records[key] for key in sorted(self._records)), self._trusted_plan)
 
     def restore(self, snapshot: CoordinatorSnapshot, *, trusted_plan_fingerprint: str | None = None) -> None:
+        _validate_coordinator_snapshot_carrier(snapshot)
         authority = trusted_plan_fingerprint or self._trusted_plan_fingerprint
         if authority is None:
             raise CoordinatorError("fresh coordinator restore requires external trusted plan authority")
@@ -490,6 +492,26 @@ class ProductFactoryCoordinator:
         self._revision += 1
 
 
+def _validate_coordinator_snapshot_carrier(snapshot: object) -> None:
+    if type(snapshot) is not CoordinatorSnapshot:
+        raise CoordinatorError("snapshot must be an exact CoordinatorSnapshot")
+    if type(snapshot.project_id) is not str or not snapshot.project_id.strip():
+        raise CoordinatorError("snapshot project id must be an exact non-empty string")
+    if type(snapshot.revision) is not int or snapshot.revision < 0:
+        raise CoordinatorError("snapshot revision must be an exact non-negative integer")
+    if type(snapshot.records) is not tuple or any(
+        type(record) is not WorkRecord for record in snapshot.records
+    ):
+        raise CoordinatorError("snapshot records must be an exact tuple of WorkRecord")
+    if snapshot.trusted_plan is not None and (
+        type(snapshot.trusted_plan) is not tuple
+        or any(type(request) is not ComponentWorkRequest for request in snapshot.trusted_plan)
+    ):
+        raise CoordinatorError(
+            "snapshot trusted plan must be an exact tuple of ComponentWorkRequest"
+        )
+
+
 def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
     if not plan:
         raise CoordinatorError("trusted plan descriptor must not be empty")
@@ -504,6 +526,7 @@ def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
 
 
 def validate_trusted_plan_snapshot(snapshot: CoordinatorSnapshot, authority_fingerprint: str) -> None:
+    _validate_coordinator_snapshot_carrier(snapshot)
     _validate_digest(authority_fingerprint, "trusted_plan_fingerprint")
     plan = snapshot.trusted_plan
     if plan is None or not plan:
@@ -575,6 +598,8 @@ def _valid_repair_goal(initial_goal: str, current_goal: str, attempt: int) -> bo
 
 
 def _validate_review_decision(decision: ReviewDecision) -> None:
+    if type(decision) is not ReviewDecision:
+        raise CoordinatorError("review decision must be an exact ReviewDecision")
     if type(decision.accepted) is not bool:
         raise CoordinatorError("review acceptance must be an exact boolean")
     _canonical_durable_text(decision.reviewer_id, label="reviewer id")
@@ -693,6 +718,8 @@ def _stable_id(prefix: str, *parts: object) -> str:
 
 
 def _validate_work_request_scalar_authority(request: ComponentWorkRequest) -> None:
+    if type(request) is not ComponentWorkRequest:
+        raise CoordinatorError("work request must be an exact ComponentWorkRequest")
     text_values = (
         request.work_id,
         request.project_id,
@@ -710,6 +737,8 @@ def _validate_work_request_scalar_authority(request: ComponentWorkRequest) -> No
 
 
 def _validate_worker_result_scalar_authority(envelope: WorkerResultEnvelope) -> None:
+    if type(envelope) is not WorkerResultEnvelope:
+        raise CoordinatorError("worker result must be an exact WorkerResultEnvelope")
     identity_values = (envelope.work_id, envelope.component_id, envelope.repository_id)
     if any(type(value) is not str for value in identity_values):
         raise CoordinatorError("worker result identity must be exact strings")

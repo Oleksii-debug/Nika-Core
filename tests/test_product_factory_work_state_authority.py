@@ -5,7 +5,9 @@ import pytest
 from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
     CoordinatorError,
+    CoordinatorSnapshot,
     ProductFactoryCoordinator,
+    ReviewDecision,
     WorkerResultEnvelope,
     WorkRecord,
 )
@@ -390,3 +392,86 @@ def test_plan_rejects_polymorphic_base_sha_before_casefold() -> None:
             permission_ceiling=PERMISSIONS,
         )
 
+
+
+
+def test_restore_rejects_behavioral_snapshot_revision_before_comparison() -> None:
+    coordinator = _coordinator()
+    snapshot = coordinator.snapshot()
+    tampered = replace(snapshot, revision=_HostileInt(snapshot.revision))
+
+    restored = ProductFactoryCoordinator(_graph())
+    with pytest.raises(CoordinatorError, match="snapshot revision must be an exact non-negative"):
+        restored.restore(
+            tampered,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
+    assert restored.revision == 0
+
+
+def test_restore_rejects_mutable_snapshot_records_alias() -> None:
+    coordinator = _coordinator()
+    snapshot = coordinator.snapshot()
+    tampered = replace(snapshot, records=list(snapshot.records))
+
+    restored = ProductFactoryCoordinator(_graph())
+    with pytest.raises(CoordinatorError, match="snapshot records must be an exact tuple"):
+        restored.restore(
+            tampered,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
+    assert restored.revision == 0
+
+
+def test_restore_rejects_mutable_snapshot_trusted_plan_alias() -> None:
+    coordinator = _coordinator()
+    snapshot = coordinator.snapshot()
+    assert snapshot.trusted_plan is not None
+    tampered = replace(snapshot, trusted_plan=list(snapshot.trusted_plan))
+
+    restored = ProductFactoryCoordinator(_graph())
+    with pytest.raises(CoordinatorError, match="snapshot trusted plan must be an exact tuple"):
+        restored.restore(
+            tampered,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
+    assert restored.revision == 0
+
+
+def test_validate_snapshot_rejects_coordinator_snapshot_subclass() -> None:
+    class SnapshotSubclass(CoordinatorSnapshot):
+        pass
+
+    coordinator = _coordinator()
+    snapshot = coordinator.snapshot()
+    subclass = SnapshotSubclass(
+        snapshot.project_id,
+        snapshot.revision,
+        snapshot.records,
+        snapshot.trusted_plan,
+    )
+
+    restored = ProductFactoryCoordinator(_graph())
+    with pytest.raises(CoordinatorError, match="snapshot must be an exact CoordinatorSnapshot"):
+        restored.restore(
+            subclass,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
+    assert restored.revision == 0
+
+
+def test_review_revalidates_forged_decision_before_state_mutation() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_success(request))
+    before = coordinator.snapshot()
+
+    forged = object.__new__(ReviewDecision)
+    object.__setattr__(forged, "reviewer_id", "qa-1")
+    object.__setattr__(forged, "accepted", 1)
+    object.__setattr__(forged, "reason", "verified")
+    object.__setattr__(forged, "evidence_refs", ("ci:1",))
+
+    with pytest.raises(CoordinatorError, match="review acceptance must be an exact boolean"):
+        coordinator.review("core", forged)
+    assert coordinator.snapshot() == before
