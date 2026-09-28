@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import importlib
+import sys
 
 import pytest
 
@@ -205,7 +207,11 @@ def test_noncanonical_host_api_container_fails_closed_without_effect() -> None:
 
     sd = _FakeSoundDevice()
     host_apis = sd.query_hostapis()
-    sd.query_hostapis = lambda: _HostApiTuple(host_apis)
+
+    def query_hostapis() -> tuple[dict[str, object], ...]:
+        return _HostApiTuple(host_apis)
+
+    sd.query_hostapis = query_hostapis
     adapter = _adapter(sd)
 
     with pytest.raises(MicrophoneCaptureAdapterError, match="invalid data"):
@@ -217,7 +223,11 @@ def test_noncanonical_host_api_container_fails_closed_without_effect() -> None:
 
 def test_no_wasapi_host_never_falls_back_to_mme() -> None:
     sd = _FakeSoundDevice()
-    sd.query_hostapis = lambda: ({"name": "Windows MME", "default_input_device": 1},)
+
+    def query_hostapis() -> tuple[dict[str, object], ...]:
+        return ({"name": "Windows MME", "default_input_device": 1},)
+
+    sd.query_hostapis = query_hostapis
     adapter = _adapter(sd)
 
     with pytest.raises(MicrophoneCaptureAdapterError, match="No default Windows WASAPI"):
@@ -323,3 +333,15 @@ def test_caller_cancellation_aborts_and_closes_physical_stream() -> None:
         assert sd.streams[-1].closed is True
 
     asyncio.run(scenario())
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="bundled PortAudio proof is Windows-only")
+def test_installed_sounddevice_loads_portaudio_on_windows() -> None:
+    sounddevice = importlib.import_module("sounddevice")
+
+    version, version_text = sounddevice.get_portaudio_version()
+
+    assert type(version) is int and version > 0
+    assert type(version_text) is str and version_text.strip()
+    assert callable(sounddevice.RawInputStream)
+    assert callable(sounddevice.WasapiSettings)
