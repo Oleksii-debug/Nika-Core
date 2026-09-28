@@ -1282,6 +1282,7 @@ def test_heartbeat_authority_loss_cancels_inflight_effect_and_marks_uncertain(
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.UNCERTAIN
 
+
 def test_unexpected_heartbeat_failure_cancels_inflight_effect_and_marks_uncertain(
     monkeypatch,
     tmp_path,
