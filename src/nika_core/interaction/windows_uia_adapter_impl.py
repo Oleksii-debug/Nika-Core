@@ -648,19 +648,25 @@ class WindowsUIAInteractionAdapter:
         view: str = "control",
         backend: WindowsUIABackend | None = None,
     ) -> None:
-        if process_id <= 0:
-            raise ValueError("process_id must be positive")
+        if type(process_id) is not int or process_id <= 0:
+            raise ValueError("process_id must be an exact positive integer")
         if (window_title is None) == (native_handle is None):
             raise ValueError(
                 "provide exactly one of window_title or native_handle"
             )
-        if view not in {"control", "content"}:
-            raise ValueError("view must be 'control' or 'content'")
+        if window_title is not None and type(window_title) is not str:
+            raise ValueError("window_title must be an exact string")
+        if native_handle is not None and (
+            type(native_handle) is not int or native_handle <= 0
+        ):
+            raise ValueError("native_handle must be an exact positive integer")
+        if type(view) is not str or view not in {"control", "content"}:
+            raise ValueError("view must be exact 'control' or 'content' text")
         self.process_id = process_id
         self.window_title = window_title
         self.native_handle = native_handle
         self.view = view
-        self.backend = backend or PywinautoUIABackend()
+        self.backend = backend if backend is not None else PywinautoUIABackend()
         self._application: ApplicationIdentity | None = None
         self._hwnd: int | None = None
         self._generation = 0

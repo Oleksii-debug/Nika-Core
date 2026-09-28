@@ -188,7 +188,7 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             window_title=window_title,
             native_handle=native_handle,
             view=view,
-            backend=backend or PywinautoUIABackend(),
+            backend=backend if backend is not None else PywinautoUIABackend(),
         )
 
     def _revalidate_action_authority(

@@ -50,6 +50,22 @@ def _record(
     )
 
 
+class _BehavioralInt(int):
+    def __le__(self, other):  # pragma: no cover - must never execute
+        raise AssertionError("UIA integer behavior executed before exact-type validation")
+
+    def __eq__(self, other):  # pragma: no cover - must never execute
+        raise AssertionError("UIA integer equality executed before exact-type validation")
+
+
+class _BehavioralText(str):
+    def __hash__(self):  # pragma: no cover - must never execute
+        raise AssertionError("UIA text hashing executed before exact-type validation")
+
+    def __eq__(self, other):  # pragma: no cover - must never execute
+        raise AssertionError("UIA text equality executed before exact-type validation")
+
+
 class FakeBackend:
     def __init__(self) -> None:
         self.started = 123456789
@@ -126,6 +142,60 @@ def _adapter(backend: FakeBackend, **kwargs) -> WindowsUIAInteractionAdapter:
         backend=backend,
         **kwargs,
     )
+
+
+class _FalseyBackend(FakeBackend):
+    def __bool__(self) -> bool:
+        return False
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    (
+        ({"process_id": True, "window_title": "Nika Fixture"}, "process_id"),
+        (
+            {"process_id": _BehavioralInt(77), "window_title": "Nika Fixture"},
+            "process_id",
+        ),
+        (
+            {"process_id": 77, "native_handle": True},
+            "native_handle",
+        ),
+        (
+            {"process_id": 77, "native_handle": _BehavioralInt(100)},
+            "native_handle",
+        ),
+        (
+            {"process_id": 77, "window_title": _BehavioralText("Nika Fixture")},
+            "window_title",
+        ),
+        (
+            {"process_id": 77, "window_title": "Nika Fixture", "view": _BehavioralText("control")},
+            "view",
+        ),
+    ),
+)
+def test_adapter_constructor_fences_identity_config_before_behavior(
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        WindowsUIAInteractionAdapter(backend=FakeBackend(), **kwargs)
+
+
+def test_falsey_injected_backend_is_not_replaced_by_live_backend() -> None:
+    backend = _FalseyBackend()
+    adapter = WindowsUIAInteractionAdapter(
+        process_id=77,
+        window_title="Nika Fixture",
+        backend=backend,
+    )
+
+    snapshot = adapter.observe()
+
+    assert adapter.backend is backend
+    assert snapshot.target.window is not None
+    assert snapshot.target.window.native_handle == 100
 
 
 def test_adapter_requires_exactly_one_window_identity() -> None:
