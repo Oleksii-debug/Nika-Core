@@ -29,7 +29,6 @@ $previousResultCanary = [System.Environment]::GetEnvironmentVariable(
     'Process'
 )
 $resultCanary = 'NIKA_UIA_MODEL_RESULT_' + [guid]::NewGuid().ToString('N')
-$env:NIKA_UIA_MODEL_RESULT_CANARY = $resultCanary
 
 function Assert-SelectedModelRequests {
     if (-not (Test-Path -LiteralPath $requestLog)) {
@@ -146,6 +145,8 @@ server.serve_forever(poll_interval=0.1)
 $serverSource | Set-Content -LiteralPath $serverScript -Encoding utf8
 
 try {
+    $env:NIKA_UIA_MODEL_RESULT_CANARY = $resultCanary
+
     # Own the exact loopback port before launching Nika. If anything else (including
     # physical Ollama) already owns it, the QA server exits and this proof fails
     # closed rather than sending controlled source text to a foreign process.
