@@ -318,11 +318,12 @@ def _validate_request_carriers(request: MicrophoneCaptureRequest) -> None:
 def _abort_and_close(stream: Any | None) -> None:
     if stream is None:
         return
+    _best_effort_cleanup(stream.abort)
+    _best_effort_cleanup(stream.close)
+
+
+def _best_effort_cleanup(operation: Any) -> None:
     try:
-        stream.abort(ignore_errors=True)
-    except Exception:  # noqa: BLE001 - cleanup must continue through backend teardown errors
-        pass
-    try:
-        stream.close(ignore_errors=True)
-    except Exception:  # noqa: BLE001 - no raw backend error crosses cleanup boundary
-        pass
+        operation(ignore_errors=True)
+    except Exception:  # noqa: BLE001 - teardown errors must not expose native diagnostics
+        return
