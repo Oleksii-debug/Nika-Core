@@ -218,6 +218,28 @@ def test_native_sounddevice_import_failure_is_minimized(monkeypatch: pytest.Monk
     assert canary not in repr(caught.value)
 
 
+@pytest.mark.parametrize("signal", [KeyboardInterrupt, SystemExit])
+def test_native_import_does_not_swallow_base_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+    signal: type[BaseException],
+) -> None:
+    adapter = WindowsWasapiMicrophoneCaptureAdapter(
+        sounddevice_module=None,
+        platform_name="win32",
+    )
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise signal("control-flow-signal")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    with pytest.raises(signal, match="control-flow-signal"):
+        _ = adapter.capabilities
+
+
 def test_non_windows_platform_fails_closed_without_backend_use() -> None:
     sd = _FakeSoundDevice()
     adapter = WindowsWasapiMicrophoneCaptureAdapter(
