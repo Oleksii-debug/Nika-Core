@@ -69,6 +69,7 @@ class _FakeSoundDevice:
         ]
         self.hold_open = False
         self.fail_check = False
+        self.replace_endpoint_during_check = False
         self.settings_calls: list[dict[str, object]] = []
         self.check_calls: list[dict[str, object]] = []
         self.streams: list[_FakeRawInputStream] = []
@@ -94,6 +95,8 @@ class _FakeSoundDevice:
 
     def check_input_settings(self, **kwargs) -> None:
         self.check_calls.append(dict(kwargs))
+        if self.replace_endpoint_during_check:
+            self.raw_device_name = "REPLACEMENT-DURING-CAPABILITY-CHECK"
         if self.fail_check:
             raise RuntimeError(f"unsupported format on {self.raw_device_name}")
 
@@ -287,6 +290,19 @@ def test_same_index_endpoint_replacement_is_rejected_before_stream_start() -> No
         asyncio.run(adapter.capture(request))
 
     assert sd.check_calls == []
+    assert sd.streams == []
+
+
+def test_endpoint_drift_during_capability_check_is_rejected_before_stream_start() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+    request = _request(adapter)
+    sd.replace_endpoint_during_check = True
+
+    with pytest.raises(MicrophoneCaptureAdapterError, match="before stream activation"):
+        asyncio.run(adapter.capture(request))
+
+    assert len(sd.check_calls) == 1
     assert sd.streams == []
 
 

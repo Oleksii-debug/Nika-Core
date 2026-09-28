@@ -65,6 +65,19 @@ class WindowsWasapiMicrophoneCaptureAdapter:
             sample_rate_hz=request.sample_rate_hz,
             extra_settings=extra_settings,
         )
+        current_sd, current_device_index, current_logical_device_id = (
+            self._resolve_wasapi_default_input()
+        )
+        if (
+            current_sd is not sd
+            or current_device_index != device_index
+            or current_logical_device_id != logical_device_id
+        ):
+            raise MicrophoneCaptureAdapterError(
+                MicrophoneCaptureFailureCode.ROUTE_MISMATCH,
+                "Windows microphone route changed before stream activation.",
+                retryable=True,
+            )
 
         loop = asyncio.get_running_loop()
         started_at = loop.time()
