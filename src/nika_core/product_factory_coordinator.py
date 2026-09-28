@@ -304,10 +304,14 @@ class ProductFactoryCoordinator:
 
     def restore(self, snapshot: CoordinatorSnapshot, *, trusted_plan_fingerprint: str | None = None) -> None:
         _validate_coordinator_snapshot_carrier(snapshot)
-        authority = trusted_plan_fingerprint or self._trusted_plan_fingerprint
-        if authority is None:
-            raise CoordinatorError("fresh coordinator restore requires external trusted plan authority")
-        _validate_digest(authority, "trusted_plan_fingerprint")
+        if trusted_plan_fingerprint is not None:
+            _validate_digest(trusted_plan_fingerprint, "trusted_plan_fingerprint")
+            authority = trusted_plan_fingerprint
+        else:
+            authority = self._trusted_plan_fingerprint
+            if authority is None:
+                raise CoordinatorError("fresh coordinator restore requires external trusted plan authority")
+            _validate_digest(authority, "trusted_plan_fingerprint")
         validate_trusted_plan_snapshot(snapshot, authority)
         if snapshot.project_id != self.graph.project_id:
             raise CoordinatorError("snapshot project does not match repository graph")

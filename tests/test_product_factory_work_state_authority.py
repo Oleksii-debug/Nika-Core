@@ -222,6 +222,9 @@ def test_restore_rejects_mutable_authority_in_work_record(
         )
 
 class _HostileStr(str):
+    def __bool__(self):  # pragma: no cover - must never execute
+        raise AssertionError("hostile truthiness executed")
+
     def strip(self, *args, **kwargs):  # pragma: no cover - must never execute
         raise AssertionError("hostile strip executed")
 
@@ -475,3 +478,18 @@ def test_review_revalidates_forged_decision_before_state_mutation() -> None:
     with pytest.raises(CoordinatorError, match="review acceptance must be an exact boolean"):
         coordinator.review("core", forged)
     assert coordinator.snapshot() == before
+
+
+
+def test_restore_validates_explicit_fingerprint_before_truthiness() -> None:
+    coordinator = _coordinator()
+    snapshot = coordinator.snapshot()
+    hostile = _HostileStr(coordinator.trusted_plan_fingerprint)
+
+    restored = ProductFactoryCoordinator(_graph())
+    with pytest.raises(
+        CoordinatorError,
+        match="trusted_plan_fingerprint must be a 64-character hexadecimal digest",
+    ):
+        restored.restore(snapshot, trusted_plan_fingerprint=hostile)
+    assert restored.revision == 0
