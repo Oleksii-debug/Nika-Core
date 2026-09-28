@@ -175,6 +175,46 @@ def test_recovery_refuses_task_that_left_created_after_scan(
     assert revived == 0
 
 
+def test_resume_refuses_task_that_changed_after_observation(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _, tasks, queue = _services(tmp_path)
+    task = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="raced-resume", title="Resume race"),
+    )
+    queue.start(task.task_id)
+    tasks.transition(task.task_id, TaskState.BLOCKED)
+
+    real_get = queue.get
+    first_read = True
+
+    def raced_get(task_id):
+        nonlocal first_read
+        observed = real_get(task_id)
+        if first_read:
+            first_read = False
+            assert observed.state is TaskState.BLOCKED
+            tasks.transition(task_id, TaskState.FAILED)
+        return observed
+
+    monkeypatch.setattr(queue, "get", raced_get)
+
+    with pytest.raises(ValueError, match="state changed before recovery transition"):
+        queue.resume(task.task_id)
+
+    assert tasks.get(task.task_id).state is TaskState.FAILED
+    with tasks.store.connection() as conn:
+        revived = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events "
+            "WHERE task_id = ? AND previous_state = ? AND new_state = ?",
+            (task.task_id, TaskState.FAILED.value, TaskState.READY.value),
+        ).fetchone()["count"]
+    assert revived == 0
+
+
 def test_listing_and_recovery_are_not_starved_by_500_newer_ordinary_tasks(
     tmp_path,
 ) -> None:
