@@ -94,8 +94,10 @@ class FoundryLocalProvider:
                 raise ValueError("expected_model_id must not contain surrounding whitespace")
             if any(not char.isprintable() for char in expected_model_id):
                 raise ValueError("expected_model_id must not contain control characters")
-        if resource_policy is not None and resource_observer is None:
-            raise ValueError("resource_observer is required when resource_policy is configured")
+        if resource_policy is not None:
+            resource_policy = self._snapshot_resource_policy(resource_policy)
+            if resource_observer is None:
+                raise ValueError("resource_observer is required when resource_policy is configured")
 
         self._capabilities = ProviderCapabilities(
             provider_id="foundry-local",
@@ -366,6 +368,18 @@ class FoundryLocalProvider:
                 self._inference_lock.release()
             if management_acquired:
                 self._model_management_lock.release()
+
+    @staticmethod
+    def _snapshot_resource_policy(raw: object) -> ModelResourcePolicy:
+        """Detach resource limits from caller-owned mutable policy state."""
+
+        if type(raw) is not ModelResourcePolicy:
+            raise TypeError("resource_policy must be exact ModelResourcePolicy")
+        return ModelResourcePolicy(
+            max_cpu_percent=raw.max_cpu_percent,
+            max_memory_percent=raw.max_memory_percent,
+            min_available_memory_bytes=raw.min_available_memory_bytes,
+        )
 
     @staticmethod
     def _snapshot_request(raw: object) -> ModelRequest:
