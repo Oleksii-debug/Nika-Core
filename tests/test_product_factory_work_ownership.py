@@ -492,6 +492,67 @@ def test_callers_cannot_supply_time_authority_per_operation(tmp_path) -> None:
         )
 
 
+class _ClockAdvancingConnection:
+    def __init__(self, inner: sqlite3.Connection, clock: FakeClock) -> None:
+        self._inner = inner
+        self._clock = clock
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner, name)
+
+    def execute(self, sql: str, parameters=()):
+        cursor = self._inner.execute(sql, parameters)
+        if sql.startswith(
+            "SELECT owner_id, fence, issued_at, expires_at FROM product_factory_work_ownership"
+        ):
+            self._clock.advance(seconds=2)
+        return cursor
+
+
+def test_mutation_and_transaction_assert_sample_time_after_durable_row_read(tmp_path) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(NOW)
+    service = ProductFactoryWorkOwnership(store, clock=clock)
+    lease = _acquire(service, seconds=1)
+    original_connection = store.connection
+
+    @contextmanager
+    def delayed_select_connection():
+        with original_connection() as connection:
+            yield _ClockAdvancingConnection(connection, clock)
+
+    store.connection = delayed_select_connection  # type: ignore[method-assign]
+
+    clock.instant = NOW
+    with pytest.raises(WorkOwnershipError, match="stale"):
+        service.renew(
+            project_id=lease.project_id,
+            work_id=lease.work_id,
+            owner_id=lease.owner_id,
+            fence=lease.fence,
+        )
+
+    clock.instant = NOW
+    replacement = service.acquire(
+        project_id=lease.project_id,
+        work_id=lease.work_id,
+        owner_id="worker-b",
+    )
+    assert replacement.fence == lease.fence + 1
+
+    clock.instant = replacement.issued_at
+    with store.connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        with pytest.raises(WorkOwnershipError, match="stale"):
+            service.assert_owner_in_transaction(
+                connection,
+                project_id=replacement.project_id,
+                work_id=replacement.work_id,
+                owner_id=replacement.owner_id,
+                fence=replacement.fence,
+            )
+
+
 def test_mutation_clock_is_sampled_only_after_writer_serialization(tmp_path) -> None:
     store = _store(tmp_path)
     original_connection = store.connection

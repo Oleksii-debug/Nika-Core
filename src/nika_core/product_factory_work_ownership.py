@@ -66,13 +66,13 @@ class ProductFactoryWorkOwnership:
         _lease_seconds(lease_seconds)
         with self._store.connection() as connection:
             _begin_immediate(connection)
-            instant = self._instant()
-            expires_at = _expiry(instant, lease_seconds)
             row = connection.execute(
                 "SELECT owner_id, fence, issued_at, expires_at FROM product_factory_work_ownership "
                 "WHERE project_id = ? AND work_id = ?",
                 (project_id, work_id),
             ).fetchone()
+            instant = self._instant()
+            expires_at = _expiry(instant, lease_seconds)
             if row is None:
                 fence = 1
                 connection.execute(
@@ -128,9 +128,9 @@ class ProductFactoryWorkOwnership:
         _lease_seconds(lease_seconds)
         with self._store.connection() as connection:
             _begin_immediate(connection)
+            current = _load(connection, project_id, work_id)
             instant = self._instant()
             expires_at = _expiry(instant, lease_seconds)
-            current = _load(connection, project_id, work_id)
             _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
             assert current is not None
             if expires_at < current.expires_at:
@@ -157,8 +157,8 @@ class ProductFactoryWorkOwnership:
         _strict_fence(fence)
         with self._store.connection() as connection:
             _begin_immediate(connection)
-            instant = self._instant()
             current = _load(connection, project_id, work_id)
+            instant = self._instant()
             _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
             connection.execute(
                 "UPDATE product_factory_work_ownership SET owner_id = NULL, "
@@ -208,8 +208,8 @@ class ProductFactoryWorkOwnership:
         _strict_fence(fence)
         if not connection.in_transaction:
             raise WorkOwnershipError("fenced mutation requires an active SQLite transaction")
-        instant = self._instant()
         current = _load(connection, project_id, work_id)
+        instant = self._instant()
         _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
 
     def _instant(self) -> datetime:
