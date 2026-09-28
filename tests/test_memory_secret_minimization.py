@@ -21,6 +21,11 @@ _WINDOWS_SLASH_KEY = "C:/Users/Alice Smith/Private Data/result.txt"
 _URL_USERINFO_USER = "private-memory-user"
 _URL_USERINFO_SECRET = "userinfo-password-secret"
 _URL_USERINFO_KEY_SECRET = "userinfo-key-secret"
+_AWS_CREDENTIAL = "AKIAEXAMPLE/20260929/eu-central-1/s3/aws4_request"
+_AWS_SIGNATURE = "aws-signature-secret"
+_AWS_SECURITY_TOKEN = "aws-security-token-secret"
+_GOOG_CREDENTIAL = "service@example.test/20260929/auto/storage/goog4_request"
+_GOOG_SIGNATURE = "goog-signature-secret"
 
 
 def _store(path: Path) -> SQLiteStore:
@@ -59,6 +64,16 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         f"https://cache-user:{_URL_USERINFO_KEY_SECRET}"
         "@example.test/cache"
     )
+    aws_signed_url = (
+        "https://storage.example.test/object?"
+        f"X-Amz-Credential={_AWS_CREDENTIAL}&X-Amz-Signature={_AWS_SIGNATURE}"
+        f"&X-Amz-Security-Token={_AWS_SECURITY_TOKEN}&partNumber=1"
+    )
+    goog_signed_url = (
+        "https://storage.example.test/object?"
+        f"X-Goog-Credential={_GOOG_CREDENTIAL}&X-Goog-Signature={_GOOG_SIGNATURE}"
+        "&generation=1"
+    )
     value = {
         "model_output": {
             "api_key": _API_TOKEN,
@@ -72,6 +87,8 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
             ),
             "local_path": _LOCAL_PATH,
             "credential_url": userinfo_url,
+            "aws_signed_url": aws_signed_url,
+            "goog_signed_url": goog_signed_url,
         },
         "dynamic_keys": {
             "posix": {_POSIX_KEY: "posix"},
@@ -114,6 +131,11 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         _URL_USERINFO_USER,
         _URL_USERINFO_SECRET,
         _URL_USERINFO_KEY_SECRET,
+        _AWS_CREDENTIAL,
+        _AWS_SIGNATURE,
+        _AWS_SECURITY_TOKEN,
+        _GOOG_CREDENTIAL,
+        _GOOG_SIGNATURE,
     )
     for secret in sensitive_fragments:
         assert secret not in raw_before_restart
@@ -131,6 +153,16 @@ def test_memory_persistence_minimizes_model_and_tool_secrets_across_restart(
         ),
         "local_path": "[LOCAL_PATH]",
         "credential_url": "https://[REDACTED]@example.test/private?view=1",
+        "aws_signed_url": (
+            "https://storage.example.test/object?"
+            "X-Amz-Credential=[REDACTED]&X-Amz-Signature=[REDACTED]"
+            "&X-Amz-Security-Token=[REDACTED]&partNumber=1"
+        ),
+        "goog_signed_url": (
+            "https://storage.example.test/object?"
+            "X-Goog-Credential=[REDACTED]&X-Goog-Signature=[REDACTED]"
+            "&generation=1"
+        ),
     }
     assert durable["dynamic_keys"] == {
         "posix": {"[LOCAL_PATH]": "posix"},
