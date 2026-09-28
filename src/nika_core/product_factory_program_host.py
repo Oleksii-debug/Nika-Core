@@ -5,7 +5,7 @@ import hashlib
 import json
 import uuid
 from collections.abc import Awaitable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol, TypeVar
@@ -972,12 +972,8 @@ async def _cancel_effect_task(task: asyncio.Future) -> None:
     if task.done():
         return
     task.cancel()
-    try:
+    with suppress(asyncio.CancelledError, Exception):
         await task
-    except asyncio.CancelledError:
-        return
-    except Exception:
-        return
 
 
 def _operation_key(request: ComponentWorkRequest) -> str:
