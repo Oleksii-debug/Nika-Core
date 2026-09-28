@@ -331,7 +331,10 @@ class FoundryLocalProvider:
                     )
                 raise ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
-                    f"Foundry Local model '{authorization.model}' download did not produce cache evidence",
+                    (
+                        f"Foundry Local model '{authorization.model}' download did not "
+                        "produce cache evidence"
+                    ),
                     provider_id=self.capabilities.provider_id,
                     retryable=False,
                 )
