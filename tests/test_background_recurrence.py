@@ -233,6 +233,44 @@ def test_binding_round_trip_and_exact_carrier_fences() -> None:
         BackgroundRecurrenceBinding.from_payload(extra)
 
 
+def test_create_rejects_missing_task_before_scheduler_persistence(tmp_path: Path) -> None:
+    h = _harness(tmp_path)
+
+    with pytest.raises(KeyError):
+        h.bridge.create(
+            h.recurrence,
+            recurrence_id="missing-task",
+            task_id="does-not-exist",
+            work_kind=BackgroundWorkKind.READING_RESEARCH,
+            effect_action_id="background.read",
+            interval_seconds=60,
+            start_at=h.clock.value,
+        )
+
+    assert h.recurrence.get("missing-task") is None
+    assert h.scheduler.upserts == []
+
+
+@pytest.mark.parametrize("terminal_state", [TaskState.COMPLETED, TaskState.CANCELLED, TaskState.ARCHIVED])
+def test_create_rejects_irreversibly_terminal_task(
+    tmp_path: Path,
+    terminal_state: TaskState,
+) -> None:
+    h = _harness(tmp_path)
+    if terminal_state is TaskState.CANCELLED:
+        h.queue.transition(h.task_id, TaskState.CANCELLED)
+    else:
+        h.queue.transition(h.task_id, TaskState.RUNNING)
+        h.queue.transition(h.task_id, TaskState.COMPLETED)
+        if terminal_state is TaskState.ARCHIVED:
+            h.queue.transition(h.task_id, TaskState.ARCHIVED)
+
+    with pytest.raises(ValueError, match="irreversibly terminal"):
+        _create(h, recurrence_id="terminal-task")
+
+    assert h.recurrence.get("terminal-task") is None
+
+
 def test_create_binds_existing_task_work_kind_and_effect_immutably(tmp_path: Path) -> None:
     h = _harness(tmp_path)
     _create(h)
