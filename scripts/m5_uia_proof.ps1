@@ -569,6 +569,34 @@ try {
         throw "Expected bound read-only UI Automation text '$Expected' did not appear."
     }
 
+    function Wait-BoundTextSequence(
+        [string[]]$ExpectedSequence,
+        [int]$Attempts = 80
+    ) {
+        if ($ExpectedSequence.Count -eq 0) {
+            throw 'Bound UI Automation text sequence must not be empty.'
+        }
+        for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            Assert-BoundProcessGeneration
+            $currentWindow = Find-ExactWindow
+            if ($null -eq $currentWindow) { continue }
+            try {
+                $names = Get-BoundDescendantNames $currentWindow
+                $sequenceIndex = 0
+                foreach ($name in $names) {
+                    if ($name -ceq $ExpectedSequence[$sequenceIndex]) {
+                        $sequenceIndex += 1
+                        if ($sequenceIndex -eq $ExpectedSequence.Count) { return }
+                    }
+                }
+            } catch [System.Windows.Automation.ElementNotAvailableException] {
+                continue
+            }
+        }
+        throw "Expected ordered bound UI Automation text sequence did not appear: $($ExpectedSequence -join ' -> ')."
+    }
+
     function Wait-DescendantName(
         [string]$Expected,
         [System.Windows.Automation.ControlType]$ExpectedControlType = $null,
@@ -781,12 +809,14 @@ try {
             # WebView2 accessibility tree. Read-only Text evidence cannot authorize an action,
             # so equivalent provider duplicates are harmless; exact labels + the per-run
             # transport canary must be physically exposed before DB binding receives credit.
-            Wait-BoundTextEvidence 'Відповідь моделі'
-            Wait-BoundTextEvidence $expectedModelResult
-            Wait-BoundTextEvidence 'Постачальник моделі'
-            Wait-BoundTextEvidence 'ollama'
-            Wait-BoundTextEvidence 'Модель'
-            Wait-BoundTextEvidence 'uia-proof-model'
+            Wait-BoundTextSequence @(
+                'Відповідь моделі',
+                $expectedModelResult,
+                'Постачальник моделі',
+                'ollama',
+                'Модель',
+                'uia-proof-model'
+            )
 
             $modelBindingProbe = @'
 import hashlib

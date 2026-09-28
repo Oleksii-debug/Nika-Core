@@ -242,6 +242,13 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
         < binding_probe
     )
 
+    assert "function Wait-BoundTextSequence(" in proof
+    assert "Get-BoundDescendantNames $currentWindow" in proof
+    assert "if ($name -ceq $ExpectedSequence[$sequenceIndex])" in proof
+    assert "Wait-BoundTextSequence @(" in proof
+    assert "Wait-BoundTextEvidence $expectedModelResult" not in proof
+    assert "Wait-BoundTextEvidence 'ollama'" not in proof
+    assert "Wait-BoundTextEvidence 'uia-proof-model'" not in proof
     assert "NIKA_UIA_MODEL_RESULT_CANARY" in proof
     assert "^NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}$" in proof
     assert "controlled loopback response" not in proof
