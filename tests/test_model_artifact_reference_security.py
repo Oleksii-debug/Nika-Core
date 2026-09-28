@@ -40,8 +40,14 @@ def _descriptor() -> ModelArtifactDescriptor:
         "id_token_hint=MODEL_CANARY",
         "id-token-hint=MODEL_CANARY",
         "idtokenhint=MODEL_CANARY",
+        "subscription-key=MODEL_CANARY",
+        "subscription_key=MODEL_CANARY",
+        "subscriptionkey=MODEL_CANARY",
+        "Ocp-Apim-Subscription-Key: MODEL_CANARY",
         "urn:model:provider-public:id_token=MODEL_CANARY",
         "urn:model:provider-public:id_token_hint=MODEL_CANARY",
+        "urn:model:provider-public:subscription-key=MODEL_CANARY",
+        "urn:model:provider-public:%73ubscription-key%3DMODEL_CANARY",
         "urn:model:provider-public:%69d_token%3DMODEL_CANARY",
         "urn:model:provider-public:%69d_token_hint%3DMODEL_CANARY",
         "https://models.example.test/%78-amz-credential%3DMODEL_CANARY",
@@ -60,6 +66,9 @@ def test_public_reference_rejects_encoded_or_bare_credentials(reference: str) ->
     (
         "urn:model:provider-public:id_token_count=3",
         "urn:model:provider-public:id_token_hint_count=3",
+        "urn:model:provider-public:subscription-key-count=3",
+        "urn:model:provider-public:subscription_key_count=3",
+        "urn:model:provider-public:subscriptionkey_count=3",
     ),
 )
 def test_opaque_public_reference_preserves_benign_id_token_metadata(reference: str) -> None:
