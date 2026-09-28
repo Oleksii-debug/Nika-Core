@@ -526,3 +526,77 @@ def test_payload_is_reference_only_and_does_not_capture_document_or_prompt_text(
     assert "document_text" not in payload
     assert "prompt" not in payload
     assert "response" not in payload
+
+def test_enqueue_revalidates_mutated_material_before_durable_write(tmp_path) -> None:
+    _, tasks, queue = _services(tmp_path)
+    material = _material(material_id="mutated-secret-source")
+    object.__setattr__(
+        material,
+        "source_ref",
+        "s3://bucket/book.pdf?X-Amz-Signature=secret",
+    )
+
+    with pytest.raises(ValueError, match="credential"):
+        queue.enqueue(
+            workspace_id="study",
+            agent_id="reader",
+            material=material,
+        )
+
+    with tasks.store.connection() as conn:
+        task_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM tasks"
+        ).fetchone()["count"]
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events"
+        ).fetchone()["count"]
+    assert task_count == 0
+    assert event_count == 0
+
+
+def test_enqueue_requires_exact_material_kind_before_durable_write(tmp_path) -> None:
+    _, tasks, queue = _services(tmp_path)
+    material = _material(material_id="mutated-kind")
+    object.__setattr__(material, "kind", "book")
+
+    with pytest.raises(TypeError, match="kind must be exact StudyMaterialKind"):
+        queue.enqueue(
+            workspace_id="study",
+            agent_id="reader",
+            material=material,
+        )
+
+    with tasks.store.connection() as conn:
+        task_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM tasks"
+        ).fetchone()["count"]
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events"
+        ).fetchone()["count"]
+    assert task_count == 0
+    assert event_count == 0
+
+
+def test_oidc_id_token_references_are_rejected_but_count_remains_public(tmp_path) -> None:
+    for source_ref in (
+        "https://example.test/book.pdf?id_token=eyJ_SECRET&state=stable",
+        "https://example.test/book.pdf#id-token=eyJ_SECRET&state=stable",
+        "idtoken=eyJ_SECRET",
+        "https%3A%2F%2Fexample.test%2Fbook.pdf%3Fid_token%3DeyJ_SECRET",
+    ):
+        with pytest.raises(ValueError, match="credential"):
+            _material(source_ref=source_ref)
+
+    safe_ref = "https://example.test/book.pdf?id_token_count=3"
+    path, _, queue = _services(tmp_path)
+    created = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="oidc-count", source_ref=safe_ref),
+    )
+    fresh_store = SQLiteStore(path)
+    fresh_store.initialize()
+    fresh = StudyQueue(TaskQueue(fresh_store)).get(created.task_id)
+
+    assert fresh.material.source_ref == safe_ref
+

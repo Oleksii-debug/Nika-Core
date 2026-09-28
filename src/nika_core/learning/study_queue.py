@@ -24,6 +24,7 @@ _SECRET_QUERY_KEYS = frozenset(
         "secret",
         "authorization",
         "cookie",
+        "idtoken",
         "xamzcredential",
         "xamzsignature",
         "xamzsecuritytoken",
@@ -35,6 +36,9 @@ _SECRET_TEXT_MARKERS = (
     "authorization:",
     "bearer ",
     "cookie:",
+    "id_token=",
+    "id-token=",
+    "idtoken=",
     "api_key=",
     "apikey=",
     "access_token=",
@@ -67,6 +71,8 @@ class StudyMaterial:
     def __post_init__(self) -> None:
         _require_text(self.material_id, "material_id", maximum=256)
         _require_text(self.title, "title", maximum=512)
+        if type(self.kind) is not StudyMaterialKind:
+            raise TypeError("kind must be exact StudyMaterialKind")
         _require_text(self.source_ref, "source_ref", maximum=4096)
         if self.source_version is None and self.content_sha256 is None:
             raise ValueError(
@@ -110,10 +116,11 @@ class StudyQueue:
     ) -> StudyTask:
         _require_text(workspace_id, "workspace_id", maximum=256)
         _require_text(agent_id, "agent_id", maximum=256)
+        canonical_material = _canonical_material(material)
         record = self._tasks.create(
             workspace_id=workspace_id,
             agent_id=agent_id,
-            payload=_material_payload(material),
+            payload=_material_payload(canonical_material),
         )
         self._tasks.transition(record.task_id, task_state.TaskState.READY)
         return self.get(record.task_id)
@@ -287,6 +294,20 @@ class StudyQueue:
                 if len(rows) < _TASK_SCAN_PAGE_SIZE:
                     break
         return tuple(selected)
+
+
+def _canonical_material(material: StudyMaterial) -> StudyMaterial:
+    if type(material) is not StudyMaterial:
+        raise TypeError("material must be exact StudyMaterial")
+    return StudyMaterial(
+        material_id=material.material_id,
+        title=material.title,
+        kind=material.kind,
+        source_ref=material.source_ref,
+        source_version=material.source_version,
+        content_sha256=material.content_sha256,
+        learning_goal=material.learning_goal,
+    )
 
 
 def _semantic_payload(material: StudyMaterial) -> dict[str, object]:
