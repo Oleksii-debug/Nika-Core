@@ -265,6 +265,77 @@ def test_memory_persistence_redacts_embedded_windows_paths_across_restart(
     ) == raw_before_restart
 
 
+def test_memory_persistence_fully_redacts_provider_and_fragment_credentials(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "nika.db"
+    first_store = _store(db_path)
+    memory = MemoryService(first_store)
+    aws_secret = "aws-signature-secret"
+    fragment_secret = "fragment-access-token-secret"
+    userinfo_secret = "userinfo-password-secret"
+    value = {
+        "aws": (
+            "Observed https://storage.example.test/object?"
+            f"X-Amz-Signature={aws_secret} next=stable"
+        ),
+        "fragment": (
+            "Observed https://auth.example.test/callback#access_token="
+            f"{fragment_secret} state=stable"
+        ),
+        "userinfo": f"Observed https://alice:{userinfo_secret}@example.test/private",
+    }
+
+    memory.put(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="research",
+        namespace="inference",
+        key="credential-boundaries",
+        value=value,
+    )
+
+    raw_before_restart = _raw_memory_value(first_store, key="credential-boundaries")
+    for secret in (aws_secret, fragment_secret, userinfo_secret):
+        assert secret not in raw_before_restart
+    for leaked_suffix in (
+        "s-signature-secret",
+        "ss-token-secret",
+        "sword-secret",
+    ):
+        assert leaked_suffix not in raw_before_restart
+
+    durable = json.loads(raw_before_restart)
+    assert durable == {
+        "aws": (
+            "Observed https://storage.example.test/object?"
+            "X-Amz-Signature=[REDACTED] next=stable"
+        ),
+        "fragment": (
+            "Observed https://auth.example.test/callback#access_token="
+            "[REDACTED] state=stable"
+        ),
+        "userinfo": "Observed https://[REDACTED]@example.test/private",
+    }
+
+    restarted_store = _store(db_path)
+    restarted = MemoryService(restarted_store)
+    record = restarted.get(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="research",
+        namespace="inference",
+        key="credential-boundaries",
+    )
+    assert record is not None
+    assert record.value == durable
+    raw_after_restart = _raw_memory_value(
+        restarted_store,
+        key="credential-boundaries",
+    )
+    assert raw_after_restart == raw_before_restart
+    for secret in (aws_secret, fragment_secret, userinfo_secret):
+        assert secret not in raw_after_restart
+
+
 def test_memory_persistence_fails_closed_on_redacted_mapping_key_collision(
     tmp_path: Path,
 ) -> None:
