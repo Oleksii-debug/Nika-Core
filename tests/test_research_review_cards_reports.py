@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier
 
 import pytest
 
@@ -143,6 +145,60 @@ def test_review_updates_are_audited_and_identical_write_is_idempotent(tmp_path: 
     assert '"previous_state": "unreviewed"' in rows[0]["payload_json"]
     assert '"previous_state": "saved"' in rows[1]["payload_json"]
 
+
+
+def test_concurrent_review_writes_preserve_audit_predecessor_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = ResearchReviewRepository(store)
+    original_get_review = repository.get_review
+    read_barrier = Barrier(2)
+
+    def interleaved_get_review(
+        *,
+        workspace_id: str,
+        document_id: str,
+    ) -> ResearchReview:
+        current = original_get_review(
+            workspace_id=workspace_id,
+            document_id=document_id,
+        )
+        read_barrier.wait(timeout=5)
+        return current
+
+    monkeypatch.setattr(repository, "get_review", interleaved_get_review)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = (
+            pool.submit(
+                repository.set_review,
+                workspace_id="ws",
+                document_id="doc-1",
+                state=ResearchReviewState.SAVED,
+                note="saved",
+            ),
+            pool.submit(
+                repository.set_review,
+                workspace_id="ws",
+                document_id="doc-1",
+                state=ResearchReviewState.DISMISSED,
+                note="dismissed",
+            ),
+        )
+        for future in futures:
+            future.result(timeout=5)
+
+    with store.connection() as conn:
+        rows = conn.execute(
+            """SELECT payload_json FROM audit_events
+            WHERE event_type='research.review.changed'
+            ORDER BY event_id"""
+        ).fetchall()
+    payloads = [json.loads(row["payload_json"]) for row in rows]
+    assert len(payloads) == 2
+    assert payloads[0]["previous_state"] == ResearchReviewState.UNREVIEWED.value
+    assert payloads[1]["previous_state"] == payloads[0]["state"]
 
 def test_review_fails_closed_for_unknown_or_cross_workspace_document(tmp_path: Path) -> None:
     repository = ResearchReviewRepository(_store(tmp_path))

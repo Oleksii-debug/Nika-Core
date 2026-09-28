@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -381,30 +382,46 @@ class ResearchReviewRepository:
             raise TypeError("note must be an exact str")
         if len(note) > _MAX_NOTE_LENGTH:
             raise ValueError(f"note exceeds {_MAX_NOTE_LENGTH} characters")
-
-        current = self.get_review(workspace_id=workspace, document_id=document)
         normalized_note = note.strip()
-        if current.state is state and current.note == normalized_note:
-            return current
 
-        created_at = _now()
-        payload = json.dumps(
-            {
-                "workspace_id": workspace,
-                "document_id": document,
-                "previous_state": current.state.value,
-                "state": state.value,
-                "note": normalized_note,
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-        )
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            self._require_document_on_connection(
+                conn,
+                workspace_id=workspace,
+                document_id=document,
+            )
+            current = self._get_review_on_connection(
+                conn,
+                workspace_id=workspace,
+                document_id=document,
+            )
+            if current.state is state and current.note == normalized_note:
+                return current
+
+            created_at = _now()
+            payload = json.dumps(
+                {
+                    "workspace_id": workspace,
+                    "document_id": document,
+                    "previous_state": current.state.value,
+                    "state": state.value,
+                    "note": normalized_note,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
             conn.execute(
                 """INSERT INTO audit_events(
                     event_type, entity_type, entity_id, payload_json, created_at
                 ) VALUES (?, ?, ?, ?, ?)""",
-                (_EVENT_TYPE, _ENTITY_TYPE, _entity_id(workspace, document), payload, created_at),
+                (
+                    _EVENT_TYPE,
+                    _ENTITY_TYPE,
+                    _entity_id(workspace, document),
+                    payload,
+                    created_at,
+                ),
             )
         return ResearchReview(
             workspace_id=workspace,
@@ -417,40 +434,62 @@ class ResearchReviewRepository:
     def get_review(self, *, workspace_id: str, document_id: str) -> ResearchReview:
         workspace = _required(workspace_id, "workspace_id")
         document = _required(document_id, "document_id")
-        self._require_document(workspace_id=workspace, document_id=document)
         with self._store.connection() as conn:
-            row = conn.execute(
-                """SELECT payload_json, created_at FROM audit_events
-                WHERE event_type=? AND entity_type=? AND entity_id=?
-                ORDER BY event_id DESC LIMIT 1""",
-                (_EVENT_TYPE, _ENTITY_TYPE, _entity_id(workspace, document)),
-            ).fetchone()
-        if row is None:
-            return ResearchReview(
+            self._require_document_on_connection(
+                conn,
                 workspace_id=workspace,
                 document_id=document,
+            )
+            return self._get_review_on_connection(
+                conn,
+                workspace_id=workspace,
+                document_id=document,
+            )
+
+    def _get_review_on_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        document_id: str,
+    ) -> ResearchReview:
+        row = conn.execute(
+            """SELECT payload_json, created_at FROM audit_events
+            WHERE event_type=? AND entity_type=? AND entity_id=?
+            ORDER BY event_id DESC LIMIT 1""",
+            (_EVENT_TYPE, _ENTITY_TYPE, _entity_id(workspace_id, document_id)),
+        ).fetchone()
+        if row is None:
+            return ResearchReview(
+                workspace_id=workspace_id,
+                document_id=document_id,
                 state=ResearchReviewState.UNREVIEWED,
             )
         state, note = _decode_review_audit_payload(
             row["payload_json"],
-            workspace_id=workspace,
-            document_id=document,
+            workspace_id=workspace_id,
+            document_id=document_id,
         )
         updated_at = _canonical_review_timestamp(row["created_at"])
         return ResearchReview(
-            workspace_id=workspace,
-            document_id=document,
+            workspace_id=workspace_id,
+            document_id=document_id,
             state=state,
             note=note,
             updated_at=updated_at,
         )
 
-    def _require_document(self, *, workspace_id: str, document_id: str) -> None:
-        with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT workspace_id FROM corpus_documents WHERE document_id=?",
-                (document_id,),
-            ).fetchone()
+    @staticmethod
+    def _require_document_on_connection(
+        conn: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        document_id: str,
+    ) -> None:
+        row = conn.execute(
+            "SELECT workspace_id FROM corpus_documents WHERE document_id=?",
+            (document_id,),
+        ).fetchone()
         if row is None:
             raise KeyError(f"unknown corpus document: {document_id}")
         if row["workspace_id"] != workspace_id:
