@@ -117,6 +117,7 @@ class FoundryLocalProvider:
         self._model_management_lock = asyncio.Lock()
         self._owned_model_lock = Lock()
         self._owned_loaded_models: dict[str, Any] = {}
+        self._tainted_loaded_models: set[int] = set()
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -129,6 +130,7 @@ class FoundryLocalProvider:
         deadline = loop.time() + request.timeout_seconds
         acquired = False
         worker: asyncio.Task[tuple[str, str, ModelUsage]] | None = None
+        abandon_event = Event()
         try:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -141,12 +143,15 @@ class FoundryLocalProvider:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
-            worker = asyncio.create_task(asyncio.to_thread(self._complete_sync, request))
+            worker = asyncio.create_task(
+                asyncio.to_thread(self._complete_sync, request, abandon_event)
+            )
             try:
                 text, model_name, usage = await asyncio.wait_for(
                     asyncio.shield(worker), timeout=remaining
                 )
             except TimeoutError as exc:
+                abandon_event.set()
                 self._release_slot_when_worker_finishes(worker)
                 acquired = False
                 raise ModelGatewayError(
@@ -156,6 +161,7 @@ class FoundryLocalProvider:
                     retryable=False,
                 ) from exc
             except asyncio.CancelledError:
+                abandon_event.set()
                 self._release_slot_when_worker_finishes(worker)
                 acquired = False
                 raise
@@ -262,7 +268,7 @@ class FoundryLocalProvider:
             model = self._get_model(authorization.model)
             expected_model_id = authorization.expected_model_id or self._expected_model_id
             self._validate_model_identity(model, expected_model_id)
-            if bool(model.is_cached):
+            if self._sdk_bool(model, "is_cached"):
                 return self._model_evidence(model)
 
             remaining = deadline - loop.time()
@@ -457,8 +463,15 @@ class FoundryLocalProvider:
             owned = tuple(self._owned_loaded_models.items())
         for model_id, model in owned:
             try:
-                if bool(model.is_loaded):
+                if self._sdk_bool(model, "is_loaded"):
                     model.unload()
+                    if self._sdk_bool(model, "is_loaded"):
+                        raise ModelGatewayError(
+                            ModelErrorCode.PROVIDER_ERROR,
+                            f"Foundry Local model '{model_id}' remained loaded after unload",
+                            provider_id=self.capabilities.provider_id,
+                            retryable=False,
+                        )
             except Exception as exc:
                 raise ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
@@ -487,12 +500,23 @@ class FoundryLocalProvider:
 
         worker.add_done_callback(release)
 
-    def _complete_sync(self, request: ModelRequest) -> tuple[str, str, ModelUsage]:
+    def _complete_sync(
+        self,
+        request: ModelRequest,
+        abandon_event: Event,
+    ) -> tuple[str, str, ModelUsage]:
         model_alias = request.model or self._default_model
         model = self._get_model(model_alias)
+        if id(model) in self._tainted_loaded_models:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "Foundry Local model has unresolved failed-load state",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
         self._validate_model_identity(model, self._expected_model_id)
 
-        if not bool(model.is_cached):
+        if not self._sdk_bool(model, "is_cached"):
             raise ModelGatewayError(
                 ModelErrorCode.UNAVAILABLE,
                 (
@@ -503,11 +527,32 @@ class FoundryLocalProvider:
                 retryable=False,
             )
 
-        if not bool(model.is_loaded):
-            model.load()
-            model_id = str(model.id)
+        if not self._sdk_bool(model, "is_loaded"):
+            try:
+                model.load()
+            except Exception:
+                self._cleanup_failed_load(model)
+                raise
+            if not self._sdk_bool(model, "is_loaded"):
+                raise ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "Foundry Local model load completed without READY evidence",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
+            self._validate_model_identity(model, self._expected_model_id)
+            model_id = self._sdk_text(model, "id")
+            self._tainted_loaded_models.discard(id(model))
             with self._owned_model_lock:
                 self._owned_loaded_models[model_id] = model
+
+        if abandon_event.is_set():
+            raise ModelGatewayError(
+                ModelErrorCode.CANCELLED,
+                "Foundry Local inference was abandoned before chat execution",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
 
         client = model.get_chat_client()
         if request.temperature is not None and hasattr(client, "settings"):
@@ -517,10 +562,10 @@ class FoundryLocalProvider:
             [{"role": message.role, "content": message.content} for message in request.messages]
         )
         raw_text = response.choices[0].message.content
-        if not isinstance(raw_text, str):
+        if type(raw_text) is not str:
             raise TypeError("Foundry Local response content must be text")
         usage = self._usage(response)
-        resolved_model = str(getattr(model, "alias", None) or model_alias)
+        resolved_model = self._sdk_text(model, "alias")
         return raw_text, resolved_model, usage
 
     def _get_model(self, alias: str) -> Any:
@@ -553,8 +598,8 @@ class FoundryLocalProvider:
         return model
 
     def _model_evidence(self, model: Any) -> FoundryModelEvidence:
-        model_id = str(model.id)
-        cached = bool(model.is_cached)
+        model_id = self._sdk_text(model, "id")
+        cached = self._sdk_bool(model, "is_cached")
         path: str | None = None
         if cached:
             try:
@@ -564,23 +609,21 @@ class FoundryLocalProvider:
         return FoundryModelEvidence(
             model_id=model_id,
             model_version=self._version_from_model_id(model_id),
-            alias=str(model.alias),
+            alias=self._sdk_text(model, "alias"),
             cached=cached,
-            loaded=bool(model.is_loaded),
+            loaded=self._sdk_bool(model, "is_loaded"),
             path=path,
-            context_length=self._optional_int(getattr(model, "context_length", None)),
-            input_modalities=self._optional_str(getattr(model, "input_modalities", None)),
-            output_modalities=self._optional_str(getattr(model, "output_modalities", None)),
-            capability_tags=self._optional_str(getattr(model, "capabilities", None)),
-            supports_tool_calling=self._optional_bool(
-                getattr(model, "supports_tool_calling", None)
-            ),
+            context_length=self._sdk_optional_int(model, "context_length"),
+            input_modalities=self._sdk_optional_text(model, "input_modalities"),
+            output_modalities=self._sdk_optional_text(model, "output_modalities"),
+            capability_tags=self._sdk_optional_text(model, "capabilities"),
+            supports_tool_calling=self._sdk_optional_bool(model, "supports_tool_calling"),
         )
 
     def _validate_model_identity(self, model: Any, expected_model_id: str | None) -> None:
         if expected_model_id is None:
             return
-        actual_model_id = str(model.id)
+        actual_model_id = self._sdk_text(model, "id")
         if actual_model_id != expected_model_id:
             raise ModelGatewayError(
                 ModelErrorCode.INVALID_REQUEST,
@@ -591,6 +634,84 @@ class FoundryLocalProvider:
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             )
+
+    def _cleanup_failed_load(self, model: Any) -> None:
+        marker = id(model)
+        self._tainted_loaded_models.add(marker)
+        try:
+            if self._sdk_bool(model, "is_loaded"):
+                model.unload()
+                if self._sdk_bool(model, "is_loaded"):
+                    return
+            self._tainted_loaded_models.discard(marker)
+        except Exception:  # noqa: BLE001 - original load failure remains authoritative.
+            return
+
+    def _sdk_text(self, model: Any, field: str) -> str:
+        value = getattr(model, field, None)
+        if (
+            type(value) is not str
+            or not value
+            or value != value.strip()
+            or any(not char.isprintable() for char in value)
+        ):
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                f"Foundry Local SDK returned invalid {field} metadata",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+        return value
+
+    def _sdk_bool(self, model: Any, field: str) -> bool:
+        value = getattr(model, field, None)
+        if type(value) is not bool:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                f"Foundry Local SDK returned invalid {field} metadata",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+        return value
+
+    def _sdk_optional_int(self, model: Any, field: str) -> int | None:
+        value = getattr(model, field, None)
+        if value is None:
+            return None
+        if type(value) is not int or value < 0:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                f"Foundry Local SDK returned invalid {field} metadata",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+        return value
+
+    def _sdk_optional_text(self, model: Any, field: str) -> str | None:
+        value = getattr(model, field, None)
+        if value is None:
+            return None
+        if type(value) is not str:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                f"Foundry Local SDK returned invalid {field} metadata",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+        return value
+
+    def _sdk_optional_bool(self, model: Any, field: str) -> bool | None:
+        value = getattr(model, field, None)
+        if value is None:
+            return None
+        if type(value) is not bool:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                f"Foundry Local SDK returned invalid {field} metadata",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+        return value
 
     def _enforce_resource_policy(self) -> None:
         policy = self._resource_policy
