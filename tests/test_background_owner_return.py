@@ -23,6 +23,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
@@ -87,6 +89,21 @@ class CompletingResumableRuntime(PausableRuntime):
     def __init__(self) -> None:
         super().__init__()
         self.resume_calls: list[RuntimeResumeRequest] = []
+        self.probe_calls: list[tuple[str, str, str]] = []
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe:
+        self.probe_calls.append((task_id, thread_id, resume_token))
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="test checkpoint is durable",
+            checkpoint_id=f"checkpoint:{resume_token}",
+        )
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
         self.resume_calls.append(request)
@@ -288,6 +305,7 @@ def test_owner_return_pause_round_trips_through_guarded_saved_resume(
     assert isinstance(resumed.effect_result, RuntimeResult)
     assert resumed.effect_result.outcome is RuntimeOutcome.COMPLETED
     assert queue.get(task_id).state is TaskState.COMPLETED
+    assert runtime.probe_calls == [(task_id, thread_id, "resume-token")]
     assert len(runtime.resume_calls) == 1
     assert runtime.resume_calls[0].task_id == task_id
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
@@ -402,7 +420,7 @@ def test_task_advancing_before_pause_is_not_overwritten(tmp_path: Path) -> None:
         clock=lambda: now,
     )
 
-    with pytest.raises(ValueError, match="cannot be paused"):
+    with pytest.raises(ValueError, match="requires a RUNNING task"):
         asyncio.run(
             controller.reconcile(runtime=runtime, task_id=task_id, thread_id=thread_id)
         )
