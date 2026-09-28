@@ -6,17 +6,21 @@ from pathlib import Path
 
 import pytest
 
-from nika_core.background_life import OwnerPresence
+from nika_core.background_life import BackgroundAction, BackgroundWorkKind, OwnerPresence
 from nika_core.background_owner_return import (
     RunningBackgroundAction,
     WindowsBackgroundOwnerReturnController,
 )
+from nika_core.background_runtime import BackgroundDispatchGuard
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
+from nika_core.resources.contracts import ResourceBudget, ResourceSnapshot
+from nika_core.resources.manager import ResourceManager
 from nika_core.runtime.contracts import (
     RuntimeCapability,
+    RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
     RuntimeResumeRequest,
@@ -45,6 +49,16 @@ class ExplodingLastInputApi:
         raise AssertionError("must not be called")
 
 
+class StableResourceObserver:
+    def snapshot(self) -> ResourceSnapshot:
+        return ResourceSnapshot(
+            cpu_percent=10.0,
+            memory_percent=20.0,
+            available_memory_bytes=2_000_000_000,
+            power_plugged=True,
+        )
+
+
 class PausableRuntime:
     runtime_id = "pausable-runtime"
     capabilities = frozenset(
@@ -67,6 +81,19 @@ class PausableRuntime:
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         self.cancel_calls.append((task_id, thread_id))
         return self.accepted
+
+
+class CompletingResumableRuntime(PausableRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.resume_calls: list[RuntimeResumeRequest] = []
+
+    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        self.resume_calls.append(request)
+        return RuntimeResult(
+            outcome=RuntimeOutcome.COMPLETED,
+            output={"resumed_task_id": request.task_id},
+        )
 
 
 def _running_runtime_state(
@@ -193,6 +220,84 @@ def test_active_owner_delegates_durable_pause_to_canonical_coordinator(tmp_path:
     assert row["previous_state"] == TaskState.RUNNING.value
     assert row["new_state"] == TaskState.PAUSED.value
     assert type(marker.payload["pause_operation_key"]) is str
+
+
+def test_owner_return_pause_round_trips_through_guarded_saved_resume(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    queue, audit, coordinator, task_id, thread_id = _running_runtime_state(tmp_path)
+    runtime = CompletingResumableRuntime()
+    physical_presence = WindowsOwnerPresenceObserver(
+        audit,
+        away_after_seconds=60,
+        api=FakeLastInputApi(
+            last_ticks=[99_500] * 12,
+            current_ticks=[100_000, 160_000, 160_001, 160_002, 160_003, 160_004],
+        ),
+        clock=lambda: now,
+    )
+    controller = WindowsBackgroundOwnerReturnController(
+        coordinator=coordinator,
+        audit=audit,
+        presence=physical_presence,
+        clock=lambda: now,
+    )
+
+    paused = asyncio.run(
+        controller.reconcile(runtime=runtime, task_id=task_id, thread_id=thread_id)
+    )
+
+    assert paused.action is RunningBackgroundAction.PAUSED
+    assert queue.get(task_id).state is TaskState.PAUSED
+
+    resources = ResourceManager(queue.store, StableResourceObserver())
+    resources.set_budget(
+        ResourceBudget(
+            scope="background_life",
+            owner_id="living-agent",
+            max_concurrent=1,
+            max_cpu_percent=80.0,
+            max_memory_percent=80.0,
+        )
+    )
+    guard = BackgroundDispatchGuard(
+        queue=queue,
+        audit=audit,
+        resources=resources,
+        presence=physical_presence,
+        source_id=physical_presence.source_id,
+        max_presence_age_seconds=5.0,
+        max_future_skew_seconds=1.0,
+        clock=lambda: now,
+    )
+
+    async def resume_effect() -> object:
+        return await coordinator.resume_saved(runtime, task_id=task_id)
+
+    resumed = asyncio.run(
+        guard.resume_paused(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.UNFINISHED_WORK,
+            effect=resume_effect,
+        )
+    )
+
+    assert resumed.action is BackgroundAction.RUN
+    assert resumed.executed is True
+    assert isinstance(resumed.effect_result, RuntimeResult)
+    assert resumed.effect_result.outcome is RuntimeOutcome.COMPLETED
+    assert queue.get(task_id).state is TaskState.COMPLETED
+    assert len(runtime.resume_calls) == 1
+    assert runtime.resume_calls[0].task_id == task_id
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+    event_types = [
+        event.event_type for event in audit.list_for(entity_type="task", entity_id=task_id)
+    ]
+    assert "background.running_paused_for_owner" in event_types
+    assert "background.resume_permitted" in event_types
+    assert "runtime.saved_resume_started" in event_types
+    assert "background.resume_returned" in event_types
 
 
 def test_preexisting_paused_task_cannot_be_relabelled_owner_return(
