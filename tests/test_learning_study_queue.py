@@ -288,6 +288,9 @@ def test_material_requires_an_immutable_source_identity() -> None:
         "https://example.test/book.pdf?X-Goog-Credential=secret",
         "https://example.test/book.pdf?X-Goog-Signature=secret",
         "https://example.test/book.pdf?X%2DAmz%2DSignature=secret",
+        "https://example.test/book.pdf#access-token=secret",
+        "https://example.test/book.pdf#X-Amz-Signature=secret",
+        "https://example.test/book.pdf#X-Goog-Credential=secret",
         "Authorization: Bearer secret",
         "https%3A%2F%2Fexample.test%2Fbook.pdf%3Ftoken%3Dsecret",
     ],
@@ -295,7 +298,6 @@ def test_material_requires_an_immutable_source_identity() -> None:
 def test_source_reference_rejects_credential_material(source_ref: str) -> None:
     with pytest.raises(ValueError, match="credential"):
         _material(source_ref=source_ref)
-
 
 
 def test_public_query_reference_remains_stable_across_restart(tmp_path) -> None:
@@ -317,6 +319,7 @@ def test_public_query_reference_remains_stable_across_restart(tmp_path) -> None:
     fresh_store.initialize()
     restored = StudyQueue(TaskQueue(fresh_store)).get(created.task_id)
     assert restored.material.source_ref == public_ref
+
 
 def test_source_reference_fails_closed_when_percent_decoding_exceeds_bound() -> None:
     source_ref = "https://example.test/book.pdf?token=secret"
