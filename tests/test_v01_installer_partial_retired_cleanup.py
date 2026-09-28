@@ -130,7 +130,7 @@ def test_partial_retired_cleanup_after_committed_update_is_restart_safe(tmp_path
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
-def test_partial_retired_cleanup_rejects_nested_junction_without_touching_target(tmp_path: Path) -> None:
+def test_partial_retired_cleanup_removes_nested_junction_without_touching_target(tmp_path: Path) -> None:
     shell = _powershell()
     if shell is None:
         pytest.skip("PowerShell is unavailable")
@@ -156,21 +156,9 @@ def test_partial_retired_cleanup_rejects_nested_junction_without_touching_target
     )
     assert created.returncode == 0, created.stderr or created.stdout
 
-    failed = _run(shell, mode="Rollback", destination=destination)
-    assert failed.returncode != 0, failed.stdout
-    assert "nested reparse" in failed.stderr.lower()
-    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
-    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
-    assert retired.exists()
+    resumed = _run(shell, mode="Rollback", destination=destination)
+    assert resumed.returncode == 0, resumed.stderr or resumed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (rollback / "NikaCore.exe").read_text(encoding="utf-8") == "v3"
+    assert not retired.exists()
     assert sentinel.read_text(encoding="utf-8") == "must-not-change"
-
-    removed = subprocess.run(
-        ["cmd", "/c", "rmdir", str(nested)],
-        check=False,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="backslashreplace",
-        timeout=10,
-    )
-    assert removed.returncode == 0, removed.stderr or removed.stdout

@@ -94,6 +94,54 @@ def test_installer_manifest_ingress_declares_strict_object_authority() -> None:
     assert "'CONOUT$'" in payload
 
 
+def test_manifest_property_projection_preserves_only_collection_authority() -> None:
+    payload = SCRIPT.read_text(encoding="utf-8")
+    getter_start = payload.index("function Get-NikaManifestProperty")
+    getter_end = payload.index("function Assert-NikaReleaseBundle", getter_start)
+    getter = payload[getter_start:getter_end]
+
+    assert "[switch]$PreserveCollection" in getter
+    assert "$value = $Object.$Name" in getter
+    assert "Write-Output -NoEnumerate ($value)" in getter
+    assert "if ($value -is [System.Array])" in getter
+    assert 'throw "Release manifest scalar metadata must not be a collection."' in getter
+    assert "return $value" in getter
+    assert (
+        '$rawFiles = Get-NikaManifestProperty -Object $manifest -Name "files" '
+        "-PreserveCollection"
+    ) in payload
+    for scalar_name in ("manifest_version", "product", "version", "source_sha"):
+        assert (
+            f'Get-NikaManifestProperty -Object $manifest -Name "{scalar_name}" '
+            "-PreserveCollection"
+        ) not in payload
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell manifest proof is Windows-only")
+def test_canonical_one_file_manifest_installs(tmp_path: Path) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "case")
+    manifest = json.loads((bundle / "release-manifest.json").read_text(encoding="utf-8"))
+    files = manifest["files"]
+    assert isinstance(files, list)
+    assert len(files) == 1
+    assert files[0]["path"] == "NikaCore.exe"
+
+    destination = tmp_path / "install" / "Nika Core"
+    installed = _run_install(
+        shell,
+        bundle=bundle,
+        destination=destination,
+        data_root=tmp_path / "data",
+    )
+
+    assert installed.returncode == 0, installed.stderr or installed.stdout
+    assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "fixture"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell manifest proof is Windows-only")
 @pytest.mark.parametrize("mutate_raw", [_duplicate_top_level, _duplicate_file_member])
 def test_duplicate_json_members_fail_before_install_mutation(
@@ -129,6 +177,42 @@ def _array_product(payload: dict[str, object]) -> None:
     payload["product"] = ["NikaCore"]
 
 
+def _array_manifest_version(payload: dict[str, object]) -> None:
+    payload["manifest_version"] = [2]
+
+
+def _array_version(payload: dict[str, object]) -> None:
+    payload["version"] = ["0.0.2"]
+
+
+def _array_source_sha(payload: dict[str, object]) -> None:
+    payload["source_sha"] = [SOURCE_SHA]
+
+
+def _first_file(payload: dict[str, object]) -> dict[str, object]:
+    files = payload["files"]
+    assert isinstance(files, list)
+    assert len(files) == 1
+    entry = files[0]
+    assert isinstance(entry, dict)
+    return entry
+
+
+def _array_file_path(payload: dict[str, object]) -> None:
+    entry = _first_file(payload)
+    entry["path"] = [entry["path"]]
+
+
+def _array_file_size(payload: dict[str, object]) -> None:
+    entry = _first_file(payload)
+    entry["size"] = [entry["size"]]
+
+
+def _array_file_sha256(payload: dict[str, object]) -> None:
+    entry = _first_file(payload)
+    entry["sha256"] = [entry["sha256"]]
+
+
 def _float_manifest_version(payload: dict[str, object]) -> None:
     payload["manifest_version"] = 2.0
 
@@ -144,7 +228,19 @@ def _missing_version(payload: dict[str, object]) -> None:
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell manifest proof is Windows-only")
 @pytest.mark.parametrize(
     "mutate",
-    [_case_variant, _array_product, _float_manifest_version, _extra_top_level, _missing_version],
+    [
+        _case_variant,
+        _array_product,
+        _array_manifest_version,
+        _array_version,
+        _array_source_sha,
+        _array_file_path,
+        _array_file_size,
+        _array_file_sha256,
+        _float_manifest_version,
+        _extra_top_level,
+        _missing_version,
+    ],
 )
 def test_noncanonical_manifest_shape_fails_before_install_mutation(
     tmp_path: Path,
