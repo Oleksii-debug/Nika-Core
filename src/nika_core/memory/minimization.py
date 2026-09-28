@@ -29,6 +29,9 @@ _POSIX_LOCAL_USER_PATH_FULL = re.compile(
 _WINDOWS_LOCAL_USER_PATH_FULL = re.compile(
     r"(?i)[A-Z]:[\\/]Users[\\/][^\\/\r\n\"'<>]+(?:[\\/][^\r\n\"'<>]*)?"
 )
+_URL_USERINFO = re.compile(
+    r"(?i)\\b([a-z][a-z0-9+.-]*://)([^/\\s?#@]*@)"
+)
 _KEY_COLLISION_ERROR = "memory persistence key collision after minimization"
 
 
@@ -38,13 +41,21 @@ def minimize_for_persistence(value: Any) -> Any:
     return _redact_local_paths(_redact_secrets(value))
 
 
+def _redact_secret_text(value: str) -> str:
+    redacted = redact_text(value)
+    return _URL_USERINFO.sub(
+        lambda match: f"{match.group(1)}[REDACTED]@",
+        redacted,
+    )
+
+
 def _redact_secrets(value: Any) -> Any:
     if isinstance(value, str):
-        return redact_text(value)
+        return _redact_secret_text(value)
     if isinstance(value, Mapping):
         result: dict[Any, Any] = {}
         for key, item in value.items():
-            safe_key = redact_text(key) if isinstance(key, str) else key
+            safe_key = _redact_secret_text(key) if isinstance(key, str) else key
             _require_unique_key(result, safe_key)
             # Mapping keys at this boundary can be dynamic model/tool content as
             # well as schema field names. If key text itself needed redaction, it
@@ -80,7 +91,7 @@ def _redact_secret_structure(value: Any) -> Any:
     if isinstance(value, Mapping):
         result: dict[Any, Any] = {}
         for key, item in value.items():
-            safe_key = redact_text(key) if isinstance(key, str) else key
+            safe_key = _redact_secret_text(key) if isinstance(key, str) else key
             _require_unique_key(result, safe_key)
             # Once a canonical parent field established secret context, that
             # authority must survive every descendant. Sanitizing a dynamic key
