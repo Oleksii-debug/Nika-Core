@@ -19,6 +19,7 @@ _MAX_LIST_LIMIT = 100
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}\Z")
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _ATTESTATION_FIELD = "autobiographical_category"
+_AGENT_ATTESTATION_FIELD = "autobiographical_agent_id"
 _VALUE_KEYS = frozenset(
     {
         "schema_version",
@@ -58,6 +59,7 @@ class AutobiographicalEntry:
 @dataclass(frozen=True, slots=True)
 class _AuditEvidence:
     category: AutobiographicalCategory
+    agent_id: str
     sha256: str
 
 
@@ -88,6 +90,10 @@ class AutobiographicalMemory:
         if evidence.category is not safe_category:
             raise AutobiographicalMemoryIntegrityError(
                 "audit evidence does not attest requested autobiographical category"
+            )
+        if evidence.agent_id != safe_agent_id:
+            raise AutobiographicalMemoryIntegrityError(
+                "audit evidence does not attest requested autobiographical agent"
             )
         key = _memory_key(safe_category, safe_event_id)
 
@@ -122,7 +128,11 @@ class AutobiographicalMemory:
                 "durable autobiographical record disappeared after persistence"
             )
         current = self._audit_evidence_many((safe_event_id,))[safe_event_id]
-        if current.category is not safe_category or current.sha256 != evidence.sha256:
+        if (
+            current.category is not safe_category
+            or current.agent_id != safe_agent_id
+            or current.sha256 != evidence.sha256
+        ):
             self._memory.delete(
                 scope=MemoryScope.AGENT,
                 owner_id=safe_agent_id,
@@ -151,6 +161,10 @@ class AutobiographicalMemory:
             if evidence.category is not entry.category:
                 raise AutobiographicalMemoryIntegrityError(
                     "audit evidence no longer attests autobiographical category"
+                )
+            if evidence.agent_id != safe_agent_id:
+                raise AutobiographicalMemoryIntegrityError(
+                    "audit evidence no longer attests autobiographical agent"
                 )
             if evidence.sha256 != entry.audit_event_sha256:
                 raise AutobiographicalMemoryIntegrityError(
@@ -315,6 +329,7 @@ def _audit_evidence_from_row(row: Any) -> _AuditEvidence:
     payload_json, payload = _canonical_audit_payload(row["payload_json"])
     created_at = _required_timestamp(row["created_at"])
     category = _decode_attested_category(payload.get(_ATTESTATION_FIELD))
+    agent_id = _decode_attested_agent(payload.get(_AGENT_ATTESTATION_FIELD))
     encoded = json.dumps(
         {
             "event_type": event_type,
@@ -328,7 +343,11 @@ def _audit_evidence_from_row(row: Any) -> _AuditEvidence:
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return _AuditEvidence(category=category, sha256=hashlib.sha256(encoded).hexdigest())
+    return _AuditEvidence(
+        category=category,
+        agent_id=agent_id,
+        sha256=hashlib.sha256(encoded).hexdigest(),
+    )
 
 
 def _require_token(value: object, *, field: str) -> str:
@@ -441,6 +460,15 @@ def _decode_category(value: object) -> AutobiographicalCategory:
     except ValueError as exc:
         raise AutobiographicalMemoryIntegrityError(
             "autobiographical memory category is invalid"
+        ) from exc
+
+
+def _decode_attested_agent(value: object) -> str:
+    try:
+        return _require_token(value, field="audit autobiographical_agent_id")
+    except AutobiographicalMemoryError as exc:
+        raise AutobiographicalMemoryIntegrityError(
+            "audit evidence lacks valid autobiographical agent attestation"
         ) from exc
 
 
