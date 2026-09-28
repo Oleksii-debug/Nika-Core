@@ -418,7 +418,7 @@ class ProductFactoryCoordinator:
                     )
             return
         if record.state is WorkState.REPAIR_REQUIRED:
-            if result is None or not blocker:
+            if result is None or blocker is None:
                 raise CoordinatorError("repair_required snapshot work requires result evidence and blocker")
             if result.coding_result.succeeded:
                 _canonical_durable_text(blocker, label="repair blocker")

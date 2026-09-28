@@ -404,6 +404,35 @@ def test_plan_rejects_polymorphic_base_sha_before_casefold() -> None:
 
 
 
+
+def test_restore_rejects_behavioral_repair_blocker_before_truthiness() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_success(request))
+    coordinator.review(
+        "core",
+        ReviewDecision("qa-1", False, "needs repair", ("ci:review-1",)),
+    )
+    snapshot = coordinator.snapshot()
+    records = tuple(
+        replace(record, blocker=_HostileStr(record.blocker))
+        if record.request.component_id == "core" and record.blocker is not None
+        else record
+        for record in snapshot.records
+    )
+    tampered = replace(snapshot, records=records)
+
+    restored = ProductFactoryCoordinator(_graph())
+    with pytest.raises(
+        CoordinatorError,
+        match="repair blocker must be canonical single-line text",
+    ):
+        restored.restore(
+            tampered,
+            trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+        )
+    assert restored.revision == 0
+
 def test_restore_rejects_behavioral_snapshot_revision_before_comparison() -> None:
     coordinator = _coordinator()
     snapshot = coordinator.snapshot()
