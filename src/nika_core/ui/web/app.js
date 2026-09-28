@@ -396,6 +396,18 @@
     );
   }
 
+  function validBoundedModelIdentity(value, maxLength, { rejectDelete = false } = {}) {
+    return Boolean(
+      typeof value === "string"
+      && value.length > 0
+      && value.length <= maxLength
+      && value === value.trim()
+      && ![...value].some((char) => (
+        char.charCodeAt(0) < 32 || (rejectDelete && char.charCodeAt(0) === 127)
+      ))
+    );
+  }
+
   function validModelResult(result) {
     if (!result || typeof result !== "object" || Array.isArray(result)) return false;
     const keys = Object.keys(result).sort();
@@ -414,12 +426,9 @@
       && result.text.length <= 2000
       && result.text === result.text.trim()
       && !result.text.includes("\0")
-      && typeof result.provider_id === "string"
-      && result.provider_id.trim()
-      && typeof result.provider_kind === "string"
-      && result.provider_kind.trim()
-      && typeof result.model === "string"
-      && result.model.trim()
+      && validBoundedModelIdentity(result.provider_id, 128, { rejectDelete: true })
+      && ["local", "cloud"].includes(result.provider_kind)
+      && validBoundedModelIdentity(result.model, 512)
       && result.provenance_validated === true
     );
   }

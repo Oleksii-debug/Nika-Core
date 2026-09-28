@@ -543,6 +543,39 @@ def test_renderer_rejects_noncanonical_model_text(invalid_text: str) -> None:
     assert rejected["summary_hidden"] is True
 
 
+@pytest.mark.parametrize(
+    ("field", "invalid_value"),
+    [
+        ("provider_id", " leading-provider"),
+        ("provider_id", "x" * 129),
+        ("provider_id", "provider\\x1fcontrol"),
+        ("provider_id", "provider\\x7fdelete"),
+        ("provider_kind", "no_llm"),
+        ("provider_kind", "LOCAL"),
+        ("model", "trailing-model "),
+        ("model", "x" * 513),
+        ("model", "model\\x1fcontrol"),
+    ],
+)
+def test_renderer_rejects_noncanonical_model_identity(
+    field: str,
+    invalid_value: str,
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    model_result = comparison["model_result"]
+    assert isinstance(model_result, dict)
+    model_result[field] = invalid_value
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
 def test_renderer_uses_explicit_no_model_fallback_for_deterministic_result() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
