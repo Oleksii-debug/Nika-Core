@@ -537,6 +537,41 @@ def test_review_readback_rejects_malformed_durable_audit_payload(
         restarted.get_review(workspace_id="ws", document_id="doc-1")
 
 
+def test_review_readback_rejects_duplicate_durable_audit_authority_key(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = ResearchReviewRepository(store)
+    repository.set_review(
+        workspace_id="ws",
+        document_id="doc-1",
+        state=ResearchReviewState.SAVED,
+        note="safe",
+    )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            """SELECT event_id, payload_json FROM audit_events
+            WHERE event_type='research.review.changed'
+            ORDER BY event_id DESC LIMIT 1"""
+        ).fetchone()
+        assert row is not None
+        duplicate_payload = row["payload_json"].replace(
+            '"state": "saved"',
+            '"state": "saved", "state": "dismissed"',
+        )
+        assert duplicate_payload != row["payload_json"]
+        assert json.loads(duplicate_payload)["state"] == "dismissed"
+        conn.execute(
+            "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+            (duplicate_payload, row["event_id"]),
+        )
+
+    restarted = ResearchReviewRepository(SQLiteStore(store.path))
+    with pytest.raises(RuntimeError, match="review audit evidence is invalid"):
+        restarted.get_review(workspace_id="ws", document_id="doc-1")
+
+
 def test_review_readback_rejects_valid_but_inconsistent_predecessor_state(
     tmp_path: Path,
 ) -> None:
