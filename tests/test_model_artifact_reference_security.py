@@ -30,6 +30,12 @@ def _descriptor() -> ModelArtifactDescriptor:
         "https://models.example.test/%2574%256f%256b%2565%256e%253dMODEL_CANARY",
         "https://models.example.test/%41uthorization%3A%20Bearer%20MODEL_CANARY",
         "https://models.example.test/%43ookie%3A%20session%3dMODEL_CANARY",
+        "x-amz-credential=MODEL_CANARY",
+        "x-amz-signature=MODEL_CANARY",
+        "x-goog-credential=MODEL_CANARY",
+        "x-goog-signature=MODEL_CANARY",
+        "https://models.example.test/%78-amz-credential%3DMODEL_CANARY",
+        "https://models.example.test/%78-goog-signature%3DMODEL_CANARY",
     ),
 )
 def test_public_reference_rejects_encoded_or_bare_credentials(reference: str) -> None:

@@ -21,7 +21,8 @@ _LABEL = re.compile(r"[A-Za-z0-9_.:+-]{1,128}")
 _ARCH = re.compile(r"[A-Za-z0-9_.+-]{1,64}")
 _CREDENTIAL_ASSIGNMENT = re.compile(
     r"(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|"
-    r"api[-_]?key|access[-_]?token|refresh[-_]?token|token|password|passwd|secret)"
+    r"api[-_]?key|access[-_]?token|refresh[-_]?token|token|password|passwd|secret|"
+    r"x-(?:amz|goog)-(?:credential|signature))"
     r"\s*[:=]",
     re.IGNORECASE,
 )
@@ -470,6 +471,8 @@ def _contains_credential_material(value: str) -> bool:
 
 def _validate_public_reference_view(name: str, text: str) -> None:
     lowered = text.lower()
+    if lowered.startswith("file:"):
+        raise ValueError(f"{name} must not contain a local filesystem path")
     if lowered.startswith(("env:", "credential:", "secret:")):
         raise ValueError(f"{name} must be public provenance, not a credential reference")
     if (

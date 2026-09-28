@@ -39,6 +39,9 @@ def _encode_reference(reference: str, rounds: int) -> str:
         "https://models.example.test/path%2523section",
         "%2Fetc%2Fprivate-model",
         "%252Fetc%252Fprivate-model",
+        "file:C:/Users/User/private-model.bin",
+        "file:/home/user/private-model.bin",
+        "%66ile%3AC%3A%2FUsers%2FUser%2Fprivate-model.bin",
     ),
 )
 def test_encoded_public_reference_structure_fails_closed(reference: str) -> None:
@@ -74,3 +77,9 @@ def test_ordinary_public_reference_remains_accepted() -> None:
     descriptor = _descriptor("https://models.example.test/catalog/model-a")
 
     assert descriptor.source_reference == "https://models.example.test/catalog/model-a"
+
+
+def test_opaque_public_identifier_remains_accepted() -> None:
+    descriptor = _descriptor("urn:model:provider-a:model-a")
+
+    assert descriptor.source_reference == "urn:model:provider-a:model-a"
