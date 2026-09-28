@@ -577,7 +577,7 @@ class DesktopBackend:
                 "не заявлено durable resume."
             )
         if not isinstance(self._runtime, RuntimeResumeProbePort):
-            raise ValueError(
+            raise TypeError(
                 "Поточний runtime не підтримує безпечне активне призупинення: "
                 "відсутня перевірка checkpoint для durable resume."
             )

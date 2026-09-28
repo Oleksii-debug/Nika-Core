@@ -235,7 +235,7 @@ def test_running_pause_requires_checkpoint_probe_before_effect(
     task_id = queue.list_recent()[0].task_id
     _wait_for_state(queue, task_id, TaskState.RUNNING)
 
-    with pytest.raises(ValueError, match="checkpoint"):
+    with pytest.raises(TypeError, match="checkpoint"):
         backend.pause_task({})
 
     assert runtime.cancel_entered.is_set() is False
