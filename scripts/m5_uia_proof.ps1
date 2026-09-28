@@ -737,6 +737,11 @@ try {
     }
 
     if ($VerifySourceSetup) {
+        $expectedModelResult = $env:NIKA_UIA_MODEL_RESULT_CANARY
+        if ($expectedModelResult -cnotmatch '^NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}$') {
+            throw 'Source/model UIA proof requires the bounded per-run model-result canary.'
+        }
+
         # The same packaged journey must expose and persist the canonical model choice before
         # task acceptance. VerifySourceSetup is driven by the proof-owned Ollama-compatible
         # loopback wrapper; it never proves physical Ollama/model inference or NVDA verification.
@@ -774,10 +779,10 @@ try {
 
             # Prove the new durable model-result presentation through the same bound packaged
             # WebView2 accessibility tree. Read-only Text evidence cannot authorize an action,
-            # so equivalent provider duplicates are harmless; exact labels + values must all
-            # be physically exposed before the DB binding proof receives any credit.
+            # so equivalent provider duplicates are harmless; exact labels + the per-run
+            # transport canary must be physically exposed before DB binding receives credit.
             Wait-BoundTextEvidence 'Відповідь моделі'
-            Wait-BoundTextEvidence 'controlled loopback response'
+            Wait-BoundTextEvidence $expectedModelResult
             Wait-BoundTextEvidence 'Постачальник моделі'
             Wait-BoundTextEvidence 'ollama'
             Wait-BoundTextEvidence 'Модель'
