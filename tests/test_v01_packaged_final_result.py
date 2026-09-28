@@ -72,6 +72,24 @@ def _complete_packaged_task(
         }
     )
     assert configured["status"] == "completed"
+    model_configured = bridge.dispatch(
+        {
+            "request_id": "safe-final-model",
+            "action_id": "settings.model.configure",
+            "payload": {
+                "schema_version": 1,
+                "route_kind": "deterministic",
+                "provider_id": None,
+                "model": None,
+                "base_url": None,
+                "credential_ref": None,
+                "private_data_allowed": False,
+                "timeout_seconds": 60,
+                "revision": 0,
+            },
+        }
+    )
+    assert model_configured["status"] == "completed"
     created = bridge.dispatch(
         {
             "request_id": "safe-final-task",
