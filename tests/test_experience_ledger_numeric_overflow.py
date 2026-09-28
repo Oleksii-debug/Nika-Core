@@ -35,6 +35,33 @@ def test_pathological_numeric_evidence_fails_closed_before_persistence(tmp_path)
     assert ledger.get("task-overflow:delay") is None
     assert ledger.get("task-overflow:clock") is None
 
+@pytest.mark.parametrize("field", ("delay_seconds", "clock_jump_seconds"))
+def test_non_lossless_integer_evidence_fails_closed_before_persistence(
+    tmp_path,
+    field: str,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    kwargs: dict[str, object] = {
+        "event_key": f"task-overflow:lossy:{field}",
+        "task_id": "task-overflow",
+        "kind": ContinuityKind.RECOVERY,
+        "outcome": ContinuityOutcome.WAITING,
+        "reason_code": "retry_pending",
+    }
+    kwargs[field] = (2**53) + 1
+
+    with pytest.raises(ValueError, match="exactly representable"):
+        ledger.record(**kwargs)  # type: ignore[arg-type]
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS event_count FROM continuity_experience_events"
+        ).fetchone()["event_count"]
+    assert count == 0
+
+
 class _BehavioralInt(int):
     def __float__(self) -> float:
         raise AssertionError("numeric behavior must not run before exact-type rejection")

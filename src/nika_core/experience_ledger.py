@@ -133,6 +133,8 @@ class ExperienceLedger:
             raise ValueError(f"{name} must be finite and non-negative") from exc
         if number < 0 or not math.isfinite(number):
             raise ValueError(f"{name} must be finite and non-negative")
+        if type(value) is int and int(number) != value:
+            raise ValueError(f"{name} must be finite, non-negative, and exactly representable")
         return number
 
     @staticmethod
