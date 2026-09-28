@@ -261,6 +261,56 @@ def test_download_authorization_accepts_canonical_expected_model_id() -> None:
     assert value.expected_model_id == "test-model-id"
 
 
+def test_foundry_download_revalidates_forged_authorization_before_manager() -> None:
+    calls: list[str] = []
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached for invalid authorization")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=manager_factory,
+    )
+    forged = authorization()
+    object.__setattr__(forged, "model", object())
+
+    with pytest.raises(TypeError, match="model"):
+        asyncio.run(provider.download_model(forged))
+
+    assert calls == []
+
+
+def test_foundry_download_snapshots_authorization_before_waiting() -> None:
+    async def scenario() -> None:
+        model = FakeFoundryModel()
+        manager = FakeManager(model)
+        provider = FoundryLocalProvider(
+            default_model="test-model",
+            manager_factory=lambda: manager,
+        )
+        supplied = authorization(expected_model_id="test-model-id")
+
+        await provider._model_management_lock.acquire()
+        task = asyncio.create_task(
+            provider.download_model(supplied, timeout_seconds=1.0)
+        )
+        try:
+            await asyncio.sleep(0)
+            assert not task.done()
+            object.__setattr__(supplied, "model", "mutated-model")
+            object.__setattr__(supplied, "expected_model_id", "mutated-model-id")
+        finally:
+            provider._model_management_lock.release()
+
+        evidence = await task
+        assert evidence.alias == "test-model"
+        assert evidence.model_id == "test-model-id"
+        assert manager.catalog.requested_aliases == ["test-model"]
+
+    asyncio.run(scenario())
+
+
 def test_foundry_download_rejects_authorization_for_other_provider() -> None:
     model = FakeFoundryModel(cached=False)
     provider = FoundryLocalProvider(
