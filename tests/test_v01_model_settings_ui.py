@@ -185,6 +185,12 @@ def test_actual_renderer_model_settings_accessibility_races_and_secret_boundary(
 def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport() -> None:
     proof = (ROOT / "scripts/m5_uia_proof.ps1").read_text(encoding="utf-8")
     wrapper = (ROOT / "scripts/v01_autostart_uia_proof.ps1").read_text(encoding="utf-8")
+    m11_workflow = (ROOT / ".github/workflows/m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    m12_workflow = (
+        ROOT / ".github/workflows/m12-prehuman-release-gate.yml"
+    ).read_text(encoding="utf-8")
     assert "'Модель для нових завдань'" in proof
     assert "'Тип маршруту моделі'" in proof
     assert "'Назва моделі'" in proof
@@ -206,41 +212,20 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
         "Wait-BoundTextEvidence 'Командне завдання завершено; "
         "збережені результати учасників доступні.'"
     )
-    model_result_label = proof.index(
-        "Wait-BoundTextEvidence 'Відповідь моделі'",
-        terminal_result,
+    sequence_start = proof.index("Wait-BoundTextSequence @(", terminal_result)
+    expected_sequence = (
+        "'Відповідь моделі',",
+        "$expectedModelResult,",
+        "'Постачальник моделі',",
+        "'ollama',",
+        "'Модель',",
+        "'uia-proof-model'",
     )
-    model_result_text = proof.index(
-        "Wait-BoundTextEvidence $expectedModelResult",
-        model_result_label,
-    )
-    model_provider_label = proof.index(
-        "Wait-BoundTextEvidence 'Постачальник моделі'",
-        model_result_text,
-    )
-    model_provider = proof.index(
-        "Wait-BoundTextEvidence 'ollama'",
-        model_provider_label,
-    )
-    final_model_label = proof.index(
-        "Wait-BoundTextEvidence 'Модель'",
-        model_provider,
-    )
-    final_model_name = proof.index(
-        "Wait-BoundTextEvidence 'uia-proof-model'",
-        final_model_label,
-    )
-    binding_probe = proof.index("$modelBindingProbe = @'", final_model_name)
-    assert (
-        terminal_result
-        < model_result_label
-        < model_result_text
-        < model_provider_label
-        < model_provider
-        < final_model_label
-        < final_model_name
-        < binding_probe
-    )
+    sequence_cursor = sequence_start
+    for expected_line in expected_sequence:
+        sequence_cursor = proof.index(expected_line, sequence_cursor) + len(expected_line)
+    binding_probe = proof.index("$modelBindingProbe = @'", sequence_cursor)
+    assert terminal_result < sequence_start < sequence_cursor < binding_probe
 
     assert "function Wait-BoundTextSequence(" in proof
     assert "foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow))" in proof
@@ -297,3 +282,9 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     assert canary_assignment < server_start < first_generic
     assert first_generic < reset_log < retry_generic < transport_assertion < first_enable
     assert first_enable < restore_canary
+
+    packaged_proof = "./scripts/v01_autostart_uia_proof.ps1"
+    assert m11_workflow.count(packaged_proof) == 1
+    assert '- "scripts/v01_autostart_uia_proof.ps1"' in m11_workflow
+    assert m12_workflow.count(packaged_proof) == 2
+    assert f"{packaged_proof} -ExePath $extractedExe" in m12_workflow
