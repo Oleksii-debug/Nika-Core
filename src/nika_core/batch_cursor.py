@@ -766,16 +766,28 @@ class BatchCursor:
                     namespace=_NAMESPACE,
                     key=candidate.cursor_id,
                 )
-                if record is None:
-                    raise BatchCursorStateError(
-                        "persisted batch cursor disappeared after failed write"
-                    )
-                persisted = BatchCursorState.model_validate(record.value)
-            except Exception:  # noqa: BLE001 - ambiguous durable reread must fail-stop
+            except Exception:  # noqa: BLE001 - unreadable authority is genuinely ambiguous
                 self._state = prior
                 self._persistence_blocked = True
                 raise BatchCursorStateError(
                     "batch cursor persistence outcome is unknown; restore is required"
+                ) from exc
+
+            if record is None:
+                self._state = prior
+                self._persistence_blocked = True
+                raise BatchCursorStateError(
+                    "batch cursor persistence outcome conflicts with durable state; "
+                    "restore is required"
+                ) from exc
+            try:
+                persisted = BatchCursorState.model_validate(record.value)
+            except (TypeError, ValueError):
+                self._state = prior
+                self._persistence_blocked = True
+                raise BatchCursorStateError(
+                    "batch cursor persistence outcome conflicts with durable state; "
+                    "restore is required"
                 ) from exc
 
             if _canonical_json_equal(
