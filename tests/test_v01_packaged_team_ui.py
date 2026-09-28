@@ -85,6 +85,7 @@ def _rendered_team_snapshot(
     *,
     live_projection: dict[str, object] | None = None,
     next_projection: dict[str, object] | None = None,
+    next_recovery: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if _NODE is None:
         pytest.skip("Node.js is required for the packaged team renderer canary regression")
@@ -94,7 +95,7 @@ def _rendered_team_snapshot(
         "available": True,
         "task": {
             "task_id": "task-71",
-            "state": "running",
+            "state": "RUNNING",
             "command": "Перевірити два контрольовані джерела.",
         },
         "team": {
@@ -153,6 +154,7 @@ def _rendered_team_snapshot(
 const fs = require("fs");
 const PROJECTION = {json.dumps(projection, ensure_ascii=False)};
 const NEXT_PROJECTION = {json.dumps(next_projection, ensure_ascii=False)};
+const NEXT_RECOVERY = {json.dumps(next_recovery, ensure_ascii=False)};
 let getStateCalls = 0;
 
 class Element {{}}
@@ -221,6 +223,19 @@ function currentProjection() {{
   getStateCalls += 1;
   return value;
 }}
+function currentRecovery() {{
+  const initial = {{
+    schema_version: 1,
+    status: "ready",
+    auto_resume_count: 0,
+    manual_resume_count: 0,
+    approval_count: 0,
+    uncertain_count: 0,
+    blocked_count: 0,
+    resume_failed_count: 0,
+  }};
+  return getStateCalls === 0 || NEXT_RECOVERY === null ? initial : NEXT_RECOVERY;
+}}
 global.crypto = {{ randomUUID: () => "team-ui-request-id" }};
 global.pywebview = {{
   api: {{
@@ -231,16 +246,7 @@ global.pywebview = {{
         tasks: [],
         agents: [],
         workspaces: [],
-        startup_recovery: {{
-          schema_version: 1,
-          status: "ready",
-          auto_resume_count: 0,
-          manual_resume_count: 0,
-          approval_count: 0,
-          uncertain_count: 0,
-          blocked_count: 0,
-          resume_failed_count: 0,
-        }},
+        startup_recovery: currentRecovery(),
         product_project: null,
         v01_team_task: currentProjection(),
       }},
@@ -605,6 +611,112 @@ def test_renderer_rejects_model_result_outside_coherent_completed_state(
     )
 
 
+@pytest.mark.parametrize("terminal_state", ["completed", "failed", "cancelled"])
+def test_renderer_rejects_terminal_team_without_durable_final_result(
+    terminal_state: str,
+) -> None:
+    projection = _model_result_projection()
+    team = projection["team"]
+    assert isinstance(team, dict)
+    team["state"] = terminal_state
+    projection["final_result"] = None
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+def test_renderer_rejects_active_team_with_terminal_final_result() -> None:
+    projection = _model_result_projection()
+    team = projection["team"]
+    assert isinstance(team, dict)
+    team["state"] = "active"
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+def test_renderer_rejects_unknown_packaged_task_state() -> None:
+    projection = _model_result_projection()
+    task = projection["task"]
+    assert isinstance(task, dict)
+    task["state"] = "CORRUPT_UNKNOWN_STATE"
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+@pytest.mark.parametrize(
+    ("status", "agreement_count", "difference_count"),
+    [
+        ("agree", 1, 1),
+        ("disagree", 1, 1),
+        ("partial", 0, 1),
+        ("partial", 1, 0),
+    ],
+)
+def test_renderer_rejects_incoherent_valid_comparison_counts(
+    status: str,
+    agreement_count: int,
+    difference_count: int,
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.update(
+        status=status,
+        validated=True,
+        source_states=["valid", "valid"],
+        agreement_count=agreement_count,
+        difference_count=difference_count,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+def test_renderer_rejects_noncomparison_with_comparison_counts() -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status="worker_error",
+        validated=False,
+        source_states=["worker_error", "valid"],
+        agreement_count=1,
+        difference_count=0,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+def test_renderer_rejects_terminal_member_count_not_matching_roster_state() -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    final_result["terminal_member_count"] = 2
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
 def test_renderer_uses_explicit_no_model_fallback_for_deterministic_result() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
@@ -631,6 +743,38 @@ def test_renderer_is_restart_stable_for_identical_durable_model_projection() -> 
 
     assert first["ready"] == reopened["ready"] == "true"
     assert first["rendered"] == reopened["rendered"]
+
+
+def test_polling_preserves_model_result_announcement_during_recovery_transition() -> None:
+    before = _model_result_projection()
+    final_before = before["final_result"]
+    assert isinstance(final_before, dict)
+    comparison_before = final_before["comparison"]
+    assert isinstance(comparison_before, dict)
+    comparison_before.pop("model_result")
+    attention_recovery = {
+        "schema_version": 1,
+        "status": "attention",
+        "auto_resume_count": 0,
+        "manual_resume_count": 0,
+        "approval_count": 0,
+        "uncertain_count": 1,
+        "blocked_count": 0,
+        "resume_failed_count": 0,
+    }
+
+    rendered = _rendered_team_snapshot(
+        live_projection=before,
+        next_projection=_model_result_projection(),
+        next_recovery=attention_recovery,
+    )
+
+    assert rendered["ready"] == "true"
+    assert "Невизначена або заблокована робота." in rendered["rendered"]
+    assert (
+        "Перевірена відповідь моделі доступна в підсумку командного завдання."
+        in rendered["rendered"]
+    )
 
 
 def test_polling_announces_when_validated_model_result_becomes_available() -> None:
