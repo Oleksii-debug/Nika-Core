@@ -513,6 +513,10 @@ class TaskRuntimeCoordinator:
             raise ValueError(f"Task {task_id} cannot be paused from state {current.value}")
         if RuntimeCapability.DURABLE_RESUME not in runtime.capabilities:
             raise ValueError("Safe active pause requires durable runtime resume support")
+        if not isinstance(runtime, RuntimeResumeProbePort):
+            raise ValueError(
+                "Safe active pause requires runtime checkpoint proof for durable resume"
+            )
         if RuntimeCapability.CANCELLATION not in runtime.capabilities:
             raise ValueError("Safe active pause requires runtime cancellation support")
         if record is None:
@@ -525,6 +529,7 @@ class TaskRuntimeCoordinator:
             raise ValueError("Pause request thread does not match persisted runtime session")
         if usable_resume_token(record.resume_token) is None:
             raise ValueError("Safe active pause requires a usable durable resume token")
+        await self._resume_checkpoint_identity(runtime, record)
 
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
