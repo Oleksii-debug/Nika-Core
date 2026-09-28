@@ -183,6 +183,38 @@ def test_lease_carrier_rejects_equivalent_non_utc_offset_datetimes() -> None:
         )
 
 
+def test_durable_lease_rejects_equivalent_non_utc_offset_timestamps(tmp_path) -> None:
+    service, _ = _service(tmp_path)
+    offset = timezone(timedelta(hours=2))
+    issued_at = NOW.astimezone(offset).isoformat()
+    expires_at = (NOW + timedelta(seconds=60)).astimezone(offset).isoformat()
+    database = tmp_path / "nika.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO product_factory_work_ownership "
+            "(project_id, work_id, owner_id, fence, issued_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            ("project-1", "work-1", "worker-a", 7, issued_at, expires_at),
+        )
+
+    with pytest.raises(WorkOwnershipError, match="corrupt work ownership timestamp"):
+        service.current(project_id="project-1", work_id="work-1")
+    with pytest.raises(WorkOwnershipError, match="corrupt work ownership timestamp"):
+        service.acquire(
+            project_id="project-1",
+            work_id="work-1",
+            owner_id="worker-b",
+        )
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT owner_id, fence, issued_at, expires_at "
+            "FROM product_factory_work_ownership WHERE project_id = ? AND work_id = ?",
+            ("project-1", "work-1"),
+        ).fetchone()
+    assert row == ("worker-a", 7, issued_at, expires_at)
+
+
 def test_trusted_clock_normalizes_non_utc_offset_before_issuing_lease(tmp_path) -> None:
     offset = timezone(timedelta(hours=2))
     service, _ = _service(tmp_path, clock=FakeClock(NOW.astimezone(offset)))

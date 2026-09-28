@@ -355,9 +355,12 @@ def _optional_time(value: object) -> datetime | None:
     if type(value) is not str:
         raise WorkOwnershipError("corrupt work ownership timestamp")
     try:
-        return _aware(datetime.fromisoformat(value))
+        parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError) as exc:
         raise WorkOwnershipError("corrupt work ownership timestamp") from exc
+    if parsed.tzinfo is not UTC:
+        raise WorkOwnershipError("corrupt work ownership timestamp")
+    return parsed
 
 
 def _utc_now() -> datetime:
