@@ -623,13 +623,15 @@ def _validate_review_decision(decision: ReviewDecision) -> None:
         raise CoordinatorError("review acceptance must be an exact boolean")
     _canonical_durable_text(decision.reviewer_id, label="reviewer id")
     _canonical_durable_text(decision.reason, label="review reason")
-    if not decision.evidence_refs:
+    evidence_refs = decision.evidence_refs
+    if type(evidence_refs) is not tuple:
+        raise CoordinatorError("independent review evidence refs must be canonical text")
+    if not evidence_refs:
         raise CoordinatorError("independent review requires reviewer, reason and evidence")
     if (
-        type(decision.evidence_refs) is not tuple
-        or len(decision.evidence_refs) > _MAX_REVIEW_EVIDENCE_REFS
-        or any(not _canonical_evidence_ref(reference) for reference in decision.evidence_refs)
-        or sum(len(reference.encode("utf-8")) for reference in decision.evidence_refs)
+        len(evidence_refs) > _MAX_REVIEW_EVIDENCE_REFS
+        or any(not _canonical_evidence_ref(reference) for reference in evidence_refs)
+        or sum(len(reference.encode("utf-8")) for reference in evidence_refs)
         > _MAX_REVIEW_EVIDENCE_UTF8_BYTES
     ):
         raise CoordinatorError("independent review evidence refs must be canonical text")

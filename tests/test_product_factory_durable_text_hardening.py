@@ -11,6 +11,11 @@ from nika_core.product_factory_coordinator import (
 from tests.test_product_factory_coordinator import _success
 from tests.test_product_factory_work_lifecycle import _coordinator, _core_record, _graph
 
+class _BehavioralEvidenceRefs:
+    def __bool__(self) -> bool:
+        raise AssertionError("evidence refs behavior must not execute before exact-type validation")
+
+
 
 @pytest.mark.parametrize(
     ("field", "value"),
@@ -38,6 +43,30 @@ def test_review_identity_and_reason_require_bounded_canonical_text(field: str, v
 
     with pytest.raises(CoordinatorError, match="canonical single-line text"):
         ReviewDecision(**values)
+
+
+def test_review_evidence_refs_reject_behavioral_carrier_before_truthiness() -> None:
+    with pytest.raises(CoordinatorError, match="evidence refs must be canonical text"):
+        ReviewDecision(
+            "qa-1",
+            True,
+            "verified",
+            _BehavioralEvidenceRefs(),
+        )
+
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    coordinator.record_result(_success(request))
+    forged = object.__new__(ReviewDecision)
+    object.__setattr__(forged, "reviewer_id", "qa-1")
+    object.__setattr__(forged, "accepted", True)
+    object.__setattr__(forged, "reason", "verified")
+    object.__setattr__(forged, "evidence_refs", _BehavioralEvidenceRefs())
+    snapshot = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match="evidence refs must be canonical text"):
+        coordinator.review("core", forged)
+    assert coordinator.snapshot() == snapshot
 
 
 def test_review_durable_text_utf8_boundary_round_trips() -> None:
