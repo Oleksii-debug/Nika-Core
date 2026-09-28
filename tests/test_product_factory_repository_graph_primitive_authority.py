@@ -248,6 +248,7 @@ def test_valid_plain_primitives_still_support_conflict_assessment() -> None:
     assert assessment.requires_integration
     assert {conflict.active_lease_id for conflict in assessment.conflicts} == {"lease:active"}
 
+
 def test_graph_detaches_runtime_authority_from_caller_and_exposed_dtos() -> None:
     repository = RepositoryRef(
         "repo:app",
