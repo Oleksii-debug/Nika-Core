@@ -381,7 +381,7 @@ def test_adapter_rejects_overlapping_speech_without_second_effect() -> None:
         "1",
         math.nan,
         math.inf,
-        1 << 100_000,
+        pytest.param(1 << 100_000, id="huge-int"),
         _HostileTimeout(1.0),
     ],
 )
