@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import sys
 from collections.abc import Mapping
 from typing import Any
@@ -18,14 +19,14 @@ _WASAPI_HOST_API_NAME = "windows wasapi"
 _MIN_SAMPLE_RATE_HZ = 8_000
 _MAX_SAMPLE_RATE_HZ = 48_000
 _BYTES_PER_MONO_PCM16_FRAME = 2
+_MAX_ENDPOINT_NAME_LENGTH = 1024
 
 
 class WindowsWasapiMicrophoneCaptureAdapter:
     """Real Windows microphone adapter backed by sounddevice/PortAudio WASAPI.
 
-    The adapter exposes only a session-local logical device identity derived from
-    PortAudio's numeric WASAPI device index. Raw Windows device names are never
-    returned, persisted, or placed in exception messages by this boundary.
+    Raw Windows endpoint names remain inside this adapter and are reduced to a
+    one-way logical identity before crossing the canonical microphone boundary.
     """
 
     def __init__(
@@ -39,19 +40,18 @@ class WindowsWasapiMicrophoneCaptureAdapter:
 
     @property
     def capabilities(self) -> MicrophoneCaptureCapabilities:
-        _, device_index = self._resolve_wasapi_default_input()
+        _, _, logical_device_id = self._resolve_wasapi_default_input()
         return MicrophoneCaptureCapabilities(
             provider_id=_PROVIDER_ID,
-            device_id=_logical_device_id(device_index),
+            device_id=logical_device_id,
             min_sample_rate_hz=_MIN_SAMPLE_RATE_HZ,
             max_sample_rate_hz=_MAX_SAMPLE_RATE_HZ,
         )
 
     async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResponse:
         _validate_request_carriers(request)
-        sd, device_index = self._resolve_wasapi_default_input()
-        expected_device_id = _logical_device_id(device_index)
-        if request.provider_id != _PROVIDER_ID or request.device_id != expected_device_id:
+        sd, device_index, logical_device_id = self._resolve_wasapi_default_input()
+        if request.provider_id != _PROVIDER_ID or request.device_id != logical_device_id:
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.ROUTE_MISMATCH,
                 "Windows microphone route changed before capture.",
@@ -161,7 +161,7 @@ class WindowsWasapiMicrophoneCaptureAdapter:
             latency_ms=latency_ms,
         )
 
-    def _resolve_wasapi_default_input(self) -> tuple[Any, int]:
+    def _resolve_wasapi_default_input(self) -> tuple[Any, int, str]:
         if self._platform_name != "win32":
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.UNAVAILABLE,
@@ -223,6 +223,7 @@ class WindowsWasapiMicrophoneCaptureAdapter:
         raw_index = raw_device.get("index")
         raw_host_api = raw_device.get("hostapi")
         raw_input_channels = raw_device.get("max_input_channels")
+        raw_name = raw_device.get("name")
         if (
             type(raw_index) is not int
             or raw_index != device_index
@@ -230,19 +231,23 @@ class WindowsWasapiMicrophoneCaptureAdapter:
             or raw_host_api != host_api_index
             or type(raw_input_channels) is not int
             or raw_input_channels < 1
+            or type(raw_name) is not str
+            or not raw_name.strip()
+            or len(raw_name) > _MAX_ENDPOINT_NAME_LENGTH
+            or "\x00" in raw_name
         ):
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.UNAVAILABLE,
                 "Default WASAPI endpoint is not a valid microphone input.",
                 retryable=True,
             )
-        return sd, device_index
+        return sd, device_index, _logical_device_id(host_api_index, device_index, raw_name)
 
     def _load_sounddevice(self) -> Any:
         if self._sounddevice_module is not None:
             return self._sounddevice_module
         try:
-            import sounddevice  # type: ignore[import-not-found]
+            import sounddevice  # type: ignore[import-not-found]  # noqa: PLC0415
         except ImportError:
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.UNAVAILABLE,
@@ -291,10 +296,19 @@ class WindowsWasapiMicrophoneCaptureAdapter:
             ) from None
 
 
-def _logical_device_id(device_index: int) -> str:
-    if type(device_index) is not int or device_index < 0:
-        raise ValueError("WASAPI device index must be a non-negative integer")
-    return f"wasapi-device-{device_index}"
+def _logical_device_id(host_api_index: int, device_index: int, raw_name: str) -> str:
+    if (
+        type(host_api_index) is not int
+        or host_api_index < 0
+        or type(device_index) is not int
+        or device_index < 0
+        or type(raw_name) is not str
+        or not raw_name
+    ):
+        raise ValueError("WASAPI endpoint identity is invalid")
+    material = f"{host_api_index}\x00{device_index}\x00{raw_name}".encode("utf-8")
+    digest = hashlib.sha256(material).hexdigest()
+    return f"wasapi-device-sha256:{digest}"
 
 
 def _validate_request_carriers(request: MicrophoneCaptureRequest) -> None:
