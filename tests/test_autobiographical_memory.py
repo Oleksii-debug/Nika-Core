@@ -54,10 +54,12 @@ def _append_attested(
     event_type: str,
     entity_type: str = "task",
     entity_id: str = "task-1",
+    agent_id: str = "agent-1",
     payload: dict[str, object] | None = None,
 ) -> int:
     body = dict(payload or {})
     body["autobiographical_category"] = category.value
+    body["autobiographical_agent_id"] = agent_id
     return audit.append(
         event_type=event_type,
         entity_type=entity_type,
@@ -160,6 +162,62 @@ def test_category_must_be_attested_by_referenced_audit_evidence(tmp_path) -> Non
         audit_event_id=outcome,
     )
     assert remembered.category is AutobiographicalCategory.OUTCOME
+
+
+def test_audit_evidence_cannot_be_rebound_to_another_agent(tmp_path) -> None:
+    _, audit, _, autobiography = _runtime(tmp_path)
+    event_id = _append_attested(
+        audit,
+        category=AutobiographicalCategory.LESSON,
+        event_type="learning.lesson.accepted",
+        agent_id="agent-1",
+    )
+
+    with pytest.raises(
+        AutobiographicalMemoryIntegrityError,
+        match="does not attest requested autobiographical agent",
+    ):
+        autobiography.remember_audit_event(
+            agent_id="agent-2",
+            category=AutobiographicalCategory.LESSON,
+            audit_event_id=event_id,
+        )
+
+    assert autobiography.list_entries(agent_id="agent-2", limit=10) == ()
+
+
+def test_tampered_audit_agent_attestation_fails_restart_validation(tmp_path) -> None:
+    store, audit, _, autobiography = _runtime(tmp_path)
+    event_id = _append_attested(
+        audit,
+        category=AutobiographicalCategory.DECISION,
+        event_type="decision.recorded",
+        agent_id="agent-1",
+    )
+    autobiography.remember_audit_event(
+        agent_id="agent-1",
+        category=AutobiographicalCategory.DECISION,
+        audit_event_id=event_id,
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM audit_events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        payload["autobiographical_agent_id"] = "agent-2"
+        conn.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
+            (json.dumps(payload, sort_keys=True, separators=(",", ":")), event_id),
+        )
+
+    restarted = AutobiographicalMemory(
+        SQLiteStore(store.path),
+        MemoryService(SQLiteStore(store.path)),
+    )
+    with pytest.raises(AutobiographicalMemoryIntegrityError):
+        restarted.list_entries(agent_id="agent-1", limit=10)
 
 
 def test_owner_rebinding_fails_closed_and_does_not_fabricate_replacement(tmp_path) -> None:
