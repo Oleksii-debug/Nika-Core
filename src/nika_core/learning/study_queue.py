@@ -346,6 +346,8 @@ def _study_task_from_record(record: task_queue.TaskRecord) -> StudyTask:
         )
         if not hmac.compare_digest(fingerprint, _payload_fingerprint(material)):
             raise ValueError("study payload fingerprint mismatch")
+        if payload != _material_payload(material):
+            raise ValueError("study payload is not canonical reference-only evidence")
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid durable study task payload") from exc
     return StudyTask(
