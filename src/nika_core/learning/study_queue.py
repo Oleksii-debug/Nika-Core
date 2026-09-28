@@ -401,6 +401,13 @@ def _normalized_query_key(value: str) -> str:
     )
 
 
+def _contains_secret_fields(value: str) -> bool:
+    return any(
+        _normalized_query_key(key) in _SECRET_QUERY_KEYS
+        for key, _ in urllib.parse.parse_qsl(value, keep_blank_values=True)
+    )
+
+
 def _reject_secret_bearing_reference(value: str) -> None:
     for view in _decoded_views(value):
         lowered = view.casefold()
@@ -410,6 +417,5 @@ def _reject_secret_bearing_reference(value: str) -> None:
         if parsed.scheme.casefold() in {"http", "https"}:
             if parsed.username is not None or parsed.password is not None:
                 raise ValueError("source_ref must not contain URL credentials")
-            for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-                if _normalized_query_key(key) in _SECRET_QUERY_KEYS:
-                    raise ValueError("source_ref must not contain credential query fields")
+            if _contains_secret_fields(parsed.query) or _contains_secret_fields(parsed.fragment):
+                raise ValueError("source_ref must not contain credential query fields")
