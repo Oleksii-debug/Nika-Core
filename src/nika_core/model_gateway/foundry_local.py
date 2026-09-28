@@ -117,7 +117,7 @@ class FoundryLocalProvider:
         self._model_management_lock = asyncio.Lock()
         self._owned_model_lock = Lock()
         self._owned_loaded_models: dict[str, Any] = {}
-        self._tainted_loaded_models: set[int] = set()
+        self._tainted_loaded_models: dict[int, Any] = {}
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -545,7 +545,7 @@ class FoundryLocalProvider:
                 )
             self._validate_model_identity(model, self._expected_model_id)
             model_id = self._sdk_text(model, "id")
-            self._tainted_loaded_models.discard(id(model))
+            self._tainted_loaded_models.pop(id(model), None)
             with self._owned_model_lock:
                 self._owned_loaded_models[model_id] = model
 
@@ -640,13 +640,13 @@ class FoundryLocalProvider:
 
     def _cleanup_failed_load(self, model: Any) -> None:
         marker = id(model)
-        self._tainted_loaded_models.add(marker)
+        self._tainted_loaded_models[marker] = model
         try:
             if self._sdk_bool(model, "is_loaded"):
                 model.unload()
                 if self._sdk_bool(model, "is_loaded"):
                     return
-            self._tainted_loaded_models.discard(marker)
+            self._tainted_loaded_models.pop(marker, None)
         except Exception:  # noqa: BLE001 - original load failure remains authoritative.
             return
 
