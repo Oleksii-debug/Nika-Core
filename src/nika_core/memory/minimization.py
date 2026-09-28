@@ -32,6 +32,10 @@ _WINDOWS_LOCAL_USER_PATH_FULL = re.compile(
 _URL_USERINFO = re.compile(
     r"(?i)\\b([a-z][a-z0-9+.-]*://)([^/\\s?#@]*@)"
 )
+_PROVIDER_SIGNED_QUERY = re.compile(
+    r"(?i)([?&](?:x-amz-(?:credential|signature|security-token)|"
+    r"x-goog-(?:credential|signature))=)([^&#\\s]+)"
+)
 _KEY_COLLISION_ERROR = "memory persistence key collision after minimization"
 
 
@@ -43,6 +47,10 @@ def minimize_for_persistence(value: Any) -> Any:
 
 def _redact_secret_text(value: str) -> str:
     redacted = redact_text(value)
+    redacted = _PROVIDER_SIGNED_QUERY.sub(
+        lambda match: f"{match.group(1)}[REDACTED]",
+        redacted,
+    )
     return _URL_USERINFO.sub(
         lambda match: f"{match.group(1)}[REDACTED]@",
         redacted,
