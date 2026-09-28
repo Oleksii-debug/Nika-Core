@@ -202,6 +202,46 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     assert "hashlib.sha256(body.encode('utf-8')).hexdigest() != selection_id" in proof
     assert "'credential_ref': None" in proof
 
+    terminal_result = proof.index(
+        "Wait-BoundTextEvidence 'Командне завдання завершено; "
+        "збережені результати учасників доступні.'"
+    )
+    model_result_label = proof.index(
+        "Wait-BoundTextEvidence 'Відповідь моделі'",
+        terminal_result,
+    )
+    model_result_text = proof.index(
+        "Wait-BoundTextEvidence 'controlled loopback response'",
+        model_result_label,
+    )
+    model_provider_label = proof.index(
+        "Wait-BoundTextEvidence 'Постачальник моделі'",
+        model_result_text,
+    )
+    model_provider = proof.index(
+        "Wait-BoundTextEvidence 'ollama'",
+        model_provider_label,
+    )
+    final_model_label = proof.index(
+        "Wait-BoundTextEvidence 'Модель'",
+        model_provider,
+    )
+    final_model_name = proof.index(
+        "Wait-BoundTextEvidence 'uia-proof-model'",
+        final_model_label,
+    )
+    binding_probe = proof.index("$modelBindingProbe = @'", final_model_name)
+    assert (
+        terminal_result
+        < model_result_label
+        < model_result_text
+        < model_provider_label
+        < model_provider
+        < final_model_label
+        < final_model_name
+        < binding_probe
+    )
+
     assert "ThreadingHTTPServer" in wrapper
     assert '("127.0.0.1", 11434)' in wrapper
     assert "'/api/chat'" in wrapper
