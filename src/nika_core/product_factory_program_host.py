@@ -867,12 +867,14 @@ class ProductFactoryProgramHost:
                         lease_seconds=self.lease_seconds,
                     )
                 except WorkOwnershipError as exc:
-                    await _cancel_effect_task(task)
                     raise ProductFactoryProgramError(
                         "Product Factory work ownership was lost during external effect "
                         f"for {request.work_id}: {exc}"
                     ) from exc
         except asyncio.CancelledError:
+            await _cancel_effect_task(task)
+            raise
+        except Exception:  # noqa: BLE001 - never leave an admitted effect orphaned
             await _cancel_effect_task(task)
             raise
 
