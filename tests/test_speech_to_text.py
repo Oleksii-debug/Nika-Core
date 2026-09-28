@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 
@@ -96,7 +97,7 @@ class _BlockedAdapter:
 
 
 class _MalformedModelRouteAdapter(_RecordingAdapter):
-    supported_models = ["uk-small-v1"]
+    supported_models: ClassVar[list[str]] = ["uk-small-v1"]
 
 
 class _MalformedTypedFailureAdapter:
