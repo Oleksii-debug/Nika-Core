@@ -1484,3 +1484,105 @@ def test_resume_paused_rejects_unrelated_terminal_event_as_advancement(
         event.event_type == "background.resume_returned"
         for event in audit.list_for(entity_type="task", entity_id=task_id)
     )
+
+
+def test_final_resource_fence_blocks_pressure_after_final_presence(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    resource_observer = SequenceResourceObserver(
+        [10.0, 10.0, 10.0, 10.0, 10.0, 95.0]
+    )
+    guard, queue, audit, resources = _guard(
+        store=store,
+        observations=[
+            _obs(400, OwnerPresence.AWAY, now=now),
+            _obs(401, OwnerPresence.AWAY, now=now),
+            _obs(402, OwnerPresence.AWAY, now=now),
+            _obs(403, OwnerPresence.AWAY, now=now),
+            _obs(404, OwnerPresence.AWAY, now=now),
+        ],
+        now=now,
+        resource_observer=resource_observer,
+    )
+    task_id = _ready_task(queue)
+    calls = 0
+
+    async def effect() -> object:
+        nonlocal calls
+        calls += 1
+        return "must-not-run"
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.READING_RESEARCH,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.DEFER
+    assert result.reason == "resource_pressure"
+    assert result.executed is False
+    assert calls == 0
+    assert queue.get(task_id).state is TaskState.READY
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+    deferred = [
+        event
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+        if event.event_type == "background.dispatch_deferred"
+    ]
+    assert deferred[-1].payload["phase"] == "effect_start_resource_fence"
+
+
+def test_resume_final_resource_fence_blocks_power_change(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    resource_observer = SequenceResourceObserver(
+        [10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
+        [True, True, True, True, True, False],
+    )
+    guard, queue, audit, resources = _guard(
+        store=store,
+        observations=[
+            _obs(410, OwnerPresence.AWAY, now=now),
+            _obs(411, OwnerPresence.AWAY, now=now),
+            _obs(412, OwnerPresence.AWAY, now=now),
+            _obs(413, OwnerPresence.AWAY, now=now),
+            _obs(414, OwnerPresence.AWAY, now=now),
+        ],
+        now=now,
+        resource_observer=resource_observer,
+    )
+    task_id, pause_event_id = _owner_return_paused_task(queue, audit)
+    calls = 0
+
+    async def effect() -> object:
+        nonlocal calls
+        calls += 1
+        return "must-not-run"
+
+    result = asyncio.run(
+        guard.resume_paused(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.EVALUATION,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.DEFER
+    assert result.reason == "battery_power"
+    assert result.executed is False
+    assert calls == 0
+    assert queue.get(task_id).state is TaskState.PAUSED
+    assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
+    blocked = [
+        event
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+        if event.event_type == "background.resume_blocked"
+    ]
+    assert blocked[-1].payload["phase"] == "effect_start_resource_fence"
+    assert blocked[-1].payload["pause_event_id"] == pause_event_id
