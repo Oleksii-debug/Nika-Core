@@ -374,3 +374,58 @@ def test_record_rejects_non_enum_authority_before_persistence(
         reason_code="checkpoint_pending",
     )
     assert accepted.event_key == event_key
+
+class _BehavioralReasonCode(str):
+    def strip(self, *_args: object, **_kwargs: object) -> str:
+        raise AssertionError("reason_code behavior must not run before exact-type rejection")
+
+
+class _BehavioralDatetime(datetime):
+    def utcoffset(self) -> object:
+        raise AssertionError("datetime behavior must not run before exact-type rejection")
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "expected_message"),
+    (
+        (
+            "reason_code",
+            _BehavioralReasonCode("checkpoint_verified"),
+            "reason_code must be a built-in string",
+        ),
+        (
+            "occurred_at",
+            _BehavioralDatetime(2026, 9, 12, 10, 0, tzinfo=UTC),
+            "occurred_at must be a built-in datetime",
+        ),
+    ),
+)
+def test_record_rejects_behavioral_scalar_subclasses_before_persistence(
+    tmp_path,
+    field: str,
+    value: object,
+    expected_message: str,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    kwargs: dict[str, object] = {
+        "event_key": "task-12:recovery:scalar-authority",
+        "task_id": "task-12",
+        "kind": ContinuityKind.RECOVERY,
+        "outcome": ContinuityOutcome.PRESERVED,
+        "reason_code": "checkpoint_verified",
+        "occurred_at": datetime(2026, 9, 12, 10, 0, tzinfo=UTC),
+    }
+    kwargs[field] = value
+
+    with pytest.raises(TypeError, match=expected_message):
+        ledger.record(**kwargs)  # type: ignore[arg-type]
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS event_count FROM continuity_experience_events"
+        ).fetchone()
+    assert row is not None
+    assert row["event_count"] == 0
+

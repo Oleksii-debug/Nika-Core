@@ -114,6 +114,8 @@ class ExperienceLedger:
 
     @staticmethod
     def _validate_reason_code(reason_code: str) -> str:
+        if type(reason_code) is not str:
+            raise TypeError("reason_code must be a built-in string")
         value = reason_code.strip()
         if value != reason_code or not _REASON_CODE.fullmatch(value):
             raise ValueError("reason_code must be a bounded machine-safe code")
@@ -123,7 +125,7 @@ class ExperienceLedger:
     def _validate_optional_number(name: str, value: float | None) -> float | None:
         if value is None:
             return None
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
+        if type(value) not in (int, float):
             raise TypeError(f"{name} must be an int or float")
         try:
             number = float(value)
@@ -198,6 +200,8 @@ class ExperienceLedger:
         clock_jump_seconds = self._validate_optional_number(
             "clock_jump_seconds", clock_jump_seconds
         )
+        if occurred_at is not None and type(occurred_at) is not datetime:
+            raise TypeError("occurred_at must be a built-in datetime")
         generated_occurrence = occurred_at is None
         when = occurred_at or datetime.now(UTC)
         if when.tzinfo is None or when.utcoffset() is None:

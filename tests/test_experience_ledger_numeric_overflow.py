@@ -34,3 +34,48 @@ def test_pathological_numeric_evidence_fails_closed_before_persistence(tmp_path)
 
     assert ledger.get("task-overflow:delay") is None
     assert ledger.get("task-overflow:clock") is None
+
+class _BehavioralInt(int):
+    def __float__(self) -> float:
+        raise AssertionError("numeric behavior must not run before exact-type rejection")
+
+
+class _BehavioralFloat(float):
+    def __float__(self) -> float:
+        raise AssertionError("numeric behavior must not run before exact-type rejection")
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("delay_seconds", _BehavioralInt(3)),
+        ("clock_jump_seconds", _BehavioralFloat(3.0)),
+    ),
+)
+def test_behavioral_numeric_subclasses_fail_closed_before_persistence(
+    tmp_path,
+    field: str,
+    value: object,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    kwargs: dict[str, object] = {
+        "event_key": "task-overflow:behavioral",
+        "task_id": "task-overflow",
+        "kind": ContinuityKind.RECOVERY,
+        "outcome": ContinuityOutcome.WAITING,
+        "reason_code": "retry_pending",
+    }
+    kwargs[field] = value
+
+    with pytest.raises(TypeError, match="int or float"):
+        ledger.record(**kwargs)  # type: ignore[arg-type]
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS event_count FROM continuity_experience_events"
+        ).fetchone()
+    assert row is not None
+    assert row["event_count"] == 0
+
