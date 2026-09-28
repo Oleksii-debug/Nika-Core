@@ -186,7 +186,7 @@ class DesktopBackend:
             raise ValueError(f"Завдання у стані {record.state.value} не можна призупинити.")
         try:
             self._queue.transition(record.task_id, TaskState.PAUSED)
-        except ValueError as exc:
+        except ValueError:
             current = self._queue.get(record.task_id)
             if current.state == TaskState.RUNNING:
                 return self.pause_task(_payload)
