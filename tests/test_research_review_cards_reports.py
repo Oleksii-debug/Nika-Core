@@ -538,6 +538,43 @@ def test_review_readback_rejects_malformed_durable_audit_payload(
         restarted.get_review(workspace_id="ws", document_id="doc-1")
 
 
+
+def test_review_readback_rejects_valid_but_inconsistent_predecessor_state(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = ResearchReviewRepository(store)
+    repository.set_review(
+        workspace_id="ws",
+        document_id="doc-1",
+        state=ResearchReviewState.SAVED,
+        note="saved",
+    )
+    repository.set_review(
+        workspace_id="ws",
+        document_id="doc-1",
+        state=ResearchReviewState.DISMISSED,
+        note="dismissed",
+    )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            """SELECT event_id, payload_json FROM audit_events
+            WHERE event_type='research.review.changed'
+            ORDER BY event_id DESC LIMIT 1"""
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        payload["previous_state"] = ResearchReviewState.UNREVIEWED.value
+        conn.execute(
+            "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), row["event_id"]),
+        )
+
+    restarted = ResearchReviewRepository(SQLiteStore(store.path))
+    with pytest.raises(RuntimeError, match="review audit chain is inconsistent"):
+        restarted.get_review(workspace_id="ws", document_id="doc-1")
+
 def test_review_readback_rejects_noncanonical_durable_timestamp(tmp_path: Path) -> None:
     store = _store(tmp_path)
     repository = ResearchReviewRepository(store)

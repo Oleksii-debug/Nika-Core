@@ -102,7 +102,7 @@ def _decode_review_audit_payload(
     *,
     workspace_id: str,
     document_id: str,
-) -> tuple[ResearchReviewState, str]:
+) -> tuple[ResearchReviewState, ResearchReviewState, str]:
     if type(raw_payload) is not str:
         raise RuntimeError("research review audit evidence is invalid")
     try:
@@ -125,14 +125,11 @@ def _decode_review_audit_payload(
         note = _exact_text(payload["note"], "audit note")
         if len(note) > _MAX_NOTE_LENGTH or note.strip() != note:
             raise ValueError("review audit note is not canonical")
-        # Validate the predecessor carrier even though the latest projection does
-        # not otherwise need it; every persisted field remains canonical evidence.
-        _ = previous_state
     except (KeyError, TypeError, ValueError) as exc:
         raise RuntimeError("research review audit evidence is invalid") from exc
     if stored_workspace != workspace_id or stored_document != document_id:
         raise RuntimeError("research review audit identity mismatch")
-    return state, note
+    return previous_state, state, note
 
 
 def _canonical_evidence(evidence: object, field_name: str) -> ResearchEvidence:
@@ -453,31 +450,41 @@ class ResearchReviewRepository:
         workspace_id: str,
         document_id: str,
     ) -> ResearchReview:
-        row = conn.execute(
+        rows = conn.execute(
             """SELECT payload_json, created_at FROM audit_events
             WHERE event_type=? AND entity_type=? AND entity_id=?
-            ORDER BY event_id DESC LIMIT 1""",
+            ORDER BY event_id""",
             (_EVENT_TYPE, _ENTITY_TYPE, _entity_id(workspace_id, document_id)),
-        ).fetchone()
-        if row is None:
+        ).fetchall()
+        if not rows:
             return ResearchReview(
                 workspace_id=workspace_id,
                 document_id=document_id,
                 state=ResearchReviewState.UNREVIEWED,
             )
-        state, note = _decode_review_audit_payload(
-            row["payload_json"],
-            workspace_id=workspace_id,
-            document_id=document_id,
-        )
-        updated_at = _canonical_review_timestamp(row["created_at"])
-        return ResearchReview(
-            workspace_id=workspace_id,
-            document_id=document_id,
-            state=state,
-            note=note,
-            updated_at=updated_at,
-        )
+
+        expected_previous_state = ResearchReviewState.UNREVIEWED
+        current: ResearchReview | None = None
+        for row in rows:
+            previous_state, state, note = _decode_review_audit_payload(
+                row["payload_json"],
+                workspace_id=workspace_id,
+                document_id=document_id,
+            )
+            if previous_state is not expected_previous_state:
+                raise RuntimeError("research review audit chain is inconsistent")
+            updated_at = _canonical_review_timestamp(row["created_at"])
+            current = ResearchReview(
+                workspace_id=workspace_id,
+                document_id=document_id,
+                state=state,
+                note=note,
+                updated_at=updated_at,
+            )
+            expected_previous_state = state
+        if current is None:
+            raise RuntimeError("research review audit chain is invalid")
+        return current
 
     @staticmethod
     def _require_document_on_connection(
