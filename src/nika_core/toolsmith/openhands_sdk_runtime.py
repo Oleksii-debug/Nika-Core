@@ -707,7 +707,7 @@ class OpenHandsAgentServerRuntime:
         *,
         operation: str,
         json: Any | None = None,
-        timeout_seconds: int | float,
+        timeout_seconds: float,
     ) -> Any:
         response = client.request(
             method,
@@ -724,9 +724,9 @@ class OpenHandsAgentServerRuntime:
             ) from exc
 
 
-def _bounded_http_timeout(timeout_seconds: int | float) -> float:
+def _bounded_http_timeout(timeout_seconds: float) -> float:
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
-        raise ValueError("OpenHands HTTP timeout must be numeric")
+        raise TypeError("OpenHands HTTP timeout must be numeric")
     if timeout_seconds <= 0:
         raise TimeoutError
     return min(float(timeout_seconds), _MAX_HTTP_BLOCK_SECONDS)
