@@ -402,9 +402,6 @@ def test_plan_rejects_polymorphic_base_sha_before_casefold() -> None:
         )
 
 
-
-
-
 def test_restore_rejects_behavioral_repair_blocker_before_truthiness() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
