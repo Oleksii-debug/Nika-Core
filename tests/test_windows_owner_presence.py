@@ -416,6 +416,34 @@ def test_source_id_requires_exact_trimmed_string(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "source_id",
+    [
+        "win32\nowner",
+        "win32\x00owner",
+        "win32\u202eowner",
+    ],
+)
+def test_source_id_rejects_control_and_format_characters(
+    tmp_path: Path,
+    source_id: str,
+) -> None:
+    audit = _audit(tmp_path)
+
+    with pytest.raises(ValueError, match="control or format"):
+        WindowsOwnerPresenceObserver(
+            audit,
+            away_after_seconds=60,
+            source_id=source_id,
+            api=FakeLastInputApi(last_ticks=[1, 1], current_ticks=[2]),
+        )
+
+    assert audit.list_for(
+        entity_type="owner_presence_source",
+        entity_id=source_id,
+    ) == ()
+
+
 def test_custom_source_id_is_bound_into_observation_and_audit(tmp_path: Path) -> None:
     audit = _audit(tmp_path)
     observer = WindowsOwnerPresenceObserver(
