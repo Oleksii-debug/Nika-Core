@@ -199,6 +199,22 @@ def test_non_windows_platform_fails_closed_without_backend_use() -> None:
     assert sd.streams == []
 
 
+def test_noncanonical_host_api_container_fails_closed_without_effect() -> None:
+    class _HostApiTuple(tuple):
+        pass
+
+    sd = _FakeSoundDevice()
+    host_apis = sd.query_hostapis()
+    sd.query_hostapis = lambda: _HostApiTuple(host_apis)
+    adapter = _adapter(sd)
+
+    with pytest.raises(MicrophoneCaptureAdapterError, match="invalid data"):
+        _ = adapter.capabilities
+
+    assert sd.check_calls == []
+    assert sd.streams == []
+
+
 def test_no_wasapi_host_never_falls_back_to_mme() -> None:
     sd = _FakeSoundDevice()
     sd.query_hostapis = lambda: ({"name": "Windows MME", "default_input_device": 1},)
@@ -230,6 +246,19 @@ def test_same_index_endpoint_replacement_is_rejected_before_stream_start() -> No
     sd.raw_device_name = "REPLACEMENT-MICROPHONE-SAME-INDEX"
 
     with pytest.raises(MicrophoneCaptureAdapterError, match="route changed"):
+        asyncio.run(adapter.capture(request))
+
+    assert sd.check_calls == []
+    assert sd.streams == []
+
+
+def test_mutated_oversized_request_fails_before_allocation_or_stream_effect() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+    request = _request(adapter)
+    object.__setattr__(request, "sample_count", 16_000 * 31)
+
+    with pytest.raises(TypeError, match="sample_count"):
         asyncio.run(adapter.capture(request))
 
     assert sd.check_calls == []
