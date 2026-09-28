@@ -159,7 +159,13 @@ class StudyQueue:
         )
         recovered: list[StudyTask] = []
         for task_id in task_ids:
-            recovered.append(self._transition(task_id, task_state.TaskState.READY))
+            recovered.append(
+                self._transition(
+                    task_id,
+                    task_state.TaskState.READY,
+                    expected_state=task_state.TaskState.CREATED,
+                )
+            )
         return tuple(recovered)
 
     def start(self, task_id: str) -> StudyTask:
@@ -188,11 +194,21 @@ class StudyQueue:
     def cancel(self, task_id: str) -> StudyTask:
         return self._transition(task_id, task_state.TaskState.CANCELLED)
 
-    def _transition(self, task_id: str, target: task_state.TaskState) -> StudyTask:
+    def _transition(
+        self,
+        task_id: str,
+        target: task_state.TaskState,
+        *,
+        expected_state: task_state.TaskState | None = None,
+    ) -> StudyTask:
         _require_text(task_id, "task_id", maximum=256)
         with self._tasks.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             task = self.get(task_id)
+            if expected_state is not None and task.state is not expected_state:
+                raise ValueError(
+                    "study task state changed before recovery transition"
+                )
             self._tasks.transition_with_connection(conn, task_id, target)
         return dataclasses.replace(task, state=target)
 
