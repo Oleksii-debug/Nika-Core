@@ -211,7 +211,7 @@ class StudyQueue:
             task = self.get(task_id)
             if expected_state is not None and task.state is not expected_state:
                 raise ValueError(
-                    "study task state changed before recovery transition"
+                    "study task state changed before transition"
                 )
             self._tasks.transition_with_connection(conn, task_id, target)
         return dataclasses.replace(task, state=target)
