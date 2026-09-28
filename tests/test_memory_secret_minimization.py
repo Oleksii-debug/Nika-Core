@@ -336,6 +336,77 @@ def test_memory_persistence_fully_redacts_provider_and_fragment_credentials(
         assert secret not in raw_after_restart
 
 
+def test_memory_persistence_redacts_oidc_id_token_text_across_restart(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "nika.db"
+    first_store = _store(db_path)
+    memory = MemoryService(first_store)
+    oidc_secret = "eyJ-oidc-id-token-secret"
+    value = {
+        "assignment": f"id_token={oidc_secret}",
+        "hyphen_assignment": f"id-token={oidc_secret}",
+        "compact_assignment": f"idtoken={oidc_secret}",
+        "query": (
+            "https://auth.example.test/callback?"
+            f"id_token={oidc_secret}&state=stable"
+        ),
+        "fragment": (
+            "https://auth.example.test/callback#"
+            f"id_token={oidc_secret}&state=stable"
+        ),
+        "benign": "id_token_count=3",
+    }
+
+    memory.put(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="research",
+        namespace="inference",
+        key="oidc-id-token-boundaries",
+        value=value,
+    )
+
+    raw_before_restart = _raw_memory_value(
+        first_store,
+        key="oidc-id-token-boundaries",
+    )
+    assert oidc_secret not in raw_before_restart
+
+    durable = json.loads(raw_before_restart)
+    assert durable == {
+        "assignment": "id_token=[REDACTED]",
+        "hyphen_assignment": "id-token=[REDACTED]",
+        "compact_assignment": "idtoken=[REDACTED]",
+        "query": (
+            "https://auth.example.test/callback?"
+            "id_token=[REDACTED]&state=stable"
+        ),
+        "fragment": (
+            "https://auth.example.test/callback#"
+            "id_token=[REDACTED]&state=stable"
+        ),
+        "benign": "id_token_count=3",
+    }
+
+    restarted_store = _store(db_path)
+    restarted = MemoryService(restarted_store)
+    record = restarted.get(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="research",
+        namespace="inference",
+        key="oidc-id-token-boundaries",
+    )
+    assert record is not None
+    assert record.value == durable
+
+    raw_after_restart = _raw_memory_value(
+        restarted_store,
+        key="oidc-id-token-boundaries",
+    )
+    assert raw_after_restart == raw_before_restart
+    assert oidc_secret not in raw_after_restart
+
+
 def test_memory_persistence_fails_closed_on_redacted_mapping_key_collision(
     tmp_path: Path,
 ) -> None:

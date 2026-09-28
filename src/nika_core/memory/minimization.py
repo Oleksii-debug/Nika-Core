@@ -40,6 +40,11 @@ _SENSITIVE_FRAGMENT_CREDENTIAL = re.compile(
     r"(?i)(#(?:token|access_token|refresh_token|api_key|auth|key|password|"
     r"secret|signature|sig)=)([^&#\s]+)"
 )
+_OIDC_ID_TOKEN_CREDENTIAL = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"((?:id[-_]?token)\\s*[:=]\\s*)"
+    r"([^\\s,;&#]+)"
+)
 _KEY_COLLISION_ERROR = "memory persistence key collision after minimization"
 
 
@@ -51,6 +56,10 @@ def minimize_for_persistence(value: Any) -> Any:
 
 def _redact_secret_text(value: str) -> str:
     redacted = redact_text(value)
+    redacted = _OIDC_ID_TOKEN_CREDENTIAL.sub(
+        lambda match: f"{match.group(1)}[REDACTED]",
+        redacted,
+    )
     redacted = _PROVIDER_SIGNED_QUERY.sub(
         lambda match: f"{match.group(1)}[REDACTED]",
         redacted,
