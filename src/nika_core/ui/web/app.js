@@ -1222,7 +1222,12 @@
     }
     if (!productReady) return false;
     if (announceTeamTransitions && recoveryRender.changed) {
-      announce(recoveryRender.message, recoveryRender.assertive);
+      announce(
+        teamRender.modelResultBecameAvailable
+          ? `${recoveryRender.message} Перевірена відповідь моделі доступна в підсумку командного завдання.`
+          : recoveryRender.message,
+        recoveryRender.assertive,
+      );
     } else if (announceTeamTransitions && teamRender.changed) {
       announce(
         teamRender.modelResultBecameAvailable

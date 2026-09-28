@@ -85,6 +85,7 @@ def _rendered_team_snapshot(
     *,
     live_projection: dict[str, object] | None = None,
     next_projection: dict[str, object] | None = None,
+    next_recovery: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if _NODE is None:
         pytest.skip("Node.js is required for the packaged team renderer canary regression")
@@ -153,6 +154,7 @@ def _rendered_team_snapshot(
 const fs = require("fs");
 const PROJECTION = {json.dumps(projection, ensure_ascii=False)};
 const NEXT_PROJECTION = {json.dumps(next_projection, ensure_ascii=False)};
+const NEXT_RECOVERY = {json.dumps(next_recovery, ensure_ascii=False)};
 let getStateCalls = 0;
 
 class Element {{}}
@@ -221,6 +223,19 @@ function currentProjection() {{
   getStateCalls += 1;
   return value;
 }}
+function currentRecovery() {{
+  const initial = {{
+    schema_version: 1,
+    status: "ready",
+    auto_resume_count: 0,
+    manual_resume_count: 0,
+    approval_count: 0,
+    uncertain_count: 0,
+    blocked_count: 0,
+    resume_failed_count: 0,
+  }};
+  return getStateCalls === 0 || NEXT_RECOVERY === null ? initial : NEXT_RECOVERY;
+}}
 global.crypto = {{ randomUUID: () => "team-ui-request-id" }};
 global.pywebview = {{
   api: {{
@@ -231,16 +246,7 @@ global.pywebview = {{
         tasks: [],
         agents: [],
         workspaces: [],
-        startup_recovery: {{
-          schema_version: 1,
-          status: "ready",
-          auto_resume_count: 0,
-          manual_resume_count: 0,
-          approval_count: 0,
-          uncertain_count: 0,
-          blocked_count: 0,
-          resume_failed_count: 0,
-        }},
+        startup_recovery: currentRecovery(),
         product_project: null,
         v01_team_task: currentProjection(),
       }},
@@ -659,6 +665,38 @@ def test_renderer_is_restart_stable_for_identical_durable_model_projection() -> 
 
     assert first["ready"] == reopened["ready"] == "true"
     assert first["rendered"] == reopened["rendered"]
+
+
+def test_polling_preserves_model_result_announcement_during_recovery_transition() -> None:
+    before = _model_result_projection()
+    final_before = before["final_result"]
+    assert isinstance(final_before, dict)
+    comparison_before = final_before["comparison"]
+    assert isinstance(comparison_before, dict)
+    comparison_before.pop("model_result")
+    attention_recovery = {
+        "schema_version": 1,
+        "status": "attention",
+        "auto_resume_count": 0,
+        "manual_resume_count": 0,
+        "approval_count": 0,
+        "uncertain_count": 1,
+        "blocked_count": 0,
+        "resume_failed_count": 0,
+    }
+
+    rendered = _rendered_team_snapshot(
+        live_projection=before,
+        next_projection=_model_result_projection(),
+        next_recovery=attention_recovery,
+    )
+
+    assert rendered["ready"] == "true"
+    assert "Невизначена або заблокована робота." in rendered["rendered"]
+    assert (
+        "Перевірена відповідь моделі доступна в підсумку командного завдання."
+        in rendered["rendered"]
+    )
 
 
 def test_polling_announces_when_validated_model_result_becomes_available() -> None:
