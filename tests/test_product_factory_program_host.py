@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 import nika_core.product_factory_program_host as program_host_module
-
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
@@ -53,12 +52,10 @@ from nika_core.toolsmith.contracts import (
     ProcessPolicy,
     RecoveryState,
     ResourceBudget,
+    TestEvidence as WorkerTestEvidence,
     WorkerFailure,
     WorkerFailureKind,
     WorkspaceLease,
-)
-from nika_core.toolsmith.contracts import (
-    TestEvidence as WorkerTestEvidence,
 )
 
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
