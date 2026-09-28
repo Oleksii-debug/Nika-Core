@@ -738,8 +738,8 @@ try {
 
     if ($VerifySourceSetup) {
         # The same packaged journey must expose and persist the canonical model choice before
-        # task acceptance. This proof stores only a fake local model identity; it never contacts
-        # Ollama, downloads a model, or claims live model inference/NVDA verification.
+        # task acceptance. VerifySourceSetup is driven by the proof-owned Ollama-compatible
+        # loopback wrapper; it never proves physical Ollama/model inference or NVDA verification.
         Wait-BoundTextEvidence 'Модель для нових завдань'
         $modelRouteControl = Wait-DescendantName 'Тип маршруту моделі' ([System.Windows.Automation.ControlType]::ComboBox)
         $modelNameControl = Wait-DescendantName 'Назва моделі' ([System.Windows.Automation.ControlType]::Edit)
@@ -771,6 +771,17 @@ try {
             [System.Windows.Forms.SendKeys]::SendWait('^n')
             Wait-FocusName $tasksControl
             Wait-BoundTextEvidence 'Командне завдання завершено; збережені результати учасників доступні.'
+
+            # Prove the new durable model-result presentation through the same bound packaged
+            # WebView2 accessibility tree. Read-only Text evidence cannot authorize an action,
+            # so equivalent provider duplicates are harmless; exact labels + values must all
+            # be physically exposed before the DB binding proof receives any credit.
+            Wait-BoundTextEvidence 'Відповідь моделі'
+            Wait-BoundTextEvidence 'controlled loopback response'
+            Wait-BoundTextEvidence 'Постачальник моделі'
+            Wait-BoundTextEvidence 'ollama'
+            Wait-BoundTextEvidence 'Модель'
+            Wait-BoundTextEvidence 'uia-proof-model'
 
             $modelBindingProbe = @'
 import hashlib
@@ -841,7 +852,7 @@ with sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + '?mode=ro', uri=True
             $stateProbe | python - $env:NIKA_DB_PATH
             throw
         }
-        Write-Host 'Packaged model UI -> durable task model selection -> source setup -> canonical task/team -> visible completed result verified.'
+        Write-Host 'Packaged model UI -> selected transport -> durable model result -> semantic UIA text -> task binding verified.'
     }
 
     Write-Host 'WebView2 UI Automation descendants, exact semantic identity, and keyboard/focus flow verified successfully.'
