@@ -1216,7 +1216,7 @@ def test_presence_freshness_window_cannot_disable_staleness(
     max_age: float,
 ) -> None:
     store = _store(tmp_path)
-    with pytest.raises(ValueError, match="\(0, 60\]"):
+    with pytest.raises(ValueError, match=r"\(0, 60\]"):
         BackgroundDispatchGuard(
             queue=TaskQueue(store),
             audit=AuditLog(store),
