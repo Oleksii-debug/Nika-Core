@@ -71,20 +71,28 @@ class FoundryLocalProvider:
         resource_observer: ResourceObserverPort | None = None,
         manager_factory: Callable[[], Any] | None = None,
     ) -> None:
+        if type(default_model) is not str:
+            raise TypeError("default_model must be text")
         if not default_model.strip():
             raise ValueError("default_model must not be empty")
         if default_model != default_model.strip():
             raise ValueError("default_model must not contain surrounding whitespace")
+        if any(not char.isprintable() for char in default_model):
+            raise ValueError("default_model must not contain control characters")
         if allow_download:
             raise ValueError(
                 "allow_download on FoundryLocalProvider is no longer supported; "
                 "use download_model() with ModelDownloadAuthorization"
             )
         if expected_model_id is not None:
+            if type(expected_model_id) is not str:
+                raise TypeError("expected_model_id must be text")
             if not expected_model_id.strip():
                 raise ValueError("expected_model_id must not be empty")
             if expected_model_id != expected_model_id.strip():
                 raise ValueError("expected_model_id must not contain surrounding whitespace")
+            if any(not char.isprintable() for char in expected_model_id):
+                raise ValueError("expected_model_id must not contain control characters")
         if resource_policy is not None and resource_observer is None:
             raise ValueError("resource_observer is required when resource_policy is configured")
 
@@ -374,11 +382,18 @@ class FoundryLocalProvider:
 
     def inspect_model(self, model_alias: str | None = None) -> FoundryModelEvidence:
         """Return read-only public-SDK metadata for release/hardware evidence."""
-        alias = model_alias or self._default_model
-        if not alias.strip():
-            raise ValueError("model_alias must not be empty")
-        if alias != alias.strip():
-            raise ValueError("model_alias must not contain surrounding whitespace")
+        if model_alias is None:
+            alias = self._default_model
+        else:
+            if type(model_alias) is not str:
+                raise TypeError("model_alias must be text")
+            if not model_alias.strip():
+                raise ValueError("model_alias must not be empty")
+            if model_alias != model_alias.strip():
+                raise ValueError("model_alias must not contain surrounding whitespace")
+            if any(not char.isprintable() for char in model_alias):
+                raise ValueError("model_alias must not contain control characters")
+            alias = model_alias
         model = self._get_model(alias)
         if self._expected_model_id is not None:
             self._validate_model_identity(model, self._expected_model_id)
