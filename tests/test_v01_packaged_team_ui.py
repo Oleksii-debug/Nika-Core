@@ -548,13 +548,13 @@ def test_renderer_rejects_noncanonical_model_text(invalid_text: str) -> None:
     [
         ("provider_id", " leading-provider"),
         ("provider_id", "x" * 129),
-        ("provider_id", "provider\\x1fcontrol"),
-        ("provider_id", "provider\\x7fdelete"),
+        ("provider_id", "provider\x1fcontrol"),
+        ("provider_id", "provider\x7fdelete"),
         ("provider_kind", "no_llm"),
         ("provider_kind", "LOCAL"),
         ("model", "trailing-model "),
         ("model", "x" * 513),
-        ("model", "model\\x1fcontrol"),
+        ("model", "model\x1fcontrol"),
     ],
 )
 def test_renderer_rejects_noncanonical_model_identity(
