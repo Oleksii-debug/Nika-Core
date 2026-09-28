@@ -42,8 +42,8 @@ _SENSITIVE_FRAGMENT_CREDENTIAL = re.compile(
 )
 _OIDC_ID_TOKEN_CREDENTIAL = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
-    r"((?:id[-_]?token)\\s*[:=]\\s*)"
-    r"([^\\s,;&#]+)"
+    r"((?:id[-_]?token)\s*[:=]\s*)"
+    r"([^\s,;&#]+)"
 )
 _KEY_COLLISION_ERROR = "memory persistence key collision after minimization"
 
