@@ -334,6 +334,36 @@ def test_resource_pressure_defers_without_effect_then_retries_next_slot(tmp_path
     assert finished.status is RecurrenceStatus.COMPLETED
 
 
+@pytest.mark.parametrize(
+    "terminal_state",
+    [TaskState.COMPLETED, TaskState.CANCELLED, TaskState.ARCHIVED],
+)
+def test_terminal_bound_task_stops_recurrence_without_presence_or_effect(
+    tmp_path: Path,
+    terminal_state: TaskState,
+) -> None:
+    h = _harness(tmp_path)
+    _create(h)
+    if terminal_state is TaskState.CANCELLED:
+        h.queue.transition(h.task_id, TaskState.CANCELLED)
+    else:
+        h.queue.transition(h.task_id, TaskState.RUNNING)
+        h.queue.transition(h.task_id, TaskState.COMPLETED)
+        if terminal_state is TaskState.ARCHIVED:
+            h.queue.transition(h.task_id, TaskState.ARCHIVED)
+
+    h.recurrence.action_handler({"recurrence_id": "living-read"})
+
+    assert h.presence.calls == 0
+    assert h.effects.resolve_calls == []
+    assert h.effects.effect_calls == 0
+    state = h.recurrence.get("living-read")
+    assert state is not None
+    assert state.status is RecurrenceStatus.COMPLETED
+    assert state.terminal_reason is RecurrenceTerminalReason.CONDITION_MET
+    assert state.next_occurrence_id is None
+
+
 def test_effect_failure_leaves_occurrence_unadvanced_and_uncertain_blocks_replay(
     tmp_path: Path,
 ) -> None:
