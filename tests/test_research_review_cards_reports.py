@@ -146,7 +146,6 @@ def test_review_updates_are_audited_and_identical_write_is_idempotent(tmp_path: 
     assert '"previous_state": "saved"' in rows[1]["payload_json"]
 
 
-
 def test_concurrent_review_writes_preserve_audit_predecessor_chain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -536,7 +535,6 @@ def test_review_readback_rejects_malformed_durable_audit_payload(
     restarted = ResearchReviewRepository(SQLiteStore(store.path))
     with pytest.raises(RuntimeError, match="review audit evidence is invalid"):
         restarted.get_review(workspace_id="ws", document_id="doc-1")
-
 
 
 def test_review_readback_rejects_valid_but_inconsistent_predecessor_state(
