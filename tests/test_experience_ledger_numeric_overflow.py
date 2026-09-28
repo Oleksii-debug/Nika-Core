@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
@@ -60,6 +62,48 @@ def test_non_lossless_integer_evidence_fails_closed_before_persistence(
             "SELECT COUNT(*) AS event_count FROM continuity_experience_events"
         ).fetchone()["event_count"]
     assert count == 0
+
+
+@pytest.mark.parametrize("field", ("delay_seconds", "clock_jump_seconds"))
+def test_signed_zero_numeric_evidence_is_canonical_and_restart_safe(
+    tmp_path,
+    field: str,
+) -> None:
+    path = tmp_path / "Користувач Ніка" / "signed zero.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    event_key = f"task-zero:canonical:{field}"
+    kwargs: dict[str, object] = {
+        "event_key": event_key,
+        "task_id": "task-zero",
+        "kind": ContinuityKind.RECOVERY,
+        "outcome": ContinuityOutcome.PRESERVED,
+        "reason_code": "clock_evidence_canonical",
+    }
+    kwargs[field] = -0.0
+
+    first = ledger.record(**kwargs)  # type: ignore[arg-type]
+    kwargs[field] = 0.0
+    replay = ledger.record(**kwargs)  # type: ignore[arg-type]
+
+    assert replay == first
+    value = getattr(first, field)
+    assert value == 0.0
+    assert math.copysign(1.0, value) == 1.0
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT delay_seconds, clock_jump_seconds, fingerprint "
+            "FROM continuity_experience_events WHERE event_key = ?",
+            (event_key,),
+        ).fetchone()
+    assert row is not None
+    assert row[field] == 0.0
+    assert "-0.0" not in row["fingerprint"]
+
+    reopened = ExperienceLedger(SQLiteStore(path))
+    assert reopened.get(event_key) == first
 
 
 class _BehavioralInt(int):
