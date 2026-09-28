@@ -70,7 +70,7 @@ def _observer(
     *,
     last_ticks: list[object],
     current_ticks: list[object],
-    away_after_seconds: int | float = 60,
+    away_after_seconds: float = 60,
     now: datetime | None = None,
 ) -> tuple[WindowsOwnerPresenceObserver, AuditLog]:
     audit = _audit(tmp_path)
@@ -330,7 +330,7 @@ def test_clock_must_be_exact_timezone_aware_utc_and_mints_no_event_on_failure(
     values: list[object] = [
         "2030-01-01T00:00:00Z",
         DatetimeSubclass(2030, 1, 1, tzinfo=UTC),
-        datetime(2030, 1, 1),
+        datetime(2030, 1, 1, tzinfo=UTC).replace(tzinfo=None),
         datetime(2030, 1, 1, tzinfo=timezone(timedelta(hours=1))),
     ]
     expected: list[tuple[type[Exception], str]] = [
