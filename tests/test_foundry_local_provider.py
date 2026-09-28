@@ -311,6 +311,66 @@ def test_foundry_download_snapshots_authorization_before_waiting() -> None:
     asyncio.run(scenario())
 
 
+def test_foundry_download_rejects_behavioral_cancel_event_before_manager() -> None:
+    calls: list[str] = []
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached for invalid cancel_event")
+
+    class BehavioralEvent(threading.Event):
+        def __bool__(self) -> bool:
+            raise AssertionError("cancel_event truthiness must not execute")
+
+        def is_set(self) -> bool:
+            raise AssertionError("cancel_event subclass behavior must not execute")
+
+        def set(self) -> None:
+            raise AssertionError("cancel_event subclass behavior must not execute")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=manager_factory,
+    )
+
+    with pytest.raises(TypeError, match="cancel_event must be exact threading.Event"):
+        asyncio.run(
+            provider.download_model(
+                authorization(),
+                cancel_event=BehavioralEvent(),
+            )
+        )
+
+    assert calls == []
+
+
+def test_foundry_download_rejects_non_event_cancel_carrier_before_manager() -> None:
+    calls: list[str] = []
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached for invalid cancel_event")
+
+    class BehavioralCarrier:
+        def __bool__(self) -> bool:
+            raise AssertionError("cancel_event truthiness must not execute")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=manager_factory,
+    )
+
+    with pytest.raises(TypeError, match="cancel_event must be exact threading.Event"):
+        asyncio.run(
+            provider.download_model(
+                authorization(),
+                cancel_event=BehavioralCarrier(),  # type: ignore[arg-type]
+            )
+        )
+
+    assert calls == []
+
+
 def test_foundry_download_rejects_authorization_for_other_provider() -> None:
     model = FakeFoundryModel(cached=False)
     provider = FoundryLocalProvider(
