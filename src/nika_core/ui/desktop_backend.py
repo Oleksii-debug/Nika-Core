@@ -572,7 +572,8 @@ class DesktopBackend:
     def _schedule_pause_locked(self, task_id: str, thread_id: str) -> Future[bool]:
         if RuntimeCapability.DURABLE_RESUME not in self._runtime.capabilities:
             raise ValueError(
-                "Поточний runtime не підтримує безпечне активне призупинення: не заявлено durable resume."
+                "Поточний runtime не підтримує безпечне активне призупинення: "
+                "не заявлено durable resume."
             )
         if RuntimeCapability.CANCELLATION not in self._runtime.capabilities:
             raise ValueError(
