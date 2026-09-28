@@ -541,6 +541,8 @@
     if (!legacyRoster && !sourceRoster) return false;
     if (!team.roster_complete
         && (team.state === "completed" || finalResult?.status === "completed")) return false;
+    const terminalTeamState = team.state !== "active";
+    if (terminalTeamState !== (finalResult != null)) return false;
     if (!Array.isArray(events) || !events.every(validTeamEvent)) return false;
     return validFinalResult(finalResult, task.task_id, team.team_id, team.state);
   }

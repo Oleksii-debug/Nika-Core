@@ -605,6 +605,34 @@ def test_renderer_rejects_model_result_outside_coherent_completed_state(
     )
 
 
+@pytest.mark.parametrize("terminal_state", ["completed", "failed", "cancelled"])
+def test_renderer_rejects_terminal_team_without_durable_final_result(
+    terminal_state: str,
+) -> None:
+    projection = _model_result_projection()
+    team = projection["team"]
+    assert isinstance(team, dict)
+    team["state"] = terminal_state
+    projection["final_result"] = None
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+def test_renderer_rejects_active_team_with_terminal_final_result() -> None:
+    projection = _model_result_projection()
+    team = projection["team"]
+    assert isinstance(team, dict)
+    team["state"] = "active"
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
 def test_renderer_uses_explicit_no_model_fallback_for_deterministic_result() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
