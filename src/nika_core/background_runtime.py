@@ -31,7 +31,9 @@ _MAX_SIGNED_64 = (1 << 63) - 1
 _SOURCE_ENTITY_TYPE = "owner_presence_source"
 _OBSERVED_EVENT = "background.owner_presence_observed"
 _BACKGROUND_PAUSED_EVENT = "background.dispatch_paused"
+_OWNER_RETURN_PAUSED_EVENT = "background.running_paused_for_owner"
 _DISPATCH_OPERATION_TYPE = "background.dispatch"
+_RESUME_OPERATION_TYPE = "background.resume"
 _MAX_IDENTITY_LENGTH = 256
 _MAX_CONFIGURED_PRESENCE_AGE_SECONDS = 60.0
 
@@ -321,6 +323,20 @@ class BackgroundDispatchGuard:
                 self._idempotency.release_pending(claim_key)
                 return denial
 
+            final_resource_decision = self._policy_for_existing_grant(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=final_observation.presence,
+            )
+            if not final_resource_decision.allowed:
+                denial = self._apply_denial(
+                    task_id=task_id,
+                    decision=final_resource_decision,
+                    phase="effect_start_resource_fence",
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
             self._resume_for_dispatch(task_id=task_id, work_kind=work_kind)
             effect_started = True
             try:
@@ -387,6 +403,302 @@ class BackgroundDispatchGuard:
                 request_id=request_id,
             )
 
+    async def resume_paused(
+        self,
+        *,
+        task_id: str,
+        work_kind: BackgroundWorkKind,
+        effect: Callable[[], Awaitable[object]],
+        owner_id: str = "living-agent",
+    ) -> BackgroundDispatchResult:
+        """Continue one exact owner-return PAUSED epoch under fresh background fences."""
+
+        pause_event_id = self._require_owner_return_paused_task(task_id)
+        if type(work_kind) is not BackgroundWorkKind:
+            raise TypeError("work_kind must be BackgroundWorkKind")
+        if not callable(effect):
+            raise TypeError("effect must be callable")
+        if type(owner_id) is not str:
+            raise TypeError("owner_id must be exact built-in str")
+        if not owner_id or owner_id != owner_id.strip():
+            raise ValueError("owner_id must be non-empty without surrounding whitespace")
+        if len(owner_id) > _MAX_IDENTITY_LENGTH:
+            raise ValueError("owner_id is too long")
+
+        for phase in (
+            PresenceEvidencePhase.PREFLIGHT,
+            PresenceEvidencePhase.EFFECT_RECHECK,
+            PresenceEvidencePhase.EFFECT_COMMIT,
+        ):
+            observation = self._observe_without_pause(task_id=task_id, phase=phase)
+            if observation is None:
+                return BackgroundDispatchResult(
+                    action=BackgroundAction.PAUSE,
+                    reason="owner_presence_untrusted",
+                    effect_started=False,
+                )
+            decision = self._policy(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=observation.presence,
+            )
+            if not decision.allowed:
+                return self._apply_continuation_denial(
+                    task_id=task_id,
+                    decision=decision,
+                    phase=phase.value,
+                    pause_event_id=pause_event_id,
+                )
+
+        claim_key, existing_completed = self._reserve_resume_claim(
+            task_id=task_id,
+            work_kind=work_kind,
+            owner_id=owner_id,
+            pause_event_id=pause_event_id,
+        )
+        if existing_completed:
+            self._audit.append(
+                event_type="background.resume_duplicate_blocked",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "work_kind": work_kind.value,
+                    "pause_event_id": pause_event_id,
+                    "reason": "already_completed",
+                },
+            )
+            return BackgroundDispatchResult(
+                action=BackgroundAction.DEFER,
+                reason="resume_already_completed",
+                effect_started=False,
+            )
+
+        request_id = f"background-resume:{task_id}:{pause_event_id}"
+        try:
+            resource_decision = self._resources.request(
+                scope="background_life",
+                owner_id=owner_id,
+                request_id=request_id,
+            )
+        except Exception:
+            self._idempotency.release_pending(claim_key)
+            raise
+        if not resource_decision.granted:
+            waiting_removed = self._resources.cancel_waiting(
+                scope="background_life",
+                owner_id=owner_id,
+                request_id=request_id,
+            )
+            self._audit.append(
+                event_type="background.resume_deferred",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "reason": resource_decision.reason,
+                    "work_kind": work_kind.value,
+                    "pause_event_id": pause_event_id,
+                    "phase": "resource_commit",
+                    "waiting_removed": waiting_removed,
+                },
+            )
+            self._idempotency.release_pending(claim_key)
+            return BackgroundDispatchResult(
+                action=BackgroundAction.DEFER,
+                reason=resource_decision.reason,
+                effect_started=False,
+            )
+
+        effect_started = False
+        try:
+            observation = self._observe_without_pause(
+                task_id=task_id,
+                phase=PresenceEvidencePhase.POST_GRANT_FENCE,
+            )
+            if observation is None:
+                self._idempotency.release_pending(claim_key)
+                return BackgroundDispatchResult(
+                    action=BackgroundAction.PAUSE,
+                    reason="owner_presence_untrusted",
+                    effect_started=False,
+                )
+            if observation.presence is not OwnerPresence.AWAY:
+                decision = BackgroundDecision(
+                    action=BackgroundAction.PAUSE,
+                    work_kind=work_kind,
+                    reason=(
+                        "owner_active"
+                        if observation.presence is OwnerPresence.ACTIVE
+                        else "owner_presence_unknown"
+                    ),
+                )
+                denial = self._apply_continuation_denial(
+                    task_id=task_id,
+                    decision=decision,
+                    phase=PresenceEvidencePhase.POST_GRANT_FENCE.value,
+                    pause_event_id=pause_event_id,
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
+            post_grant_decision = self._policy_for_existing_grant(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=observation.presence,
+            )
+            if not post_grant_decision.allowed:
+                denial = self._apply_continuation_denial(
+                    task_id=task_id,
+                    decision=post_grant_decision,
+                    phase="post_grant_resource_fence",
+                    pause_event_id=pause_event_id,
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
+            final_observation = self._observe_without_pause(
+                task_id=task_id,
+                phase=PresenceEvidencePhase.EFFECT_START_FENCE,
+            )
+            if final_observation is None:
+                self._idempotency.release_pending(claim_key)
+                return BackgroundDispatchResult(
+                    action=BackgroundAction.PAUSE,
+                    reason="owner_presence_untrusted",
+                    effect_started=False,
+                )
+            if final_observation.presence is not OwnerPresence.AWAY:
+                final_decision = BackgroundDecision(
+                    action=BackgroundAction.PAUSE,
+                    work_kind=work_kind,
+                    reason=(
+                        "owner_active"
+                        if final_observation.presence is OwnerPresence.ACTIVE
+                        else "owner_presence_unknown"
+                    ),
+                )
+                denial = self._apply_continuation_denial(
+                    task_id=task_id,
+                    decision=final_decision,
+                    phase=PresenceEvidencePhase.EFFECT_START_FENCE.value,
+                    pause_event_id=pause_event_id,
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
+            final_resource_decision = self._policy_for_existing_grant(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=final_observation.presence,
+            )
+            if not final_resource_decision.allowed:
+                denial = self._apply_continuation_denial(
+                    task_id=task_id,
+                    decision=final_resource_decision,
+                    phase="effect_start_resource_fence",
+                    pause_event_id=pause_event_id,
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
+            self._require_owner_return_pause_epoch(task_id, pause_event_id)
+            self._audit.append(
+                event_type="background.resume_permitted",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "work_kind": work_kind.value,
+                    "pause_event_id": pause_event_id,
+                },
+            )
+            effect_started = True
+            try:
+                result = await effect()
+            except Exception as exc:
+                self._idempotency.mark_uncertain(claim_key)
+                self._audit.append(
+                    event_type="background.resume_uncertain",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "work_kind": work_kind.value,
+                        "pause_event_id": pause_event_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise
+            if (
+                inspect.isawaitable(result)
+                or inspect.isgenerator(result)
+                or inspect.isasyncgen(result)
+            ):
+                if inspect.iscoroutine(result):
+                    result.close()
+                self._idempotency.mark_uncertain(claim_key)
+                self._audit.append(
+                    event_type="background.resume_uncertain",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "work_kind": work_kind.value,
+                        "pause_event_id": pause_event_id,
+                        "error_type": "DeferredEffectResult",
+                    },
+                )
+                raise TypeError(
+                    "background resume effect returned deferred execution outside "
+                    "the checked authority window"
+                )
+            try:
+                self._require_resume_effect_advanced(task_id, pause_event_id)
+            except Exception as exc:
+                self._idempotency.mark_uncertain(claim_key)
+                self._audit.append(
+                    event_type="background.resume_uncertain",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "work_kind": work_kind.value,
+                        "pause_event_id": pause_event_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise
+            self._idempotency.complete(
+                claim_key,
+                {
+                    "effect_started": True,
+                    "work_kind": work_kind.value,
+                    "pause_event_id": pause_event_id,
+                },
+            )
+            self._audit.append(
+                event_type="background.resume_returned",
+                entity_type="task",
+                entity_id=task_id,
+                payload={
+                    "work_kind": work_kind.value,
+                    "pause_event_id": pause_event_id,
+                },
+            )
+            return BackgroundDispatchResult(
+                action=BackgroundAction.RUN,
+                reason="owner_away_capacity_available",
+                effect_started=True,
+                effect_result=result,
+            )
+        except Exception:
+            if not effect_started:
+                record = self._idempotency.get(claim_key)
+                if record is not None and record.status is IdempotencyStatus.PENDING:
+                    self._idempotency.release_pending(claim_key)
+            raise
+        finally:
+            self._resources.release(
+                scope="background_life",
+                owner_id=owner_id,
+                request_id=request_id,
+            )
+
     def _reserve_dispatch_claim(
         self,
         *,
@@ -421,6 +733,45 @@ class BackgroundDispatchGuard:
             return operation_key, True
         raise IdempotencyConflictError(
             "background dispatch is already pending or uncertain; "
+            "reconcile it before replay"
+        )
+
+    def _reserve_resume_claim(
+        self,
+        *,
+        task_id: str,
+        work_kind: BackgroundWorkKind,
+        owner_id: str,
+        pause_event_id: int,
+    ) -> tuple[str, bool]:
+        operation_key = f"background.resume:{task_id}:{pause_event_id}"
+        fingerprint_payload = {
+            "schema": "nika-background-resume-v1",
+            "task_id": task_id,
+            "work_kind": work_kind.value,
+            "owner_id": owner_id,
+            "pause_event_id": pause_event_id,
+        }
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_payload,
+                ensure_ascii=True,
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        record, created = self._idempotency.reserve_once(
+            operation_key=operation_key,
+            task_id=task_id,
+            operation_type=_RESUME_OPERATION_TYPE,
+            input_fingerprint=fingerprint,
+        )
+        if created:
+            return operation_key, False
+        if record.status is IdempotencyStatus.COMPLETED:
+            return operation_key, True
+        raise IdempotencyConflictError(
+            "background resume is already pending or uncertain; "
             "reconcile it before replay"
         )
 
@@ -505,6 +856,25 @@ class BackgroundDispatchGuard:
                 task_id=task_id,
                 reason="owner_presence_untrusted",
                 phase=phase.value,
+            )
+            return None
+        return observation
+
+    def _observe_without_pause(
+        self,
+        *,
+        task_id: str,
+        phase: PresenceEvidencePhase,
+    ) -> OwnerPresenceObservation | None:
+        try:
+            observation = self._snapshot_observation(self._presence.observe())
+            self._accept_observation(task_id=task_id, phase=phase, observation=observation)
+        except Exception as exc:  # noqa: BLE001 - provider/evidence boundary fails closed
+            self._audit.append(
+                event_type="background.owner_presence_rejected",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"phase": phase.value, "error_type": type(exc).__name__},
             )
             return None
         return observation
@@ -638,6 +1008,32 @@ class BackgroundDispatchGuard:
             effect_started=False,
         )
 
+    def _apply_continuation_denial(
+        self,
+        *,
+        task_id: str,
+        decision: BackgroundDecision,
+        phase: str,
+        pause_event_id: int,
+    ) -> BackgroundDispatchResult:
+        self._audit.append(
+            event_type="background.resume_blocked",
+            entity_type="task",
+            entity_id=task_id,
+            payload={
+                "action": decision.action.value,
+                "reason": decision.reason,
+                "work_kind": decision.work_kind.value,
+                "phase": phase,
+                "pause_event_id": pause_event_id,
+            },
+        )
+        return BackgroundDispatchResult(
+            action=decision.action,
+            reason=decision.reason,
+            effect_started=False,
+        )
+
     def _pause_task(self, *, task_id: str, reason: str, phase: str) -> None:
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -709,6 +1105,73 @@ class BackgroundDispatchGuard:
                 raise ValueError(
                     "background dispatch requires a durable READY or owned-PAUSED task"
                 )
+
+    def _require_owner_return_paused_task(self, task_id: str) -> int:
+        if type(task_id) is not str:
+            raise TypeError("task_id must be exact built-in str")
+        if not task_id or task_id != task_id.strip():
+            raise ValueError("task_id must be non-empty without surrounding whitespace")
+        with self._queue.store.connection() as conn:
+            return self._owner_return_pause_event_id_with_connection(conn, task_id)
+
+    def _require_owner_return_pause_epoch(self, task_id: str, pause_event_id: int) -> None:
+        with self._queue.store.connection() as conn:
+            current_pause_id = self._owner_return_pause_event_id_with_connection(
+                conn,
+                task_id,
+            )
+        if current_pause_id != pause_event_id:
+            raise ValueError("owner-return pause epoch changed before resume effect")
+
+    def _require_resume_effect_advanced(self, task_id: str, pause_event_id: int) -> None:
+        with self._queue.store.connection() as conn:
+            rows = conn.execute(
+                "SELECT event_id, previous_state, new_state FROM task_events "
+                "WHERE task_id = ? AND event_id > ? ORDER BY event_id ASC LIMIT 2",
+                (task_id, pause_event_id),
+            ).fetchall()
+        if len(rows) < 2:
+            raise RuntimeError(
+                "background resume effect did not prove canonical "
+                "PAUSED -> READY -> RUNNING transition"
+            )
+        ready_event, running_event = rows
+        if (
+            ready_event["previous_state"] != TaskState.PAUSED.value
+            or ready_event["new_state"] != TaskState.READY.value
+            or running_event["previous_state"] != TaskState.READY.value
+            or running_event["new_state"] != TaskState.RUNNING.value
+        ):
+            raise RuntimeError(
+                "background resume effect did not prove canonical "
+                "PAUSED -> READY -> RUNNING transition"
+            )
+
+    @classmethod
+    def _owner_return_pause_event_id_with_connection(cls, conn, task_id: str) -> int:
+        latest_pause_id = cls._latest_task_event_id_with_connection(
+            conn,
+            task_id=task_id,
+            expected_state=TaskState.PAUSED,
+        )
+        row = conn.execute(
+            "SELECT payload_json FROM audit_events "
+            "WHERE event_type = ? AND entity_type = ? AND entity_id = ? "
+            "ORDER BY event_id DESC LIMIT 1",
+            (_OWNER_RETURN_PAUSED_EVENT, "task", task_id),
+        ).fetchone()
+        if row is None:
+            raise ValueError("PAUSED task lacks owner-return background pause provenance")
+        try:
+            payload = json.loads(row["payload_json"])
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("owner-return pause provenance is malformed") from exc
+        if type(payload) is not dict:
+            raise ValueError("owner-return pause provenance is malformed")
+        task_event_id = payload.get("task_event_id")
+        if type(task_event_id) is not int or task_event_id != latest_pause_id:
+            raise ValueError("owner-return pause provenance does not match current PAUSED epoch")
+        return latest_pause_id
 
     @staticmethod
     def _latest_task_event_id_with_connection(
