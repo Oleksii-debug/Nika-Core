@@ -97,6 +97,17 @@ def _canonical_review_timestamp(value: object) -> str:
     return value
 
 
+def _strict_json_object_pairs(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
 def _decode_review_audit_payload(
     raw_payload: object,
     *,
@@ -106,7 +117,7 @@ def _decode_review_audit_payload(
     if type(raw_payload) is not str:
         raise RuntimeError("research review audit evidence is invalid")
     try:
-        payload = json.loads(raw_payload)
+        payload = json.loads(raw_payload, object_pairs_hook=_strict_json_object_pairs)
         expected_keys = {
             "workspace_id",
             "document_id",
