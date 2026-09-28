@@ -94,6 +94,9 @@
     text: document.getElementById("team-final-text"),
     task_id: document.getElementById("team-final-task-id"),
     team_id: document.getElementById("team-final-team-id"),
+    model_text: document.getElementById("team-final-model-text"),
+    model_provider: document.getElementById("team-final-model-provider"),
+    model_name: document.getElementById("team-final-model-name"),
   });
   const productProjectUnavailableMessage = "Стан поточного ProductProject недоступний.";
   const teamTaskUnavailableMessage = "Стан командного завдання недоступний.";
@@ -391,6 +394,63 @@
     );
   }
 
+  function validModelResult(result) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+    const keys = Object.keys(result).sort();
+    const expectedKeys = [
+      "model",
+      "provenance_validated",
+      "provider_id",
+      "provider_kind",
+      "text",
+    ];
+    if (keys.length !== expectedKeys.length
+        || keys.some((key, index) => key !== expectedKeys[index])) return false;
+    return Boolean(
+      typeof result.text === "string"
+      && result.text.trim()
+      && typeof result.provider_id === "string"
+      && result.provider_id.trim()
+      && typeof result.provider_kind === "string"
+      && result.provider_kind.trim()
+      && typeof result.model === "string"
+      && result.model.trim()
+      && result.provenance_validated === true
+    );
+  }
+
+  function validComparison(comparison) {
+    if (comparison == null) return true;
+    if (typeof comparison !== "object" || Array.isArray(comparison)) return false;
+    const keys = Object.keys(comparison).sort();
+    const requiredKeys = [
+      "agreement_count",
+      "difference_count",
+      "source_states",
+      "status",
+      "validated",
+    ];
+    const allowedKeys = comparison.model_result == null
+      ? requiredKeys
+      : [...requiredKeys, "model_result"].sort();
+    if (keys.length !== allowedKeys.length
+        || keys.some((key, index) => key !== allowedKeys[index])) return false;
+    if (typeof comparison.status !== "string" || typeof comparison.validated !== "boolean") {
+      return false;
+    }
+    if (!Array.isArray(comparison.source_states)
+        || comparison.source_states.length !== 2
+        || comparison.source_states.some((state) => (
+          !["valid", "missing", "worker_error", "evidence_invalid"].includes(state)
+        ))) return false;
+    if (!Number.isInteger(comparison.agreement_count) || comparison.agreement_count < 0
+        || !Number.isInteger(comparison.difference_count) || comparison.difference_count < 0) {
+      return false;
+    }
+    if (comparison.model_result == null) return true;
+    return comparison.validated === true && validModelResult(comparison.model_result);
+  }
+
   function validFinalResult(result, taskId, teamId) {
     if (result == null) return true;
     return Boolean(
@@ -403,7 +463,8 @@
       && Number.isInteger(result.terminal_member_count)
       && result.terminal_member_count >= 0
       && Number.isInteger(result.result_record_count)
-      && result.result_record_count >= 0,
+      && result.result_record_count >= 0
+      && validComparison(result.comparison),
     );
   }
 
@@ -496,6 +557,13 @@
       ]),
       events: projection.events.map((event) => [event.code, event.time]),
       final_status: projection.final_result?.status || null,
+      final_model_result: projection.final_result?.comparison?.model_result
+        ? [
+          projection.final_result.comparison.model_result.text,
+          projection.final_result.comparison.model_result.provider_id,
+          projection.final_result.comparison.model_result.model,
+        ]
+        : null,
     });
   }
 
@@ -560,6 +628,11 @@
       teamFinalFields.text.textContent = finalMessages[finalResult.status];
       teamFinalFields.task_id.textContent = finalResult.task_id;
       teamFinalFields.team_id.textContent = finalResult.team_id;
+      const modelResult = finalResult.comparison?.model_result || null;
+      teamFinalFields.model_text.textContent = modelResult?.text
+        || "Немає перевіреної відповіді моделі для цього результату.";
+      teamFinalFields.model_provider.textContent = modelResult?.provider_id || "Не застосовується";
+      teamFinalFields.model_name.textContent = modelResult?.model || "Не застосовується";
       teamFinalEmpty.hidden = true;
       teamFinalSummary.hidden = false;
     }
