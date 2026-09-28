@@ -339,6 +339,71 @@ def test_raw_digest_and_scope_factory_arguments_are_not_accepted():
         )
 
 
+def test_received_intent_revalidates_against_cognition_and_transient_payload():
+    candidate = make_candidate()
+    verification = make_verification(candidate)
+    intent = make_intent(candidate=candidate, verification=verification, payload=b"semantic-bytes")
+
+    rebuilt = LearningUpdateIntent.revalidate(
+        intent,
+        candidate=candidate,
+        verification=verification,
+        expected_verification_policy_sha256=POLICY,
+        expected_requirements=requirements(),
+        payload=b"semantic-bytes",
+    )
+
+    assert rebuilt == intent
+
+
+def test_forged_exact_intent_cannot_cross_revalidation_boundary():
+    candidate = make_candidate()
+    verification = make_verification(candidate)
+    good = make_intent(candidate=candidate, verification=verification)
+    forged = object.__new__(LearningUpdateIntent)
+    for field in (
+        "intent_id",
+        "workspace_id",
+        "agent_id",
+        "target",
+        "target_ref_sha256",
+        "candidate_sha256",
+        "verification_sha256",
+        "update_schema",
+        "payload_sha256",
+        "payload_bytes",
+        "expected_revision_sha256",
+    ):
+        object.__setattr__(forged, field, getattr(good, field))
+    object.__setattr__(forged, "candidate_sha256", E)
+
+    with pytest.raises(ValueError, match="trusted cognition"):
+        LearningUpdateIntent.revalidate(
+            forged,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=POLICY,
+            expected_requirements=requirements(),
+            payload=b'{"fact":"bounded"}',
+        )
+
+
+def test_revalidation_rejects_payload_substitution():
+    candidate = make_candidate()
+    verification = make_verification(candidate)
+    intent = make_intent(candidate=candidate, verification=verification, payload=b"original")
+
+    with pytest.raises(ValueError, match="trusted cognition"):
+        LearningUpdateIntent.revalidate(
+            intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=POLICY,
+            expected_requirements=requirements(),
+            payload=b"changed!",
+        )
+
+
 def test_direct_raw_field_constructor_is_not_public_update_authority():
     with pytest.raises(TypeError):
         LearningUpdateIntent(
