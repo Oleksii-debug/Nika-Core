@@ -295,6 +295,8 @@ class ProductFactoryCoordinator:
     def block(self, component_id: str, reason: str) -> WorkRecord:
         reason = _canonical_durable_text(reason, label="blocker reason")
         record = self._record(component_id)
+        if record.state is WorkState.RUNNING:
+            raise CoordinatorError("running component requires execution stop and fence proof")
         if record.state in {WorkState.ACCEPTED, WorkState.DONE, WorkState.CANCELLED}:
             raise CoordinatorError(f"{record.state.value} component cannot be blocked")
         if record.result is not None or record.review is not None:

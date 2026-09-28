@@ -249,6 +249,16 @@ def test_block_rejects_post_result_provenance(rejected_review: bool) -> None:
     assert _core_record(coordinator) == result
 
 
+def test_running_work_cannot_be_blocked_without_stop_and_fence_proof() -> None:
+    coordinator = _coordinator()
+    coordinator.start("core")
+    snapshot = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match="stop and fence proof"):
+        coordinator.block("core", "external dependency")
+    assert coordinator.snapshot() == snapshot
+
+
 def test_running_work_cannot_be_cancelled_without_stop_and_fence_proof() -> None:
     coordinator = _coordinator()
     coordinator.start("core")
