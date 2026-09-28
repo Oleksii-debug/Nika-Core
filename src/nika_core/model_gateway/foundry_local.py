@@ -207,6 +207,7 @@ class FoundryLocalProvider:
         and retains the shared provider/model-management slots until the native
         worker really exits.
         """
+        authorization = self._snapshot_download_authorization(authorization)
         if authorization.provider_id != self.capabilities.provider_id:
             raise ValueError(
                 "download authorization provider does not match Foundry Local provider"
@@ -355,6 +356,19 @@ class FoundryLocalProvider:
                 self._inference_lock.release()
             if management_acquired:
                 self._model_management_lock.release()
+
+    @staticmethod
+    def _snapshot_download_authorization(
+        authorization: ModelDownloadAuthorization,
+    ) -> ModelDownloadAuthorization:
+        if type(authorization) is not ModelDownloadAuthorization:
+            raise TypeError("authorization must be a ModelDownloadAuthorization")
+        return ModelDownloadAuthorization(
+            provider_id=authorization.provider_id,
+            model=authorization.model,
+            license_reference=authorization.license_reference,
+            expected_model_id=authorization.expected_model_id,
+        )
 
     def inspect_model(self, model_alias: str | None = None) -> FoundryModelEvidence:
         """Return read-only public-SDK metadata for release/hardware evidence."""
