@@ -249,6 +249,32 @@ def test_block_rejects_post_result_provenance(rejected_review: bool) -> None:
     assert _core_record(coordinator) == result
 
 
+def test_block_is_idempotent_only_for_same_reason_and_survives_restart() -> None:
+    coordinator = _coordinator()
+    blocked = coordinator.block("core", "external dependency")
+    snapshot = coordinator.snapshot()
+
+    assert coordinator.block("core", "external dependency") == blocked
+    assert coordinator.snapshot() == snapshot
+
+    with pytest.raises(CoordinatorError, match="reason cannot be rebound"):
+        coordinator.block("core", "different dependency")
+    assert coordinator.snapshot() == snapshot
+
+    restored = ProductFactoryCoordinator(_graph())
+    restored.restore(
+        snapshot,
+        trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
+    )
+    restored_snapshot = restored.snapshot()
+    assert restored.block("core", "external dependency") == blocked
+    assert restored.snapshot() == restored_snapshot
+
+    with pytest.raises(CoordinatorError, match="reason cannot be rebound"):
+        restored.block("core", "different dependency")
+    assert restored.snapshot() == restored_snapshot
+
+
 def test_running_work_cannot_be_blocked_without_stop_and_fence_proof() -> None:
     coordinator = _coordinator()
     coordinator.start("core")

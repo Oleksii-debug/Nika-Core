@@ -297,6 +297,10 @@ class ProductFactoryCoordinator:
         record = self._record(component_id)
         if record.state is WorkState.RUNNING:
             raise CoordinatorError("running component requires execution stop and fence proof")
+        if record.state is WorkState.BLOCKED:
+            if record.blocker != reason:
+                raise CoordinatorError("blocked component reason cannot be rebound")
+            return record
         if record.state in {WorkState.ACCEPTED, WorkState.DONE, WorkState.CANCELLED}:
             raise CoordinatorError(f"{record.state.value} component cannot be blocked")
         if record.result is not None or record.review is not None:
