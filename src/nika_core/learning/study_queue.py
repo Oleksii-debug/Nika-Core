@@ -15,16 +15,20 @@ _EVIDENCE_POLICY = "source_bound_v1"
 _TASK_SCAN_PAGE_SIZE = 128
 _SECRET_QUERY_KEYS = frozenset(
     {
-        "api_key",
         "apikey",
-        "access_token",
-        "refresh_token",
+        "accesstoken",
+        "refreshtoken",
         "token",
         "password",
         "passwd",
         "secret",
         "authorization",
         "cookie",
+        "xamzcredential",
+        "xamzsignature",
+        "xamzsecuritytoken",
+        "xgoogcredential",
+        "xgoogsignature",
     }
 )
 _SECRET_TEXT_MARKERS = (
@@ -390,6 +394,13 @@ def _decoded_views(value: str) -> tuple[str, ...]:
     return tuple(views)
 
 
+def _normalized_query_key(value: str) -> str:
+    folded = value.casefold()
+    return "".join(
+        char for char in folded if ("a" <= char <= "z") or ("0" <= char <= "9")
+    )
+
+
 def _reject_secret_bearing_reference(value: str) -> None:
     for view in _decoded_views(value):
         lowered = view.casefold()
@@ -400,5 +411,5 @@ def _reject_secret_bearing_reference(value: str) -> None:
             if parsed.username is not None or parsed.password is not None:
                 raise ValueError("source_ref must not contain URL credentials")
             for key, _ in urllib.parse.parse_qsl(parsed.query, keep_blank_values=True):
-                if key.casefold() in _SECRET_QUERY_KEYS:
+                if _normalized_query_key(key) in _SECRET_QUERY_KEYS:
                     raise ValueError("source_ref must not contain credential query fields")
