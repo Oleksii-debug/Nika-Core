@@ -537,6 +537,7 @@ def test_mutation_and_transaction_assert_sample_time_after_durable_row_read(tmp_
         project_id=lease.project_id,
         work_id=lease.work_id,
         owner_id="worker-b",
+        lease_seconds=1,
     )
     assert replacement.fence == lease.fence + 1
 
