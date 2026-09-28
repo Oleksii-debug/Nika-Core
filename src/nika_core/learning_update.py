@@ -203,6 +203,42 @@ class LearningUpdateIntent:
         instance.__post_init__()
         return instance
 
+    @classmethod
+    def revalidate(
+        cls,
+        value: object,
+        *,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+    ) -> LearningUpdateIntent:
+        """Reconstruct one received intent from canonical cognition and transient bytes."""
+
+        if cls is not LearningUpdateIntent:
+            raise TypeError("learning update revalidation must use the canonical type")
+        if type(value) is not LearningUpdateIntent:
+            raise TypeError("learning update intent must be the canonical exact type")
+        try:
+            canonical = cls.bind_payload(
+                intent_id=value.intent_id,
+                candidate=candidate,
+                verification=verification,
+                expected_verification_policy_sha256=expected_verification_policy_sha256,
+                expected_requirements=expected_requirements,
+                target=value.target,
+                target_ref_sha256=value.target_ref_sha256,
+                update_schema=value.update_schema,
+                payload=payload,
+                expected_revision_sha256=value.expected_revision_sha256,
+            )
+        except AttributeError as exc:
+            raise TypeError("learning update intent is missing canonical fields") from exc
+        if canonical != value:
+            raise ValueError("learning update intent does not match trusted cognition evidence")
+        return canonical
+
     def assert_payload_matches(self, payload: bytes) -> None:
         """Fail closed if transient application bytes differ from the bound intent."""
 
