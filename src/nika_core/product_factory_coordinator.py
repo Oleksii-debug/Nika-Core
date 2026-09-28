@@ -699,7 +699,7 @@ def _commands_equivalent(observed: tuple[str, ...], declared: tuple[str, ...], *
     if observed_pytest is None or declared_pytest is None:
         return False
     if not observed_pytest:
-        return True
+        return not declared_pytest
     if observed_pytest == declared_pytest:
         return True
     if len(observed_pytest) != 1 or len(declared_pytest) != 1:

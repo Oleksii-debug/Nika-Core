@@ -75,7 +75,7 @@ def _success(request, *, base_sha=SHA_A) -> WorkerResultEnvelope:
         diff_digest=DIGEST,
         coding_result=CodingResult(
             job_id=request.work_id,
-            test_evidence=(TestEvidence(("pytest",), 0, "ok"),),
+            test_evidence=tuple(TestEvidence(command, 0, "ok") for command in request.acceptance_commands) or (TestEvidence(("pytest",), 0, "ok"),),
         ),
     )
 
@@ -115,6 +115,53 @@ def test_success_without_test_evidence_is_rejected() -> None:
     )
     with pytest.raises(CoordinatorError, match="passing test evidence"):
         coordinator.record_result(envelope)
+
+
+def test_bare_pytest_does_not_satisfy_scoped_acceptance_command() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        CodingResult(
+            job_id=request.work_id,
+            test_evidence=(TestEvidence(("pytest",), 0, "ok"),),
+        ),
+    )
+    before = coordinator.snapshot()
+
+    with pytest.raises(
+        CoordinatorError,
+        match="prove every declared acceptance command",
+    ):
+        coordinator.record_result(envelope)
+
+    assert coordinator.snapshot() == before
+
+
+def test_pytest_wrapper_and_windows_target_normalization_remain_equivalent() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        CodingResult(
+            job_id=request.work_id,
+            test_evidence=(TestEvidence(("pytest.exe", r"tests\core"), 0, "ok"),),
+        ),
+    )
+
+    record = coordinator.record_result(envelope)
+
+    assert record.state is WorkState.REVIEW_REQUIRED
 
 
 class _FakePassingEvidence:
