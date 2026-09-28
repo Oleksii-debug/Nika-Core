@@ -568,6 +568,10 @@ class OpenHandsAgentServerRuntime:
                 operation="conversation status",
                 timeout_seconds=remaining,
             )
+            # Cancellation can arrive while the blocking status request is in flight.
+            # Re-sample before interpreting terminal/paused evidence so fresh stop proof
+            # is not discarded by a stale pre-request cancellation snapshot.
+            cancel_requested = active.cancel_requested.is_set()
             if type(info) is not dict:
                 raise OpenHandsAgentServerCompatibilityError(
                     "OpenHands conversation status must be a JSON object"
