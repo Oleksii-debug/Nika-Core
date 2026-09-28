@@ -1080,6 +1080,51 @@ def test_twenty_five_components_progress_through_five_restart_waves_without_dupl
     assert all(record.state is WorkState.ACCEPTED for record in coordinator.snapshot().records)
 
 
+class _BehavioralProgramBound(int):
+    def __le__(self, other):  # pragma: no cover - must never execute
+        raise AssertionError("program bound comparison executed before exact-type validation")
+
+
+@pytest.mark.parametrize(
+    ("operation", "kwargs"),
+    (
+        ("dispatch", {"max_parallel": True}),
+        ("dispatch", {"max_count": True}),
+        ("dispatch", {"max_parallel": _BehavioralProgramBound(1)}),
+        ("dispatch", {"max_count": _BehavioralProgramBound(1)}),
+        ("recover", {"max_parallel": True}),
+        ("recover", {"max_parallel": _BehavioralProgramBound(1)}),
+    ),
+)
+def test_program_bounds_require_exact_integers_before_behavior(
+    tmp_path,
+    operation: str,
+    kwargs: dict[str, object],
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host = ProductFactoryProgramHost(store, FakeProgramWorker())
+    before = coordinator.snapshot()
+
+    if operation == "dispatch":
+        awaitable = host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            **kwargs,
+        )
+    else:
+        awaitable = host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match="exact positive integer"):
+        _run(awaitable)
+    assert coordinator.snapshot() == before
+
+
 def test_invalid_program_bounds_fail_before_any_coordinator_mutation(tmp_path) -> None:
     store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
     host = ProductFactoryProgramHost(store, FakeProgramWorker())
