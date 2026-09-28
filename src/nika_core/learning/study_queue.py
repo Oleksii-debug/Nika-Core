@@ -182,7 +182,11 @@ class StudyQueue:
             task_state.TaskState.BLOCKED,
             task_state.TaskState.FAILED,
         }:
-            return self._transition(task_id, task_state.TaskState.READY)
+            return self._transition(
+                task_id,
+                task_state.TaskState.READY,
+                expected_state=task.state,
+            )
         raise ValueError(f"study task cannot resume from {task.state.value}")
 
     def complete(self, task_id: str) -> StudyTask:
