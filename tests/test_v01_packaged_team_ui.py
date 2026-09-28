@@ -35,6 +35,9 @@ def test_existing_web_shell_contains_semantic_three_agent_state_structure() -> N
     assert '<ol id="team-members-list" aria-labelledby="team-members-heading"></ol>' in html
     assert '<ol id="team-events-list" aria-labelledby="team-events-heading"></ol>' in html
     assert '<dl id="team-final-summary" aria-labelledby="team-final-heading" hidden>' in html
+    assert '<dd id="team-final-model-text">—</dd>' in html
+    assert '<dd id="team-final-model-provider">—</dd>' in html
+    assert '<dd id="team-final-model-name">—</dd>' in html
     assert '<a href="#team-task-heading">Командне завдання</a>' in html
     assert html.count('aria-live="') == 1
 
@@ -247,6 +250,9 @@ setTimeout(() => {{
     "team-final-text",
     "team-final-task-id",
     "team-final-team-id",
+    "team-final-model-text",
+    "team-final-model-provider",
+    "team-final-model-name",
   ];
   const rendered = ids.map((id) => collect(element(id))).join("\\n");
   console.log(JSON.stringify({{
@@ -403,3 +409,122 @@ def test_renderer_accepts_actual_packaged_team_and_rejects_duplicate_member_iden
         assert rejected["ready"] == "false"
         assert rejected["summary_hidden"] is True
         assert rejected["member_count"] == 0
+
+
+def _model_result_projection() -> dict[str, object]:
+    return {
+        "available": True,
+        "task": {
+            "task_id": "task-model-result",
+            "state": "COMPLETED",
+            "command": "Покажи перевірену відповідь моделі.",
+        },
+        "team": {
+            "team_id": "team-model-result",
+            "state": "completed",
+            "member_count": 3,
+            "expected_member_count": 3,
+            "roster_complete": True,
+        },
+        "members": [
+            {
+                "member_id": "checker",
+                "role": "checker",
+                "state": "completed",
+                "current_operation": "Роботу завершено.",
+            },
+            {
+                "member_id": "worker-a",
+                "role": "worker",
+                "state": "completed",
+                "current_operation": "Роботу завершено.",
+            },
+            {
+                "member_id": "worker-b",
+                "role": "worker",
+                "state": "completed",
+                "current_operation": "Роботу завершено.",
+            },
+        ],
+        "events": [],
+        "final_result": {
+            "status": "completed",
+            "summary": "bounded",
+            "task_id": "task-model-result",
+            "team_id": "team-model-result",
+            "terminal_member_count": 3,
+            "result_record_count": 3,
+            "comparison": {
+                "status": "agree",
+                "validated": True,
+                "source_states": ["valid", "valid"],
+                "agreement_count": 1,
+                "difference_count": 0,
+                "model_result": {
+                    "text": "Перевірена відповідь <b>лишається текстом</b> & не HTML.",
+                    "provider_id": "ollama",
+                    "provider_kind": "local",
+                    "model": "qwen2.5:7b",
+                    "provenance_validated": True,
+                },
+            },
+        },
+    }
+
+
+def test_renderer_exposes_only_validated_bounded_model_result_as_semantic_text() -> None:
+    projection = _model_result_projection()
+    rendered = _rendered_team_snapshot(live_projection=projection)
+    text = str(rendered["rendered"])
+
+    assert rendered["ready"] == "true"
+    assert rendered["summary_hidden"] is False
+    assert "Перевірена відповідь <b>лишається текстом</b> & не HTML." in text
+    assert "ollama" in text
+    assert "qwen2.5:7b" in text
+    assert "innerHTML" not in _app_source()
+
+
+def test_renderer_rejects_model_result_with_unknown_authority_fields() -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    model_result = comparison["model_result"]
+    assert isinstance(model_result, dict)
+    model_result["raw_provenance"] = "MODEL_RESULT_SECRET_CANARY"
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+    assert "MODEL_RESULT_SECRET_CANARY" not in str(rejected["rendered"])
+
+
+def test_renderer_uses_explicit_no_model_fallback_for_deterministic_result() -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+
+    rendered = _rendered_team_snapshot(live_projection=projection)
+    text = str(rendered["rendered"])
+
+    assert rendered["ready"] == "true"
+    assert "Немає перевіреної відповіді моделі для цього результату." in text
+    assert text.count("Не застосовується") >= 2
+
+
+def test_renderer_is_restart_stable_for_identical_durable_model_projection() -> None:
+    projection = _model_result_projection()
+
+    first = _rendered_team_snapshot(live_projection=projection)
+    reopened = _rendered_team_snapshot(
+        live_projection=json.loads(json.dumps(projection, ensure_ascii=False))
+    )
+
+    assert first["ready"] == reopened["ready"] == "true"
+    assert first["rendered"] == reopened["rendered"]
