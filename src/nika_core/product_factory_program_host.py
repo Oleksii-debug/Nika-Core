@@ -364,8 +364,15 @@ class ProductFactoryProgramHost:
     ) -> ProgramWorkOutcome:
         operation_key = _operation_key(request)
         try:
-            await semaphore.acquire()
+            lease = await self._wait_for_effect_admission(
+                semaphore=semaphore,
+                request=request,
+                lease=lease,
+            )
         except asyncio.CancelledError:
+            self._release_best_effort(lease)
+            raise
+        except Exception:
             self._release_best_effort(lease)
             raise
 
@@ -441,7 +448,11 @@ class ProductFactoryProgramHost:
             operation = self._ledger.get(operation_key)
 
             if operation is None:
-                await semaphore.acquire()
+                lease = await self._wait_for_effect_admission(
+                    semaphore=semaphore,
+                    request=request,
+                    lease=lease,
+                )
                 try:
                     lease = self._reestablish_effect_authority(request, lease)
                     operation, created = self._reserve_effect(
@@ -514,7 +525,11 @@ class ProductFactoryProgramHost:
                     "completed worker operation is inconsistent with RUNNING coordinator state",
                 )
 
-            await semaphore.acquire()
+            lease = await self._wait_for_effect_admission(
+                semaphore=semaphore,
+                request=request,
+                lease=lease,
+            )
             try:
                 lease = self._reestablish_effect_authority(request, lease)
                 try:
@@ -843,6 +858,43 @@ class ProductFactoryProgramHost:
                 f"stale Product Factory authority cannot start external effect for {request.work_id}: {exc}"
             ) from exc
 
+    async def _wait_for_effect_admission(
+        self,
+        *,
+        semaphore: asyncio.Semaphore,
+        request: ComponentWorkRequest,
+        lease: WorkOwnershipLease,
+    ) -> WorkOwnershipLease:
+        """Keep the exact fence alive while bounded external-effect admission waits."""
+
+        admission = asyncio.ensure_future(semaphore.acquire())
+        interval = _lease_heartbeat_interval(self.lease_seconds)
+        try:
+            while True:
+                done, _ = await asyncio.wait((admission,), timeout=interval)
+                if done:
+                    admission.result()
+                    return lease
+                try:
+                    lease = self._ownership.renew(
+                        project_id=lease.project_id,
+                        work_id=lease.work_id,
+                        owner_id=lease.owner_id,
+                        fence=lease.fence,
+                        lease_seconds=self.lease_seconds,
+                    )
+                except WorkOwnershipError as exc:
+                    raise ProductFactoryProgramError(
+                        "Product Factory work ownership was lost while waiting for "
+                        f"external effect admission for {request.work_id}: {exc}"
+                    ) from exc
+        except asyncio.CancelledError:
+            await _cancel_semaphore_admission(admission, semaphore)
+            raise
+        except Exception:  # noqa: BLE001 - never leak an admitted semaphore permit
+            await _cancel_semaphore_admission(admission, semaphore)
+            raise
+
     async def _run_effect_with_lease(
         self,
         request: ComponentWorkRequest,
@@ -1017,6 +1069,20 @@ def _outcome(
 
 def _lease_heartbeat_interval(lease_seconds: int) -> float:
     return min(30.0, max(0.05, lease_seconds / 3.0))
+
+
+async def _cancel_semaphore_admission(
+    admission: asyncio.Future[bool],
+    semaphore: asyncio.Semaphore,
+) -> None:
+    if not admission.done():
+        admission.cancel()
+        await asyncio.gather(admission, return_exceptions=True)
+    if admission.cancelled():
+        return
+    with suppress(asyncio.CancelledError, Exception):
+        if admission.result():
+            semaphore.release()
 
 
 async def _cancel_effect_task(task: asyncio.Future) -> None:

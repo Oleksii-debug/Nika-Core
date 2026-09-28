@@ -1454,6 +1454,216 @@ def test_long_dispatch_renews_same_fence_before_original_expiry_allows_takeover(
     assert len(worker.dispatch_calls) == 1
 
 
+def test_dispatch_queue_renews_exact_fence_while_waiting_for_semaphore(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    clock = _MutableOwnershipClock(datetime(2026, 9, 28, 10, 0, tzinfo=UTC))
+    authority = ProductFactoryWorkOwnership(store, clock=clock)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    class QueueBlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            if len(self.dispatch_calls) == 1:
+                first_started.set()
+                await release_first.wait()
+            return _envelope(request, len(self.dispatch_calls))
+
+    worker = QueueBlockingWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:queued-dispatch",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.01)
+
+    async def scenario():
+        task = asyncio.create_task(
+            host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=1,
+                max_count=2,
+            )
+        )
+        await first_started.wait()
+        first_component = worker.dispatch_calls[0].component_id
+        queued = next(
+            _record(coordinator, component_id).request
+            for component_id in ("component-0", "component-1")
+            if component_id != first_component
+        )
+        original = authority.current(
+            project_id=queued.project_id,
+            work_id=queued.work_id,
+        )
+        assert original is not None
+
+        clock.advance(seconds=2)
+        for _ in range(200):
+            refreshed = authority.current(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+            )
+            if refreshed is not None and refreshed.expires_at > original.expires_at:
+                break
+            await asyncio.sleep(0.002)
+        else:
+            raise AssertionError("queued dispatch lease heartbeat did not extend exact fence")
+
+        assert refreshed.fence == original.fence
+        clock.advance(seconds=2)
+        with pytest.raises(WorkOwnershipError, match="active owner"):
+            ProductFactoryWorkOwnership(store, clock=clock).acquire(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+                owner_id="program-host:queued-dispatch-competitor",
+                lease_seconds=3,
+            )
+
+        release_first.set()
+        outcomes = await asyncio.wait_for(task, timeout=1.0)
+        return queued, outcomes
+
+    queued, outcomes = _run(scenario())
+    assert len(outcomes) == 2
+    assert sorted(item.component_id for item in worker.dispatch_calls) == [
+        "component-0",
+        "component-1",
+    ]
+    assert authority.current(
+        project_id=queued.project_id,
+        work_id=queued.work_id,
+    ) is None
+
+
+def test_recovery_queue_renews_exact_fence_while_waiting_for_semaphore(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    clock = _MutableOwnershipClock(datetime(2026, 9, 28, 11, 0, tzinfo=UTC))
+    authority = ProductFactoryWorkOwnership(store, clock=clock)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    class QueueBlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            if len(self.dispatch_calls) == 1:
+                first_started.set()
+                await release_first.wait()
+            return _envelope(request, len(self.dispatch_calls))
+
+    worker = QueueBlockingWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:queued-recovery",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.01)
+
+    requests = tuple(
+        coordinator.start(component_id)
+        for component_id in ("component-0", "component-1")
+    )
+    seed_leases = tuple(host._acquire(request) for request in requests)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=requests,
+            leases=seed_leases,
+        )
+    finally:
+        for lease in seed_leases:
+            host._release_best_effort(lease)
+
+    async def scenario():
+        task = asyncio.create_task(
+            host.recover_running(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=1,
+            )
+        )
+        await first_started.wait()
+        first_component = worker.dispatch_calls[0].component_id
+        queued = next(
+            request for request in requests if request.component_id != first_component
+        )
+        for _ in range(100):
+            original = authority.current(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+            )
+            if original is not None:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("queued recovery lease was not acquired")
+
+        clock.advance(seconds=2)
+        for _ in range(200):
+            refreshed = authority.current(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+            )
+            if refreshed is not None and refreshed.expires_at > original.expires_at:
+                break
+            await asyncio.sleep(0.002)
+        else:
+            raise AssertionError("queued recovery lease heartbeat did not extend exact fence")
+
+        assert refreshed.fence == original.fence
+        clock.advance(seconds=2)
+        with pytest.raises(WorkOwnershipError, match="active owner"):
+            ProductFactoryWorkOwnership(store, clock=clock).acquire(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+                owner_id="program-host:queued-recovery-competitor",
+                lease_seconds=3,
+            )
+
+        release_first.set()
+        outcomes = await asyncio.wait_for(task, timeout=1.0)
+        return queued, outcomes
+
+    queued, outcomes = _run(scenario())
+    assert len(outcomes) == 2
+    assert sorted(item.component_id for item in worker.dispatch_calls) == [
+        "component-0",
+        "component-1",
+    ]
+    assert all(
+        IdempotencyLedger(store).require(f"pf-worker:{request.work_id}").status
+        is IdempotencyStatus.COMPLETED
+        for request in requests
+    )
+    assert authority.current(
+        project_id=queued.project_id,
+        work_id=queued.work_id,
+    ) is None
+
+
 def test_result_reconcile_marker_failure_reports_actual_pending_ledger_status(tmp_path) -> None:
     store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
 
