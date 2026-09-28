@@ -13,11 +13,13 @@ from nika_core.model_gateway.contracts import (
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
+    ModelResourcePolicy,
     PrivacyClass,
     ProviderKind,
 )
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway
+from nika_core.resources.contracts import ResourceSnapshot
 
 
 class FakeFoundryModel:
@@ -162,6 +164,54 @@ def test_foundry_local_runs_through_existing_gateway_without_cloud() -> None:
     assert model.settings.temperature == 0.25
     assert model.last_messages == [{"role": "user", "content": "hello"}]
     assert provider.capabilities.supports_hard_cancellation is False
+
+
+def test_foundry_provider_revalidates_resource_policy_at_construction() -> None:
+    class Observer:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                cpu_percent=10.0,
+                memory_percent=20.0,
+                available_memory_bytes=1_000_000,
+            )
+
+    forged = ModelResourcePolicy(max_cpu_percent=50.0)
+    object.__setattr__(forged, "max_cpu_percent", -1.0)
+
+    with pytest.raises(ValueError, match="max_cpu_percent"):
+        FoundryLocalProvider(
+            default_model="test-model",
+            resource_policy=forged,
+            resource_observer=Observer(),
+        )
+
+
+def test_foundry_provider_snapshots_resource_policy_before_inference() -> None:
+    class Observer:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                cpu_percent=80.0,
+                memory_percent=20.0,
+                available_memory_bytes=1_000_000,
+            )
+
+    model = FakeFoundryModel()
+    manager = FakeManager(model)
+    supplied = ModelResourcePolicy(max_cpu_percent=50.0)
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        resource_policy=supplied,
+        resource_observer=Observer(),
+        manager_factory=lambda: manager,
+    )
+
+    object.__setattr__(supplied, "max_cpu_percent", 100.0)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(request()))
+
+    assert exc_info.value.code is ModelErrorCode.RESOURCE_LIMIT
+    assert manager.catalog.requested_aliases == []
 
 
 def test_foundry_complete_revalidates_forged_request_before_manager() -> None:
