@@ -307,7 +307,7 @@ class WindowsBackgroundOwnerReturnController:
             ):
                 return
         raise ValueError(
-            "task lacks matching runtime start after background dispatch permission"
+            "task lacks matching runtime/thread start after background dispatch permission"
         )
 
     def _validate_observation(self, observation: object) -> None:
