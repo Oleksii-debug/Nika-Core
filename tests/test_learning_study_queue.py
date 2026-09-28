@@ -495,6 +495,41 @@ def test_source_reference_rejects_credential_material(source_ref: str) -> None:
         _material(source_ref=source_ref)
 
 
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "https://example.test/book.pdf?subscription-key=canary-value-123",
+        "https://example.test/book.pdf?subscription_key=canary-value-123",
+        "https://example.test/book.pdf?x-api-key=canary-value-123",
+        "https://example.test/book.pdf#subscription-key=canary-value-123",
+        "https://example.test/book.pdf#subscription_key=canary-value-123",
+        "https://example.test/book.pdf#x-api-key=canary-value-123",
+        "https://example.test/book.pdf?subscription%2Dkey=canary-value-123",
+        "https://example.test/book.pdf?x%2Dapi%2Dkey=canary-value-123",
+        "subscription-key=canary-value-123",
+        "x-api-key=canary-value-123",
+    ],
+)
+def test_study_material_rejects_common_credential_query_aliases(source_ref: str) -> None:
+    with pytest.raises(ValueError, match="credential"):
+        _material(source_ref=source_ref)
+
+
+def test_study_material_keeps_benign_subscription_metadata(tmp_path) -> None:
+    safe_ref = "https://example.test/book.pdf?subscription_count=3&chapter=4"
+    path, _, queue = _services(tmp_path)
+    created = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="subscription-count", source_ref=safe_ref),
+    )
+    fresh_store = SQLiteStore(path)
+    fresh_store.initialize()
+    fresh = StudyQueue(TaskQueue(fresh_store)).get(created.task_id)
+
+    assert fresh.material.source_ref == safe_ref
+
+
 def test_public_query_reference_remains_stable_across_restart(tmp_path) -> None:
     path, tasks, queue = _services(tmp_path)
     public_ref = (
