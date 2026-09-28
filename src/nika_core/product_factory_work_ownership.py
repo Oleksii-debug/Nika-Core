@@ -169,9 +169,9 @@ class ProductFactoryWorkOwnership:
 
     def current(self, *, project_id: str, work_id: str) -> WorkOwnershipLease | None:
         _identity(project_id, work_id)
-        instant = self._instant()
         with self._store.connection() as connection:
             current = _load(connection, project_id, work_id)
+        instant = self._instant()
         if current is None:
             return None
         _validate_observation_time(current, instant)
@@ -189,9 +189,9 @@ class ProductFactoryWorkOwnership:
     ) -> None:
         _identity(project_id, work_id, owner_id)
         _strict_fence(fence)
-        instant = self._instant()
         with self._store.connection() as connection:
             current = _load(connection, project_id, work_id)
+        instant = self._instant()
         _assert_exact(current, owner_id=owner_id, fence=fence, now=instant)
 
     def assert_owner_in_transaction(

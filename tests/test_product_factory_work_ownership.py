@@ -405,6 +405,34 @@ def test_loaded_blob_owner_identity_fails_closed_instead_of_stringifying(tmp_pat
         )
 
 
+def test_observation_clock_is_sampled_after_durable_read(tmp_path) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(NOW)
+    service = ProductFactoryWorkOwnership(store, clock=clock)
+    lease = _acquire(service, seconds=1)
+    original_connection = store.connection
+
+    @contextmanager
+    def delayed_connection() -> Iterator[sqlite3.Connection]:
+        with original_connection() as connection:
+            clock.advance(seconds=2)
+            yield connection
+
+    store.connection = delayed_connection  # type: ignore[method-assign]
+
+    clock.instant = NOW
+    assert service.current(project_id=lease.project_id, work_id=lease.work_id) is None
+
+    clock.instant = NOW
+    with pytest.raises(WorkOwnershipError, match="stale"):
+        service.assert_owner(
+            project_id=lease.project_id,
+            work_id=lease.work_id,
+            owner_id=lease.owner_id,
+            fence=lease.fence,
+        )
+
+
 def test_backward_clock_observation_and_assertion_fail_closed_without_mutation(tmp_path) -> None:
     service, clock = _service(tmp_path)
     lease = _acquire(service)
