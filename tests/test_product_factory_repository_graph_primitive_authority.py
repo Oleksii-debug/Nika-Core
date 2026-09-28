@@ -212,7 +212,6 @@ def test_integration_decision_authority_collections_require_exact_tuple() -> Non
         )
 
 
-
 @pytest.mark.parametrize("evidence_ref", ("", "   ", "\t"))
 def test_integration_decision_requires_nonempty_evidence_ref(evidence_ref: str) -> None:
     with pytest.raises(
@@ -256,6 +255,7 @@ def test_assess_lease_revalidates_blank_evidence_after_constructor_bypass() -> N
         match="integration decision evidence ref must not be empty",
     ):
         graph.assess_lease(candidate, (active,), decision=decision)
+
 
 def test_graph_authority_collections_require_exact_tuple_before_iteration() -> None:
     repository = RepositoryRef("repo:app", "github", "owner/app", "main")
