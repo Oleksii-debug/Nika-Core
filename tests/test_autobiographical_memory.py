@@ -212,9 +212,11 @@ def test_tampered_audit_agent_attestation_fails_restart_validation(tmp_path) -> 
             (json.dumps(payload, sort_keys=True, separators=(",", ":")), event_id),
         )
 
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
     restarted = AutobiographicalMemory(
-        SQLiteStore(store.path),
-        MemoryService(SQLiteStore(store.path)),
+        restarted_store,
+        MemoryService(restarted_store, audit=AuditLog(restarted_store)),
     )
     with pytest.raises(AutobiographicalMemoryIntegrityError):
         restarted.list_entries(agent_id="agent-1", limit=10)
