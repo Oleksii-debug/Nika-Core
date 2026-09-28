@@ -70,8 +70,15 @@ class PausableRuntime:
         }
     )
 
-    def __init__(self, *, accepted: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        accepted: bool = True,
+        probe_status: RuntimeResumeProbeStatus = RuntimeResumeProbeStatus.READY,
+    ) -> None:
         self.accepted = accepted
+        self.probe_status = probe_status
+        self.probe_calls: list[tuple[str, str, str]] = []
         self.cancel_calls: list[tuple[str, str]] = []
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
@@ -79,6 +86,24 @@ class PausableRuntime:
 
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
         raise AssertionError("resume is not used by this controller test")
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe:
+        self.probe_calls.append((task_id, thread_id, resume_token))
+        return RuntimeResumeProbe(
+            status=self.probe_status,
+            reason="owner-return checkpoint proof",
+            checkpoint_id=(
+                f"checkpoint:{resume_token}"
+                if self.probe_status is RuntimeResumeProbeStatus.READY
+                else None
+            ),
+        )
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         self.cancel_calls.append((task_id, thread_id))
@@ -190,6 +215,7 @@ def test_fresh_away_leaves_running_background_task_untouched(tmp_path: Path) -> 
     assert result.action is RunningBackgroundAction.CONTINUE
     assert result.reason == "owner_away"
     assert result.pause_applied is False
+    assert runtime.probe_calls == []
     assert runtime.cancel_calls == []
     assert queue.get(task_id).state is TaskState.RUNNING
     assert coordinator.sessions.get(task_id).is_active is True
@@ -213,6 +239,7 @@ def test_active_owner_delegates_durable_pause_to_canonical_coordinator(tmp_path:
     assert result.action is RunningBackgroundAction.PAUSED
     assert result.reason == "owner_active"
     assert result.pause_applied is True
+    assert runtime.probe_calls == [(task_id, thread_id, "resume-token")]
     assert runtime.cancel_calls == [(task_id, thread_id)]
     assert queue.get(task_id).state is TaskState.PAUSED
     session = coordinator.sessions.get(task_id)
@@ -316,6 +343,40 @@ def test_owner_return_pause_round_trips_through_guarded_saved_resume(
     assert "background.resume_permitted" in event_types
     assert "runtime.saved_resume_started" in event_types
     assert "background.resume_returned" in event_types
+
+
+def test_missing_checkpoint_blocks_owner_return_pause_before_cancel(tmp_path: Path) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    queue, audit, coordinator, task_id, thread_id = _running_runtime_state(tmp_path)
+    runtime = PausableRuntime(probe_status=RuntimeResumeProbeStatus.MISSING)
+    controller = WindowsBackgroundOwnerReturnController(
+        coordinator=coordinator,
+        audit=audit,
+        presence=_presence(audit, presence=OwnerPresence.ACTIVE, observed_at=now),
+        clock=lambda: now,
+    )
+
+    with pytest.raises(ValueError, match="checkpoint is not readable: missing"):
+        asyncio.run(
+            controller.reconcile(runtime=runtime, task_id=task_id, thread_id=thread_id)
+        )
+
+    assert runtime.probe_calls == [(task_id, thread_id, "resume-token")]
+    assert runtime.cancel_calls == []
+    assert queue.get(task_id).state is TaskState.RUNNING
+    session = coordinator.sessions.get(task_id)
+    assert session is not None
+    assert session.is_active is True
+    events = audit.list_for(entity_type="task", entity_id=task_id)
+    assert not any(
+        event.event_type == "background.running_paused_for_owner" for event in events
+    )
+    failures = [
+        event for event in events if event.event_type == "background.running_pause_failed"
+    ]
+    assert len(failures) == 1
+    assert failures[0].payload["reason"] == "owner_active"
+    assert failures[0].payload["error_type"] == "ValueError"
 
 
 def test_preexisting_paused_task_cannot_be_relabelled_owner_return(
