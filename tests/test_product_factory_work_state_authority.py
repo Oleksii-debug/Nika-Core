@@ -10,6 +10,7 @@ from nika_core.product_factory_coordinator import (
     ReviewDecision,
     WorkerResultEnvelope,
     WorkRecord,
+    trusted_plan_fingerprint,
 )
 from nika_core.toolsmith.contracts import CodingResult
 from tests.test_product_factory_coordinator import DIGEST, PERMISSIONS, SHA_A, SHA_B
@@ -220,6 +221,11 @@ def test_restore_rejects_mutable_authority_in_work_record(
             tampered,
             trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
         )
+
+class _HostilePlan(tuple):
+    def __bool__(self):  # pragma: no cover - must never execute
+        raise AssertionError("hostile plan truthiness executed")
+
 
 class _HostileStr(str):
     def __bool__(self):  # pragma: no cover - must never execute
@@ -479,6 +485,16 @@ def test_review_revalidates_forged_decision_before_state_mutation() -> None:
         coordinator.review("core", forged)
     assert coordinator.snapshot() == before
 
+
+
+def test_trusted_plan_fingerprint_rejects_behavioral_container_before_truthiness() -> None:
+    coordinator = _coordinator()
+    plan = coordinator.snapshot().trusted_plan
+    assert plan is not None
+    hostile = _HostilePlan(plan)
+
+    with pytest.raises(CoordinatorError, match="trusted plan descriptor must be an exact tuple"):
+        trusted_plan_fingerprint(hostile)
 
 
 def test_restore_validates_explicit_fingerprint_before_truthiness() -> None:

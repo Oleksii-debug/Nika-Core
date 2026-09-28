@@ -532,6 +532,8 @@ def _validate_coordinator_snapshot_carrier(snapshot: object) -> None:
 
 
 def trusted_plan_fingerprint(plan: tuple[ComponentWorkRequest, ...]) -> str:
+    if type(plan) is not tuple:
+        raise CoordinatorError("trusted plan descriptor must be an exact tuple")
     if not plan:
         raise CoordinatorError("trusted plan descriptor must not be empty")
     for request in plan:
