@@ -211,7 +211,7 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
         terminal_result,
     )
     model_result_text = proof.index(
-        "Wait-BoundTextEvidence 'controlled loopback response'",
+        "Wait-BoundTextEvidence $expectedModelResult",
         model_result_label,
     )
     model_provider_label = proof.index(
@@ -242,8 +242,21 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
         < binding_probe
     )
 
+    assert "NIKA_UIA_MODEL_RESULT_CANARY" in proof
+    assert "^NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}$" in proof
+    assert "controlled loopback response" not in proof
+
     assert "ThreadingHTTPServer" in wrapper
     assert '("127.0.0.1", 11434)' in wrapper
+    assert (
+        "$resultCanary = 'NIKA_UIA_MODEL_RESULT_' + [guid]::NewGuid().ToString('N')"
+        in wrapper
+    )
+    assert "$env:NIKA_UIA_MODEL_RESULT_CANARY = $resultCanary" in wrapper
+    assert "RESULT_TEXT = sys.argv[3]" in wrapper
+    assert 're.fullmatch(r"NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}", RESULT_TEXT)' in wrapper
+    assert '"content": RESULT_TEXT' in wrapper
+    assert "controlled loopback response" not in wrapper
     assert "'/api/chat'" in wrapper
     assert "'uia-proof-model'" in wrapper
     assert "$lines.Count -ne 3" in wrapper
