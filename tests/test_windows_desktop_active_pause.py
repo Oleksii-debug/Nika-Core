@@ -18,6 +18,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.ui.desktop_backend import DesktopBackend
@@ -53,6 +55,19 @@ class DurableBlockingRuntime:
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
         self.resumed.set()
         return RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe:
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="test checkpoint available",
+            checkpoint_id=f"checkpoint:{task_id}:{thread_id}:{resume_token}",
+        )
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         del task_id, thread_id
