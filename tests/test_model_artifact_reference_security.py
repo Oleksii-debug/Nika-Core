@@ -37,8 +37,13 @@ def _descriptor() -> ModelArtifactDescriptor:
         "id_token=MODEL_CANARY",
         "id-token=MODEL_CANARY",
         "idtoken=MODEL_CANARY",
+        "id_token_hint=MODEL_CANARY",
+        "id-token-hint=MODEL_CANARY",
+        "idtokenhint=MODEL_CANARY",
         "urn:model:provider-public:id_token=MODEL_CANARY",
+        "urn:model:provider-public:id_token_hint=MODEL_CANARY",
         "urn:model:provider-public:%69d_token%3DMODEL_CANARY",
+        "urn:model:provider-public:%69d_token_hint%3DMODEL_CANARY",
         "https://models.example.test/%78-amz-credential%3DMODEL_CANARY",
         "https://models.example.test/%78-goog-signature%3DMODEL_CANARY",
     ),
@@ -50,13 +55,17 @@ def test_public_reference_rejects_encoded_or_bare_credentials(reference: str) ->
     assert "MODEL_CANARY" not in str(exc_info.value)
 
 
-def test_opaque_public_reference_preserves_benign_id_token_count() -> None:
-    descriptor = replace(
-        _descriptor(),
-        source_reference="urn:model:provider-public:id_token_count=3",
-    )
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "urn:model:provider-public:id_token_count=3",
+        "urn:model:provider-public:id_token_hint_count=3",
+    ),
+)
+def test_opaque_public_reference_preserves_benign_id_token_metadata(reference: str) -> None:
+    descriptor = replace(_descriptor(), source_reference=reference)
 
-    assert descriptor.source_reference == "urn:model:provider-public:id_token_count=3"
+    assert descriptor.source_reference == reference
 
 
 def test_public_reference_preserves_ordinary_public_url() -> None:
