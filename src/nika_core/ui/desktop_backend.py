@@ -16,6 +16,7 @@ from nika_core.runtime.contracts import (
     AgentRuntimePort,
     RuntimeCapability,
     RuntimeRequest,
+    RuntimeResumeProbePort,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.recovery import (
@@ -574,6 +575,11 @@ class DesktopBackend:
             raise ValueError(
                 "Поточний runtime не підтримує безпечне активне призупинення: "
                 "не заявлено durable resume."
+            )
+        if not isinstance(self._runtime, RuntimeResumeProbePort):
+            raise ValueError(
+                "Поточний runtime не підтримує безпечне активне призупинення: "
+                "відсутня перевірка checkpoint для durable resume."
             )
         if RuntimeCapability.CANCELLATION not in self._runtime.capabilities:
             raise ValueError(
