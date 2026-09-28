@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -164,6 +164,34 @@ def test_lease_carrier_rejects_behavioral_identity_and_fence_subclasses() -> Non
             issued_at,
             expires_at,
         )
+
+
+def test_lease_carrier_rejects_equivalent_non_utc_offset_datetimes() -> None:
+    offset = timezone(timedelta(hours=2))
+    issued_at = NOW.astimezone(offset)
+    expires_at = (NOW + timedelta(seconds=60)).astimezone(offset)
+
+    assert issued_at == NOW
+    with pytest.raises(WorkOwnershipError, match="canonical UTC"):
+        WorkOwnershipLease(
+            "project-1",
+            "work-1",
+            "worker-a",
+            1,
+            issued_at,
+            expires_at,
+        )
+
+
+def test_trusted_clock_normalizes_non_utc_offset_before_issuing_lease(tmp_path) -> None:
+    offset = timezone(timedelta(hours=2))
+    service, _ = _service(tmp_path, clock=FakeClock(NOW.astimezone(offset)))
+
+    lease = _acquire(service)
+
+    assert lease.issued_at == NOW
+    assert lease.issued_at.tzinfo is UTC
+    assert lease.expires_at.tzinfo is UTC
 
 
 def test_one_writer_lease_survives_restart_and_blocks_competitor(tmp_path) -> None:

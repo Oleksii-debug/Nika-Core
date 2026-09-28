@@ -26,7 +26,12 @@ class WorkOwnershipLease:
         _strict_fence(self.fence)
         issued_at = _aware(self.issued_at)
         expires_at = _aware(self.expires_at)
-        if issued_at != self.issued_at or expires_at != self.expires_at:
+        if (
+            self.issued_at.tzinfo is not UTC
+            or self.expires_at.tzinfo is not UTC
+            or issued_at != self.issued_at
+            or expires_at != self.expires_at
+        ):
             raise WorkOwnershipError("work ownership lease times must be canonical UTC datetimes")
         if expires_at <= issued_at:
             raise WorkOwnershipError("work ownership lease expiry must follow issuance")
