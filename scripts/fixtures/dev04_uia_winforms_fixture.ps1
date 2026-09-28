@@ -23,13 +23,13 @@ $inputLabel.Left = 20
 $inputLabel.Top = 65
 $form.Controls.Add($inputLabel)
 
-$input = New-Object System.Windows.Forms.TextBox
-$input.Name = 'ProblemInput'
-$input.AccessibleName = 'Problem description'
-$input.Left = 20
-$input.Top = 90
-$input.Width = 360
-$form.Controls.Add($input)
+$problemInput = New-Object System.Windows.Forms.TextBox
+$problemInput.Name = 'ProblemInput'
+$problemInput.AccessibleName = 'Problem description'
+$problemInput.Left = 20
+$problemInput.Top = 90
+$problemInput.Width = 360
+$form.Controls.Add($problemInput)
 
 $check = New-Object System.Windows.Forms.CheckBox
 $check.Name = 'VerifySemantics'
@@ -111,7 +111,7 @@ $check.Add_CheckedChanged({
 }.GetNewClosure())
 
 $apply.Add_Click({
-    $status.Text = 'Applied: ' + $input.Text
+    $status.Text = 'Applied: ' + $problemInput.Text
     $status.AccessibleName = $status.Text
 }.GetNewClosure())
 

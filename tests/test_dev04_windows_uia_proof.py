@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import re
+
 import pytest
 
 from nika_core.interaction import (
@@ -13,7 +15,7 @@ from nika_core.interaction import (
     StaleSnapshotError,
     resolve_strict,
 )
-from scripts.dev04_windows_uia_proof import invoke_and_observe_until
+from scripts.dev04_windows_uia_proof import FIXTURE, invoke_and_observe_until
 
 
 def _action(
@@ -214,3 +216,11 @@ def test_invoke_wait_rejects_invalid_bounds_before_effect(
 
     assert adapter.act_calls == []
     assert adapter.observe_calls == 0
+
+
+
+def test_fixture_does_not_shadow_powershell_input_automatic_variable() -> None:
+    source = FIXTURE.read_text(encoding="utf-8")
+
+    assert re.search(r"\\$input(?![A-Za-z0-9_])", source, flags=re.IGNORECASE) is None
+    assert "$problemInput.Text" in source
