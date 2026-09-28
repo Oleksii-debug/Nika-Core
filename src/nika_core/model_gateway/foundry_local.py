@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from math import isfinite
 from pathlib import Path
 from threading import Event, Lock
+from types import MappingProxyType
 from typing import Any
 
 from nika_core.model_gateway.contracts import (
@@ -120,6 +121,7 @@ class FoundryLocalProvider:
         return self._capabilities
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        request = self._snapshot_request(request)
         started = time.perf_counter()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + request.timeout_seconds
@@ -364,6 +366,32 @@ class FoundryLocalProvider:
                 self._inference_lock.release()
             if management_acquired:
                 self._model_management_lock.release()
+
+    @staticmethod
+    def _snapshot_request(raw: object) -> ModelRequest:
+        """Detach inference authority from caller-owned mutable request state."""
+
+        if type(raw) is not ModelRequest:
+            raise TypeError("request must be exact ModelRequest")
+        if type(raw.messages) is not tuple:
+            raise TypeError("request messages must be a canonical tuple")
+        if type(raw.fallback_provider_ids) is not tuple:
+            raise TypeError("fallback provider IDs must be a canonical tuple")
+        if type(raw.metadata) is not MappingProxyType:
+            raise TypeError("request metadata must be a canonical mapping")
+
+        return ModelRequest(
+            request_id=raw.request_id,
+            messages=raw.messages,
+            model=raw.model,
+            provider_id=raw.provider_id,
+            provider_kind=raw.provider_kind,
+            fallback_provider_ids=raw.fallback_provider_ids,
+            privacy=raw.privacy,
+            timeout_seconds=raw.timeout_seconds,
+            temperature=raw.temperature,
+            metadata=dict(raw.metadata),
+        )
 
     @staticmethod
     def _snapshot_download_authorization(
