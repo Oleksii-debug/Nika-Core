@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sys
-from collections.abc import Mapping
 from typing import Any
 
 from nika_core.microphone_capture import (
@@ -18,6 +17,7 @@ _PROVIDER_ID = "sounddevice-wasapi"
 _WASAPI_HOST_API_NAME = "windows wasapi"
 _MIN_SAMPLE_RATE_HZ = 8_000
 _MAX_SAMPLE_RATE_HZ = 48_000
+_MAX_CAPTURE_SECONDS = 30
 _BYTES_PER_MONO_PCM16_FRAME = 2
 _MAX_ENDPOINT_NAME_LENGTH = 1024
 
@@ -177,7 +177,7 @@ class WindowsWasapiMicrophoneCaptureAdapter:
                 "Windows WASAPI microphone discovery failed.",
                 retryable=True,
             ) from None
-        if not isinstance(host_apis, (tuple, list)):
+        if type(host_apis) is not tuple:
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.UNAVAILABLE,
                 "Windows WASAPI microphone discovery returned invalid data.",
@@ -187,7 +187,7 @@ class WindowsWasapiMicrophoneCaptureAdapter:
         host_api_index: int | None = None
         device_index: int | None = None
         for index, raw_host_api in enumerate(host_apis):
-            if not isinstance(raw_host_api, Mapping):
+            if type(raw_host_api) is not dict:
                 continue
             name = raw_host_api.get("name")
             if type(name) is not str or name.casefold() != _WASAPI_HOST_API_NAME:
@@ -214,7 +214,7 @@ class WindowsWasapiMicrophoneCaptureAdapter:
                 "Windows WASAPI microphone discovery failed.",
                 retryable=True,
             ) from None
-        if not isinstance(raw_device, Mapping):
+        if type(raw_device) is not dict:
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.UNAVAILABLE,
                 "Windows WASAPI microphone discovery returned invalid data.",
@@ -325,8 +325,12 @@ def _validate_request_carriers(request: MicrophoneCaptureRequest) -> None:
         or not _MIN_SAMPLE_RATE_HZ <= request.sample_rate_hz <= _MAX_SAMPLE_RATE_HZ
     ):
         raise TypeError("sample_rate_hz must be an exact supported integer")
-    if type(request.sample_count) is not int or request.sample_count <= 0:
-        raise TypeError("sample_count must be a positive exact integer")
+    if (
+        type(request.sample_count) is not int
+        or request.sample_count <= 0
+        or request.sample_count > request.sample_rate_hz * _MAX_CAPTURE_SECONDS
+    ):
+        raise TypeError("sample_count must be an exact supported positive integer")
 
 
 def _abort_and_close(stream: Any | None) -> None:
