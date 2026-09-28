@@ -399,6 +399,8 @@ class IntegrationDecision:
         _require_plain_str_items(self.lease_ids, "integration decision lease id")
         _require_plain_str(self.reason, "integration decision reason")
         _require_plain_str_items(self.evidence_refs, "integration decision evidence ref")
+        if any(not evidence_ref.strip() for evidence_ref in self.evidence_refs):
+            raise RepositoryGraphError("integration decision evidence ref must not be empty")
 
         if not self.decision_id.strip() or not self.reason.strip() or not self.evidence_refs:
             raise RepositoryGraphError("integration decisions require identity, reason and evidence")
