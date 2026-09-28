@@ -82,7 +82,9 @@ def test_windows_bridge_composes_team_projection_into_existing_pywebview_state()
 
 
 def _rendered_team_snapshot(
-    *, live_projection: dict[str, object] | None = None
+    *,
+    live_projection: dict[str, object] | None = None,
+    next_projection: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if _NODE is None:
         pytest.skip("Node.js is required for the packaged team renderer canary regression")
@@ -150,6 +152,8 @@ def _rendered_team_snapshot(
     harness = f"""
 const fs = require("fs");
 const PROJECTION = {json.dumps(projection, ensure_ascii=False)};
+const NEXT_PROJECTION = {json.dumps(next_projection, ensure_ascii=False)};
+let getStateCalls = 0;
 
 class Element {{}}
 const created = [];
@@ -202,9 +206,21 @@ global.document = {{
 }};
 global.window = {{
   addEventListener: () => {{}},
-  setInterval: () => 1,
+  setInterval: (callback) => {{
+    if (NEXT_PROJECTION !== null) {{
+      setTimeout(() => {{ void callback(); }}, 5);
+    }}
+    return 1;
+  }},
   clearInterval: () => {{}},
 }};
+function currentProjection() {{
+  const value = getStateCalls === 0 || NEXT_PROJECTION === null
+    ? PROJECTION
+    : NEXT_PROJECTION;
+  getStateCalls += 1;
+  return value;
+}}
 global.crypto = {{ randomUUID: () => "team-ui-request-id" }};
 global.pywebview = {{
   api: {{
@@ -226,7 +242,7 @@ global.pywebview = {{
           resume_failed_count: 0,
         }},
         product_project: null,
-        v01_team_task: PROJECTION,
+        v01_team_task: currentProjection(),
       }},
     }}),
   }},
@@ -553,3 +569,23 @@ def test_renderer_is_restart_stable_for_identical_durable_model_projection() -> 
 
     assert first["ready"] == reopened["ready"] == "true"
     assert first["rendered"] == reopened["rendered"]
+
+
+def test_polling_announces_when_validated_model_result_becomes_available() -> None:
+    before = _model_result_projection()
+    final_before = before["final_result"]
+    assert isinstance(final_before, dict)
+    comparison_before = final_before["comparison"]
+    assert isinstance(comparison_before, dict)
+    comparison_before.pop("model_result")
+
+    rendered = _rendered_team_snapshot(
+        live_projection=before,
+        next_projection=_model_result_projection(),
+    )
+
+    assert rendered["ready"] == "true"
+    assert (
+        "Перевірена відповідь моделі доступна в підсумку командного завдання."
+        in rendered["rendered"]
+    )
