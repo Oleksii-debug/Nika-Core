@@ -523,7 +523,7 @@ def test_renderer_rejects_model_result_with_unknown_authority_fields() -> None:
     [
         " leading boundary whitespace",
         "trailing boundary whitespace ",
-        "contains\\x00nul",
+        "contains\x00nul",
         "x" * 2001,
     ],
 )
