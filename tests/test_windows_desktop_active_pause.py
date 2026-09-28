@@ -192,6 +192,62 @@ class NonResumableBlockingRuntime(DurableBlockingRuntime):
     capabilities = frozenset({RuntimeCapability.CANCELLATION})
 
 
+class UnprovenDurableRuntime:
+    runtime_id = "desktop-active-pause-unproven-resume"
+    capabilities = frozenset(
+        {RuntimeCapability.CANCELLATION, RuntimeCapability.DURABLE_RESUME}
+    )
+
+    def __init__(self) -> None:
+        self.started = threading.Event()
+        self.cancel_entered = threading.Event()
+        self.cancelled = threading.Event()
+
+    def initial_resume_token(self, *, task_id: str, thread_id: str) -> str:
+        return f"initial:{task_id}:{thread_id}"
+
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        del request
+        self.started.set()
+        while not self.cancelled.is_set():
+            await asyncio.sleep(0.01)
+        return RuntimeResult(outcome=RuntimeOutcome.CANCELLED)
+
+    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        del request
+        return RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        self.cancel_entered.set()
+        self.cancelled.set()
+        return True
+
+
+def test_running_pause_requires_checkpoint_probe_before_effect(
+    tmp_path: Path,
+) -> None:
+    runtime = UnprovenDurableRuntime()
+    backend, queue, _audit = _build_backend(tmp_path, runtime)  # type: ignore[arg-type]
+
+    backend.create_task({"command": "durable resume без checkpoint proof"})
+    assert runtime.started.wait(timeout=1)
+    task_id = queue.list_recent()[0].task_id
+    _wait_for_state(queue, task_id, TaskState.RUNNING)
+
+    with pytest.raises(ValueError, match="checkpoint"):
+        backend.pause_task({})
+
+    assert runtime.cancel_entered.is_set() is False
+    assert queue.get(task_id).state is TaskState.RUNNING
+
+    stopped = backend.stop_agent({})
+    assert stopped.status == "accepted"
+    assert runtime.cancel_entered.wait(timeout=1)
+    _wait_for_state(queue, task_id, TaskState.CANCELLED)
+    backend.close()
+
+
 def test_running_pause_fails_before_effect_without_durable_resume_capability(
     tmp_path: Path,
 ) -> None:
