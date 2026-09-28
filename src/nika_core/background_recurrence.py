@@ -62,7 +62,7 @@ class BackgroundRecurrenceBinding:
         }
 
     @classmethod
-    def from_payload(cls, raw: object) -> "BackgroundRecurrenceBinding":
+    def from_payload(cls, raw: object) -> BackgroundRecurrenceBinding:
         if type(raw) is not dict:
             raise TypeError("background recurrence payload must be exact built-in dict")
         if any(type(key) is not str for key in raw):
