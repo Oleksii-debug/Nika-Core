@@ -435,9 +435,15 @@
       : [...requiredKeys, "model_result"].sort();
     if (keys.length !== allowedKeys.length
         || keys.some((key, index) => key !== allowedKeys[index])) return false;
-    if (typeof comparison.status !== "string" || typeof comparison.validated !== "boolean") {
-      return false;
-    }
+    const validComparisonStatuses = ["agree", "disagree", "partial"];
+    const allowedComparisonStatuses = [
+      ...validComparisonStatuses,
+      "missing",
+      "worker_error",
+      "evidence_invalid",
+    ];
+    if (!allowedComparisonStatuses.includes(comparison.status)
+        || typeof comparison.validated !== "boolean") return false;
     if (!Array.isArray(comparison.source_states)
         || comparison.source_states.length !== 2
         || comparison.source_states.some((state) => (
@@ -447,6 +453,9 @@
         || !Number.isInteger(comparison.difference_count) || comparison.difference_count < 0) {
       return false;
     }
+    const evidenceValid = validComparisonStatuses.includes(comparison.status)
+      && comparison.source_states.every((state) => state === "valid");
+    if (comparison.validated !== evidenceValid) return false;
     if (comparison.model_result == null) return true;
     return comparison.validated === true && validModelResult(comparison.model_result);
   }
