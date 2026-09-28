@@ -619,7 +619,21 @@ class BackgroundDispatchGuard:
                     "background resume effect returned deferred execution outside "
                     "the checked authority window"
                 )
-            self._require_resume_effect_advanced(task_id, pause_event_id)
+            try:
+                self._require_resume_effect_advanced(task_id, pause_event_id)
+            except Exception as exc:
+                self._idempotency.mark_uncertain(claim_key)
+                self._audit.append(
+                    event_type="background.resume_uncertain",
+                    entity_type="task",
+                    entity_id=task_id,
+                    payload={
+                        "work_kind": work_kind.value,
+                        "pause_event_id": pause_event_id,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+                raise
             self._idempotency.complete(
                 claim_key,
                 {
@@ -1082,15 +1096,27 @@ class BackgroundDispatchGuard:
 
     def _require_resume_effect_advanced(self, task_id: str, pause_event_id: int) -> None:
         with self._queue.store.connection() as conn:
-            row = conn.execute(
-                "SELECT event_id FROM task_events WHERE task_id = ? "
-                "ORDER BY event_id DESC LIMIT 1",
-                (task_id,),
-            ).fetchone()
-        if row is None:
-            raise RuntimeError("background task has no durable task event after resume")
-        if int(row["event_id"]) <= pause_event_id:
-            raise RuntimeError("background resume effect did not advance the paused task epoch")
+            rows = conn.execute(
+                "SELECT event_id, previous_state, new_state FROM task_events "
+                "WHERE task_id = ? AND event_id > ? ORDER BY event_id ASC LIMIT 2",
+                (task_id, pause_event_id),
+            ).fetchall()
+        if len(rows) < 2:
+            raise RuntimeError(
+                "background resume effect did not prove canonical "
+                "PAUSED -> READY -> RUNNING transition"
+            )
+        ready_event, running_event = rows
+        if (
+            ready_event["previous_state"] != TaskState.PAUSED.value
+            or ready_event["new_state"] != TaskState.READY.value
+            or running_event["previous_state"] != TaskState.READY.value
+            or running_event["new_state"] != TaskState.RUNNING.value
+        ):
+            raise RuntimeError(
+                "background resume effect did not prove canonical "
+                "PAUSED -> READY -> RUNNING transition"
+            )
 
     @classmethod
     def _owner_return_pause_event_id_with_connection(cls, conn, task_id: str) -> int:
