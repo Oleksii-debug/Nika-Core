@@ -1665,6 +1665,21 @@ def _agent_server_client(
     )
 
 
+@pytest.mark.parametrize(
+    "poll_interval_seconds",
+    [float("nan"), float("inf"), float("-inf")],
+)
+def test_agent_server_runtime_rejects_non_finite_poll_interval(
+    poll_interval_seconds: float,
+) -> None:
+    with pytest.raises(ValueError, match="poll interval"):
+        OpenHandsAgentServerRuntime(
+            client_factory=lambda _endpoint: None,
+            agent_profile_id_factory=lambda _job, _endpoint: PROFILE_ID,
+            poll_interval_seconds=poll_interval_seconds,
+        )
+
+
 def test_agent_server_runtime_uses_authenticated_profile_only_contract(
     tmp_path: Path,
 ) -> None:
