@@ -529,6 +529,7 @@ class TaskRuntimeCoordinator:
             raise ValueError("Pause request thread does not match persisted runtime session")
         if usable_resume_token(record.resume_token) is None:
             raise ValueError("Safe active pause requires a usable durable resume token")
+        await self._resume_checkpoint_identity(runtime, record)
 
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
