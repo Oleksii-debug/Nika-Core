@@ -467,6 +467,21 @@
         || !Number.isInteger(comparison.difference_count) || comparison.difference_count < 0) {
       return false;
     }
+    const countsCoherent = (
+      (comparison.status === "agree"
+        && comparison.agreement_count === 1
+        && comparison.difference_count === 0)
+      || (comparison.status === "disagree"
+        && comparison.agreement_count === 0
+        && comparison.difference_count === 1)
+      || (comparison.status === "partial"
+        && comparison.agreement_count >= 1
+        && comparison.difference_count === 1)
+      || (!validComparisonStatuses.includes(comparison.status)
+        && comparison.agreement_count === 0
+        && comparison.difference_count === 0)
+    );
+    if (!countsCoherent) return false;
     const evidenceValid = validComparisonStatuses.includes(comparison.status)
       && comparison.source_states.every((state) => state === "valid");
     if (comparison.validated !== evidenceValid) return false;
@@ -474,7 +489,7 @@
     return comparison.validated === true && validModelResult(comparison.model_result);
   }
 
-  function validFinalResult(result, taskId, teamId, teamState) {
+  function validFinalResult(result, taskId, teamId, teamState, terminalMemberCount) {
     if (result == null) return true;
     if (
       !result
@@ -485,7 +500,7 @@
       || result.task_id !== taskId
       || result.team_id !== teamId
       || !Number.isInteger(result.terminal_member_count)
-      || result.terminal_member_count < 0
+      || result.terminal_member_count !== terminalMemberCount
       || !Number.isInteger(result.result_record_count)
       || result.result_record_count < 0
     ) {
@@ -506,7 +521,7 @@
       || typeof task.task_id !== "string"
       || !task.task_id.trim()
       || typeof task.state !== "string"
-      || !task.state.trim()
+      || !Object.prototype.hasOwnProperty.call(taskStateLabels, task.state)
       || (task.command != null && (typeof task.command !== "string" || !task.command.trim()))
     ) {
       return false;
@@ -544,7 +559,16 @@
     const terminalTeamState = team.state !== "active";
     if (terminalTeamState !== (finalResult != null)) return false;
     if (!Array.isArray(events) || !events.every(validTeamEvent)) return false;
-    return validFinalResult(finalResult, task.task_id, team.team_id, team.state);
+    const terminalMemberCount = members.filter((member) => (
+      ["completed", "failed", "cancelled"].includes(member.state)
+    )).length;
+    return validFinalResult(
+      finalResult,
+      task.task_id,
+      team.team_id,
+      team.state,
+      terminalMemberCount,
+    );
   }
 
   function appendDefinitionItem(list, term, value) {

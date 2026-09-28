@@ -639,6 +639,84 @@ def test_renderer_rejects_active_team_with_terminal_final_result() -> None:
     assert rejected["summary_hidden"] is True
 
 
+def test_renderer_rejects_unknown_packaged_task_state() -> None:
+    projection = _model_result_projection()
+    task = projection["task"]
+    assert isinstance(task, dict)
+    task["state"] = "CORRUPT_UNKNOWN_STATE"
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+@pytest.mark.parametrize(
+    ("status", "agreement_count", "difference_count"),
+    [
+        ("agree", 1, 1),
+        ("disagree", 1, 1),
+        ("partial", 0, 1),
+        ("partial", 1, 0),
+    ],
+)
+def test_renderer_rejects_incoherent_valid_comparison_counts(
+    status: str,
+    agreement_count: int,
+    difference_count: int,
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.update(
+        status=status,
+        validated=True,
+        source_states=["valid", "valid"],
+        agreement_count=agreement_count,
+        difference_count=difference_count,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+def test_renderer_rejects_noncomparison_with_comparison_counts() -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status="worker_error",
+        validated=False,
+        source_states=["worker_error", "valid"],
+        agreement_count=1,
+        difference_count=0,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+def test_renderer_rejects_terminal_member_count_not_matching_roster_state() -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    final_result["terminal_member_count"] = 2
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
 def test_renderer_uses_explicit_no_model_fallback_for_deterministic_result() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
