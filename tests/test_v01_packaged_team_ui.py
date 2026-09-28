@@ -95,7 +95,7 @@ def _rendered_team_snapshot(
         "available": True,
         "task": {
             "task_id": "task-71",
-            "state": "running",
+            "state": "RUNNING",
             "command": "Перевірити два контрольовані джерела.",
         },
         "team": {
