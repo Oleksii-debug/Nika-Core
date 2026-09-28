@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import hashlib
 import importlib
 import sys
@@ -185,6 +186,33 @@ def test_adapter_composes_through_canonical_microphone_service() -> None:
     assert result.evidence.error_code is None
     assert result.pcm_s16le == b"\x01\x00" * 3 + b"\x02\x00" * 2
     assert sd.raw_device_name not in repr(result.evidence.as_dict())
+
+
+def test_native_sounddevice_import_failure_is_minimized(monkeypatch: pytest.MonkeyPatch) -> None:
+    adapter = WindowsWasapiMicrophoneCaptureAdapter(
+        sounddevice_module=None,
+        platform_name="win32",
+    )
+    original_import = builtins.__import__
+    canary = r"C:\\private\\SECRET-PORTAUDIO.dll?token=do-not-leak"
+
+    def guarded_import(name, *args, **kwargs):
+        if name == "sounddevice":
+            raise OSError(canary)
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+
+    with pytest.raises(MicrophoneCaptureAdapterError) as caught:
+        _ = adapter.capabilities
+
+    assert caught.value.code is MicrophoneCaptureFailureCode.UNAVAILABLE
+    assert caught.value.retryable is False
+    assert str(caught.value) == "Windows microphone capture dependency is unavailable."
+    assert caught.value.__suppress_context__ is True
+    assert caught.value.__cause__ is None
+    assert canary not in str(caught.value)
+    assert canary not in repr(caught.value)
 
 
 def test_non_windows_platform_fails_closed_without_backend_use() -> None:

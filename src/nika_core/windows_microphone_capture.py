@@ -248,7 +248,7 @@ class WindowsWasapiMicrophoneCaptureAdapter:
             return self._sounddevice_module
         try:
             import sounddevice  # type: ignore[import-not-found]  # noqa: PLC0415
-        except ImportError:
+        except Exception:  # noqa: BLE001 - minimize Python/native dependency-load diagnostics
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.UNAVAILABLE,
                 "Windows microphone capture dependency is unavailable.",
