@@ -170,7 +170,11 @@ class _FalseyBackend(FakeBackend):
             "window_title",
         ),
         (
-            {"process_id": 77, "window_title": "Nika Fixture", "view": _BehavioralText("control")},
+            {
+                "process_id": 77,
+                "window_title": "Nika Fixture",
+                "view": _BehavioralText("control"),
+            },
             "view",
         ),
     ),
@@ -196,6 +200,67 @@ def test_falsey_injected_backend_is_not_replaced_by_live_backend() -> None:
     assert adapter.backend is backend
     assert snapshot.target.window is not None
     assert snapshot.target.window.native_handle == 100
+
+
+class _LookalikeNode:
+    def __init__(self, node) -> None:
+        self.node_id = node.node_id
+        self.role = node.role
+        self.name = node.name
+        self.enabled = node.enabled
+        self.visible = node.visible
+        self.attributes = node.attributes
+
+
+@pytest.mark.parametrize(
+    ("action", "value"),
+    (
+        ("invoke", None),
+        (InteractionAction.INVOKE, "unexpected"),
+        (InteractionAction.SET_VALUE, _BehavioralText("value")),
+    ),
+)
+def test_action_ingress_rejects_noncanonical_authority_before_effect(
+    action: object,
+    value: object,
+) -> None:
+    backend = FakeBackend()
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    with pytest.raises(ValueError):
+        adapter.act(node, action, value)  # type: ignore[arg-type]
+
+    assert backend.calls == []
+
+
+def test_action_and_focus_reject_lookalike_node_before_backend_effect() -> None:
+    backend = FakeBackend()
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+    lookalike = _LookalikeNode(node)
+
+    with pytest.raises(ValueError, match="exact ControlNode"):
+        adapter.act(
+            lookalike,  # type: ignore[arg-type]
+            InteractionAction.INVOKE,
+            None,
+        )
+    with pytest.raises(ValueError, match="exact ControlNode"):
+        adapter.focus(lookalike)  # type: ignore[arg-type]
+
+    assert backend.calls == []
+
+
+def test_restore_focus_rejects_behavioral_identity_before_hashing() -> None:
+    backend = FakeBackend()
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    with pytest.raises(ValueError, match="exact string"):
+        adapter.restore_focus(_BehavioralText(node.node_id))
+
+    assert backend.calls == []
 
 
 def test_adapter_requires_exactly_one_window_identity() -> None:

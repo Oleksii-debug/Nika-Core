@@ -313,6 +313,8 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
     def focus(self, node: ControlNode) -> None:
         """Issue exactly one SetFocus effect and await exact provider acknowledgement."""
 
+        if type(node) is not ControlNode:
+            raise ValueError("UIA focus target must be an exact ControlNode")
         hwnd, runtime_id, generation = self._revalidate_action_authority(
             node,
             InteractionAction.FOCUS,
@@ -330,6 +332,8 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
 
         if node_id is None:
             return True
+        if type(node_id) is not str:
+            raise ValueError("UIA focus identity must be an exact string")
         identity = self._identity_by_node.get(node_id)
         if identity is None:
             return False
@@ -376,8 +380,15 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
         action: InteractionAction,
         value: str | None,
     ) -> None:
-        if action is InteractionAction.SET_VALUE and value is None:
-            raise ValueError("SET_VALUE requires a value")
+        if type(node) is not ControlNode:
+            raise ValueError("UIA action target must be an exact ControlNode")
+        if type(action) is not InteractionAction:
+            raise ValueError("UIA action must be an exact InteractionAction")
+        if action is InteractionAction.SET_VALUE:
+            if type(value) is not str:
+                raise ValueError("SET_VALUE requires an exact string value")
+        elif value is not None:
+            raise ValueError("only SET_VALUE accepts a UIA action value")
         if action is InteractionAction.FOCUS:
             self.focus(node)
             return
