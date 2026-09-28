@@ -220,6 +220,9 @@ class FoundryLocalProvider:
             bounded_timeout = float("inf")
         if not isfinite(bounded_timeout) or bounded_timeout <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
+        if cancel_event is not None and type(cancel_event) is not Event:
+            raise TypeError("cancel_event must be exact threading.Event")
+        effective_cancel_event = cancel_event if cancel_event is not None else Event()
         if (
             self._expected_model_id is not None
             and authorization.expected_model_id is not None
@@ -237,7 +240,6 @@ class FoundryLocalProvider:
         management_acquired = False
         inference_acquired = False
         worker: asyncio.Task[None] | None = None
-        effective_cancel_event = cancel_event or Event()
         try:
             remaining = deadline - loop.time()
             if remaining <= 0:
