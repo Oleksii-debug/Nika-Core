@@ -408,6 +408,65 @@ class IntegrationDecision:
             raise RepositoryGraphError("integration decision lease identity must not be empty")
 
 
+def _snapshot_repository_ref(raw: object) -> RepositoryRef:
+    """Detach validated repository authority from caller-owned DTO state."""
+
+    if type(raw) is not RepositoryRef:
+        raise RepositoryGraphError("repository must be a canonical RepositoryRef")
+    return RepositoryRef(
+        repository_id=raw.repository_id,
+        provider=raw.provider,
+        locator=raw.locator,
+        default_branch=raw.default_branch,
+        credential_ref=raw.credential_ref,
+        case_sensitive_paths=raw.case_sensitive_paths,
+        windows_path_semantics=raw.windows_path_semantics,
+    )
+
+
+def _snapshot_product_component(raw: object) -> ProductComponent:
+    """Detach validated component authority from caller-owned DTO state."""
+
+    if type(raw) is not ProductComponent:
+        raise RepositoryGraphError("component must be a canonical ProductComponent")
+    return ProductComponent(
+        component_id=raw.component_id,
+        repository_id=raw.repository_id,
+        paths=raw.paths,
+        dependencies=raw.dependencies,
+        build_commands=raw.build_commands,
+        test_commands=raw.test_commands,
+        release_identity=raw.release_identity,
+    )
+
+
+def _snapshot_ownership_lease(raw: object, *, type_error: str) -> OwnershipLease:
+    """Reconstruct one lease through canonical constructor validation."""
+
+    if type(raw) is not OwnershipLease:
+        raise RepositoryGraphError(type_error)
+    return OwnershipLease(
+        lease_id=raw.lease_id,
+        worker_id=raw.worker_id,
+        component_ids=raw.component_ids,
+        allowed_paths=raw.allowed_paths,
+    )
+
+
+def _snapshot_integration_decision(raw: object) -> IntegrationDecision:
+    """Reconstruct integration evidence through canonical validation."""
+
+    if type(raw) is not IntegrationDecision:
+        raise RepositoryGraphError("decision must be a canonical IntegrationDecision")
+    return IntegrationDecision(
+        decision_id=raw.decision_id,
+        kind=raw.kind,
+        lease_ids=raw.lease_ids,
+        reason=raw.reason,
+        evidence_refs=raw.evidence_refs,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class LeaseAssessment:
     conflicts: tuple[OwnershipConflict, ...]
@@ -440,8 +499,32 @@ class ProductRepositoryGraph:
             raise RepositoryGraphError("components must contain canonical ProductComponent values")
         if not self.project_id.strip():
             raise RepositoryGraphError("project_id must not be empty")
-        self._repositories_by_id = _unique_by(self.repositories, "repository_id")
-        self._components_by_id = _unique_by(self.components, "component_id")
+
+        # The public DTOs are caller-visible, and frozen dataclasses can still be
+        # altered through object.__setattr__. Keep canonical public snapshots for
+        # introspection, then build separate private snapshots for runtime
+        # ownership/conflict authority so post-admission caller mutation cannot
+        # retarget an already validated graph.
+        self.repositories = tuple(
+            _snapshot_repository_ref(repository) for repository in self.repositories
+        )
+        self.components = tuple(
+            _snapshot_product_component(component) for component in self.components
+        )
+        self._repositories_by_id = _unique_by(
+            tuple(
+                _snapshot_repository_ref(repository)
+                for repository in self.repositories
+            ),
+            "repository_id",
+        )
+        self._components_by_id = _unique_by(
+            tuple(
+                _snapshot_product_component(component)
+                for component in self.components
+            ),
+            "component_id",
+        )
         self._validate_physical_repository_identity()
         self._validate_components()
         self._validate_acyclic()
@@ -468,13 +551,23 @@ class ProductRepositoryGraph:
         *,
         decision: IntegrationDecision | None = None,
     ) -> LeaseAssessment:
-        if type(candidate) is not OwnershipLease:
-            raise RepositoryGraphError("candidate must be a canonical OwnershipLease")
-        active_tuple = tuple(active_leases)
-        if any(type(lease) is not OwnershipLease for lease in active_tuple):
-            raise RepositoryGraphError("active leases must be canonical OwnershipLease values")
-        if decision is not None and type(decision) is not IntegrationDecision:
-            raise RepositoryGraphError("decision must be a canonical IntegrationDecision")
+        # Snapshot every authority carrier before using it. In particular,
+        # snapshot candidate/decision before consuming an arbitrary active-leases
+        # iterable, whose iteration may execute caller code and mutate retained
+        # frozen-dataclass references.
+        candidate = _snapshot_ownership_lease(
+            candidate,
+            type_error="candidate must be a canonical OwnershipLease",
+        )
+        if decision is not None:
+            decision = _snapshot_integration_decision(decision)
+        active_tuple = tuple(
+            _snapshot_ownership_lease(
+                lease,
+                type_error="active leases must be canonical OwnershipLease values",
+            )
+            for lease in active_leases
+        )
 
         candidate_paths = self._lease_paths(candidate)
         conflicts: list[OwnershipConflict] = []

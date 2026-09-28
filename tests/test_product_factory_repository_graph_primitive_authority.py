@@ -247,3 +247,131 @@ def test_valid_plain_primitives_still_support_conflict_assessment() -> None:
 
     assert assessment.requires_integration
     assert {conflict.active_lease_id for conflict in assessment.conflicts} == {"lease:active"}
+
+def test_graph_detaches_runtime_authority_from_caller_and_exposed_dtos() -> None:
+    repository = RepositoryRef(
+        "repo:app",
+        "github",
+        "owner/app",
+        "main",
+        case_sensitive_paths=True,
+    )
+    component = ProductComponent("app", "repo:app", ("src",))
+    graph = ProductRepositoryGraph(
+        project_id="project:detached-authority",
+        repositories=(repository,),
+        components=(component,),
+    )
+
+    object.__setattr__(component, "paths", ("retargeted",))
+    object.__setattr__(repository, "case_sensitive_paths", False)
+    object.__setattr__(graph.components[0], "paths", ("exposed-retargeted",))
+    object.__setattr__(graph.repositories[0], "case_sensitive_paths", False)
+
+    original = OwnershipLease(
+        "lease:original",
+        "worker:a",
+        ("app",),
+        ("src/api",),
+    )
+    assert graph.assess_lease(original, ()).grantable
+
+    for lease_id, path in (
+        ("lease:caller-retarget", "retargeted/api"),
+        ("lease:exposed-retarget", "exposed-retargeted/api"),
+    ):
+        with pytest.raises(RepositoryGraphError, match="outside component ownership"):
+            graph.assess_lease(
+                OwnershipLease(lease_id, "worker:a", ("app",), (path,)),
+                (),
+            )
+
+    upper = OwnershipLease("lease:upper", "worker:a", ("app",), ("src/API",))
+    lower = OwnershipLease("lease:lower", "worker:b", ("app",), ("src/api",))
+    assert graph.assess_lease(lower, (upper,)).grantable
+
+
+def test_assess_lease_revalidates_constructor_bypassed_authority_carriers() -> None:
+    graph = _graph()
+
+    candidate = OwnershipLease(
+        "lease:candidate",
+        "worker:b",
+        ("app",),
+        ("src/api/routes",),
+    )
+    object.__setattr__(candidate, "allowed_paths", ["src/api/routes"])
+    with pytest.raises(RepositoryGraphError, match="lease allowed_paths must be a plain tuple"):
+        graph.assess_lease(candidate, ())
+
+    active = OwnershipLease(
+        "lease:active",
+        "worker:a",
+        ("app",),
+        ("src/api",),
+    )
+    object.__setattr__(active, "component_ids", ["app"])
+    with pytest.raises(RepositoryGraphError, match="lease component_ids must be a plain tuple"):
+        graph.assess_lease(
+            OwnershipLease(
+                "lease:fresh-candidate",
+                "worker:b",
+                ("app",),
+                ("src/api/routes",),
+            ),
+            (active,),
+        )
+
+    active = OwnershipLease(
+        "lease:active",
+        "worker:a",
+        ("app",),
+        ("src/api",),
+    )
+    decision = IntegrationDecision(
+        "decision:reconcile",
+        IntegrationDecisionKind.RECONCILE,
+        ("lease:decision-candidate", "lease:active"),
+        "validated evidence is required",
+        ("evidence:review",),
+    )
+    object.__setattr__(decision, "evidence_refs", ())
+    with pytest.raises(
+        RepositoryGraphError,
+        match="integration decisions require identity, reason and evidence",
+    ):
+        graph.assess_lease(
+            OwnershipLease(
+                "lease:decision-candidate",
+                "worker:b",
+                ("app",),
+                ("src/api/routes",),
+            ),
+            (active,),
+            decision=decision,
+        )
+
+
+def test_assess_lease_snapshots_candidate_before_active_iterable_runs() -> None:
+    graph = _graph()
+    candidate = OwnershipLease(
+        "lease:candidate",
+        "worker:b",
+        ("app",),
+        ("src/api",),
+    )
+
+    def active_leases() -> object:
+        object.__setattr__(candidate, "allowed_paths", ("outside",))
+        yield OwnershipLease(
+            "lease:active",
+            "worker:a",
+            ("app",),
+            ("src/docs",),
+        )
+
+    assessment = graph.assess_lease(candidate, active_leases())
+
+    assert assessment.grantable
+    assert assessment.conflicts == ()
+
