@@ -323,6 +323,20 @@ class BackgroundDispatchGuard:
                 self._idempotency.release_pending(claim_key)
                 return denial
 
+            final_resource_decision = self._policy_for_existing_grant(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=final_observation.presence,
+            )
+            if not final_resource_decision.allowed:
+                denial = self._apply_denial(
+                    task_id=task_id,
+                    decision=final_resource_decision,
+                    phase="effect_start_resource_fence",
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
             self._resume_for_dispatch(task_id=task_id, work_kind=work_kind)
             effect_started = True
             try:
@@ -566,6 +580,21 @@ class BackgroundDispatchGuard:
                     task_id=task_id,
                     decision=final_decision,
                     phase=PresenceEvidencePhase.EFFECT_START_FENCE.value,
+                    pause_event_id=pause_event_id,
+                )
+                self._idempotency.release_pending(claim_key)
+                return denial
+
+            final_resource_decision = self._policy_for_existing_grant(
+                owner_id=owner_id,
+                work_kind=work_kind,
+                presence=final_observation.presence,
+            )
+            if not final_resource_decision.allowed:
+                denial = self._apply_continuation_denial(
+                    task_id=task_id,
+                    decision=final_resource_decision,
+                    phase="effect_start_resource_fence",
                     pause_event_id=pause_event_id,
                 )
                 self._idempotency.release_pending(claim_key)
