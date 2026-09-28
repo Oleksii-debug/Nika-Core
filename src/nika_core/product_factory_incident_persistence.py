@@ -4,7 +4,6 @@ import json
 from datetime import UTC, datetime
 from enum import StrEnum
 
-from .product_factory_coordinator import CoordinatorSnapshot
 from .product_factory_deployment import DeploymentFabricSnapshot
 from .product_factory_incident_contracts import (
     IncidentKind,
@@ -20,7 +19,10 @@ from .product_factory_incident_contracts import (
     RepairWorkOrder,
     SupplyChainAdvisory,
 )
-from .product_factory_incidents import IncidentRepairReleaseCoordinator
+from .product_factory_incidents import (
+    IncidentRepairReleaseCoordinator,
+    TrustedReviewAuthority,
+)
 
 
 def dump_incident_snapshot(snapshot: IncidentLifecycleSnapshot) -> str:
@@ -39,7 +41,7 @@ def load_incident_snapshot(
     payload: str,
     *,
     deployments: DeploymentFabricSnapshot | None = None,
-    review_authorities: tuple[CoordinatorSnapshot, ...] = (),
+    review_authorities: tuple[TrustedReviewAuthority, ...] = (),
 ) -> IncidentLifecycleSnapshot:
     """Parse canonical PF8 JSON and revalidate external authority before trust."""
 
