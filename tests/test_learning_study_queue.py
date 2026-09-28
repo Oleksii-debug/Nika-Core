@@ -125,6 +125,56 @@ def test_interrupted_enqueue_created_state_is_recovered_without_touching_other_t
     assert tasks.get(ordinary.task_id).state is TaskState.CREATED
 
 
+def test_recovery_refuses_task_that_left_created_after_scan(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    _, tasks, queue = _services(tmp_path)
+    interrupted = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="raced-recovery", title="Recovery race"),
+    )
+    with tasks.store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET state = ? WHERE task_id = ?",
+            (TaskState.CREATED.value, interrupted.task_id),
+        )
+
+    original_match = queue._matching_task_ids
+
+    def raced_match(*, workspace_id, agent_id, state, limit):
+        selected = original_match(
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            state=state,
+            limit=limit,
+        )
+        assert selected == (interrupted.task_id,)
+        tasks.transition(interrupted.task_id, TaskState.READY)
+        tasks.transition(interrupted.task_id, TaskState.RUNNING)
+        tasks.transition(interrupted.task_id, TaskState.FAILED)
+        return selected
+
+    monkeypatch.setattr(queue, "_matching_task_ids", raced_match)
+
+    with pytest.raises(ValueError, match="state changed before recovery transition"):
+        queue.recover_created(limit=1)
+
+    assert tasks.get(interrupted.task_id).state is TaskState.FAILED
+    with tasks.store.connection() as conn:
+        revived = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events "
+            "WHERE task_id = ? AND previous_state = ? AND new_state = ?",
+            (
+                interrupted.task_id,
+                TaskState.FAILED.value,
+                TaskState.READY.value,
+            ),
+        ).fetchone()["count"]
+    assert revived == 0
+
+
 def test_listing_and_recovery_are_not_starved_by_500_newer_ordinary_tasks(
     tmp_path,
 ) -> None:
