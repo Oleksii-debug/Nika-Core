@@ -13,7 +13,7 @@ from nika_core.product_factory_coordinator import (
 )
 from nika_core.toolsmith.contracts import CodingResult
 from tests.test_product_factory_coordinator import DIGEST, PERMISSIONS, SHA_A, SHA_B
-from tests.test_product_factory_work_lifecycle import _coordinator, _core_record, _graph
+from tests.test_product_factory_work_lifecycle import _coordinator, _core_record, _graph, _success
 
 
 @pytest.mark.parametrize("state", ("planned", "ready", "accepted", "done", "cancelled"))
