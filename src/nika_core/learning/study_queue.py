@@ -415,6 +415,8 @@ def _require_text(value: str, name: str, *, maximum: int) -> None:
 
 
 def _validate_sha256(value: str, name: str) -> None:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be text")
     if (
         len(value) != 64
         or any(char not in string.hexdigits for char in value)
