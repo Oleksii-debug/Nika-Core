@@ -26,6 +26,8 @@ def _now() -> str:
 
 
 def _required(value: str, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field_name} must be an exact str")
     normalized = value.strip()
     if not normalized:
         raise ValueError(f"{field_name} is required")
@@ -78,6 +80,58 @@ def _exact_text(value: object, field_name: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{field_name} must be an exact str")
     return value
+
+
+def _canonical_review_timestamp(value: object) -> str:
+    if type(value) is not str:
+        raise RuntimeError("research review audit timestamp is invalid")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise RuntimeError("research review audit timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RuntimeError("research review audit timestamp is invalid")
+    if parsed.astimezone(UTC).isoformat() != value:
+        raise RuntimeError("research review audit timestamp is invalid")
+    return value
+
+
+def _decode_review_audit_payload(
+    raw_payload: object,
+    *,
+    workspace_id: str,
+    document_id: str,
+) -> tuple[ResearchReviewState, str]:
+    if type(raw_payload) is not str:
+        raise RuntimeError("research review audit evidence is invalid")
+    try:
+        payload = json.loads(raw_payload)
+        expected_keys = {
+            "workspace_id",
+            "document_id",
+            "previous_state",
+            "state",
+            "note",
+        }
+        if type(payload) is not dict or set(payload) != expected_keys:
+            raise ValueError("unexpected review audit payload shape")
+        stored_workspace = _exact_text(payload["workspace_id"], "audit workspace_id")
+        stored_document = _exact_text(payload["document_id"], "audit document_id")
+        previous_state = ResearchReviewState(
+            _exact_text(payload["previous_state"], "audit previous_state")
+        )
+        state = ResearchReviewState(_exact_text(payload["state"], "audit state"))
+        note = _exact_text(payload["note"], "audit note")
+        if len(note) > _MAX_NOTE_LENGTH or note.strip() != note:
+            raise ValueError("review audit note is not canonical")
+        # Validate the predecessor carrier even though the latest projection does
+        # not otherwise need it; every persisted field remains canonical evidence.
+        _ = previous_state
+    except (KeyError, TypeError, ValueError) as exc:
+        raise RuntimeError("research review audit evidence is invalid") from exc
+    if stored_workspace != workspace_id or stored_document != document_id:
+        raise RuntimeError("research review audit identity mismatch")
+    return state, note
 
 
 def _canonical_evidence(evidence: object, field_name: str) -> ResearchEvidence:
@@ -321,8 +375,10 @@ class ResearchReviewRepository:
     ) -> ResearchReview:
         workspace = _required(workspace_id, "workspace_id")
         document = _required(document_id, "document_id")
-        if not isinstance(state, ResearchReviewState):
-            raise TypeError("state must be a ResearchReviewState")
+        if type(state) is not ResearchReviewState:
+            raise TypeError("state must be an exact ResearchReviewState")
+        if type(note) is not str:
+            raise TypeError("note must be an exact str")
         if len(note) > _MAX_NOTE_LENGTH:
             raise ValueError(f"note exceeds {_MAX_NOTE_LENGTH} characters")
 
@@ -375,15 +431,18 @@ class ResearchReviewRepository:
                 document_id=document,
                 state=ResearchReviewState.UNREVIEWED,
             )
-        payload = json.loads(row["payload_json"])
-        if payload.get("workspace_id") != workspace or payload.get("document_id") != document:
-            raise RuntimeError("research review audit identity mismatch")
+        state, note = _decode_review_audit_payload(
+            row["payload_json"],
+            workspace_id=workspace,
+            document_id=document,
+        )
+        updated_at = _canonical_review_timestamp(row["created_at"])
         return ResearchReview(
             workspace_id=workspace,
             document_id=document,
-            state=ResearchReviewState(payload["state"]),
-            note=str(payload.get("note", "")),
-            updated_at=row["created_at"],
+            state=state,
+            note=note,
+            updated_at=updated_at,
         )
 
     def _require_document(self, *, workspace_id: str, document_id: str) -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -399,4 +400,106 @@ def test_direct_text_renderer_rejects_forged_nested_report_carrier() -> None:
 
     with pytest.raises(ValueError, match=r"report\.cards\[0\]\.rank must be finite"):
         render_accessible_report_text(report)
+
+class _BehavioralReviewText(str):
+    def strip(self, *_args: object, **_kwargs: object) -> str:
+        raise AssertionError("review text behavior must not run before exact-type rejection")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    (
+        ("workspace_id", _BehavioralReviewText("ws"), "workspace_id must be an exact str"),
+        ("document_id", _BehavioralReviewText("doc-1"), "document_id must be an exact str"),
+        ("note", _BehavioralReviewText("safe"), "note must be an exact str"),
+    ),
+)
+def test_review_write_rejects_behavioral_text_before_audit_effect(
+    tmp_path: Path,
+    field_name: str,
+    value: object,
+    message: str,
+) -> None:
+    store = _store(tmp_path)
+    repository = ResearchReviewRepository(store)
+    kwargs: dict[str, object] = {
+        "workspace_id": "ws",
+        "document_id": "doc-1",
+        "state": ResearchReviewState.SAVED,
+        "note": "safe",
+    }
+    kwargs[field_name] = value
+
+    with pytest.raises(TypeError, match=message):
+        repository.set_review(**kwargs)  # type: ignore[arg-type]
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS event_count FROM audit_events "
+            "WHERE event_type='research.review.changed'"
+        ).fetchone()
+    assert row is not None
+    assert row["event_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        {"note": ["forged"]},
+        {"note": 7},
+        {"previous_state": "forged"},
+        {"unexpected": "field"},
+    ),
+)
+def test_review_readback_rejects_malformed_durable_audit_payload(
+    tmp_path: Path,
+    mutation: dict[str, object],
+) -> None:
+    store = _store(tmp_path)
+    repository = ResearchReviewRepository(store)
+    repository.set_review(
+        workspace_id="ws",
+        document_id="doc-1",
+        state=ResearchReviewState.SAVED,
+        note="safe",
+    )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_id, payload_json FROM audit_events "
+            "WHERE event_type='research.review.changed' ORDER BY event_id DESC LIMIT 1"
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        payload.update(mutation)
+        conn.execute(
+            "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+            (json.dumps(payload, ensure_ascii=False, sort_keys=True), row["event_id"]),
+        )
+
+    restarted = ResearchReviewRepository(SQLiteStore(store.path))
+    with pytest.raises(RuntimeError, match="review audit evidence is invalid"):
+        restarted.get_review(workspace_id="ws", document_id="doc-1")
+
+
+def test_review_readback_rejects_noncanonical_durable_timestamp(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    repository = ResearchReviewRepository(store)
+    repository.set_review(
+        workspace_id="ws",
+        document_id="doc-1",
+        state=ResearchReviewState.SAVED,
+        note="safe",
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at=? "
+            "WHERE event_type='research.review.changed'",
+            ("2026-08-20T00:00:00",),
+        )
+
+    restarted = ResearchReviewRepository(SQLiteStore(store.path))
+    with pytest.raises(RuntimeError, match="review audit timestamp is invalid"):
+        restarted.get_review(workspace_id="ws", document_id="doc-1")
 
