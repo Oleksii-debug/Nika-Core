@@ -243,8 +243,10 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     )
 
     assert "function Wait-BoundTextSequence(" in proof
-    assert "Get-BoundDescendantNames $currentWindow" in proof
+    assert "foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow))" in proof
+    assert "[System.Windows.Automation.TreeScope]::Descendants" in proof
     assert "if ($name -ceq $ExpectedSequence[$sequenceIndex])" in proof
+    assert "did not appear in one bound search root" in proof
     assert "Wait-BoundTextSequence @(" in proof
     assert "Wait-BoundTextEvidence $expectedModelResult" not in proof
     assert "Wait-BoundTextEvidence 'ollama'" not in proof

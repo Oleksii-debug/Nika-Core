@@ -582,19 +582,29 @@ try {
             $currentWindow = Find-ExactWindow
             if ($null -eq $currentWindow) { continue }
             try {
-                $names = Get-BoundDescendantNames $currentWindow
-                $sequenceIndex = 0
-                foreach ($name in $names) {
-                    if ($name -ceq $ExpectedSequence[$sequenceIndex]) {
-                        $sequenceIndex += 1
-                        if ($sequenceIndex -eq $ExpectedSequence.Count) { return }
+                foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow)) {
+                    $names = New-Object 'System.Collections.Generic.List[string]'
+                    if ($searchRoot.Current.Name) { $names.Add($searchRoot.Current.Name) }
+                    $descendants = $searchRoot.FindAll(
+                        [System.Windows.Automation.TreeScope]::Descendants,
+                        [System.Windows.Automation.Condition]::TrueCondition
+                    )
+                    foreach ($element in $descendants) {
+                        if ($element.Current.Name) { $names.Add($element.Current.Name) }
+                    }
+                    $sequenceIndex = 0
+                    foreach ($name in $names) {
+                        if ($name -ceq $ExpectedSequence[$sequenceIndex]) {
+                            $sequenceIndex += 1
+                            if ($sequenceIndex -eq $ExpectedSequence.Count) { return }
+                        }
                     }
                 }
             } catch [System.Windows.Automation.ElementNotAvailableException] {
                 continue
             }
         }
-        throw "Expected ordered bound UI Automation text sequence did not appear: $($ExpectedSequence -join ' -> ')."
+        throw "Expected ordered bound UI Automation text sequence did not appear in one bound search root: $($ExpectedSequence -join ' -> ')."
     }
 
     function Wait-DescendantName(
