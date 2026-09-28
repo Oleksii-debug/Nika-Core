@@ -474,21 +474,25 @@
     return comparison.validated === true && validModelResult(comparison.model_result);
   }
 
-  function validFinalResult(result, taskId, teamId) {
+  function validFinalResult(result, taskId, teamId, teamState) {
     if (result == null) return true;
-    return Boolean(
-      result
-      && typeof result === "object"
-      && !Array.isArray(result)
-      && Object.prototype.hasOwnProperty.call(finalMessages, result.status)
-      && result.task_id === taskId
-      && result.team_id === teamId
-      && Number.isInteger(result.terminal_member_count)
-      && result.terminal_member_count >= 0
-      && Number.isInteger(result.result_record_count)
-      && result.result_record_count >= 0
-      && validComparison(result.comparison),
-    );
+    if (
+      !result
+      || typeof result !== "object"
+      || Array.isArray(result)
+      || !Object.prototype.hasOwnProperty.call(finalMessages, result.status)
+      || result.status !== teamState
+      || result.task_id !== taskId
+      || result.team_id !== teamId
+      || !Number.isInteger(result.terminal_member_count)
+      || result.terminal_member_count < 0
+      || !Number.isInteger(result.result_record_count)
+      || result.result_record_count < 0
+    ) {
+      return false;
+    }
+    if (result.comparison != null && result.status !== "completed") return false;
+    return validComparison(result.comparison);
   }
 
   function validTeamTaskProjection(projection) {
@@ -538,7 +542,7 @@
     if (!team.roster_complete
         && (team.state === "completed" || finalResult?.status === "completed")) return false;
     if (!Array.isArray(events) || !events.every(validTeamEvent)) return false;
-    return validFinalResult(finalResult, task.task_id, team.team_id);
+    return validFinalResult(finalResult, task.task_id, team.team_id, team.state);
   }
 
   function appendDefinitionItem(list, term, value) {

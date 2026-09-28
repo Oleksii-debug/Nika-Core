@@ -576,6 +576,35 @@ def test_renderer_rejects_noncanonical_model_identity(
     assert rejected["summary_hidden"] is True
 
 
+@pytest.mark.parametrize(
+    ("team_state", "final_status"),
+    [
+        ("failed", "completed"),
+        ("failed", "failed"),
+        ("cancelled", "cancelled"),
+    ],
+)
+def test_renderer_rejects_model_result_outside_coherent_completed_state(
+    team_state: str,
+    final_status: str,
+) -> None:
+    projection = _model_result_projection()
+    team = projection["team"]
+    final_result = projection["final_result"]
+    assert isinstance(team, dict)
+    assert isinstance(final_result, dict)
+    team["state"] = team_state
+    final_result["status"] = final_status
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+    assert "Перевірена відповідь <b>лишається текстом</b> & не HTML." not in str(
+        rejected["rendered"]
+    )
+
+
 def test_renderer_uses_explicit_no_model_fallback_for_deterministic_result() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
