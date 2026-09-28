@@ -902,32 +902,38 @@ class ProductFactoryProgramHost:
 async def _settle_work_batch(
     operations: tuple[Awaitable[ProgramWorkOutcome], ...],
 ) -> tuple[ProgramWorkOutcome, ...]:
-    """Cancel and settle sibling work before propagating an uncontained batch failure."""
+    """Cancel and settle siblings before propagating any uncontained child failure."""
 
     tasks = tuple(asyncio.ensure_future(operation) for operation in operations)
     if not tasks:
         return ()
+
+    pending: set[asyncio.Future[ProgramWorkOutcome]] = set(tasks)
     try:
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_EXCEPTION)
+        while pending:
+            done, pending = await asyncio.wait(
+                pending,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            first_error: BaseException | None = None
+            for task in tasks:
+                if task not in done:
+                    continue
+                if task.cancelled():
+                    if first_error is None:
+                        first_error = asyncio.CancelledError()
+                    continue
+                error = task.exception()
+                if error is not None and first_error is None:
+                    first_error = error
+
+            if first_error is not None:
+                await _cancel_work_batch_tasks(tuple(pending))
+                raise first_error
     except asyncio.CancelledError:
         await _cancel_work_batch_tasks(tasks)
         raise
-
-    first_error: BaseException | None = None
-    for task in tasks:
-        if task not in done:
-            continue
-        if task.cancelled():
-            if first_error is None:
-                first_error = asyncio.CancelledError()
-            continue
-        error = task.exception()
-        if error is not None and first_error is None:
-            first_error = error
-
-    if first_error is not None:
-        await _cancel_work_batch_tasks(tuple(pending))
-        raise first_error
 
     return tuple(task.result() for task in tasks)
 
