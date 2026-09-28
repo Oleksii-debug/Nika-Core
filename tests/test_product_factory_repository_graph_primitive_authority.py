@@ -212,6 +212,51 @@ def test_integration_decision_authority_collections_require_exact_tuple() -> Non
         )
 
 
+
+@pytest.mark.parametrize("evidence_ref", ("", "   ", "\t"))
+def test_integration_decision_requires_nonempty_evidence_ref(evidence_ref: str) -> None:
+    with pytest.raises(
+        RepositoryGraphError,
+        match="integration decision evidence ref must not be empty",
+    ):
+        IntegrationDecision(
+            "decision:blank-evidence",
+            IntegrationDecisionKind.RECONCILE,
+            ("lease:candidate", "lease:active"),
+            "integration authority requires real evidence",
+            (evidence_ref,),
+        )
+
+
+def test_assess_lease_revalidates_blank_evidence_after_constructor_bypass() -> None:
+    graph = _graph()
+    candidate = OwnershipLease(
+        "lease:candidate",
+        "worker:b",
+        ("app",),
+        ("src/api/routes",),
+    )
+    active = OwnershipLease(
+        "lease:active",
+        "worker:a",
+        ("app",),
+        ("src/api",),
+    )
+    decision = IntegrationDecision(
+        "decision:reconcile",
+        IntegrationDecisionKind.RECONCILE,
+        ("lease:candidate", "lease:active"),
+        "validated evidence is required",
+        ("evidence:review",),
+    )
+    object.__setattr__(decision, "evidence_refs", ("   ",))
+
+    with pytest.raises(
+        RepositoryGraphError,
+        match="integration decision evidence ref must not be empty",
+    ):
+        graph.assess_lease(candidate, (active,), decision=decision)
+
 def test_graph_authority_collections_require_exact_tuple_before_iteration() -> None:
     repository = RepositoryRef("repo:app", "github", "owner/app", "main")
     component = ProductComponent("app", "repo:app", ("src",))
