@@ -17,7 +17,6 @@ from nika_core.model_gateway.contracts import (
     ProviderKind,
 )
 
-
 _MAX_ID_UTF8_BYTES = 256
 _MAX_TIMEOUT_SECONDS = 3600.0
 
