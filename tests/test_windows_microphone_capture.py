@@ -1,0 +1,261 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from nika_core.microphone_capture import (
+    MicrophoneCaptureAdapterError,
+    MicrophoneCapturePolicy,
+    MicrophoneCaptureRequest,
+)
+from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureAdapter
+
+
+class _CallbackStop(Exception):
+    pass
+
+
+class _CallbackAbort(Exception):
+    pass
+
+
+class _FakeRawInputStream:
+    def __init__(self, owner: _FakeSoundDevice, **kwargs) -> None:
+        self.owner = owner
+        self.kwargs = kwargs
+        self.started = False
+        self.aborted = False
+        self.closed = False
+
+    def start(self) -> None:
+        self.started = True
+        if self.owner.hold_open:
+            return
+        callback = self.kwargs["callback"]
+        for raw, frames, status in self.owner.callback_blocks:
+            try:
+                callback(raw, frames, None, status)
+            except (_CallbackStop, _CallbackAbort):
+                break
+
+    def abort(self, *, ignore_errors: bool = True) -> None:
+        assert ignore_errors is True
+        self.aborted = True
+
+    def close(self, *, ignore_errors: bool = True) -> None:
+        assert ignore_errors is True
+        self.closed = True
+
+
+class _FakeSoundDevice:
+    CallbackStop = _CallbackStop
+    CallbackAbort = _CallbackAbort
+
+    def __init__(self) -> None:
+        self.default_input_device = 7
+        self.device_host_api = 1
+        self.raw_device_name = "SECRET-RAW-MICROPHONE-NAME"
+        self.callback_blocks = [
+            (b"\x01\x00" * 3, 3, False),
+            (b"\x02\x00" * 4, 4, False),
+        ]
+        self.hold_open = False
+        self.fail_check = False
+        self.settings_calls: list[dict[str, object]] = []
+        self.check_calls: list[dict[str, object]] = []
+        self.streams: list[_FakeRawInputStream] = []
+
+    def query_hostapis(self):
+        return (
+            {"name": "Windows MME", "default_input_device": 1},
+            {"name": "Windows WASAPI", "default_input_device": self.default_input_device},
+        )
+
+    def query_devices(self, device_index: int):
+        return {
+            "name": self.raw_device_name,
+            "index": device_index,
+            "hostapi": self.device_host_api,
+            "max_input_channels": 2,
+            "default_samplerate": 48_000.0,
+        }
+
+    def WasapiSettings(self, **kwargs):
+        self.settings_calls.append(dict(kwargs))
+        return ("wasapi-settings", dict(kwargs))
+
+    def check_input_settings(self, **kwargs) -> None:
+        self.check_calls.append(dict(kwargs))
+        if self.fail_check:
+            raise RuntimeError(f"unsupported format on {self.raw_device_name}")
+
+    def RawInputStream(self, **kwargs):
+        stream = _FakeRawInputStream(self, **kwargs)
+        self.streams.append(stream)
+        return stream
+
+
+def _adapter(sd: _FakeSoundDevice | None = None) -> WindowsWasapiMicrophoneCaptureAdapter:
+    return WindowsWasapiMicrophoneCaptureAdapter(
+        sounddevice_module=sd or _FakeSoundDevice(),
+        platform_name="win32",
+    )
+
+
+def _request(
+    adapter: WindowsWasapiMicrophoneCaptureAdapter,
+    *,
+    sample_count: int = 5,
+) -> MicrophoneCaptureRequest:
+    capabilities = adapter.capabilities
+    return MicrophoneCaptureRequest(
+        request_id="physical-capture-1",
+        provider_id=capabilities.provider_id,
+        device_id=capabilities.device_id,
+        sample_rate_hz=16_000,
+        sample_count=sample_count,
+        policy=MicrophoneCapturePolicy(timeout_seconds=1.0),
+    )
+
+
+def test_capabilities_use_only_wasapi_and_hide_raw_device_name() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+
+    capabilities = adapter.capabilities
+
+    assert capabilities.provider_id == "sounddevice-wasapi"
+    assert capabilities.device_id == "wasapi-device-7"
+    assert capabilities.min_sample_rate_hz == 8_000
+    assert capabilities.max_sample_rate_hz == 48_000
+    assert sd.raw_device_name not in repr(capabilities)
+
+
+def test_capture_returns_exact_pcm16_and_uses_wasapi_shared_conversion() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+    request = _request(adapter)
+
+    response = asyncio.run(adapter.capture(request))
+
+    assert response.request_id == request.request_id
+    assert response.provider_id == "sounddevice-wasapi"
+    assert response.device_id == "wasapi-device-7"
+    assert response.sample_rate_hz == 16_000
+    assert response.pcm_s16le == b"\x01\x00" * 3 + b"\x02\x00" * 2
+    assert response.latency_ms >= 0.0
+    assert sd.settings_calls[-1] == {
+        "exclusive": False,
+        "auto_convert": True,
+        "explicit_sample_format": False,
+    }
+    assert sd.check_calls[-1]["device"] == 7
+    assert sd.check_calls[-1]["channels"] == 1
+    assert sd.check_calls[-1]["dtype"] == "int16"
+    assert sd.check_calls[-1]["samplerate"] == 16_000
+    stream = sd.streams[-1]
+    assert stream.kwargs["blocksize"] == 0
+    assert stream.kwargs["latency"] == "high"
+    assert stream.started is True
+    assert stream.aborted is True
+    assert stream.closed is True
+    assert sd.raw_device_name not in repr(response)
+
+
+def test_non_windows_platform_fails_closed_without_backend_use() -> None:
+    sd = _FakeSoundDevice()
+    adapter = WindowsWasapiMicrophoneCaptureAdapter(
+        sounddevice_module=sd,
+        platform_name="linux",
+    )
+
+    with pytest.raises(MicrophoneCaptureAdapterError, match="unavailable on this platform"):
+        _ = adapter.capabilities
+
+    assert sd.check_calls == []
+    assert sd.streams == []
+
+
+def test_no_wasapi_host_never_falls_back_to_mme() -> None:
+    sd = _FakeSoundDevice()
+    sd.query_hostapis = lambda: ({"name": "Windows MME", "default_input_device": 1},)
+    adapter = _adapter(sd)
+
+    with pytest.raises(MicrophoneCaptureAdapterError, match="No default Windows WASAPI"):
+        _ = adapter.capabilities
+
+    assert sd.streams == []
+
+
+def test_default_endpoint_drift_is_rejected_before_stream_start() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+    request = _request(adapter)
+    sd.default_input_device = 8
+
+    with pytest.raises(MicrophoneCaptureAdapterError, match="route changed"):
+        asyncio.run(adapter.capture(request))
+
+    assert sd.check_calls == []
+    assert sd.streams == []
+
+
+def test_unsupported_input_format_is_minimized_and_has_no_stream_effect() -> None:
+    sd = _FakeSoundDevice()
+    sd.fail_check = True
+    adapter = _adapter(sd)
+    request = _request(adapter)
+
+    with pytest.raises(MicrophoneCaptureAdapterError) as caught:
+        asyncio.run(adapter.capture(request))
+
+    assert sd.raw_device_name not in str(caught.value)
+    assert caught.value.__suppress_context__ is True
+    assert sd.streams == []
+
+
+def test_callback_status_fails_closed_without_returning_partial_audio() -> None:
+    sd = _FakeSoundDevice()
+    sd.callback_blocks = [(b"\x01\x00" * 5, 5, True)]
+    adapter = _adapter(sd)
+    request = _request(adapter)
+
+    with pytest.raises(MicrophoneCaptureAdapterError, match="invalid audio"):
+        asyncio.run(adapter.capture(request))
+
+    assert sd.streams[-1].aborted is True
+    assert sd.streams[-1].closed is True
+
+
+def test_short_callback_buffer_fails_closed() -> None:
+    sd = _FakeSoundDevice()
+    sd.callback_blocks = [(b"\x01\x00", 5, False)]
+    adapter = _adapter(sd)
+    request = _request(adapter)
+
+    with pytest.raises(MicrophoneCaptureAdapterError, match="invalid audio"):
+        asyncio.run(adapter.capture(request))
+
+    assert sd.streams[-1].aborted is True
+    assert sd.streams[-1].closed is True
+
+
+def test_caller_cancellation_aborts_and_closes_physical_stream() -> None:
+    async def scenario() -> None:
+        sd = _FakeSoundDevice()
+        sd.hold_open = True
+        adapter = _adapter(sd)
+        request = _request(adapter)
+        task = asyncio.create_task(adapter.capture(request))
+        await asyncio.sleep(0)
+        assert sd.streams[-1].started is True
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        assert sd.streams[-1].aborted is True
+        assert sd.streams[-1].closed is True
+
+    asyncio.run(scenario())
