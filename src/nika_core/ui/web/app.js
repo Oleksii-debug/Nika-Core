@@ -408,7 +408,10 @@
         || keys.some((key, index) => key !== expectedKeys[index])) return false;
     return Boolean(
       typeof result.text === "string"
-      && result.text.trim()
+      && result.text.length > 0
+      && result.text.length <= 2000
+      && result.text === result.text.trim()
+      && !result.text.includes("\0")
       && typeof result.provider_id === "string"
       && result.provider_id.trim()
       && typeof result.provider_kind === "string"
