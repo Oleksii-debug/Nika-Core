@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 import pytest
 
 from nika_core.microphone_capture import (
     MicrophoneCaptureAdapterError,
+    MicrophoneCaptureFailureCode,
     MicrophoneCapturePolicy,
     MicrophoneCaptureRequest,
+    MicrophoneCaptureService,
+    MicrophoneCaptureStatus,
 )
 from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureAdapter
 
@@ -66,13 +70,13 @@ class _FakeSoundDevice:
         self.check_calls: list[dict[str, object]] = []
         self.streams: list[_FakeRawInputStream] = []
 
-    def query_hostapis(self):
+    def query_hostapis(self) -> tuple[dict[str, object], ...]:
         return (
             {"name": "Windows MME", "default_input_device": 1},
             {"name": "Windows WASAPI", "default_input_device": self.default_input_device},
         )
 
-    def query_devices(self, device_index: int):
+    def query_devices(self, device_index: int) -> dict[str, object]:
         return {
             "name": self.raw_device_name,
             "index": device_index,
@@ -81,7 +85,7 @@ class _FakeSoundDevice:
             "default_samplerate": 48_000.0,
         }
 
-    def WasapiSettings(self, **kwargs):
+    def WasapiSettings(self, **kwargs):  # noqa: N802 - mirrors sounddevice API
         self.settings_calls.append(dict(kwargs))
         return ("wasapi-settings", dict(kwargs))
 
@@ -90,7 +94,7 @@ class _FakeSoundDevice:
         if self.fail_check:
             raise RuntimeError(f"unsupported format on {self.raw_device_name}")
 
-    def RawInputStream(self, **kwargs):
+    def RawInputStream(self, **kwargs):  # noqa: N802 - mirrors sounddevice API
         stream = _FakeRawInputStream(self, **kwargs)
         self.streams.append(stream)
         return stream
@@ -119,6 +123,11 @@ def _request(
     )
 
 
+def _expected_device_id(sd: _FakeSoundDevice) -> str:
+    material = f"{sd.device_host_api}\x00{sd.default_input_device}\x00{sd.raw_device_name}"
+    return f"wasapi-device-sha256:{hashlib.sha256(material.encode('utf-8')).hexdigest()}"
+
+
 def test_capabilities_use_only_wasapi_and_hide_raw_device_name() -> None:
     sd = _FakeSoundDevice()
     adapter = _adapter(sd)
@@ -126,7 +135,7 @@ def test_capabilities_use_only_wasapi_and_hide_raw_device_name() -> None:
     capabilities = adapter.capabilities
 
     assert capabilities.provider_id == "sounddevice-wasapi"
-    assert capabilities.device_id == "wasapi-device-7"
+    assert capabilities.device_id == _expected_device_id(sd)
     assert capabilities.min_sample_rate_hz == 8_000
     assert capabilities.max_sample_rate_hz == 48_000
     assert sd.raw_device_name not in repr(capabilities)
@@ -141,7 +150,7 @@ def test_capture_returns_exact_pcm16_and_uses_wasapi_shared_conversion() -> None
 
     assert response.request_id == request.request_id
     assert response.provider_id == "sounddevice-wasapi"
-    assert response.device_id == "wasapi-device-7"
+    assert response.device_id == request.device_id
     assert response.sample_rate_hz == 16_000
     assert response.pcm_s16le == b"\x01\x00" * 3 + b"\x02\x00" * 2
     assert response.latency_ms >= 0.0
@@ -161,6 +170,19 @@ def test_capture_returns_exact_pcm16_and_uses_wasapi_shared_conversion() -> None
     assert stream.aborted is True
     assert stream.closed is True
     assert sd.raw_device_name not in repr(response)
+
+
+def test_adapter_composes_through_canonical_microphone_service() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+    request = _request(adapter)
+
+    result = asyncio.run(MicrophoneCaptureService(adapter).capture(request))
+
+    assert result.evidence.status is MicrophoneCaptureStatus.SUCCEEDED
+    assert result.evidence.error_code is None
+    assert result.pcm_s16le == b"\x01\x00" * 3 + b"\x02\x00" * 2
+    assert sd.raw_device_name not in repr(result.evidence.as_dict())
 
 
 def test_non_windows_platform_fails_closed_without_backend_use() -> None:
@@ -193,6 +215,19 @@ def test_default_endpoint_drift_is_rejected_before_stream_start() -> None:
     adapter = _adapter(sd)
     request = _request(adapter)
     sd.default_input_device = 8
+
+    with pytest.raises(MicrophoneCaptureAdapterError, match="route changed"):
+        asyncio.run(adapter.capture(request))
+
+    assert sd.check_calls == []
+    assert sd.streams == []
+
+
+def test_same_index_endpoint_replacement_is_rejected_before_stream_start() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+    request = _request(adapter)
+    sd.raw_device_name = "REPLACEMENT-MICROPHONE-SAME-INDEX"
 
     with pytest.raises(MicrophoneCaptureAdapterError, match="route changed"):
         asyncio.run(adapter.capture(request))
