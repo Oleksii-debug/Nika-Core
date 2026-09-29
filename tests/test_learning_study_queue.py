@@ -733,3 +733,79 @@ def test_oidc_id_token_references_are_rejected_but_count_remains_public(tmp_path
 
     assert fresh.material.source_ref == safe_ref
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("material_id", "book-\ud800"),
+        ("title", "title-\ud800"),
+        ("source_ref", "https://example.test/\ud800"),
+        ("source_version", "version-\ud800"),
+        ("learning_goal", "goal-\ud800"),
+    ],
+)
+def test_material_rejects_non_utf8_text_at_public_ingress(
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(ValueError, match=f"{field} must be valid UTF-8 text"):
+        _material(**{field: value})
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("workspace_id", "workspace-\ud800"),
+        ("agent_id", "agent-\ud800"),
+    ],
+)
+def test_enqueue_rejects_non_utf8_identity_before_durable_write(
+    tmp_path,
+    field: str,
+    value: str,
+) -> None:
+    _, tasks, queue = _services(tmp_path)
+    kwargs = {
+        "workspace_id": "study",
+        "agent_id": "reader",
+        "material": _material(material_id="utf8-identity"),
+    }
+    kwargs[field] = value
+
+    with pytest.raises(ValueError, match=f"{field} must be valid UTF-8 text"):
+        queue.enqueue(**kwargs)
+
+    with tasks.store.connection() as conn:
+        task_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM tasks"
+        ).fetchone()["count"]
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events"
+        ).fetchone()["count"]
+    assert task_count == 0
+    assert event_count == 0
+
+
+def test_enqueue_revalidates_non_utf8_mutated_material_before_durable_write(
+    tmp_path,
+) -> None:
+    _, tasks, queue = _services(tmp_path)
+    material = _material(material_id="mutated-non-utf8")
+    object.__setattr__(material, "title", "mutated-\ud800")
+
+    with pytest.raises(ValueError, match="title must be valid UTF-8 text"):
+        queue.enqueue(
+            workspace_id="study",
+            agent_id="reader",
+            material=material,
+        )
+
+    with tasks.store.connection() as conn:
+        task_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM tasks"
+        ).fetchone()["count"]
+        event_count = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events"
+        ).fetchone()["count"]
+    assert task_count == 0
+    assert event_count == 0
+
