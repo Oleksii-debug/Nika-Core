@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 import pytest
@@ -789,6 +789,75 @@ def test_behavioral_text_and_datetime_carriers_fail_before_behavior(tmp_path: Pa
         )
 
     assert scheduler.upserts == []
+    assert calls == []
+
+
+def test_datetime_timezone_carrier_fails_before_behavior(tmp_path: Path) -> None:
+    class BehavioralTimezone(tzinfo):
+        def utcoffset(self, dt: datetime | None) -> timedelta:
+            del dt
+            raise AssertionError("behavioral timezone offset must not run")
+
+        def dst(self, dt: datetime | None) -> timedelta:
+            del dt
+            raise AssertionError("behavioral timezone dst must not run")
+
+        def tzname(self, dt: datetime | None) -> str:
+            del dt
+            raise AssertionError("behavioral timezone name must not run")
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    hostile_time = datetime(
+        2030,
+        1,
+        1,
+        12,
+        0,
+        tzinfo=BehavioralTimezone(),
+    )
+
+    with pytest.raises(ValueError, match="canonical fixed offset"):
+        service.create(
+            recurrence_id="hostile-start-timezone",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=hostile_time,
+        )
+
+    clock.value = hostile_time
+    valid_start = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    with pytest.raises(ValueError, match="canonical fixed offset"):
+        service.create(
+            recurrence_id="hostile-clock-timezone",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=valid_start,
+            deadline_at=valid_start + timedelta(hours=1),
+        )
+
+    clock.value = valid_start
+    fixed_offset_start = datetime(
+        2030,
+        1,
+        1,
+        14,
+        0,
+        tzinfo=timezone(timedelta(hours=2)),
+    )
+    created = service.create(
+        recurrence_id="fixed-offset-timezone",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=fixed_offset_start,
+    )
+    assert created.anchor_at == valid_start
+    assert len(scheduler.upserts) == 1
     assert calls == []
 
 
