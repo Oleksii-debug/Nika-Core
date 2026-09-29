@@ -443,7 +443,13 @@ def _decode_job(
         raise ValueError("durable recurrence job has an unexpected action_id")
     if job.trigger_kind is not TriggerKind.DATE:
         raise ValueError("durable recurrence job must use a DATE trigger")
-    if type(job.trigger) is not dict or set(job.trigger) != {"run_date"}:
+    if type(job.trigger) is not dict:
+        raise ValueError("durable recurrence trigger shape is corrupt")
+    trigger = _detached_exact_key_dict(
+        job.trigger,
+        label="durable recurrence trigger",
+    )
+    if len(trigger) != 1 or "run_date" not in trigger:
         raise ValueError("durable recurrence trigger shape is corrupt")
     if type(job.coalesce) is not bool or job.coalesce is not True:
         raise ValueError("durable recurrence coalesce policy is corrupt")
@@ -453,16 +459,24 @@ def _decode_job(
         raise ValueError("durable recurrence misfire policy is corrupt")
     if type(job.payload) is not dict:
         raise TypeError("durable recurrence payload is corrupt")
+    persisted_payload = _detached_exact_key_dict(
+        job.payload,
+        label="durable recurrence payload",
+    )
     scheduled_recurrence_id = _required_text(
-        job.payload.get("recurrence_id"),
+        persisted_payload.get("recurrence_id"),
         "scheduled recurrence_id",
     )
     if scheduled_recurrence_id != expected_recurrence_id:
         raise ValueError("durable recurrence scheduled identity mismatch")
-    metadata = job.payload.get(_RECURRENCE_PAYLOAD_KEY)
-    target_payload = job.payload.get(_TARGET_PAYLOAD_KEY)
+    metadata = persisted_payload.get(_RECURRENCE_PAYLOAD_KEY)
+    target_payload = persisted_payload.get(_TARGET_PAYLOAD_KEY)
     if type(metadata) is not dict or type(target_payload) is not dict:
         raise TypeError("durable recurrence payload is corrupt")
+    metadata = _detached_exact_key_dict(
+        metadata,
+        label="durable recurrence metadata",
+    )
     target_payload = _canonical_payload(target_payload)
     version = metadata.get("version")
     if type(version) is not int or version != _RECURRENCE_VERSION:
@@ -472,7 +486,7 @@ def _decode_job(
         raise ValueError("durable recurrence identity mismatch")
     task_id = _canonical_task_id(metadata.get("task_id"), label="persisted task_id")
     top_level_task_id = _canonical_task_id(
-        job.payload.get(_TASK_ID_KEY),
+        persisted_payload.get(_TASK_ID_KEY),
         label="scheduled task_id",
     )
     if top_level_task_id != task_id:
@@ -544,7 +558,7 @@ def _decode_job(
     if job.enabled != (status is RecurrenceStatus.ACTIVE and next_due is not None):
         raise ValueError("durable recurrence enabled state does not match lifecycle state")
     expected_run_date = next_due or last_due or anchor
-    run_date_raw = job.trigger.get("run_date")
+    run_date_raw = trigger.get("run_date")
     if type(run_date_raw) is not str or run_date_raw != _iso(expected_run_date):
         raise ValueError("durable recurrence trigger run_date is corrupt")
     state = RecurrenceState(
@@ -562,7 +576,7 @@ def _decode_job(
         last_completed_occurrence_id=last_id,
         terminal_reason=terminal_reason,
     )
-    persisted_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
+    persisted_binding = persisted_payload.get(IMMUTABLE_JOB_BINDING_KEY)
     expected_binding = _definition_fingerprint(
         recurrence_id=state.recurrence_id,
         task_id=state.task_id,
@@ -692,6 +706,19 @@ def _require_aware_utc(value: datetime, label: str) -> datetime:
 
 def _iso(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
+
+
+def _detached_exact_key_dict(
+    value: dict[str, Any],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    detached: dict[str, Any] = {}
+    for key, item in value.items():
+        if type(key) is not str:
+            raise TypeError(f"{label} keys must be exact strings")
+        detached[key] = item
+    return detached
 
 
 def _canonical_task_id(value: object, *, label: str = "task_id") -> str:
