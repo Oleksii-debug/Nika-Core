@@ -268,6 +268,55 @@ def test_mcp_routing_segments_are_bounded() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    "tool_name",
+    ["publish name", "publish\nshadow", "públish", "publish$"],
+)
+def test_direct_call_rejects_noncanonical_mcp_tool_names(tool_name: str) -> None:
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    with pytest.raises(ValueError, match="MCP tool name must use only"):
+        asyncio.run(
+            adapter.call(
+                ToolCall(
+                    call_id="mcp-invalid-tool-name-1",
+                    tool_id=f"mcp:safety:{tool_name}",
+                    arguments={},
+                )
+            )
+        )
+
+
+@pytest.mark.parametrize(
+    "tool_name",
+    ["publish name", "publish\nshadow", "públish", "publish$"],
+)
+def test_list_tools_rejects_noncanonical_mcp_tool_names(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+) -> None:
+    fake_client = _list_tools_client(
+        {None: ([_listed_tool(tool_name)], None)}
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    with pytest.raises(ValueError, match="MCP tool name must use only"):
+        asyncio.run(adapter.list_tools())
+
+
 def test_list_tools_rejects_duplicate_canonical_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any
 
 from mcp import Client
@@ -19,6 +20,7 @@ from nika_core.tools import (
 _MAX_MCP_SEGMENT_CHARS = 128
 _MAX_MCP_CURSOR_BYTES = 4096
 _MAX_MCP_LIST_PAGES = 1000
+_MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
 def _exact_utf8_text(
@@ -48,6 +50,15 @@ def _exact_mcp_segment(value: object, *, field: str) -> str:
         raise ValueError(f"{field} must not contain edge whitespace")
     if ":" in text:
         raise ValueError(f"{field} must not contain ':'")
+    return text
+
+
+def _exact_mcp_tool_name(value: object) -> str:
+    text = _exact_mcp_segment(value, field="MCP tool name")
+    if _MCP_TOOL_NAME_RE.fullmatch(text) is None:
+        raise ValueError(
+            "MCP tool name must use only A-Z, a-z, 0-9, '_', '-' or '.'"
+        )
     return text
 
 
@@ -154,10 +165,7 @@ class MCPClientAdapter:
                     raise TypeError("MCP tools page must contain an exact list")
 
                 for tool in page_tools:
-                    tool_name = _exact_mcp_segment(
-                        tool.name,
-                        field="MCP tool name",
-                    )
+                    tool_name = _exact_mcp_tool_name(tool.name)
                     tool_id = f"mcp:{self._server_id}:{tool_name}"
                     if tool_id in seen_tool_ids:
                         raise ValueError(f"duplicate MCP tool id: {tool_id}")
@@ -194,7 +202,7 @@ class MCPClientAdapter:
                 tool_id=canonical_call.tool_id,
                 error="invalid MCP tool id",
             )
-        tool_name = _exact_mcp_segment(tool_name, field="MCP tool name")
+        tool_name = _exact_mcp_tool_name(tool_name)
         spec = ToolSpec(
             tool_id=canonical_call.tool_id,
             description=f"MCP tool {tool_name}",
