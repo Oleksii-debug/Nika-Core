@@ -37,6 +37,7 @@ from nika_core.runtime.idempotency import (
 from nika_core.toolsmith.contracts import RecoveryState
 
 _OPERATION_TYPE = "product_factory.coding_worker"
+_EFFECT_CANCEL_GRACE_SECONDS = 0.1
 _T = TypeVar("_T")
 
 
@@ -1118,8 +1119,21 @@ async def _cancel_effect_task(task: asyncio.Future) -> None:
     if task.done():
         return
     task.cancel()
+    done, _ = await asyncio.wait((task,), timeout=_EFFECT_CANCEL_GRACE_SECONDS)
+    if done:
+        with suppress(asyncio.CancelledError, Exception):
+            task.result()
+        return
+
+    # Foreign worker coroutines are not trusted to cooperate with cancellation.
+    # Once Product Factory authority is lost, cleanup must not hold the host
+    # indefinitely. Keep the task detached and consume any eventual exception.
+    task.add_done_callback(_consume_detached_task_result)
+
+
+def _consume_detached_task_result(task: asyncio.Future) -> None:
     with suppress(asyncio.CancelledError, Exception):
-        await task
+        task.result()
 
 
 def _operation_key(request: ComponentWorkRequest) -> str:
