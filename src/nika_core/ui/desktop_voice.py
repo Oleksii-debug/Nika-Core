@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -189,6 +190,42 @@ class DesktopVoiceTurnController:
         with self._lock:
             self._reap_cancelled_settlement_locked()
             return self._snapshot.as_dict()
+
+    def close(self, *, timeout_seconds: float = 5.0) -> None:
+        if type(timeout_seconds) not in (int, float):
+            raise TypeError("timeout_seconds must be an exact number")
+        try:
+            timeout = float(timeout_seconds)
+        except OverflowError:
+            timeout = float("inf")
+        if not math.isfinite(timeout) or timeout <= 0.0 or timeout > 30.0:
+            raise ValueError("timeout_seconds must be finite and in the range (0, 30]")
+
+        with self._lock:
+            self._reap_cancelled_settlement_locked()
+            active = self._active
+            started = self._active_started
+            settled = self._active_settled
+        if active is None:
+            return
+
+        if not active.done():
+            active.cancel()
+
+        if (
+            started is not None
+            and started.is_set()
+            and settled is not None
+            and not settled.wait(timeout=timeout)
+        ):
+            raise RuntimeError(
+                "voice coroutine did not settle before the desktop shutdown deadline"
+            )
+
+        with self._lock:
+            self._reap_cancelled_settlement_locked()
+            if self._active is active and active.done() and not active.cancelled():
+                raise RuntimeError("voice completion callback did not settle controller state")
 
     async def _execute(
         self,
