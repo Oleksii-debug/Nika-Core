@@ -29,7 +29,7 @@ class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="NIKA_",
         case_sensitive=False,
-        extra="ignore",
+        extra="forbid",
         validate_default=True,
         populate_by_name=True,
     )
