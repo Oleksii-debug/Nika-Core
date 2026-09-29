@@ -223,6 +223,45 @@ def test_upsert_uses_durable_job_after_caller_payload_mutation(tmp_path) -> None
 
 
 
+def test_upsert_audits_final_suppressed_durable_state(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Upsert Audit Authority" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    terminal_id = _task(queue, terminal=TaskState.CANCELLED)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda _action_id: lambda _payload: None,
+        audit=audit,
+    )
+    adapter.start()
+
+    adapter.upsert(
+        _date_job(
+            job_id="job-terminal-upsert",
+            action_id="terminal",
+            run_at=datetime.now(UTC) + timedelta(days=1),
+            payload={"task_id": terminal_id},
+        )
+    )
+
+    durable = jobs.get("job-terminal-upsert")
+    events = audit.list_for(
+        entity_type="scheduled_job",
+        entity_id="job-terminal-upsert",
+    )
+    assert durable is not None
+    assert durable.enabled is False
+    assert not adapter.has_runtime_job("job-terminal-upsert")
+    assert [event.event_type for event in events] == [
+        "scheduler.job_suppressed_task_authority",
+        "scheduler.job_upserted",
+    ]
+    assert events[-1].payload["enabled"] is False
+    adapter.shutdown(wait=False)
+
+
 def test_start_reloads_durable_job_before_live_install(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Start Install Fence" / "nika core.db")
     store.initialize()
