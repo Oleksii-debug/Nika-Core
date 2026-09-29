@@ -458,6 +458,35 @@ def test_forged_nested_voice_evidence_fails_closed_without_callback_error() -> N
     assert "evidence" in snapshot.message
 
 
+def test_forged_exact_success_result_cannot_project_unbound_transcript() -> None:
+    async def scenario() -> VoiceTurnResult:
+        return await _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+
+    result = asyncio.run(scenario())
+    object.__setattr__(result, "transcript", "forged transcript")
+
+    snapshot = DesktopVoiceTurnController._result_snapshot("desktop-voice-test", result)
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "доказові" in snapshot.message
+
+
+def test_forged_exact_success_result_cannot_project_unbound_stt_digest() -> None:
+    async def scenario() -> VoiceTurnResult:
+        return await _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+
+    result = asyncio.run(scenario())
+    assert result.evidence.transcription is not None
+    object.__setattr__(result.evidence.transcription, "transcript_sha256", "0" * 64)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot("desktop-voice-test", result)
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "доказові" in snapshot.message
+
+
 def test_behavioral_mapping_payload_is_rejected_without_mapping_methods() -> None:
     class BehavioralDict(dict[str, object]):
         def __bool__(self) -> bool:
