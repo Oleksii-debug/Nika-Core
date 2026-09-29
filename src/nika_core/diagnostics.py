@@ -67,6 +67,20 @@ class DiagnosticReport:
         return "\n".join(lines)
 
 
+def _python_check() -> DiagnosticCheck:
+    version = (sys.version_info.major, sys.version_info.minor)
+    supported = (3, 12) <= version < (3, 14)
+    return DiagnosticCheck(
+        "python",
+        CheckStatus.PASS if supported else CheckStatus.FAIL,
+        (
+            f"Python {version[0]}.{version[1]} runtime is supported."
+            if supported
+            else f"Python {version[0]}.{version[1]} runtime is outside supported 3.12-3.13."
+        ),
+    )
+
+
 def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
     parent = path.parent
     if not parent.exists():
@@ -161,11 +175,7 @@ def collect_diagnostics(config: AppConfig | None = None) -> DiagnosticReport:
             CheckStatus.PASS,
             "Configuration loaded and validated.",
         ),
-        DiagnosticCheck(
-            "python",
-            CheckStatus.PASS,
-            f"Python {sys.version_info.major}.{sys.version_info.minor} runtime is available.",
-        ),
+        _python_check(),
     ]
     checks.extend(_database_checks(config.database_path))
     checks.append(
