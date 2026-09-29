@@ -550,7 +550,7 @@ class FoundryLocalProvider:
                         raise RuntimeError(
                             f"Foundry Local model '{model_id}' remained loaded after unload"
                         )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - continue provider cleanup
                 if first_failure is None:
                     first_failure = exc
                 continue
@@ -565,7 +565,7 @@ class FoundryLocalProvider:
                         raise RuntimeError(
                             "Foundry Local tainted model remained loaded after unload"
                         )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - continue provider cleanup
                 if first_failure is None:
                     first_failure = exc
                 continue
