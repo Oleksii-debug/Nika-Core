@@ -28,6 +28,16 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
     re.IGNORECASE,
 )
 _BEARER_CREDENTIAL = re.compile(r"\bbearer\s+\S+", re.IGNORECASE)
+_AZURE_SHARED_ACCESS_SIGNATURE = re.compile(
+    r"(?:shared[-_ ]?access[-_ ]?signature)\s*[:=]",
+    re.IGNORECASE,
+)
+_AZURE_SAS_SIG = re.compile(r"(?:^|[?&;:\s])sig\s*=", re.IGNORECASE)
+_AZURE_SAS_VERSION = re.compile(r"(?:^|[?&;:\s])sv\s*=", re.IGNORECASE)
+_AZURE_SAS_SCOPE = re.compile(
+    r"(?:^|[?&;:\s])(?:se|sp|sr|ss|srt|si|skoid|sktid)\s*=",
+    re.IGNORECASE,
+)
 _DESCRIPTOR_KEYS = {
     "schema_version",
     "kind",
@@ -463,10 +473,20 @@ def _decoded_views(value: str) -> tuple[str, ...]:
 
 
 def _contains_credential_material(value: str) -> bool:
-    return any(
-        _CREDENTIAL_ASSIGNMENT.search(candidate) is not None
-        or _BEARER_CREDENTIAL.search(candidate) is not None
-        for candidate in _decoded_views(value)
+    return any(_contains_credential_material_view(candidate) for candidate in _decoded_views(value))
+
+
+def _contains_credential_material_view(value: str) -> bool:
+    if (
+        _CREDENTIAL_ASSIGNMENT.search(value) is not None
+        or _BEARER_CREDENTIAL.search(value) is not None
+        or _AZURE_SHARED_ACCESS_SIGNATURE.search(value) is not None
+    ):
+        return True
+    return (
+        _AZURE_SAS_SIG.search(value) is not None
+        and _AZURE_SAS_VERSION.search(value) is not None
+        and _AZURE_SAS_SCOPE.search(value) is not None
     )
 
 
@@ -499,11 +519,7 @@ def _validate_public_reference_view(name: str, text: str) -> None:
 def _public_reference(name: str, value: str) -> str:
     text = _clean_text(name, value)
     views = _decoded_views(text)
-    if any(
-        _CREDENTIAL_ASSIGNMENT.search(candidate) is not None
-        or _BEARER_CREDENTIAL.search(candidate) is not None
-        for candidate in views
-    ):
+    if any(_contains_credential_material_view(candidate) for candidate in views):
         raise ValueError(f"{name} must be public provenance, not credential material")
     for candidate in views:
         _validate_public_reference_view(name, candidate)
