@@ -44,8 +44,20 @@ def build_experiment_definition(
 ) -> ExperimentDefinition:
     """Build an Experiment Engine definition without creating or promoting it."""
 
+    if type(champion) is not ModelCandidate:
+        raise TypeError("champion must be an exact ModelCandidate")
+    if type(challengers) is not tuple:
+        raise TypeError("challengers must be a canonical tuple")
+    if any(type(candidate) is not ModelCandidate for candidate in challengers):
+        raise TypeError("challengers must use exact ModelCandidate values")
+    if type(evaluation_set) is not EvaluationSet:
+        raise TypeError("evaluation_set must be an exact EvaluationSet")
     if type(execution_config) is not BenchmarkExecutionConfig:
         raise TypeError("execution_config must be an exact BenchmarkExecutionConfig")
+    if type(policy) is not PromotionPolicy:
+        raise TypeError("policy must be an exact PromotionPolicy")
+    if type(permission_fingerprint) is not str:
+        raise TypeError("permission_fingerprint must be canonical text")
     if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
         raise ValueError("model promotion experiments require a held-out evaluation set")
     if not challengers:
@@ -86,6 +98,12 @@ def benchmark_observations(
 ) -> tuple[MetricObservation, ...]:
     """Project exact benchmark evidence into its exact Experiment Engine definition."""
 
+    if type(report) is not CandidateBenchmarkReport:
+        raise TypeError("report must be an exact CandidateBenchmarkReport")
+    if type(definition) is not ExperimentDefinition:
+        raise TypeError("definition must be an exact ExperimentDefinition")
+    if type(evaluation_set) is not EvaluationSet:
+        raise TypeError("evaluation_set must be an exact EvaluationSet")
     if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
         raise ValueError("model promotion observations require held-out evidence")
     metrics = _validate_policy_metrics(definition.policy)

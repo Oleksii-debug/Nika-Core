@@ -524,3 +524,80 @@ def test_bridge_rejects_execution_config_subclass_before_digest_access() -> None
             policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
             permission_fingerprint="permissions-v1",
         )
+
+
+class _HostileBridgeEnvelope:
+    @property
+    def purpose(self):
+        raise AssertionError("bridge envelope property executed")
+
+
+class _HostilePermission(str):
+    def strip(self, *args, **kwargs):
+        del args, kwargs
+        raise AssertionError("permission string behavior executed")
+
+
+def test_definition_bridge_fences_envelopes_before_behavior() -> None:
+    policy = PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2)
+    candidate = _candidate("champion", "m1")
+    evaluation = _evaluation(EvaluationPurpose.HELD_OUT)
+
+    with pytest.raises(TypeError, match="champion must be an exact ModelCandidate"):
+        build_experiment_definition(
+            experiment_id="bridge-envelope",
+            champion=_HostileBridgeEnvelope(),  # type: ignore[arg-type]
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=evaluation,
+            execution_config=_execution_config(),
+            policy=policy,
+            permission_fingerprint="permissions-v1",
+        )
+    with pytest.raises(TypeError, match="evaluation_set must be an exact EvaluationSet"):
+        build_experiment_definition(
+            experiment_id="bridge-envelope",
+            champion=candidate,
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=_HostileBridgeEnvelope(),  # type: ignore[arg-type]
+            execution_config=_execution_config(),
+            policy=policy,
+            permission_fingerprint="permissions-v1",
+        )
+    with pytest.raises(TypeError, match="permission_fingerprint must be canonical text"):
+        build_experiment_definition(
+            experiment_id="bridge-envelope",
+            champion=candidate,
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=evaluation,
+            execution_config=_execution_config(),
+            policy=policy,
+            permission_fingerprint=_HostilePermission("permissions-v1"),
+        )
+
+
+def test_observation_bridge_fences_envelopes_before_behavior() -> None:
+    candidate = _candidate("candidate", "m1")
+    evaluation = _evaluation(EvaluationPurpose.HELD_OUT)
+    definition = build_experiment_definition(
+        experiment_id="bridge-observation-envelope",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=_execution_config(),
+        policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+        permission_fingerprint="permissions-v1",
+    )
+    report = _report(candidate, evaluation)
+
+    with pytest.raises(TypeError, match="report must be an exact CandidateBenchmarkReport"):
+        benchmark_observations(
+            _HostileBridgeEnvelope(),  # type: ignore[arg-type]
+            definition=definition,
+            evaluation_set=evaluation,
+        )
+    with pytest.raises(TypeError, match="definition must be an exact ExperimentDefinition"):
+        benchmark_observations(
+            report,
+            definition=_HostileBridgeEnvelope(),  # type: ignore[arg-type]
+            evaluation_set=evaluation,
+        )
