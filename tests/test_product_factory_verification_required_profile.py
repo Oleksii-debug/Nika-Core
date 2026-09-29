@@ -43,3 +43,12 @@ def test_canonical_profile_still_requires_every_exact_head_gate_to_pass() -> Non
 
     assert result.state is verification.VerificationState.PASS
     assert result.merge_clearance is True
+
+
+def test_noncanonical_profile_is_rejected_even_before_evidence_arrives() -> None:
+    with pytest.raises(verification.VerificationError, match="authoritative Product Factory profile"):
+        verification.classify_candidate_verification(
+            SHA,
+            (),
+            ("core",),
+        )
