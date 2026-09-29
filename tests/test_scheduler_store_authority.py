@@ -289,3 +289,25 @@ def test_excessively_deep_persisted_json_fails_closed(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="persisted payload is corrupt"):
         store.get("job-1")
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    (
+        ({"job_id": "job-\ud800"}, "job_id must be valid UTF-8 text"),
+        ({"action_id": "action-\ud800"}, "action_id must be valid UTF-8 text"),
+        ({"payload": {"value": "\ud800"}}, "payload must be valid UTF-8 text"),
+        ({"payload": {"key-\ud800": "value"}}, "payload key must be valid UTF-8 text"),
+    ),
+)
+def test_non_utf8_surrogate_text_is_rejected_before_persistence(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(ValueError, match=message):
+        store.upsert(_job(**overrides))
+
+    assert store.get("job-1") is None
