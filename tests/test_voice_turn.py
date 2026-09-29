@@ -213,6 +213,19 @@ def test_malformed_stt_authority_fails_before_microphone_effect(
     assert stt.calls == []
 
 
+def test_impossible_stt_audio_budget_fails_before_microphone_effect() -> None:
+    microphone = _MicrophoneAdapter()
+    stt = _SttAdapter()
+    request = _request()
+    object.__setattr__(request.stt_policy, "max_audio_bytes", 2)
+
+    with pytest.raises(ValueError, match="max_audio_bytes"):
+        asyncio.run(_service(microphone, stt).run(request))
+
+    assert microphone.calls == 0
+    assert stt.calls == []
+
+
 def test_stt_route_failure_stops_before_wake() -> None:
     microphone = _MicrophoneAdapter()
     stt = _SttAdapter()

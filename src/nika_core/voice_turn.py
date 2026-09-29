@@ -68,6 +68,8 @@ class VoiceTurnRequest:
             raise ValueError(
                 "stt_policy.max_transcript_chars exceeds wake activation bound"
             )
+        if self.capture.expected_audio_bytes > self.stt_policy.max_audio_bytes:
+            raise ValueError("capture audio exceeds stt_policy.max_audio_bytes")
 
 
 @dataclass(frozen=True, slots=True)
