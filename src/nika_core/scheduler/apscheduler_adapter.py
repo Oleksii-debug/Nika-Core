@@ -197,14 +197,15 @@ class APSchedulerAdapter(SchedulerPort):
         except Exception as exc:
             self._audit_failure(job_id, action_id, exc)
             raise
-        # Resolver work can race with pause/remove/upsert. Re-read the durable
-        # job at the last scheduler-owned boundary before any external effect.
-        job = self._jobs.get(job_id)
-        if job is None or not job.enabled:
+        # Resolver work can race with scheduler or task mutations. Serialize the
+        # final authority decision with durable writers before the external effect.
+        dispatch_snapshot = installed_job if installed_job is not None else job
+        job = self._jobs.authorize_dispatch(dispatch_snapshot)
+        if job is None:
+            if self._started or self._starting:
+                self._sync_runtime_job(job_id)
             return
-        if installed_job is not None and job != installed_job:
-            return
-        if job.action_id != action_id or not self._task_authority_allows(job):
+        if job.action_id != action_id:
             return
         if self._audit is not None:
             self._audit.append(
