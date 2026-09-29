@@ -32,6 +32,7 @@ def benchmark_suite_json(report: BenchmarkSuiteReport) -> str:
         "evaluation_set_id": report.evaluation_set_id,
         "evaluation_set_version": report.evaluation_set_version,
         "evaluation_set_sha256": report.evaluation_set_sha256,
+        "execution_config_sha256": report.execution_config_sha256,
         "reports": [benchmark_report_payload(item) for item in report.reports],
     }
     return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -52,6 +53,7 @@ def render_text_report(report: CandidateBenchmarkReport) -> str:
         ),
         f"Evaluation SHA-256: {report.evaluation_set_sha256}",
         f"Candidate evidence SHA-256: {report.candidate.evidence_sha256}",
+        f"Execution config SHA-256: {report.execution_config_sha256}",
         f"Weighted quality score: {report.weighted_quality_score:.6f}",
         f"Task pass rate: {report.task_pass_rate:.6f}",
         f"Completion rate: {report.completion_rate:.6f}",
@@ -101,6 +103,7 @@ def benchmark_report_payload(report: CandidateBenchmarkReport) -> dict[str, Any]
             "model_sha256": report.candidate.model_sha256,
             "evidence_sha256": report.candidate.evidence_sha256,
         },
+        "execution_config_sha256": report.execution_config_sha256,
         "evaluation_set": {
             "evaluation_set_id": report.evaluation_set_id,
             "version": report.evaluation_set_version,
