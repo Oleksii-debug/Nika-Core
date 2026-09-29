@@ -16,6 +16,8 @@ from nika_core.product_project import (
     StaleProjectVersionError,
 )
 
+_SQLITE_INTEGER_MAX = (1 << 63) - 1
+
 
 def _now() -> str:
     return datetime.now(UTC).isoformat()
@@ -57,7 +59,14 @@ class ProductDecisionRepository:
         expected_row_version: int,
         idempotency_key: str,
     ) -> StoredProductDecision:
-        self._validate_input(decision, idempotency_key)
+        project_id = self._validated_text(project_id, label="project_id")
+        idempotency_key = self._validated_text(idempotency_key, label="idempotency_key")
+        expected_row_version = self._validated_integer(
+            expected_row_version,
+            label="expected_row_version",
+            minimum=0,
+        )
+        decision = self._snapshot_decision(decision)
         fingerprint = hashlib.sha256(
             _canonical(
                 {
@@ -101,7 +110,11 @@ class ProductDecisionRepository:
                     conn,
                     project_id,
                     decision.decision_id,
-                    int(replay["entity_version"]),
+                    self._validated_integer(
+                        replay["entity_version"],
+                        label="stored idempotency entity_version",
+                        minimum=1,
+                    ),
                 )
 
             project = conn.execute(
@@ -110,10 +123,15 @@ class ProductDecisionRepository:
             ).fetchone()
             if project is None:
                 raise KeyError(project_id)
-            if int(project["row_version"]) != expected_row_version:
+            stored_row_version = self._validated_integer(
+                project["row_version"],
+                label="stored ProductProject row_version",
+                minimum=0,
+            )
+            if stored_row_version != expected_row_version:
                 raise StaleProjectVersionError(
                     f"stale ProductProject write: expected {expected_row_version}, "
-                    f"current {project['row_version']}"
+                    f"current {stored_row_version}"
                 )
 
             evidence_package_ids = self._option_evidence_conn(
@@ -200,6 +218,8 @@ class ProductDecisionRepository:
             return stored
 
     def get(self, project_id: str, decision_id: str) -> StoredProductDecision:
+        project_id = self._validated_text(project_id, label="project_id")
+        decision_id = self._validated_text(decision_id, label="decision_id")
         with self.store.connection() as conn:
             decision = self._latest_conn(conn, project_id, decision_id)
             if decision is None:
@@ -207,6 +227,7 @@ class ProductDecisionRepository:
             return decision
 
     def list(self, project_id: str) -> tuple[StoredProductDecision, ...]:
+        project_id = self._validated_text(project_id, label="project_id")
         with self.store.connection() as conn:
             if not conn.execute(
                 "SELECT 1 FROM product_projects WHERE project_id=?",
@@ -230,6 +251,8 @@ class ProductDecisionRepository:
         project_id: str,
         decision_id: str,
     ) -> tuple[StoredProductDecision, ...]:
+        project_id = self._validated_text(project_id, label="project_id")
+        decision_id = self._validated_text(decision_id, label="decision_id")
         with self.store.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM product_decisions WHERE project_id=? AND decision_id=? "
@@ -248,6 +271,14 @@ class ProductDecisionRepository:
         decision_id: str,
         expected_row_version: int,
     ) -> ProductProject:
+        project_id = self._validated_text(project_id, label="project_id")
+        requirement_id = self._validated_text(requirement_id, label="requirement_id")
+        decision_id = self._validated_text(decision_id, label="decision_id")
+        expected_row_version = self._validated_integer(
+            expected_row_version,
+            label="expected_row_version",
+            minimum=0,
+        )
         project = self.projects.get(project_id)
         matching = [
             (index, requirement)
@@ -284,15 +315,72 @@ class ProductDecisionRepository:
         )
 
     @staticmethod
-    def _validate_input(decision: ProductDecision, idempotency_key: str) -> None:
-        if not idempotency_key.strip():
-            raise ProductProjectError("idempotency_key is required")
-        if not decision.decision_id.strip() or not decision.option_id.strip():
-            raise ProductProjectError("product decision requires decision_id and option_id")
-        if not isinstance(decision.state, ProductDecisionState):
+    def _validated_text(value: object, *, label: str) -> str:
+        if type(value) is not str or not value.strip():
+            raise ProductProjectError(f"{label} must be non-empty text")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ProductProjectError(f"{label} must be valid UTF-8 text") from exc
+        return value
+
+    @staticmethod
+    def _validated_integer(value: object, *, label: str, minimum: int) -> int:
+        if (
+            type(value) is not int
+            or value < minimum
+            or value > _SQLITE_INTEGER_MAX
+        ):
+            raise ProductProjectError(
+                f"{label} must be an exact integer in range "
+                f"{minimum}..{_SQLITE_INTEGER_MAX}"
+            )
+        return value
+
+    @classmethod
+    def _snapshot_decision(cls, decision: object) -> ProductDecision:
+        if type(decision) is not ProductDecision:
+            raise ProductProjectError("product decision must be an exact ProductDecision")
+        try:
+            decision_id = decision.decision_id
+            option_id = decision.option_id
+            state = decision.state
+            rationale = decision.rationale
+            decided_by_ref = decision.decided_by_ref
+        except AttributeError as exc:
+            raise ProductProjectError("product decision is incomplete") from exc
+        if type(state) is not ProductDecisionState:
             raise ProductProjectError("product decision state must be ProductDecisionState")
-        if not decision.rationale.strip() or not decision.decided_by_ref.strip():
-            raise ProductProjectError("product decision requires rationale and decided_by_ref")
+        return ProductDecision(
+            decision_id=cls._validated_text(decision_id, label="product decision decision_id"),
+            option_id=cls._validated_text(option_id, label="product decision option_id"),
+            state=state,
+            rationale=cls._validated_text(rationale, label="product decision rationale"),
+            decided_by_ref=cls._validated_text(
+                decided_by_ref,
+                label="product decision decided_by_ref",
+            ),
+        )
+
+    @classmethod
+    def _validated_string_list(
+        cls,
+        value: object,
+        *,
+        label: str,
+        require_nonempty: bool,
+    ) -> tuple[str, ...]:
+        if type(value) is not list:
+            raise ProductProjectError(f"{label} must be a JSON array")
+        items = tuple(
+            cls._validated_text(item, label=f"{label} item")
+            for item in value
+        )
+        if require_nonempty and not items:
+            raise ProductProjectError(f"{label} must not be empty")
+        if len(items) != len(set(items)):
+            raise ProductProjectError(f"{label} must not contain duplicates")
+        return items
 
     @staticmethod
     def _validate_transition(
@@ -310,20 +398,66 @@ class ProductDecisionRepository:
         if decision.state is ProductDecisionState.PROPOSED:
             raise ProductProjectError("proposed product decision cannot be proposed twice")
 
-    @staticmethod
-    def _from_row(row: Any) -> StoredProductDecision:
+    @classmethod
+    def _from_row(cls, row: Any) -> StoredProductDecision:
+        project_id = cls._validated_text(
+            row["project_id"],
+            label="stored product decision project_id",
+        )
+        raw_state = cls._validated_text(
+            row["state"],
+            label="stored product decision state",
+        )
+        try:
+            state = ProductDecisionState(raw_state)
+        except ValueError as exc:
+            raise ProductProjectError("stored product decision state is invalid") from exc
+        raw_evidence = cls._validated_text(
+            row["evidence_package_ids_json"],
+            label="stored product decision evidence_package_ids_json",
+        )
+        try:
+            decoded_evidence = json.loads(raw_evidence)
+        except json.JSONDecodeError as exc:
+            raise ProductProjectError(
+                "stored product decision evidence_package_ids_json is invalid JSON"
+            ) from exc
+        evidence_package_ids = cls._validated_string_list(
+            decoded_evidence,
+            label="stored product decision evidence_package_ids",
+            require_nonempty=True,
+        )
         return StoredProductDecision(
-            project_id=row["project_id"],
+            project_id=project_id,
             decision=ProductDecision(
-                decision_id=row["decision_id"],
-                option_id=row["option_id"],
-                state=ProductDecisionState(row["state"]),
-                rationale=row["rationale"],
-                decided_by_ref=row["decided_by_ref"],
+                decision_id=cls._validated_text(
+                    row["decision_id"],
+                    label="stored product decision decision_id",
+                ),
+                option_id=cls._validated_text(
+                    row["option_id"],
+                    label="stored product decision option_id",
+                ),
+                state=state,
+                rationale=cls._validated_text(
+                    row["rationale"],
+                    label="stored product decision rationale",
+                ),
+                decided_by_ref=cls._validated_text(
+                    row["decided_by_ref"],
+                    label="stored product decision decided_by_ref",
+                ),
             ),
-            decision_version=int(row["decision_version"]),
-            evidence_package_ids=tuple(json.loads(row["evidence_package_ids_json"])),
-            created_at=row["created_at"],
+            decision_version=cls._validated_integer(
+                row["decision_version"],
+                label="stored product decision decision_version",
+                minimum=1,
+            ),
+            evidence_package_ids=evidence_package_ids,
+            created_at=cls._validated_text(
+                row["created_at"],
+                label="stored product decision created_at",
+            ),
         )
 
     def _get_version_conn(
@@ -374,8 +508,9 @@ class ProductDecisionRepository:
         ).fetchone()
         return None if row is None else self._from_row(row)
 
-    @staticmethod
+    @classmethod
     def _option_evidence_conn(
+        cls,
         conn: Any,
         project_id: str,
         option_id: str,
@@ -386,10 +521,35 @@ class ProductDecisionRepository:
         ).fetchall()
         matches: list[tuple[str, ...]] = []
         for row in rows:
-            payload = json.loads(row["payload_json"])
-            for option in payload.get("options", []):
-                if option.get("option_id") == option_id:
-                    matches.append(tuple(option.get("evidence_package_ids", ())))
+            raw_payload = cls._validated_text(
+                row["payload_json"],
+                label="stored research handoff payload_json",
+            )
+            try:
+                payload = json.loads(raw_payload)
+            except json.JSONDecodeError as exc:
+                raise ProductProjectError("stored research handoff payload is invalid JSON") from exc
+            if type(payload) is not dict:
+                raise ProductProjectError("stored research handoff payload must be a JSON object")
+            options = payload.get("options")
+            if type(options) is not list:
+                raise ProductProjectError("stored research handoff options must be a JSON array")
+            for option in options:
+                if type(option) is not dict:
+                    raise ProductProjectError(
+                        "stored research handoff option must be a JSON object"
+                    )
+                stored_option_id = cls._validated_text(
+                    option.get("option_id"),
+                    label="stored research handoff option_id",
+                )
+                evidence_package_ids = cls._validated_string_list(
+                    option.get("evidence_package_ids"),
+                    label="stored research handoff evidence_package_ids",
+                    require_nonempty=True,
+                )
+                if stored_option_id == option_id:
+                    matches.append(evidence_package_ids)
         if not matches:
             raise ProductProjectError(f"unknown product option: {option_id}")
         if len(matches) > 1:
