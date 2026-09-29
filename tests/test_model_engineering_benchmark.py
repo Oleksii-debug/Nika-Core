@@ -937,3 +937,40 @@ def test_custom_scorer_requires_stable_identity_before_execution() -> None:
 def test_execution_config_rejects_behavioral_scorer_id_before_string_methods() -> None:
     with pytest.raises(TypeError, match="scorer_id must be canonical text"):
         BenchmarkExecutionConfig(scorer_id=_HostileText("scorer-v1"))
+
+
+class _HostileBenchmarkEnvelope:
+    @property
+    def cases(self):
+        raise AssertionError("benchmark envelope fields must not be accessed")
+
+
+def test_benchmark_requires_exact_candidate_and_evaluation_envelopes() -> None:
+    runner = ModelBenchmarkRunner(_FakeGateway())
+
+    with pytest.raises(TypeError, match="candidate must be an exact ModelCandidate"):
+        asyncio.run(
+            runner.benchmark(
+                _HostileBenchmarkEnvelope(),  # type: ignore[arg-type]
+                _evaluation_set(),
+            )
+        )
+    with pytest.raises(TypeError, match="evaluation_set must be an exact EvaluationSet"):
+        asyncio.run(
+            runner.benchmark(
+                _candidate(),
+                _HostileBenchmarkEnvelope(),  # type: ignore[arg-type]
+            )
+        )
+
+
+def test_benchmark_suite_requires_exact_evaluation_envelope() -> None:
+    runner = ModelBenchmarkRunner(_FakeGateway())
+
+    with pytest.raises(TypeError, match="evaluation_set must be an exact EvaluationSet"):
+        asyncio.run(
+            runner.benchmark_suite(
+                (_candidate(),),
+                _HostileBenchmarkEnvelope(),  # type: ignore[arg-type]
+            )
+        )

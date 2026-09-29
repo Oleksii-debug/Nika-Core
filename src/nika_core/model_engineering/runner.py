@@ -101,6 +101,10 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> CandidateBenchmarkReport:
+        if type(candidate) is not ModelCandidate:
+            raise TypeError("candidate must be an exact ModelCandidate")
+        if type(evaluation_set) is not EvaluationSet:
+            raise TypeError("evaluation_set must be an exact EvaluationSet")
         execution_config = BenchmarkExecutionConfig(
             timeout_seconds=timeout_seconds,
             temperature=temperature,
@@ -132,6 +136,8 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> BenchmarkSuiteReport:
+        if type(evaluation_set) is not EvaluationSet:
+            raise TypeError("evaluation_set must be an exact EvaluationSet")
         if type(candidates) is not tuple:
             raise TypeError("benchmark suite candidates must be a canonical tuple")
         if not candidates:
