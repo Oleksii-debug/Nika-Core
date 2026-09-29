@@ -88,7 +88,8 @@ def test_json_report_has_stable_public_shape(tmp_path: Path) -> None:
 
 def test_doctor_cli_warning_exit_contract(tmp_path: Path) -> None:
     database = tmp_path / "missing" / "nika_core.db"
-    environment = dict(os.environ)\n    environment["NIKA_DB_PATH"] = str(database)
+    environment = dict(os.environ)
+    environment["NIKA_DB_PATH"] = str(database)
     command = [sys.executable, "scripts/nika_doctor.py", "--json"]
 
     normal = subprocess.run(
