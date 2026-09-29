@@ -89,6 +89,7 @@ class IncrementalSpeechStream:
         self._condition = Condition()
         self._cancel_event = Event()
         self._incoming = ""
+        self._buffered_characters = 0
         self._finish_requested = False
         self._state = SpeechStreamState.RUNNING
         self._accepted_characters = 0
@@ -131,13 +132,14 @@ class IncrementalSpeechStream:
                     SpeechErrorCode.INVALID_REQUEST,
                     f"speech stream exceeds {MAX_STREAM_TOTAL_CHARS} characters",
                 )
-            if len(self._incoming) + len(fragment) > MAX_STREAM_PENDING_CHARS:
+            if self._buffered_characters + len(fragment) > MAX_STREAM_PENDING_CHARS:
                 raise SpeechError(
                     SpeechErrorCode.ENGINE_BUSY,
                     "speech stream producer exceeded the pending buffer",
                     retryable=True,
                 )
             self._incoming += fragment
+            self._buffered_characters += len(fragment)
             self._accepted_characters = next_total
             self._condition.notify_all()
 
@@ -171,7 +173,7 @@ class IncrementalSpeechStream:
                 accepted_characters=self._accepted_characters,
                 spoken_characters=self._spoken_characters,
                 chunk_count=self._chunk_count,
-                pending_characters=len(self._incoming),
+                pending_characters=self._buffered_characters,
                 cancellation_requested=self._cancel_event.is_set(),
             )
 
@@ -218,6 +220,7 @@ class IncrementalSpeechStream:
                     not self._incoming
                     and not self._finish_requested
                     and not self._cancel_event.is_set()
+                    and not _has_ready_chunk(pending, chunk_chars=self._chunk_chars)
                 ):
                     self._condition.wait()
 
@@ -232,11 +235,14 @@ class IncrementalSpeechStream:
 
                 finish_requested = self._finish_requested
 
-            chunk, pending = _pop_ready_chunk(
+            chunk, pending, consumed_characters = _pop_ready_chunk(
                 pending,
                 chunk_chars=self._chunk_chars,
                 flush=finish_requested,
             )
+            if consumed_characters:
+                with self._condition:
+                    self._buffered_characters -= consumed_characters
             if chunk is None:
                 if finish_requested:
                     if pending.strip():
@@ -277,6 +283,10 @@ class IncrementalSpeechStream:
                         "streaming speech output failed",
                     )
                 )
+                return
+
+            if self._cancel_event.is_set():
+                self._cancel()
                 return
 
             try:
@@ -325,14 +335,21 @@ class IncrementalSpeechStream:
             self._condition.notify_all()
 
 
+def _has_ready_chunk(text: str, *, chunk_chars: int) -> bool:
+    return (
+        _first_sentence_boundary(text, limit=chunk_chars) is not None
+        or len(text) >= chunk_chars
+    )
+
+
 def _pop_ready_chunk(
     text: str,
     *,
     chunk_chars: int,
     flush: bool,
-) -> tuple[str | None, str]:
+) -> tuple[str | None, str, int]:
     if not text:
-        return None, text
+        return None, text, 0
 
     boundary = _first_sentence_boundary(text, limit=chunk_chars)
     if boundary is None and len(text) >= chunk_chars:
@@ -340,11 +357,11 @@ def _pop_ready_chunk(
     if boundary is None and flush:
         boundary = min(len(text), chunk_chars)
     if boundary is None:
-        return None, text
+        return None, text, 0
 
     raw = text[:boundary]
     remaining = text[boundary:]
-    return raw.strip(), remaining
+    return raw.strip(), remaining, len(raw)
 
 
 def _first_sentence_boundary(text: str, *, limit: int) -> int | None:
@@ -415,6 +432,11 @@ def _validate_receipt(
 
 
 def _sanitize_speech_error(error: SpeechError) -> SpeechError:
+    if type(error) is not SpeechError:
+        return SpeechError(
+            SpeechErrorCode.PROCESS_FAILED,
+            "streaming speech output failed",
+        )
     code = error.code if type(error.code) is SpeechErrorCode else SpeechErrorCode.PROCESS_FAILED
     retryable = error.retryable if type(error.retryable) is bool else False
     return SpeechError(code, "streaming speech output failed", retryable=retryable)
