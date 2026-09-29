@@ -149,7 +149,20 @@ class HealthService:
         resource_observer: ResourceObserverPort | None = None,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        self._config = config
+        if type(config) is not AppConfig:
+            raise TypeError("config must be a canonical AppConfig")
+        schema_version = config.schema_version
+        app_version = config.app_version
+        database_path = config.database_path
+        if type(schema_version) is not int:
+            raise TypeError("config schema_version must be a canonical int")
+        if type(app_version) is not str:
+            raise TypeError("config app_version must be canonical text")
+        if type(database_path) is not type(Path()):
+            raise TypeError("config database_path must be a canonical platform Path")
+        self._schema_version = schema_version
+        self._app_version = app_version
+        self._database_path = database_path
         self._resource_observer = resource_observer
         self._clock = clock or (lambda: datetime.now(UTC))
 
@@ -170,13 +183,13 @@ class HealthService:
     def _check_configuration(self) -> HealthCheck:
         # The provider value is intentionally not echoed because AppConfig accepts arbitrary
         # provider identifiers, and a malformed identifier may contain credential material.
-        if self._config.schema_version != SUPPORTED_CONFIG_SCHEMA_VERSION:
+        if self._schema_version != SUPPORTED_CONFIG_SCHEMA_VERSION:
             return HealthCheck(
                 check_id="configuration",
                 status=HealthStatus.FAIL,
                 summary="Application configuration schema is not supported by this build.",
             )
-        if not self._config.app_version.strip():
+        if not self._app_version.strip():
             return HealthCheck(
                 check_id="configuration",
                 status=HealthStatus.FAIL,
@@ -191,7 +204,7 @@ class HealthService:
         )
 
     def _check_database(self) -> list[HealthCheck]:
-        path = Path(self._config.database_path)
+        path = self._database_path
         if not path.exists():
             return [
                 HealthCheck(
