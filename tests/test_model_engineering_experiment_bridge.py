@@ -371,6 +371,38 @@ def test_bridge_rejects_same_candidate_id_with_different_model_evidence() -> Non
         )
 
 
+def test_observation_bridge_rejects_pass_flag_that_conflicts_with_threshold() -> None:
+    candidate = _candidate("candidate", "m")
+    evaluation = _evaluation()
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 0.0),
+        latency=(10.0, 20.0),
+    )
+    first = replace(report.case_results[0], passed=False)
+    forged = replace(report, case_results=(first, report.case_results[1]))
+    definition = build_experiment_definition(
+        experiment_id="threshold-binding",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=_execution_config(),
+        policy=PromotionPolicy(
+            primary_metric=TASK_PASS_METRIC,
+            minimum_replays=2,
+        ),
+        permission_fingerprint="permissions-v1",
+    )
+
+    with pytest.raises(ValueError, match="pass evidence"):
+        benchmark_observations(
+            forged,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
+
+
 def test_report_identity_guard_rejects_cross_candidate_rebinding() -> None:
     candidate = _candidate("candidate", "m")
     evaluation = _evaluation()
