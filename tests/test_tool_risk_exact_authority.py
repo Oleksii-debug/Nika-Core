@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from datetime import UTC, datetime, timedelta
@@ -17,7 +18,7 @@ from nika_core.security.standing_permission import (
     StandingPermissionStore,
     StandingPermissionUse,
 )
-from nika_core.tools import ToolRisk
+from nika_core.tools import ToolCall, ToolRisk, ToolSpec
 
 
 class _ForgedRisk(str):
@@ -190,6 +191,104 @@ def test_policy_rejects_duck_typed_binding_carrier(tmp_path) -> None:
             permissions,
             _ProxyCarrier(binding),  # type: ignore[arg-type]
         )
+
+
+def test_policy_snapshots_binding_authority_before_retained_object_mutation(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "binding-snapshot.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    now = datetime(2026, 9, 27, tzinfo=UTC)
+
+    def scope(suffix: str) -> StandingPermissionScope:
+        return StandingPermissionScope(
+            subject_id=f"agent-{suffix}",
+            context=PermissionContext(
+                f"user-{suffix}",
+                f"project-{suffix}",
+                f"task-{suffix}",
+            ),
+            action_class="safe.read",
+            targets=(f"target-{suffix}",),
+            sites=(),
+            resources=(f"resource-{suffix}",),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=now,
+            expires_at=now + timedelta(minutes=5),
+        )
+
+    scope_a = scope("a")
+    scope_b = scope("b")
+    permissions.grant(permission_id="perm-a", scope=scope_a)
+    permissions.grant(permission_id="perm-b", scope=scope_b)
+    binding = StandingPermissionBinding(
+        permission_id="perm-a",
+        subject_id="agent-a",
+        context=scope_a.context,
+        target="target-a",
+        resource_id="resource-a",
+        network_host=None,
+    )
+    policy = StandingPermissionPolicy(
+        permissions,
+        binding,
+        clock=lambda: now + timedelta(seconds=1),
+    )
+
+    object.__setattr__(binding, "permission_id", "perm-b")
+    object.__setattr__(binding, "subject_id", "agent-b")
+    object.__setattr__(binding, "context", scope_b.context)
+    object.__setattr__(binding, "target", "target-b")
+    object.__setattr__(binding, "resource_id", "resource-b")
+
+    spec = ToolSpec(
+        tool_id="safe.read",
+        description="read with standing authority",
+        risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+    )
+    redirected = ToolCall(
+        call_id="call-b",
+        tool_id="safe.read",
+        arguments={},
+        task_id="task-b",
+    )
+    with pytest.raises(PermissionError, match="task is outside standing permission context"):
+        asyncio.run(policy(spec, redirected))
+
+    original = ToolCall(
+        call_id="call-a",
+        tool_id="safe.read",
+        arguments={},
+        task_id="task-a",
+    )
+    authorization = asyncio.run(policy(spec, original))
+
+    assert authorization.task_id == "task-a"
+    assert authorization.tool_id == "safe.read"
+    assert authorization.risk is ToolRisk.EXTERNAL_SIDE_EFFECT
+
+
+def test_policy_revalidates_exact_binding_fields_before_snapshot(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "binding-revalidation.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    binding = StandingPermissionBinding(
+        permission_id="perm-a",
+        subject_id="agent-a",
+        context=PermissionContext("user-a", "project-a", "task-a"),
+        target="target-a",
+        resource_id="resource-a",
+        network_host=None,
+    )
+    object.__setattr__(
+        binding,
+        "subject_id",
+        _HashRebindingText("agent-visible", "agent-authorized"),
+    )
+
+    with pytest.raises(ValueError, match="canonical identity"):
+        StandingPermissionPolicy(permissions, binding)
 
 
 def test_hash_rebinding_text_cannot_enter_permission_context() -> None:

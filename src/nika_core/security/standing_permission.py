@@ -675,8 +675,23 @@ class StandingPermissionPolicy:
     ) -> None:
         if type(binding) is not StandingPermissionBinding:
             raise TypeError("standing policy binding must be an exact StandingPermissionBinding value")
+        context = binding.context
+        if type(context) is not PermissionContext:
+            raise TypeError("binding context must be an exact PermissionContext value")
+        binding_snapshot = StandingPermissionBinding(
+            permission_id=binding.permission_id,
+            subject_id=binding.subject_id,
+            context=PermissionContext(
+                user_id=context.user_id,
+                project_id=context.project_id,
+                task_id=context.task_id,
+            ),
+            target=binding.target,
+            resource_id=binding.resource_id,
+            network_host=binding.network_host,
+        )
         self._permissions = permissions
-        self._binding = binding
+        self._binding = binding_snapshot
         self._clock = clock or (lambda: datetime.now(UTC))
 
     async def __call__(self, spec: ToolSpec, call: ToolCall) -> ToolAuthorization:
