@@ -1105,7 +1105,7 @@ def test_forged_exact_success_result_cannot_project_unbound_transcript() -> None
 
     assert snapshot.status is DesktopVoiceStatus.FAILED
     assert snapshot.transcript is None
-    assert "доказові" in snapshot.message
+    assert "неузгоджен" in snapshot.message
 
 
 def test_forged_success_transcript_length_evidence_cannot_project() -> None:
