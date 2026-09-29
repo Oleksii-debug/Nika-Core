@@ -306,3 +306,34 @@ def test_newer_work_fence_can_clear_crash_stale_claim_for_reconciliation(
         {"winner": "manual-after-crash"},
     )
     assert reconciled.status is IdempotencyStatus.COMPLETED
+
+
+def test_recovery_claim_blocks_pending_operation_release(tmp_path) -> None:
+    clock = _Clock()
+    host, ownership = _host(tmp_path, clock, "program-host:first")
+    request = _request()
+    lease = ownership.acquire(
+        project_id=request.project_id,
+        work_id=request.work_id,
+        owner_id=host.owner_id,
+        lease_seconds=10,
+    )
+    operation, _ = host._reserve_effect(
+        host_task_id="host-task",
+        request=request,
+        lease=lease,
+    )
+    host._claim_recovery_effect(
+        host_task_id="host-task",
+        request=request,
+        lease=lease,
+    )
+
+    with pytest.raises(
+        sqlite3.IntegrityError,
+        match="active Product Factory recovery claim blocks release",
+    ):
+        host._ledger.release_pending(operation.operation_key)
+
+    current = host._ledger.require(operation.operation_key)
+    assert current.status is IdempotencyStatus.PENDING
