@@ -137,6 +137,16 @@ class ScheduledJobStore:
         )
         return cursor.rowcount > 0
 
+    def disable_if_current(self, expected_job: ScheduledJob) -> bool:
+        """Disable only when the exact rejected snapshot still owns the job id."""
+        expected = _canonical_job(expected_job)
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self.get_with_connection(conn, expected.job_id)
+            if current != expected:
+                return False
+            return self.set_enabled_with_connection(conn, expected.job_id, False)
+
     def delete(self, job_id: str) -> bool:
         job_key = _stable_identity(job_id, "job_id")
         with self._store.connection() as conn:
