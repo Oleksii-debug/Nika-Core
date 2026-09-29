@@ -459,12 +459,31 @@
     if (!allowedComparisonStatuses.includes(comparison.status)
         || typeof comparison.validated !== "boolean") return false;
     if (!Array.isArray(comparison.source_states)
-        || comparison.source_states.length !== 2
+        || ![0, 2].includes(comparison.source_states.length)
         || comparison.source_states.some((state) => (
           !["valid", "missing", "worker_error", "evidence_invalid"].includes(state)
         ))) return false;
-    if (!Number.isInteger(comparison.agreement_count) || comparison.agreement_count < 0
-        || !Number.isInteger(comparison.difference_count) || comparison.difference_count < 0) {
+    let expectedNoncomparisonStatus = null;
+    if (comparison.source_states.length === 0) {
+      expectedNoncomparisonStatus = "evidence_invalid";
+    } else if (comparison.source_states.includes("evidence_invalid")) {
+      expectedNoncomparisonStatus = "evidence_invalid";
+    } else if (comparison.source_states.includes("worker_error")) {
+      expectedNoncomparisonStatus = "worker_error";
+    } else if (comparison.source_states.includes("missing")) {
+      expectedNoncomparisonStatus = "missing";
+    }
+    if (expectedNoncomparisonStatus === null) {
+      if (!validComparisonStatuses.includes(comparison.status)) return false;
+    } else if (comparison.status !== expectedNoncomparisonStatus) {
+      return false;
+    }
+    if (!Number.isSafeInteger(comparison.agreement_count)
+        || comparison.agreement_count < 0
+        || comparison.agreement_count > 100
+        || !Number.isSafeInteger(comparison.difference_count)
+        || comparison.difference_count < 0
+        || comparison.difference_count > 100) {
       return false;
     }
     const countsCoherent = (
@@ -521,6 +540,7 @@
       || typeof task.task_id !== "string"
       || !task.task_id.trim()
       || typeof task.state !== "string"
+      || !task.state.trim()
       || (task.command != null && (typeof task.command !== "string" || !task.command.trim()))
     ) {
       return false;
