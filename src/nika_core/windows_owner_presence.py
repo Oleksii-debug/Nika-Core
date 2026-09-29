@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import unicodedata
 from collections.abc import Callable
 from datetime import UTC, datetime
 from math import ceil, isfinite
@@ -97,6 +98,8 @@ class WindowsOwnerPresenceObserver:
             raise ValueError("source_id must be non-empty without surrounding whitespace")
         if len(source_id) > _MAX_IDENTITY_LENGTH:
             raise ValueError("source_id is too long")
+        if any(unicodedata.category(char).startswith("C") for char in source_id):
+            raise ValueError("source_id must not contain control or format characters")
         if type(away_after_seconds) not in (int, float):
             raise TypeError("away_after_seconds must be exact built-in int or float")
         if type(away_after_seconds) is float and not isfinite(away_after_seconds):
