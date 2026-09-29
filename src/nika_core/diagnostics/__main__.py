@@ -19,6 +19,10 @@ def _resource_observer() -> ResourceObserverPort | None:
     return PsutilResourceObserver()
 
 
+def _load_config() -> AppConfig:
+    return AppConfig()
+
+
 def _configuration_failure_report() -> HealthReport:
     return HealthReport(
         generated_at=datetime.now(UTC),
@@ -42,7 +46,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        config = AppConfig.from_environment()
+        config = _load_config()
     except Exception:  # noqa: BLE001
         # Pydantic diagnostics can include raw environment values, so expose a stable message only.
         report = _configuration_failure_report()
