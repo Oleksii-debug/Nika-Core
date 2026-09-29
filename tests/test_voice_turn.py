@@ -22,6 +22,7 @@ from nika_core.speech_to_text import (
 )
 from nika_core.voice_turn import (
     OneShotVoiceTurnService,
+    build_windows_one_shot_voice_turn_service,
     VoiceTurnRequest,
     VoiceTurnStatus,
 )
@@ -112,6 +113,44 @@ def _service(
         speech_to_text=SpeechToTextService(stt),
         wake_detector=WakeActivationDetector(),
     )
+
+
+def test_windows_factory_composes_real_backend_types_without_network() -> None:
+    class _OfflineRecognizer:
+        calls: list[dict[str, object]] = []
+
+        @classmethod
+        def from_whisper(cls, **kwargs):
+            cls.calls.append(dict(kwargs))
+            return object()
+
+    class _SherpaModule:
+        OfflineRecognizer = _OfflineRecognizer
+
+    service = build_windows_one_shot_voice_turn_service(
+        encoder=r"C:\models\encoder.onnx",
+        decoder=r"C:\models\decoder.onnx",
+        tokens=r"C:\models\tokens.txt",
+        model_id="whisper-uk-v1",
+        language="uk",
+        num_threads=3,
+        sounddevice_module=_MicrophoneAdapter(),
+        sherpa_module=_SherpaModule,
+    )
+
+    assert type(service) is OneShotVoiceTurnService
+    assert _OfflineRecognizer.calls == [
+        {
+            "encoder": r"C:\models\encoder.onnx",
+            "decoder": r"C:\models\decoder.onnx",
+            "tokens": r"C:\models\tokens.txt",
+            "language": "uk",
+            "task": "transcribe",
+            "num_threads": 3,
+            "debug": False,
+            "provider": "cpu",
+        }
+    ]
 
 
 def test_one_shot_turn_composes_capture_stt_and_wake_without_durable_content() -> None:

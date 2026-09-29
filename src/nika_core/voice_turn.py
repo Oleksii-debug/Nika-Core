@@ -10,6 +10,7 @@ from nika_core.microphone_capture import (
     MicrophoneCaptureStatus,
 )
 from nika_core.model_gateway.contracts import PrivacyClass
+from nika_core.sherpa_onnx_stt import SherpaOnnxWhisperSpeechToTextAdapter
 from nika_core.speech_to_text import (
     SpeechAudio,
     SpeechAudioFormat,
@@ -19,6 +20,7 @@ from nika_core.speech_to_text import (
     SpeechToTextService,
     SpeechToTextStatus,
 )
+from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureAdapter
 from nika_core.wake_activation import (
     MAX_TRANSCRIPT_CHARS,
     WakeActivationDetector,
@@ -257,4 +259,40 @@ def _snapshot_request(request: VoiceTurnRequest) -> VoiceTurnRequest:
         stt_model=request.stt_model,
         language=request.language,
         stt_policy=policy,
+    )
+
+
+def build_windows_one_shot_voice_turn_service(
+    *,
+    encoder: str,
+    decoder: str,
+    tokens: str,
+    model_id: str,
+    language: str,
+    num_threads: int = 2,
+    sounddevice_module: object | None = None,
+    sherpa_module: object | None = None,
+) -> OneShotVoiceTurnService:
+    """Compose the real local Windows capture and sherpa STT backends.
+
+    Model files must already exist locally; this factory performs no download,
+    network access, persistence, background listening or privileged action.
+    """
+    microphone_adapter = WindowsWasapiMicrophoneCaptureAdapter(
+        sounddevice_module=sounddevice_module,
+        platform_name="win32",
+    )
+    stt_adapter = SherpaOnnxWhisperSpeechToTextAdapter.from_whisper_files(
+        encoder=encoder,
+        decoder=decoder,
+        tokens=tokens,
+        model_id=model_id,
+        language=language,
+        num_threads=num_threads,
+        sherpa_module=sherpa_module,
+    )
+    return OneShotVoiceTurnService(
+        microphone=MicrophoneCaptureService(microphone_adapter),
+        speech_to_text=SpeechToTextService(stt_adapter),
+        wake_detector=WakeActivationDetector(),
     )
