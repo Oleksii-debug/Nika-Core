@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from enum import StrEnum
 from pathlib import Path
 
@@ -38,6 +38,17 @@ class _HealthTextSubclass(str):
 class _BehavioralDatetime(datetime):
     def astimezone(self, *args: object, **kwargs: object) -> datetime:
         raise AssertionError("behavioral datetime must not execute")
+
+
+class _BehavioralTimezone(tzinfo):
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        raise AssertionError("behavioral timezone must not execute")
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        raise AssertionError("behavioral timezone must not execute")
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        raise AssertionError("behavioral timezone must not execute")
 
 
 class _BehavioralInt(int):
@@ -149,8 +160,15 @@ def test_health_report_rejects_noncanonical_timestamp_carriers(value: object) ->
 
 def test_health_report_rejects_naive_timestamp() -> None:
     naive = datetime(2026, 9, 27, 21, 0, tzinfo=UTC).replace(tzinfo=None)
-    with pytest.raises(ValueError, match="generated_at must be timezone-aware"):
+    with pytest.raises(TypeError, match="generated_at timezone must be canonical"):
         HealthReport(generated_at=naive, checks=())
+
+
+def test_health_report_rejects_behavioral_timezone_before_offset_methods() -> None:
+    value = datetime(2026, 9, 27, 21, 0, tzinfo=_BehavioralTimezone())
+
+    with pytest.raises(TypeError, match="generated_at timezone must be canonical"):
+        HealthReport(generated_at=value, checks=())
 
 
 def test_health_report_snapshots_timestamp_in_canonical_utc() -> None:
@@ -174,6 +192,21 @@ def test_health_service_rejects_behavioral_clock_before_datetime_methods() -> No
     service._clock = lambda: _BehavioralDatetime(2026, 9, 27, tzinfo=UTC)
 
     with pytest.raises(TypeError, match="health clock must return a canonical datetime"):
+        service._normalized_now()
+
+
+def test_health_service_rejects_behavioral_clock_timezone_before_offset_methods() -> None:
+    service = object.__new__(HealthService)
+    service._clock = lambda: datetime(
+        2026,
+        9,
+        27,
+        21,
+        0,
+        tzinfo=_BehavioralTimezone(),
+    )
+
+    with pytest.raises(TypeError, match="health clock timezone must be canonical"):
         service._normalized_now()
 
 
