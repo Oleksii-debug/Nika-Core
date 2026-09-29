@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -12,6 +13,12 @@ from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition, ToolGrant
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.diagnostics import (
+    ModelHealthFact,
+    ModelHealthProbePort,
+    ModelHealthSnapshot,
+    OllamaModelHealthProbe,
+)
 from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
@@ -48,7 +55,11 @@ from nika_core.runtime.contracts import (
     RuntimeResumeRequest,
 )
 from nika_core.tools import ToolRisk, ToolSpec
-from nika_core.v01_model_settings import V01BoundModelRuntimeFactory
+from nika_core.v01_model_settings import (
+    ModelSelection,
+    V01BoundModelRuntimeFactory,
+    V01ModelSettings,
+)
 from nika_core.v01_source_settings import MAX_SOURCE_BYTES, V01SourceSettings
 from nika_core.v01_three_agent_supervisor import (
     V01ChildAssignment,
@@ -66,6 +77,7 @@ _WORKER_B_ID = "v01.source-b"
 _GRANT = ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",))
 _MAX_MODEL_ANALYSIS_CHARS = 2000
 _MODEL_SELECTION_FIELD = "v01_model_selection"
+_RECOVERY_MODEL_HEALTH_TIMEOUT_SECONDS = 2.0
 
 
 class V01PackagedThreeAgentRuntime(AgentRuntimePort):
@@ -78,14 +90,22 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         config: AppConfig,
         source_settings: V01SourceSettings | None = None,
         model_runtime_factory: V01BoundModelRuntimeFactory | None = None,
+        ollama_health_probe_factory: (
+            Callable[[ModelSelection], ModelHealthProbePort] | None
+        ) = None,
     ) -> None:
         self._sqlite = store
         self._sources = source_settings or V01SourceSettings(store, config)
         self._multi_store = MultiAgentStore(store)
         self._definitions = AgentDefinitionRepository(store)
+        self._model_settings = V01ModelSettings(store)
         self._model_factory = model_runtime_factory or V01BoundModelRuntimeFactory(
             store=store,
             definitions=self._definitions,
+            settings=self._model_settings,
+        )
+        self._ollama_health_probe_factory = (
+            ollama_health_probe_factory or self._default_ollama_health_probe
         )
         self._model_runtimes: dict[str, ModelGatewayAgentRuntime] = {}
         self._coordinator = MultiAgentSupervisor(
@@ -128,13 +148,85 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 status=RuntimeResumeProbeStatus.INVALID,
                 reason="Persisted V0.1 runtime cursor does not match task identity.",
             )
+        model_health_block = await self._model_recovery_health(task_id)
+        if model_health_block is not None:
+            return model_health_block
         checkpoint = hashlib.sha256(
             f"v01-packaged-checkpoint\0{expected}".encode()
         ).hexdigest()
         return RuntimeResumeProbe(
             status=RuntimeResumeProbeStatus.READY,
-            reason="Deterministic V0.1 team cursor is reconstructible from durable Nika state.",
+            reason="Durable V0.1 team cursor and required recovery health are verified.",
             checkpoint_id=checkpoint,
+        )
+
+    async def _model_recovery_health(
+        self,
+        task_id: str,
+    ) -> RuntimeResumeProbe | None:
+        try:
+            if not self._task_has_model_selection(task_id):
+                return None
+            selection = self._model_settings.for_task(task_id)
+        except Exception:  # noqa: BLE001 - recovery boundary exposes no stored diagnostics
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="Frozen model route could not be verified safely for recovery.",
+            )
+
+        if selection.route_kind == "deterministic":
+            return None
+        if selection.route_kind != "ollama":
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="Selected model route has no canonical automatic recovery health proof.",
+            )
+
+        try:
+            probe = self._ollama_health_probe_factory(selection)
+            observed = await asyncio.to_thread(probe.snapshot)
+            snapshot = ModelHealthSnapshot(
+                configured=observed.configured,
+                reachable=observed.reachable,
+                model_present=observed.model_present,
+                model_ready=observed.model_ready,
+                inference_proven=observed.inference_proven,
+            )
+        except Exception:  # noqa: BLE001 - health failures block recovery without diagnostics
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="Selected local model readiness could not be verified safely.",
+            )
+
+        required = (
+            snapshot.configured,
+            snapshot.reachable,
+            snapshot.model_present,
+            snapshot.model_ready,
+        )
+        if not all(value is ModelHealthFact.YES for value in required):
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="Selected local model is not positively ready for automatic recovery.",
+            )
+        return None
+
+    @staticmethod
+    def _default_ollama_health_probe(
+        selection: ModelSelection,
+    ) -> ModelHealthProbePort:
+        if (
+            selection.route_kind != "ollama"
+            or selection.provider_id != "ollama"
+            or selection.model is None
+            or selection.base_url is None
+        ):
+            raise ValueError("Ollama recovery health requires a canonical local route")
+        return OllamaModelHealthProbe(
+            model_id=selection.model,
+            base_url=selection.base_url,
+            provider_id=selection.provider_id,
+            timeout_seconds=_RECOVERY_MODEL_HEALTH_TIMEOUT_SECONDS,
         )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
