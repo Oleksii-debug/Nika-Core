@@ -583,6 +583,38 @@ def test_cancelled_recovery_child_settles_blocking_sibling_before_propagation(
     ) is None
 
 
+def test_external_effect_cleanup_is_bounded_when_worker_ignores_first_cancel(
+    monkeypatch,
+) -> None:
+    first_cancel_seen = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cancellation_resistant_effect() -> None:
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            first_cancel_seen.set()
+            await release.wait()
+
+    async def scenario() -> None:
+        monkeypatch.setattr(program_host_module, "_EFFECT_CANCEL_GRACE_SECONDS", 0.01)
+        task = asyncio.create_task(cancellation_resistant_effect())
+        await asyncio.sleep(0)
+
+        await asyncio.wait_for(
+            program_host_module._cancel_effect_task(task),
+            timeout=0.2,
+        )
+
+        assert first_cancel_seen.is_set()
+        assert not task.done()
+
+        release.set()
+        await asyncio.wait_for(task, timeout=0.2)
+
+    _run(scenario())
+
+
 def test_running_checkpoint_without_ledger_is_proven_pre_dispatch_and_can_start_once(
     tmp_path,
 ) -> None:
