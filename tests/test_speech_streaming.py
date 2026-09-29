@@ -13,6 +13,7 @@ from nika_core.speech.contracts import (
 )
 from nika_core.speech.streaming import (
     MAX_STREAM_PENDING_CHARS,
+    MAX_STREAM_TOTAL_CHARS,
     IncrementalSpeechStream,
     SpeechStreamState,
 )
@@ -367,3 +368,44 @@ def test_wait_rejects_behavioral_or_nonfinite_timeout() -> None:
 
     stream.cancel()
     assert stream.wait(1)
+
+
+def test_total_stream_bound_fails_before_audio_effect() -> None:
+    port = FakeSpeechPort()
+    stream = IncrementalSpeechStream(port)
+
+    with pytest.raises(SpeechError) as error:
+        stream.feed("x" * (MAX_STREAM_TOTAL_CHARS + 1))
+
+    assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+    stream.cancel()
+    assert stream.wait(1)
+    assert port.requests == []
+
+
+def test_empty_feed_after_finish_is_rejected_like_other_late_input() -> None:
+    stream = IncrementalSpeechStream(FakeSpeechPort())
+    stream.finish()
+
+    with pytest.raises(SpeechError) as error:
+        stream.feed("")
+
+    assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+    assert stream.wait(1)
+
+
+def test_cancel_after_completion_is_idempotent_and_does_not_relabel_result() -> None:
+    port = FakeSpeechPort()
+    stream = IncrementalSpeechStream(port)
+    stream.feed("Готово.")
+    stream.finish()
+    assert stream.wait(1)
+
+    before = stream.snapshot()
+    stream.cancel()
+    after = stream.snapshot()
+
+    assert before.state is SpeechStreamState.COMPLETED
+    assert after.state is SpeechStreamState.COMPLETED
+    assert after.cancellation_requested is False
+    assert stream.result().chunk_count == 1
