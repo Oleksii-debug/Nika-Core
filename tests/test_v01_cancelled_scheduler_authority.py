@@ -367,6 +367,47 @@ def test_scheduler_start_failure_discards_generation_and_retries(tmp_path) -> No
     adapter.shutdown(wait=False)
 
 
+def test_shutdown_during_start_transition_cannot_leave_scheduler_live(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Start Shutdown Race" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    run_at = datetime.now(UTC) + timedelta(days=1)
+    jobs.upsert(
+        _date_job(
+            job_id="job-start-shutdown",
+            action_id="start-shutdown",
+            run_at=run_at,
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    starting_scheduler = adapter._scheduler
+    scheduler_start = starting_scheduler.start
+    observed: list[tuple[bool, bool]] = []
+
+    def start_with_shutdown(*args, **kwargs):
+        adapter.shutdown(wait=False)
+        observed.append((adapter._starting, adapter._started))
+        return scheduler_start(*args, **kwargs)
+
+    adapter._scheduler.start = start_with_shutdown
+
+    adapter.start()
+
+    assert observed == [(True, False)]
+    assert adapter._starting is False
+    assert adapter._started is False
+    assert adapter._scheduler is not starting_scheduler
+    assert not adapter.has_runtime_job("job-start-shutdown")
+
+    adapter.start()
+
+    runtime = adapter._scheduler.get_job("job-start-shutdown")
+    assert runtime is not None
+    assert runtime.trigger.run_date == run_at
+    adapter.shutdown(wait=False)
+
+
 def test_adapter_restart_rebuilds_apscheduler_executor(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Restart Lifecycle" / "nika core.db")
     store.initialize()
