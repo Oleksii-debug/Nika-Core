@@ -109,5 +109,14 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
         BEGIN
             SELECT RAISE(ABORT, 'active Product Factory recovery claim blocks completion');
         END""",
+        """CREATE TRIGGER IF NOT EXISTS product_factory_recovery_blocks_release
+        BEFORE DELETE ON idempotency_records
+        WHEN EXISTS (
+            SELECT 1 FROM product_factory_recovery_claims
+            WHERE operation_key = OLD.operation_key
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active Product Factory recovery claim blocks release');
+        END""",
     ),
 }
