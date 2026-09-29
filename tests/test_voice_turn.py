@@ -254,7 +254,7 @@ def test_non_wake_transcript_completes_without_activation() -> None:
 
 def test_wake_rejection_fails_closed_without_exposing_transcript() -> None:
     microphone = _MicrophoneAdapter()
-    stt = _SttAdapter("Ніка\\x00секрет")
+    stt = _SttAdapter("Ніка\x00секрет")
     result = asyncio.run(_service(microphone, stt).run(_request()))
 
     assert result.evidence.status is VoiceTurnStatus.INVALID_COMPOSITION
