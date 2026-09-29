@@ -639,11 +639,26 @@ def test_renderer_rejects_active_team_with_terminal_final_result() -> None:
     assert rejected["summary_hidden"] is True
 
 
-def test_renderer_rejects_unknown_packaged_task_state() -> None:
+def test_renderer_presents_unknown_packaged_task_state_without_raw_leak() -> None:
     projection = _model_result_projection()
     task = projection["task"]
     assert isinstance(task, dict)
-    task["state"] = "CORRUPT_UNKNOWN_STATE"
+    task["state"] = "FUTURE_TASK_STATE"
+
+    rendered = _rendered_team_snapshot(live_projection=projection)
+    text = str(rendered["rendered"])
+
+    assert rendered["ready"] == "true"
+    assert rendered["summary_hidden"] is False
+    assert "Стан недоступний" in text
+    assert "FUTURE_TASK_STATE" not in text
+
+
+def test_renderer_rejects_blank_packaged_task_state() -> None:
+    projection = _model_result_projection()
+    task = projection["task"]
+    assert isinstance(task, dict)
+    task["state"] = "   "
 
     rejected = _rendered_team_snapshot(live_projection=projection)
 
