@@ -12,6 +12,7 @@ from typing import Any
 from nika_core.ui.bridge_models import UIResult
 from nika_core.voice_turn import (
     OneShotVoiceTurnService,
+    VoiceTurnEvidence,
     VoiceTurnRequest,
     VoiceTurnResult,
     VoiceTurnStatus,
@@ -206,6 +207,16 @@ class DesktopVoiceTurnController:
                 message="Голосовий сервіс повернув некоректний результат.",
             )
         evidence = result.evidence
+        if (
+            type(evidence) is not VoiceTurnEvidence
+            or type(evidence.status) is not VoiceTurnStatus
+            or type(evidence.activated) is not bool
+        ):
+            return DesktopVoiceSnapshot(
+                status=DesktopVoiceStatus.FAILED,
+                request_id=request_id,
+                message="Голосовий сервіс повернув некоректні voice evidence.",
+            )
         if evidence.request_id != request_id:
             return DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.FAILED,
@@ -250,7 +261,7 @@ class DesktopVoiceTurnController:
 
     @staticmethod
     def _require_empty_payload(payload: Mapping[str, Any]) -> None:
-        if not isinstance(payload, Mapping):
-            raise TypeError("voice desktop action payload must be a mapping")
+        if type(payload) is not dict:
+            raise TypeError("voice desktop action payload must be an exact dict")
         if payload:
             raise ValueError("voice desktop action does not accept payload authority")
