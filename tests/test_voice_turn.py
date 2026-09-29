@@ -251,6 +251,22 @@ def test_non_wake_transcript_completes_without_activation() -> None:
     assert result.transcript == "сьогодні гарна погода"
 
 
+def test_wake_rejection_fails_closed_without_exposing_transcript() -> None:
+    microphone = _MicrophoneAdapter()
+    stt = _SttAdapter("Ніка\\x00секрет")
+    result = asyncio.run(_service(microphone, stt).run(_request()))
+
+    assert result.evidence.status is VoiceTurnStatus.INVALID_COMPOSITION
+    assert result.transcript is None
+    assert result.evidence.wake is None
+    assert result.evidence.activated is False
+    assert microphone.calls == 1
+    assert len(stt.calls) == 1
+    rendered = repr(result.evidence.as_dict())
+    assert "Ніка" not in rendered
+    assert "секрет" not in rendered
+
+
 def test_caller_mutation_after_turn_start_cannot_retarget_stt_authority() -> None:
     class _HeldMicrophone(_MicrophoneAdapter):
         def __init__(self) -> None:
