@@ -342,6 +342,7 @@ class DesktopVoiceTurnController:
             or type(evidence.status) is not VoiceTurnStatus
             or type(evidence.activated) is not bool
             or type(evidence.capture) is not MicrophoneCaptureEvidence
+            or type(evidence.capture.request_id) is not str
         ):
             return DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.FAILED,
@@ -376,12 +377,24 @@ class DesktopVoiceTurnController:
                     request_id=request_id,
                     message="Голосовий сервіс повернув неузгоджений успішний результат.",
                 )
+            if (
+                type(transcription.request_id) is not str
+                or type(wake.request_id) is not str
+                or not _is_sha256(evidence.capture.audio_sha256)
+                or not _is_sha256(transcription.audio_sha256)
+                or not _is_sha256(transcription.transcript_sha256)
+                or not _is_sha256(wake.transcript_sha256)
+            ):
+                return DesktopVoiceSnapshot(
+                    status=DesktopVoiceStatus.FAILED,
+                    request_id=request_id,
+                    message="Голосовий сервіс повернув некоректні доказові поля.",
+                )
             transcript_sha256 = hashlib.sha256(
                 result.transcript.encode("utf-8", errors="surrogatepass")
             ).hexdigest()
             if (
-                evidence.capture.audio_sha256 is None
-                or transcription.audio_sha256 != evidence.capture.audio_sha256
+                transcription.audio_sha256 != evidence.capture.audio_sha256
                 or transcription.transcript_sha256 != transcript_sha256
                 or wake.transcript_sha256 != transcript_sha256
                 or evidence.activated
@@ -413,6 +426,7 @@ class DesktopVoiceTurnController:
             )
         if evidence.transcription is not None and (
             type(evidence.transcription) is not SpeechToTextEvidence
+            or type(evidence.transcription.request_id) is not str
             or evidence.transcription.request_id != request_id
         ):
             return DesktopVoiceSnapshot(
@@ -422,6 +436,7 @@ class DesktopVoiceTurnController:
             )
         if evidence.wake is not None and (
             type(evidence.wake) is not WakeActivationEvidence
+            or type(evidence.wake.request_id) is not str
             or evidence.wake.request_id != request_id
         ):
             return DesktopVoiceSnapshot(
@@ -452,6 +467,15 @@ class DesktopVoiceTurnController:
             raise TypeError("voice desktop action payload must be an exact dict")
         if payload:
             raise ValueError("voice desktop action does not accept payload authority")
+
+
+
+def _is_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(char in "0123456789abcdef" for char in value)
+    )
 
 
 def _settle_late_factory_future(

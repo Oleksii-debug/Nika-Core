@@ -699,3 +699,77 @@ def test_non_wake_transcript_is_completed_without_activation() -> None:
         assert "не виявлено" in str(snapshot["message"])
     finally:
         submitter.close()
+
+def test_behavioral_nested_evidence_scalars_fail_closed_without_dispatch() -> None:
+    class BehavioralStr(str):
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral evidence equality must not execute")
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral evidence inequality must not execute")
+
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    object.__setattr__(
+        result.evidence.capture,
+        "request_id",
+        BehavioralStr("desktop-voice-test"),
+    )
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
+
+def test_behavioral_nested_digest_fails_closed_without_dispatch() -> None:
+    class BehavioralStr(str):
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral digest equality must not execute")
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral digest inequality must not execute")
+
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    assert result.evidence.transcription is not None
+    object.__setattr__(
+        result.evidence.transcription,
+        "audio_sha256",
+        BehavioralStr(result.evidence.transcription.audio_sha256 or ""),
+    )
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
+
+def test_non_hex_audio_digest_cannot_satisfy_success_evidence_binding() -> None:
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    assert result.evidence.transcription is not None
+    object.__setattr__(result.evidence.capture, "audio_sha256", "g" * 64)
+    object.__setattr__(result.evidence.transcription, "audio_sha256", "g" * 64)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
