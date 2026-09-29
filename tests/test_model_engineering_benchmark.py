@@ -655,3 +655,98 @@ def test_case_result_requires_exact_resource_snapshot_carriers() -> None:
             accelerator_before=None,
             accelerator_after=None,
         )
+
+
+
+class _ResponseAlias(ModelResponse):
+    pass
+
+
+class _AliasResponseGateway:
+    async def complete(self, request):
+        return _ResponseAlias(
+            request_id=request.request_id,
+            text="answer",
+            provider_id=request.provider_id,
+            provider_kind=request.provider_kind,
+            model=request.model,
+        )
+
+
+class _HostileScorer:
+    def score(self, case, response):
+        return _HostileFloat(1.0)
+
+
+def test_runner_rejects_behavioral_timeout_before_numeric_conversion() -> None:
+    runner = ModelBenchmarkRunner(_FakeGateway())
+
+    with pytest.raises(TypeError, match="timeout_seconds must be numeric"):
+        asyncio.run(
+            runner.benchmark(
+                _candidate(),
+                _evaluation_set(),
+                timeout_seconds=_HostileFloat(1.0),
+            )
+        )
+
+
+def test_runner_rejects_behavioral_clock_before_arithmetic() -> None:
+    runner = ModelBenchmarkRunner(
+        _FakeGateway(),
+        clock=_Clock((_HostileFloat(1.0),)),
+    )
+
+    with pytest.raises(ModelBenchmarkError, match="clock returned"):
+        asyncio.run(runner.benchmark(_candidate(), _evaluation_set()))
+
+
+def test_runner_rejects_response_subclass_before_identity_access() -> None:
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+    runner = ModelBenchmarkRunner(
+        _AliasResponseGateway(),
+        clock=_Clock((1.0,)),
+    )
+
+    with pytest.raises(ModelBenchmarkError, match="invalid response carrier"):
+        asyncio.run(runner.benchmark(_candidate(), evaluation))
+
+
+def test_runner_rejects_behavioral_scorer_result_before_conversion() -> None:
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+    runner = ModelBenchmarkRunner(
+        _ProviderKindSpyGateway(),
+        scorer=_HostileScorer(),
+        clock=_Clock((1.0, 1.1)),
+    )
+
+    with pytest.raises(ModelBenchmarkError, match="non-canonical numeric score"):
+        asyncio.run(runner.benchmark(_candidate(), evaluation))
