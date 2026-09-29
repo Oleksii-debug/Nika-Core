@@ -25,6 +25,7 @@ from nika_core.speech_to_text import (
     SpeechToTextService,
 )
 from nika_core.ui.bridge import UIActionBridge
+from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_voice import (
     DesktopVoiceSnapshot,
     DesktopVoiceStatus,
