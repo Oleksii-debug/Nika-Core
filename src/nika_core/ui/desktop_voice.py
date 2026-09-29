@@ -559,10 +559,20 @@ def _is_valid_failure_evidence(
             and wake is None
         )
     if evidence.status is VoiceTurnStatus.INVALID_COMPOSITION:
+        if (
+            capture_status is not MicrophoneCaptureStatus.SUCCEEDED
+            or transcription is None
+            or transcription.status is not SpeechToTextStatus.SUCCEEDED
+            or not _is_sha256(evidence.capture.audio_sha256)
+            or not _is_sha256(transcription.audio_sha256)
+            or not _is_sha256(transcription.transcript_sha256)
+        ):
+            return False
+        if wake is None:
+            return True
         return (
-            capture_status is MicrophoneCaptureStatus.SUCCEEDED
-            and transcription is not None
-            and transcription.status is SpeechToTextStatus.SUCCEEDED
+            _is_sha256(wake.transcript_sha256)
+            and wake.transcript_sha256 != transcription.transcript_sha256
         )
     return False
 
