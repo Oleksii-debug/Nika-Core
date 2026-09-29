@@ -74,6 +74,19 @@ def test_database_symlink_is_rejected(tmp_path: Path) -> None:
     assert check.status is CheckStatus.FAIL
 
 
+def test_invalid_environment_configuration_fails_without_echoing_value(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NIKA_DB_PATH", "relative-secret.db")
+
+    report = collect_diagnostics()
+
+    assert report.status is CheckStatus.FAIL
+    assert report.checks[0].check_id == "configuration"
+    assert "relative-secret.db" not in report.to_text()
+    assert "relative-secret.db" not in report.to_json()
+
+
 def test_json_report_has_stable_public_shape(tmp_path: Path) -> None:
     report = collect_diagnostics(_config(tmp_path / "nika_core.db"))
 
