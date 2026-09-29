@@ -313,7 +313,7 @@ def test_close_during_blocking_submit_marks_cancellation_and_fails_closed() -> N
     thread.start()
     assert entered.wait(timeout=2)
 
-    with pytest.raises(RuntimeError, match="submission remained in progress"):
+    with pytest.raises(RuntimeError, match="voice submission did not settle"):
         controller.close(timeout_seconds=0.01)
     pending = controller.snapshot()
     assert pending["status"] == DesktopVoiceStatus.CANCELLING.value
