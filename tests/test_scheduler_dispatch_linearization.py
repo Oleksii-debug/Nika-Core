@@ -129,3 +129,62 @@ def test_authorization_before_pause_preserves_only_claimed_occurrence(
     persisted = jobs.get(installed.job_id)
     assert persisted is not None
     assert persisted.enabled is False
+
+
+def test_compare_disable_rejects_stale_snapshot(tmp_path: Path) -> None:
+    jobs = ScheduledJobStore(_sqlite(tmp_path))
+    stale = _job(payload={"generation": "old"})
+    replacement = replace(stale, payload={"generation": "new"})
+    jobs.upsert(stale)
+    jobs.upsert(replacement)
+
+    assert jobs.disable_if_current(stale) is False
+
+    current = jobs.get(stale.job_id)
+    assert current == replacement
+    assert current.enabled is True
+
+
+def test_runtime_sync_preserves_replacement_when_stale_suppression_loses_cas(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    queue = TaskQueue(sqlite)
+    jobs = ScheduledJobStore(sqlite)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "stale suppression race"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    stale = _job(payload={"task_id": task.task_id, "generation": "old"})
+    replacement = replace(stale, payload={"generation": "new"})
+    jobs.upsert(stale)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.start()
+    queue.transition(task.task_id, TaskState.CANCELLED)
+
+    original_task_state = jobs.task_state
+    replaced = False
+
+    def replace_during_task_check(task_id: str) -> TaskState | None:
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            jobs.upsert(replacement)
+        return original_task_state(task_id)
+
+    monkeypatch.setattr(jobs, "task_state", replace_during_task_check)
+
+    synced = adapter._sync_runtime_job(stale.job_id)
+
+    current = jobs.get(stale.job_id)
+    runtime = adapter._scheduler.get_job(stale.job_id)
+    assert synced == replacement
+    assert current == replacement
+    assert current.enabled is True
+    assert runtime is not None
+    assert tuple(runtime.args)[1] == replacement
+    adapter.shutdown(wait=False)
