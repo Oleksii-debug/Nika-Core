@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Event, Thread
+from threading import Event
 
 import pytest
 
@@ -328,7 +329,6 @@ def test_runtime_sync_serializes_concurrent_replacement_install(
     )
     stale_install_entered = Event()
     release_stale_install = Event()
-    errors: list[Exception] = []
     original_install = adapter._install
 
     def blocking_install(job: ScheduledJob) -> None:
@@ -338,31 +338,15 @@ def test_runtime_sync_serializes_concurrent_replacement_install(
                 raise AssertionError("stale install was not released")
         original_install(job)
 
-    def upsert_in_thread(job: ScheduledJob) -> None:
-        try:
-            adapter.upsert(job)
-        except Exception as exc:  # pragma: no cover - asserted below
-            errors.append(exc)
-
     monkeypatch.setattr(adapter, "_install", blocking_install)
-    stale_thread = Thread(target=upsert_in_thread, args=(stale,), daemon=True)
-    stale_thread.start()
-    assert stale_install_entered.wait(timeout=5)
-
-    replacement_thread = Thread(
-        target=upsert_in_thread,
-        args=(replacement,),
-        daemon=True,
-    )
-    replacement_thread.start()
-    assert replacement_committed.wait(timeout=5)
-    release_stale_install.set()
-    stale_thread.join(timeout=5)
-    replacement_thread.join(timeout=5)
-
-    assert not stale_thread.is_alive()
-    assert not replacement_thread.is_alive()
-    assert errors == []
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        stale_future = executor.submit(adapter.upsert, stale)
+        assert stale_install_entered.wait(timeout=5)
+        replacement_future = executor.submit(adapter.upsert, replacement)
+        assert replacement_committed.wait(timeout=5)
+        release_stale_install.set()
+        stale_future.result(timeout=5)
+        replacement_future.result(timeout=5)
     durable = jobs.get(stale.job_id)
     runtime = adapter._scheduler.get_job(stale.job_id)
     assert durable == replacement
