@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.scheduler.store as scheduler_store
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
 from nika_core.scheduler.store import (
@@ -155,6 +156,46 @@ def test_scheduler_integer_overflow_is_rejected_before_sqlite_bind(
         store.upsert(_job(**{field: value}))
 
     assert store.get("job-1") is None
+
+
+def test_upsert_uses_one_canonical_snapshot_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    caller = _job(
+        action_id="updated.action",
+        max_instances=2,
+        payload={IMMUTABLE_JOB_BINDING_KEY: "binding-1"},
+    )
+    canonicalize = getattr(scheduler_store, "_canonical_job")
+
+    def snapshot_then_mutate(job: ScheduledJob) -> ScheduledJob:
+        canonical = canonicalize(job)
+        object.__setattr__(job, "job_id", "job-forged")
+        object.__setattr__(job, "action_id", "forged.action")
+        object.__setattr__(job, "enabled", False)
+        object.__setattr__(job, "max_instances", 9)
+        job.trigger["run_date"] = "2040-01-01T12:00:00+00:00"
+        job.payload["forged"] = True
+        return canonical
+
+    monkeypatch.setattr(
+        scheduler_store,
+        "_canonical_job",
+        snapshot_then_mutate,
+    )
+
+    store.upsert(caller)
+
+    restored = store.get("job-1")
+    assert restored is not None
+    assert restored.action_id == "updated.action"
+    assert restored.enabled is True
+    assert restored.max_instances == 2
+    assert restored.trigger == {"run_date": "2030-01-01T12:00:00+00:00"}
+    assert restored.payload == {IMMUTABLE_JOB_BINDING_KEY: "binding-1"}
+    assert store.get("job-forged") is None
 
 
 def test_nested_payload_is_exact_finite_json_and_detached(tmp_path: Path) -> None:

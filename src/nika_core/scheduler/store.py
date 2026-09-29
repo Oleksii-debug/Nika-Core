@@ -28,7 +28,7 @@ class ScheduledJobStore:
 
     def upsert_with_connection(self, conn: sqlite3.Connection, job: ScheduledJob) -> None:
         """Upsert one job inside a caller-owned SQLite transaction."""
-        trigger, payload = _validated_job_data(job)
+        job = _canonical_job(job)
         now = datetime.now(UTC).isoformat()
         existing = conn.execute(
             "SELECT * FROM scheduled_jobs WHERE job_id = ?",
@@ -36,7 +36,7 @@ class ScheduledJobStore:
         ).fetchone()
         if existing is not None:
             existing_job = _from_row(existing)
-            incoming_binding = payload.get(IMMUTABLE_JOB_BINDING_KEY)
+            incoming_binding = job.payload.get(IMMUTABLE_JOB_BINDING_KEY)
             existing_binding = _validated_binding(
                 existing_job.payload.get(IMMUTABLE_JOB_BINDING_KEY),
                 "persisted scheduled job immutable binding",
@@ -64,8 +64,8 @@ class ScheduledJobStore:
                 job.job_id,
                 job.action_id,
                 job.trigger_kind.value,
-                _encode_json(trigger, "trigger"),
-                _encode_json(payload, "payload"),
+                _encode_json(job.trigger, "trigger"),
+                _encode_json(job.payload, "payload"),
                 int(job.enabled),
                 int(job.coalesce),
                 job.max_instances,
@@ -150,30 +150,36 @@ class ScheduledJobStore:
         return TaskState(raw_state)
 
 
-def _validated_job_data(job: ScheduledJob) -> tuple[dict[str, Any], dict[str, Any]]:
+def _canonical_job(job: ScheduledJob) -> ScheduledJob:
     if type(job) is not ScheduledJob:
         raise TypeError("job must be an exact ScheduledJob")
-    _stable_identity(job.job_id, "job_id")
-    _stable_identity(job.action_id, "action_id")
-    if type(job.trigger_kind) is not TriggerKind:
+    job_id = _stable_identity(job.job_id, "job_id")
+    action_id = _stable_identity(job.action_id, "action_id")
+    trigger_kind = job.trigger_kind
+    if type(trigger_kind) is not TriggerKind:
         raise TypeError("trigger_kind must be an exact TriggerKind")
-    if type(job.enabled) is not bool or type(job.coalesce) is not bool:
+    enabled = job.enabled
+    coalesce = job.coalesce
+    if type(enabled) is not bool or type(coalesce) is not bool:
         raise TypeError("enabled and coalesce must be exact bool values")
+    max_instances = job.max_instances
     if (
-        type(job.max_instances) is not int
-        or job.max_instances <= 0
-        or job.max_instances > _MAX_SQLITE_INTEGER
+        type(max_instances) is not int
+        or max_instances <= 0
+        or max_instances > _MAX_SQLITE_INTEGER
     ):
         raise ValueError(
             "max_instances must be a positive exact integer within SQLite range"
         )
-    if job.misfire_grace_seconds is not None and (
-        type(job.misfire_grace_seconds) is not int
-        or job.misfire_grace_seconds <= 0
-        or job.misfire_grace_seconds > _MAX_SQLITE_INTEGER
+    grace = job.misfire_grace_seconds
+    if grace is not None and (
+        type(grace) is not int
+        or grace <= 0
+        or grace > _MAX_SQLITE_INTEGER
     ):
         raise ValueError(
-            "misfire_grace_seconds must be a positive exact integer within SQLite range or None"
+            "misfire_grace_seconds must be a positive exact integer "
+            "within SQLite range or None"
         )
     trigger = _canonical_json_object(job.trigger, "trigger", depth=0)
     if not trigger:
@@ -183,7 +189,17 @@ def _validated_job_data(job: ScheduledJob) -> tuple[dict[str, Any], dict[str, An
         payload.get(IMMUTABLE_JOB_BINDING_KEY),
         "scheduled job immutable binding",
     )
-    return trigger, payload
+    return ScheduledJob(
+        job_id=job_id,
+        action_id=action_id,
+        trigger_kind=trigger_kind,
+        trigger=trigger,
+        payload=payload,
+        enabled=enabled,
+        coalesce=coalesce,
+        max_instances=max_instances,
+        misfire_grace_seconds=grace,
+    )
 
 
 def _validated_binding(value: object, label: str) -> str | None:
