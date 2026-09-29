@@ -560,7 +560,10 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
     def _task_has_model_selection(self, task_id: str) -> bool:
         with self._sqlite.connection() as conn:
             row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
+                "SELECT t.payload_json, b.selection_id AS bound_selection_id "
+                "FROM tasks AS t "
+                "LEFT JOIN v01_task_model_bindings AS b ON b.task_id = t.task_id "
+                "WHERE t.task_id = ?",
                 (task_id,),
             ).fetchone()
         if row is None:
@@ -568,7 +571,11 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         payload = json.loads(row["payload_json"])
         if not isinstance(payload, dict):
             raise TypeError("task payload must be an object")
-        return _MODEL_SELECTION_FIELD in payload
+        if _MODEL_SELECTION_FIELD in payload:
+            return True
+        if row["bound_selection_id"] is not None:
+            raise ValueError("bound model task lost its frozen selection identity")
+        return False
 
     @staticmethod
     def _model_text(result: RuntimeResult) -> str:

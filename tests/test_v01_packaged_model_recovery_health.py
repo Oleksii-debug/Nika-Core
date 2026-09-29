@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -267,6 +268,41 @@ def test_legacy_unbound_recovery_remains_deterministic_and_ready(tmp_path: Path)
     result = _probe(_runtime(store, health_probe_factory=forbidden), task_id)
 
     assert result.status is RuntimeResumeProbeStatus.READY
+
+
+def test_bound_model_task_cannot_downgrade_to_legacy_when_selection_is_lost(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _task_with_selection(store, _ollama())
+    settings = V01ModelSettings(store)
+    assert settings.for_task(task_id).route_kind == "ollama"
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        assert isinstance(payload, dict)
+        payload.pop("v01_model_selection")
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (json.dumps(payload, sort_keys=True), task_id),
+        )
+
+    factory_calls: list[ModelSelection] = []
+
+    def forbidden(selection: ModelSelection):
+        factory_calls.append(selection)
+        raise AssertionError("inconsistent frozen binding must stop before model health")
+
+    result = _probe(_runtime(store, health_probe_factory=forbidden), task_id)
+
+    assert result.status is RuntimeResumeProbeStatus.UNVERIFIABLE
+    assert result.checkpoint_id is None
+    assert factory_calls == []
 
 
 def test_recovery_health_uses_frozen_task_route_after_default_changes(
