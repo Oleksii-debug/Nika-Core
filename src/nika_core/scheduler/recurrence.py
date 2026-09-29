@@ -738,8 +738,13 @@ def _parse_optional_iso(value: object, label: str) -> datetime | None:
 
 
 def _require_aware_utc(value: datetime, label: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None:
+    if type(value) is not datetime:
         raise ValueError(f"{label} must be timezone-aware")
+    timezone_info = value.tzinfo
+    if timezone_info is None:
+        raise ValueError(f"{label} must be timezone-aware")
+    if type(timezone_info) is not type(UTC):
+        raise ValueError(f"{label} timezone must be a canonical fixed offset")
     return value.astimezone(UTC)
 
 
