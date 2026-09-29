@@ -37,6 +37,7 @@ class APSchedulerAdapter(SchedulerPort):
         self._started = False
         self._starting = False
         self._lifecycle_lock = RLock()
+        self._runtime_sync_lock = RLock()
         self._shutdown_requested = False
         self._shutdown_wait = True
 
@@ -144,39 +145,43 @@ class APSchedulerAdapter(SchedulerPort):
 
     def _sync_runtime_job(self, job_id: str) -> ScheduledJob | None:
         job_id = _require_job_id(job_id)
-        for _ in range(_SYNC_RETRY_LIMIT):
-            job = self._jobs.get(job_id)
-            if job is None or not job.enabled:
-                self._remove_runtime_job(job_id)
-                return None
-            if not self._task_authority_allows(job):
+        # Durable writers may commit while another caller reconciles live APScheduler
+        # state. Serialize only live reconciliation so an older in-flight install
+        # cannot overwrite the runtime state of a newer canonical adapter mutation.
+        with self._runtime_sync_lock:
+            for _ in range(_SYNC_RETRY_LIMIT):
+                job = self._jobs.get(job_id)
+                if job is None or not job.enabled:
+                    self._remove_runtime_job(job_id)
+                    return None
+                if not self._task_authority_allows(job):
+                    current = self._jobs.get(job_id)
+                    if current is not None and current != job:
+                        continue
+                    self._remove_runtime_job(job_id)
+                    return None
                 current = self._jobs.get(job_id)
-                if current is not None and current != job:
+                if current is None or not current.enabled:
+                    self._remove_runtime_job(job_id)
+                    return None
+                if current != job:
                     continue
-                self._remove_runtime_job(job_id)
-                return None
-            current = self._jobs.get(job_id)
-            if current is None or not current.enabled:
-                self._remove_runtime_job(job_id)
-                return None
-            if current != job:
-                continue
-            if not self._task_authority_allows(current):
-                after_authority = self._jobs.get(job_id)
-                if after_authority is not None and after_authority != current:
+                if not self._task_authority_allows(current):
+                    after_authority = self._jobs.get(job_id)
+                    if after_authority is not None and after_authority != current:
+                        continue
+                    self._remove_runtime_job(job_id)
+                    return None
+                if self._jobs.get(job_id) != current:
                     continue
-                self._remove_runtime_job(job_id)
-                return None
-            if self._jobs.get(job_id) != current:
-                continue
-            try:
-                self._install(current)
-            except Exception:
-                self._remove_runtime_job(job_id)
-                raise
-            return current
-        self._remove_runtime_job(job_id)
-        return None
+                try:
+                    self._install(current)
+                except Exception:
+                    self._remove_runtime_job(job_id)
+                    raise
+                return current
+            self._remove_runtime_job(job_id)
+            return None
 
     def _remove_runtime_job(self, job_id: str) -> None:
         if self._scheduler.get_job(job_id) is not None:

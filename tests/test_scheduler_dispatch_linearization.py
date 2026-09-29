@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -298,6 +299,75 @@ def test_runtime_sync_bounds_continuous_stale_suppression_churn(
     assert current.payload["generation"] == churn_count
     assert current.enabled is True
     assert not adapter.has_runtime_job(initial.job_id)
+    adapter.shutdown(wait=False)
+
+
+
+def test_runtime_sync_serializes_concurrent_replacement_install(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement_committed = Event()
+
+    class SignalingJobs(ScheduledJobStore):
+        def upsert(self, job: ScheduledJob) -> None:
+            super().upsert(job)
+            if job.payload.get("generation") == "new":
+                replacement_committed.set()
+
+    jobs = SignalingJobs(_sqlite(tmp_path))
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.start()
+    stale = _job(payload={"generation": "old"})
+    replacement = replace(
+        stale,
+        trigger={
+            "run_date": (datetime.now(UTC) + timedelta(days=2)).isoformat(),
+        },
+        payload={"generation": "new"},
+    )
+    stale_install_entered = Event()
+    release_stale_install = Event()
+    errors: list[BaseException] = []
+    original_install = adapter._install
+
+    def blocking_install(job: ScheduledJob) -> None:
+        if job == stale and not stale_install_entered.is_set():
+            stale_install_entered.set()
+            if not release_stale_install.wait(timeout=5):
+                raise AssertionError("stale install was not released")
+        original_install(job)
+
+    def upsert_in_thread(job: ScheduledJob) -> None:
+        try:
+            adapter.upsert(job)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    monkeypatch.setattr(adapter, "_install", blocking_install)
+    stale_thread = Thread(target=upsert_in_thread, args=(stale,), daemon=True)
+    stale_thread.start()
+    assert stale_install_entered.wait(timeout=5)
+
+    replacement_thread = Thread(
+        target=upsert_in_thread,
+        args=(replacement,),
+        daemon=True,
+    )
+    replacement_thread.start()
+    assert replacement_committed.wait(timeout=5)
+    release_stale_install.set()
+    stale_thread.join(timeout=5)
+    replacement_thread.join(timeout=5)
+
+    assert not stale_thread.is_alive()
+    assert not replacement_thread.is_alive()
+    assert errors == []
+    durable = jobs.get(stale.job_id)
+    runtime = adapter._scheduler.get_job(stale.job_id)
+    assert durable == replacement
+    assert runtime is not None
+    assert tuple(runtime.args)[1] == replacement
     adapter.shutdown(wait=False)
 
 
