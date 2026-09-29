@@ -750,7 +750,6 @@ def test_runner_rejects_behavioral_scorer_result_before_conversion() -> None:
         asyncio.run(runner.benchmark(_candidate(), evaluation))
 
 
-
 class _FalseyScorer:
     def __bool__(self):
         raise AssertionError("scorer truthiness executed")
