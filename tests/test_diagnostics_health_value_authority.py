@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta, timezone
 from enum import StrEnum
+from pathlib import Path
 
 import pytest
 
+from nika_core.config import AppConfig
 from nika_core.diagnostics import (
     HealthCheck,
     HealthReport,
@@ -36,6 +38,25 @@ class _HealthTextSubclass(str):
 class _BehavioralDatetime(datetime):
     def astimezone(self, *args: object, **kwargs: object) -> datetime:
         raise AssertionError("behavioral datetime must not execute")
+
+
+class _BehavioralInt(int):
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("behavioral int must not execute")
+
+
+class _BehavioralString(str):
+    def strip(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("behavioral string must not execute")
+
+
+class _BehavioralPath:
+    def __fspath__(self) -> str:
+        raise AssertionError("behavioral path must not execute")
+
+
+class _AppConfigSubclass(AppConfig):
+    pass
 
 
 class _CheckTuple(tuple[HealthCheck, ...]):
@@ -213,3 +234,51 @@ def test_health_report_snapshots_canonical_checks() -> None:
             "summary": "canonical",
         }
     ]
+
+
+
+def test_health_service_rejects_app_config_subclass(tmp_path: Path) -> None:
+    config = _AppConfigSubclass(database_path=tmp_path / "nika.db")
+
+    with pytest.raises(TypeError, match="config must be a canonical AppConfig"):
+        HealthService(config)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "message"),
+    [
+        ("schema_version", _BehavioralInt(1), "schema_version must be a canonical int"),
+        ("app_version", _BehavioralString("0.0.2"), "app_version must be canonical text"),
+        (
+            "database_path",
+            _BehavioralPath(),
+            "database_path must be a canonical platform Path",
+        ),
+    ],
+)
+def test_health_service_rejects_forged_config_field_carriers_before_behavior(
+    tmp_path: Path,
+    field_name: str,
+    value: object,
+    message: str,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "nika.db")
+    object.__setattr__(config, field_name, value)
+
+    with pytest.raises(TypeError, match=message):
+        HealthService(config)
+
+
+def test_health_service_snapshots_config_authority(tmp_path: Path) -> None:
+    original_path = tmp_path / "original.db"
+    config = AppConfig(database_path=original_path)
+    service = HealthService(config)
+
+    config.schema_version = 999
+    config.app_version = ""
+    config.database_path = tmp_path / "replacement.db"
+
+    check = service._check_configuration()
+
+    assert check.status is HealthStatus.PASS
+    assert service._database_path == original_path
