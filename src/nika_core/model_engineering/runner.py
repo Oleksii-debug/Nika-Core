@@ -58,18 +58,37 @@ class ExactMatchScorer:
         )
 
 
+_DEFAULT_SCORER_ID = "exact-match-nfc-v1"
+
+
 class ModelBenchmarkRunner:
     def __init__(
         self,
         gateway: ModelCompletionPort,
         *,
         scorer: ModelScoringPort | None = None,
+        scorer_id: str | None = None,
         resource_observer: ResourceObserverPort | None = None,
         accelerator_observer: AcceleratorObserverPort | None = None,
         clock: Callable[[], float] = perf_counter,
     ) -> None:
         self._gateway = gateway
-        self._scorer = ExactMatchScorer() if scorer is None else scorer
+        if scorer is None:
+            if scorer_id is not None and scorer_id != _DEFAULT_SCORER_ID:
+                raise ValueError(
+                    "default ExactMatchScorer requires the canonical scorer_id"
+                )
+            self._scorer = ExactMatchScorer()
+            self._scorer_id = _DEFAULT_SCORER_ID
+        else:
+            if type(scorer_id) is not str:
+                raise TypeError("custom scorer requires a canonical scorer_id")
+            if not scorer_id or scorer_id != scorer_id.strip():
+                raise ValueError(
+                    "custom scorer_id must be non-empty without surrounding whitespace"
+                )
+            self._scorer = scorer
+            self._scorer_id = scorer_id
         self._resource_observer = resource_observer
         self._accelerator_observer = accelerator_observer
         self._clock = clock
@@ -125,6 +144,7 @@ class ModelBenchmarkRunner:
         execution_config = BenchmarkExecutionConfig(
             timeout_seconds=timeout_seconds,
             temperature=temperature,
+            scorer_id=self._scorer_id,
         )
         reports = []
         for candidate in candidates:
