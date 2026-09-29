@@ -240,6 +240,52 @@ def test_dispatch_rechecks_durable_job_after_resolver_pause(tmp_path) -> None:
     adapter.shutdown(wait=False)
 
 
+def test_resume_uses_durable_replacement_after_enable_interleaving(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Resume Fence" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    live_id = _task(queue)
+    terminal_id = _task(queue, terminal=TaskState.CANCELLED)
+    run_at = datetime.now(UTC) + timedelta(days=1)
+
+    class ReplacingJobs(ScheduledJobStore):
+        def set_enabled(self, job_id: str, enabled: bool) -> bool:
+            if enabled:
+                self.upsert(
+                    _date_job(
+                        job_id=job_id,
+                        action_id="replacement",
+                        run_at=run_at,
+                        payload={"task_id": terminal_id},
+                    )
+                )
+            return super().set_enabled(job_id, enabled)
+
+    jobs = ReplacingJobs(store)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.upsert(
+        _date_job(
+            job_id="job-resume-race",
+            action_id="original",
+            run_at=run_at,
+            payload={"task_id": live_id},
+        )
+    )
+    adapter.start()
+    adapter.pause("job-resume-race")
+    assert not adapter.has_runtime_job("job-resume-race")
+
+    adapter.resume("job-resume-race")
+
+    durable = jobs.get("job-resume-race")
+    assert durable is not None
+    assert durable.action_id == "replacement"
+    assert durable.payload == {"task_id": terminal_id}
+    assert durable.enabled is False
+    assert not adapter.has_runtime_job("job-resume-race")
+    adapter.shutdown(wait=False)
+
+
 def test_repeated_stop_of_one_cancelled_task_is_idempotent(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Repeated Stop" / "nika core.db")
     store.initialize()
