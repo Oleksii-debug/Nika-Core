@@ -20,7 +20,12 @@ from nika_core.model_engineering import (
     benchmark_observations,
     build_experiment_definition,
 )
-from nika_core.model_gateway.contracts import ModelMessage, PrivacyClass, ProviderKind
+from nika_core.model_gateway.contracts import (
+    ModelErrorCode,
+    ModelMessage,
+    PrivacyClass,
+    ProviderKind,
+)
 
 
 def _candidate(candidate_id: str, model: str) -> ModelCandidate:
@@ -429,10 +434,7 @@ def test_failure_attempt_latency_is_not_projected_as_promotion_latency() -> None
         passed=False,
         score=0.0,
         response_sha256=None,
-        error_code=__import__(
-            "nika_core.model_gateway.contracts",
-            fromlist=["ModelErrorCode"],
-        ).ModelErrorCode.UNAVAILABLE,
+        error_code=ModelErrorCode.UNAVAILABLE,
         input_tokens=None,
         output_tokens=None,
         total_tokens=None,
