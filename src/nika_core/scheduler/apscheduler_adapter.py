@@ -50,15 +50,15 @@ class APSchedulerAdapter(SchedulerPort):
         self._started = False
 
     def upsert(self, job: ScheduledJob) -> None:
+        job_id = job.job_id
         self._jobs.upsert(job)
-        effective_job = job
+        effective_job = self._required_job(job_id)
         if self._started:
-            allowed = job.enabled and self._task_authority_allows(job)
-            effective_job = self._required_job(job.job_id)
+            allowed = effective_job.enabled and self._task_authority_allows(effective_job)
             if allowed:
                 self._install(effective_job)
-            elif self._scheduler.get_job(job.job_id) is not None:
-                self._scheduler.remove_job(job.job_id)
+            elif self._scheduler.get_job(effective_job.job_id) is not None:
+                self._scheduler.remove_job(effective_job.job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
 
     def remove(self, job_id: str) -> bool:
