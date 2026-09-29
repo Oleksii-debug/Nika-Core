@@ -318,6 +318,7 @@ def test_worker_result_revalidates_forged_recovery_state_before_state_effect() -
     assert coordinator.snapshot() == before
 
 
+
 def test_worker_result_rejects_control_bearing_test_output_digest() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
@@ -331,22 +332,20 @@ def test_worker_result_rejects_control_bearing_test_output_digest() -> None:
             ),
         ),
     )
-    envelope = WorkerResultEnvelope(
-        request.work_id,
-        request.component_id,
-        request.repository_id,
-        request.base_sha,
-        SHA_B,
-        DIGEST,
-        result,
-    )
     before = coordinator.snapshot()
 
     with pytest.raises(CoordinatorError, match="canonical single-line text"):
-        coordinator.record_result(envelope)
+        WorkerResultEnvelope(
+            request.work_id,
+            request.component_id,
+            request.repository_id,
+            request.base_sha,
+            SHA_B,
+            DIGEST,
+            result,
+        )
 
     assert coordinator.snapshot() == before
-
 
 def test_worker_result_rejects_oversized_artifact_text_before_state_effect() -> None:
     coordinator = _coordinator()
@@ -362,22 +361,20 @@ def test_worker_result_rejects_oversized_artifact_text_before_state_effect() -> 
         ),
         artifacts=(ArtifactEvidence("x" * 4097, "artifact-digest", "text/plain"),),
     )
-    envelope = WorkerResultEnvelope(
-        request.work_id,
-        request.component_id,
-        request.repository_id,
-        request.base_sha,
-        SHA_B,
-        DIGEST,
-        result,
-    )
     before = coordinator.snapshot()
 
     with pytest.raises(CoordinatorError, match="artifact evidence name"):
-        coordinator.record_result(envelope)
+        WorkerResultEnvelope(
+            request.work_id,
+            request.component_id,
+            request.repository_id,
+            request.base_sha,
+            SHA_B,
+            DIGEST,
+            result,
+        )
 
     assert coordinator.snapshot() == before
-
 
 def test_worker_result_rejects_control_bearing_recovery_token() -> None:
     coordinator = _coordinator()
@@ -393,23 +390,20 @@ def test_worker_result_rejects_control_bearing_recovery_token() -> None:
         ),
         recovery_state=RecoveryState("checkpoint", "opaque\nsecret"),
     )
-    envelope = WorkerResultEnvelope(
-        request.work_id,
-        request.component_id,
-        request.repository_id,
-        request.base_sha,
-        SHA_B,
-        DIGEST,
-        result,
-    )
     before = coordinator.snapshot()
 
     with pytest.raises(CoordinatorError, match="recovery state opaque token"):
-        coordinator.record_result(envelope)
+        WorkerResultEnvelope(
+            request.work_id,
+            request.component_id,
+            request.repository_id,
+            request.base_sha,
+            SHA_B,
+            DIGEST,
+            result,
+        )
 
     assert coordinator.snapshot() == before
-
-
 class _FakePassingEvidence:
     command = ("python", "-m", "pytest", "tests/core")
     exit_code = 0
