@@ -172,6 +172,13 @@ def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
         CheckStatus.PASS if writable else CheckStatus.FAIL,
         "Data directory is writable." if writable else "Data directory is not writable.",
     )
+    if path.is_symlink():
+        yield DiagnosticCheck(
+            "database",
+            CheckStatus.FAIL,
+            "Database path is not a safe regular file.",
+        )
+        return
     if not path.exists():
         yield DiagnosticCheck(
             "database",
@@ -179,7 +186,7 @@ def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
             "Database does not exist yet.",
         )
         return
-    if not path.is_file() or path.is_symlink():
+    if not path.is_file():
         yield DiagnosticCheck(
             "database",
             CheckStatus.FAIL,
