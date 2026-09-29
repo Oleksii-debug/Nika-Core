@@ -340,14 +340,35 @@ class HealthService:
 
     @classmethod
     def _copy_stable_file(cls, source: Path, destination: Path) -> _FileIdentity:
-        before = cls._file_identity(source)
-        with source.open("rb") as source_file, destination.open("xb") as destination_file:
-            shutil.copyfileobj(source_file, destination_file)
-            descriptor_after = cls._identity_from_stat(os.fstat(source_file.fileno()))
-        after = cls._file_identity(source)
-        if before != descriptor_after or before != after:
-            raise OSError("SQLite source file changed while being copied")
-        return before
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        source_fd = os.open(source, flags)
+        try:
+            descriptor_metadata = os.fstat(source_fd)
+            if not stat.S_ISREG(descriptor_metadata.st_mode):
+                raise OSError("health source is not a regular file")
+            descriptor_before = cls._identity_from_stat(descriptor_metadata)
+            path_before = cls._file_identity(source)
+            if descriptor_before != path_before:
+                raise OSError("SQLite source path changed before health snapshot copy")
+
+            source_file = os.fdopen(source_fd, "rb")
+            source_fd = -1
+            with source_file, destination.open("xb") as destination_file:
+                shutil.copyfileobj(source_file, destination_file)
+                descriptor_after = cls._identity_from_stat(os.fstat(source_file.fileno()))
+
+            path_after = cls._file_identity(source)
+            if descriptor_before != descriptor_after or descriptor_before != path_after:
+                raise OSError("SQLite source file changed while being copied")
+            return descriptor_before
+        finally:
+            if source_fd >= 0:
+                os.close(source_fd)
 
     @classmethod
     def _optional_file_identity(cls, path: Path) -> _FileIdentity | None:

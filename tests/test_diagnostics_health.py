@@ -271,6 +271,41 @@ def test_current_markers_with_missing_canonical_table_fail_schema_shape(tmp_path
     assert report.overall is HealthStatus.FAIL
 
 
+def test_health_snapshot_does_not_copy_before_descriptor_identity_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source.db"
+    destination = tmp_path / "snapshot.db"
+    source.write_bytes(b"canonical sqlite bytes")
+    original_file_identity = HealthService._file_identity
+    calls = 0
+
+    def mismatched_path_identity(cls: type[HealthService], path: Path):
+        nonlocal calls
+        identity = original_file_identity(path)
+        if path == source and calls == 0:
+            calls += 1
+            return type(identity)(
+                device=identity.device,
+                inode=identity.inode,
+                size=identity.size + 1,
+                modified_ns=identity.modified_ns,
+            )
+        return identity
+
+    monkeypatch.setattr(
+        HealthService,
+        "_file_identity",
+        classmethod(mismatched_path_identity),
+    )
+
+    with pytest.raises(OSError):
+        HealthService._copy_stable_file(source, destination)
+
+    assert not destination.exists()
+
+
 def test_health_does_not_mutate_source_wal_family(tmp_path: Path) -> None:
     database = tmp_path / "wal health" / "nika.db"
     _write_healthy_database(database)
