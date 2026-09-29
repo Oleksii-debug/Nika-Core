@@ -11,6 +11,7 @@ from typing import Protocol
 from nika_core.model_engineering.contracts import (
     AcceleratorObserverPort,
     AcceleratorSnapshot,
+    BenchmarkExecutionConfig,
     BenchmarkSuiteReport,
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
@@ -81,16 +82,10 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> CandidateBenchmarkReport:
-        if type(timeout_seconds) not in (int, float):
-            raise TypeError("timeout_seconds must be numeric")
-        if not isfinite(float(timeout_seconds)) or timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be finite and greater than zero")
-        if temperature is not None:
-            if type(temperature) not in (int, float):
-                raise TypeError("temperature must be numeric")
-            temperature_number = float(temperature)
-            if not isfinite(temperature_number) or not 0 <= temperature_number <= 2:
-                raise ValueError("temperature must be finite and in [0, 2]")
+        execution_config = BenchmarkExecutionConfig(
+            timeout_seconds=execution_config.timeout_seconds,
+            temperature=execution_config.temperature,
+        )
 
         results: list[CaseBenchmarkResult] = []
         for case in evaluation_set.cases:
@@ -99,11 +94,15 @@ class ModelBenchmarkRunner:
                     candidate,
                     evaluation_set,
                     case,
-                    timeout_seconds=float(timeout_seconds),
-                    temperature=temperature,
+                    execution_config=execution_config,
                 )
             )
-        return self._build_report(candidate, evaluation_set, tuple(results))
+        return self._build_report(
+            candidate,
+            evaluation_set,
+            execution_config,
+            tuple(results),
+        )
 
     async def benchmark_suite(
         self,
@@ -123,6 +122,10 @@ class ModelBenchmarkRunner:
         if len(ids) != len(set(ids)):
             raise ValueError("benchmark suite candidate IDs must be unique")
 
+        execution_config = BenchmarkExecutionConfig(
+            timeout_seconds=timeout_seconds,
+            temperature=temperature,
+        )
         reports = []
         for candidate in candidates:
             reports.append(
@@ -137,6 +140,7 @@ class ModelBenchmarkRunner:
             evaluation_set_id=evaluation_set.evaluation_set_id,
             evaluation_set_version=evaluation_set.version,
             evaluation_set_sha256=evaluation_set.content_sha256,
+            execution_config_sha256=execution_config.evidence_sha256,
             reports=tuple(reports),
         )
 
@@ -146,8 +150,7 @@ class ModelBenchmarkRunner:
         evaluation_set: EvaluationSet,
         case: EvaluationCase,
         *,
-        timeout_seconds: float,
-        temperature: float | None,
+        execution_config: BenchmarkExecutionConfig,
     ) -> CaseBenchmarkResult:
         resource_before = self._resource_snapshot()
         accelerator_before = self._accelerator_snapshot()
@@ -166,6 +169,7 @@ class ModelBenchmarkRunner:
                 "evaluation_set_sha256": evaluation_set.content_sha256,
                 "evaluation_case_id": case.case_id,
                 "model_candidate_id": candidate.candidate_id,
+                "benchmark_execution_config_sha256": execution_config.evidence_sha256,
             },
         )
         started = self._clock()
@@ -332,6 +336,7 @@ class ModelBenchmarkRunner:
     def _build_report(
         candidate: ModelCandidate,
         evaluation_set: EvaluationSet,
+        execution_config: BenchmarkExecutionConfig,
         results: tuple[CaseBenchmarkResult, ...],
     ) -> CandidateBenchmarkReport:
         case_by_id = {case.case_id: case for case in evaluation_set.cases}
@@ -374,6 +379,7 @@ class ModelBenchmarkRunner:
             evaluation_set_id=evaluation_set.evaluation_set_id,
             evaluation_set_version=evaluation_set.version,
             evaluation_set_sha256=evaluation_set.content_sha256,
+            execution_config_sha256=execution_config.evidence_sha256,
             evaluation_purpose=evaluation_set.purpose,
             case_results=results,
             weighted_quality_score=quality,
