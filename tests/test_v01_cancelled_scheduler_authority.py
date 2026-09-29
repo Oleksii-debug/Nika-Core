@@ -200,6 +200,46 @@ def test_upsert_uses_durable_job_after_caller_payload_mutation(tmp_path) -> None
     adapter.shutdown(wait=False)
 
 
+def test_dispatch_rechecks_durable_job_after_resolver_pause(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Dispatch Fence" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    live_id = _task(queue)
+    jobs = ScheduledJobStore(store)
+    calls: list[str] = []
+
+    adapter: APSchedulerAdapter
+
+    def resolve(action_id: str):
+        assert action_id == "live-race"
+        adapter.pause("job-live-race")
+
+        def handler(_payload: dict[str, object]) -> None:
+            calls.append(action_id)
+
+        return handler
+
+    adapter = APSchedulerAdapter(jobs, resolve)
+    adapter.upsert(
+        _date_job(
+            job_id="job-live-race",
+            action_id="live-race",
+            run_at=datetime.now(UTC) + timedelta(days=1),
+            payload={"task_id": live_id},
+        )
+    )
+    adapter.start()
+
+    adapter._dispatch("job-live-race")
+
+    durable = jobs.get("job-live-race")
+    assert durable is not None
+    assert durable.enabled is False
+    assert not adapter.has_runtime_job("job-live-race")
+    assert calls == []
+    adapter.shutdown(wait=False)
+
+
 def test_repeated_stop_of_one_cancelled_task_is_idempotent(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Repeated Stop" / "nika core.db")
     store.initialize()
