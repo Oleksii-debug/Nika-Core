@@ -755,6 +755,13 @@ class TaskRuntimeCoordinator:
                 raise ValueError(
                     "Cancel request runtime/thread does not match persisted runtime session"
                 )
+            if (
+                current is TaskState.PAUSED
+                and self._unresolved_pause_authority_with_connection(conn, task_id) is not None
+            ):
+                raise IdempotencyConflictError(
+                    "runtime pause is pending or uncertain; reconcile it before cancel"
+                )
             reservation, created = self._idempotency.reserve_with_connection(
                 conn,
                 operation_key=operation_key,
@@ -1478,6 +1485,28 @@ class TaskRuntimeCoordinator:
                 "multiple pending runtime pause operations exist for one task"
             )
         return None if not rows else str(rows[0]["operation_key"])
+
+    @staticmethod
+    def _unresolved_pause_authority_with_connection(conn, task_id: str) -> str | None:
+        row = conn.execute(
+            """
+            SELECT operation_key
+            FROM idempotency_records
+            WHERE task_id = ?
+              AND operation_type IN (?, ?)
+              AND status IN (?, ?)
+            ORDER BY created_at, operation_key
+            LIMIT 1
+            """,
+            (
+                task_id,
+                _PAUSE_OPERATION_TYPE,
+                _PAUSE_OUTCOME_OPERATION_TYPE,
+                IdempotencyStatus.PENDING.value,
+                IdempotencyStatus.UNCERTAIN.value,
+            ),
+        ).fetchone()
+        return None if row is None else str(row["operation_key"])
 
     def _task_state(self, task_id: str) -> TaskState:
         with self._queue.store.connection() as conn:
