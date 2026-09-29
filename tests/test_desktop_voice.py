@@ -543,6 +543,104 @@ def test_cancel_propagates_to_active_async_capture() -> None:
         submitter.close()
 
 
+def test_close_waits_for_submission_then_cancels_resulting_future() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    future_created = threading.Event()
+    future: Future[Any] = Future()
+
+    def blocking_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        entered.set()
+        assert release.wait(timeout=2)
+        future_created.set()
+        return future
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=blocking_submit,
+    )
+    start_done = threading.Event()
+
+    def start_voice() -> None:
+        try:
+            assert controller.start({}).status == "accepted"
+        finally:
+            start_done.set()
+
+    starter = threading.Thread(target=start_voice, daemon=True)
+    starter.start()
+    assert entered.wait(timeout=2)
+
+    close_done = threading.Event()
+    close_errors: list[BaseException] = []
+
+    def close_voice() -> None:
+        try:
+            controller.close(timeout_seconds=1.0)
+        except BaseException as exc:
+            close_errors.append(exc)
+        finally:
+            close_done.set()
+
+    closer = threading.Thread(target=close_voice, daemon=True)
+    closer.start()
+    time.sleep(0.05)
+    assert close_done.is_set() is False
+    assert controller.snapshot()["status"] == DesktopVoiceStatus.CANCELLING.value
+
+    release.set()
+    assert future_created.wait(timeout=2)
+    assert close_done.wait(timeout=2)
+    assert start_done.wait(timeout=2)
+    starter.join(timeout=1)
+    closer.join(timeout=1)
+
+    assert close_errors == []
+    assert future.cancelled() is True
+    snapshot = controller.snapshot()
+    assert snapshot["status"] == DesktopVoiceStatus.CANCELLED.value
+    assert snapshot["active"] is False
+
+
+def test_close_submission_wait_respects_deadline_without_losing_reservation() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        entered.set()
+        assert release.wait(timeout=2)
+        future: Future[Any] = Future()
+        return future
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=blocking_submit,
+    )
+
+    starter = threading.Thread(target=lambda: controller.start({}), daemon=True)
+    starter.start()
+    assert entered.wait(timeout=2)
+
+    started_at = time.monotonic()
+    with pytest.raises(RuntimeError, match="submission did not settle"):
+        controller.close(timeout_seconds=0.05)
+    elapsed = time.monotonic() - started_at
+
+    assert elapsed >= 0.04
+    snapshot = controller.snapshot()
+    assert snapshot["status"] == DesktopVoiceStatus.CANCELLING.value
+    assert snapshot["active"] is True
+    with pytest.raises(ValueError, match="завершує скасування"):
+        controller.start({})
+
+    release.set()
+    starter.join(timeout=2)
+    assert starter.is_alive() is False
+    _wait_status(controller, DesktopVoiceStatus.CANCELLED)
+
+
 def test_close_cancels_active_turn_and_waits_for_coroutine_settlement() -> None:
     submitter = _LoopSubmitter()
     entered = threading.Event()
