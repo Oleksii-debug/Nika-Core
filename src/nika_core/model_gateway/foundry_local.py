@@ -859,14 +859,8 @@ class FoundryLocalProvider:
         def read(*names: str) -> int | None:
             for name in names:
                 value = getattr(raw, name, None)
-                if value is None or isinstance(value, bool):
-                    continue
-                try:
-                    converted = int(value)
-                except (TypeError, ValueError):
-                    continue
-                if converted >= 0:
-                    return converted
+                if type(value) is int and value >= 0:
+                    return value
             return None
 
         return ModelUsage(
@@ -874,31 +868,6 @@ class FoundryLocalProvider:
             output_tokens=read("completion_tokens", "output_tokens"),
             total_tokens=read("total_tokens"),
         )
-
-    @staticmethod
-    def _optional_int(value: object) -> int | None:
-        if value is None or isinstance(value, bool):
-            return None
-        try:
-            result = int(value)
-        except (TypeError, ValueError):
-            return None
-        return result if result >= 0 else None
-
-    @staticmethod
-    def _optional_str(value: object) -> str | None:
-        if value is None:
-            return None
-        text = str(value).strip()
-        return text or None
-
-    @staticmethod
-    def _optional_bool(value: object) -> bool | None:
-        if value is None:
-            return None
-        if isinstance(value, bool):
-            return value
-        return bool(value)
 
     @staticmethod
     def _version_from_model_id(model_id: str) -> str | None:
