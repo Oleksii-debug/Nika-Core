@@ -909,6 +909,29 @@ def test_renderer_is_restart_stable_for_identical_durable_model_projection() -> 
     assert first["rendered"] == reopened["rendered"]
 
 
+def test_polling_announces_task_state_only_transition() -> None:
+    before = _model_result_projection()
+    before_task = before["task"]
+    assert isinstance(before_task, dict)
+    before_task["state"] = "RUNNING"
+
+    after = json.loads(json.dumps(before, ensure_ascii=False))
+    after_task = after["task"]
+    assert isinstance(after_task, dict)
+    after_task["state"] = "PAUSED"
+
+    rendered = _rendered_team_snapshot(
+        live_projection=before,
+        next_projection=after,
+    )
+    text = str(rendered["rendered"])
+
+    assert rendered["ready"] == "true"
+    assert "Призупинено" in text
+    assert "Стан командного завдання оновлено." in text
+    assert "Перевірена відповідь моделі доступна" not in text
+
+
 def test_polling_preserves_model_result_announcement_during_recovery_transition() -> None:
     before = _model_result_projection()
     final_before = before["final_result"]

@@ -620,6 +620,7 @@
     if (projection == null) return "none";
     return JSON.stringify({
       task_id: projection.task.task_id,
+      task_state: projection.task.state,
       team_id: projection.team.team_id,
       team_state: projection.team.state,
       roster_complete: projection.team.roster_complete,
