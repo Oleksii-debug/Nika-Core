@@ -12,10 +12,19 @@ from nika_core.scheduler.store import (
 )
 
 
-def _store(tmp_path: Path) -> ScheduledJobStore:
+class BehavioralJobId(str):
+    def __str__(self) -> str:
+        raise AssertionError("behavioral identifier conversion must not run")
+
+
+def _sqlite(tmp_path: Path) -> SQLiteStore:
     sqlite = SQLiteStore(tmp_path / "nika.sqlite3")
     sqlite.initialize()
-    return ScheduledJobStore(sqlite)
+    return sqlite
+
+
+def _store(tmp_path: Path) -> ScheduledJobStore:
+    return ScheduledJobStore(_sqlite(tmp_path))
 
 
 def _job(**overrides: object) -> ScheduledJob:
@@ -111,6 +120,59 @@ def test_scheduler_policy_carriers_are_exact(tmp_path: Path) -> None:
         store.get(BehavioralJobId("job-1"))
 
 
-class BehavioralJobId(str):
-    def __str__(self) -> str:
-        raise AssertionError("behavioral identifier conversion must not run")
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    (
+        ("enabled", "2", "persisted enabled is corrupt"),
+        ("coalesce", "-1", "persisted coalesce is corrupt"),
+        ("max_instances", "0", "persisted max_instances is corrupt"),
+    ),
+)
+def test_persisted_numeric_corruption_fails_closed(
+    tmp_path: Path,
+    column: str,
+    value: str,
+    message: str,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            f"UPDATE scheduled_jobs SET {column} = ? WHERE job_id = ?",
+            (value, "job-1"),
+        )
+
+    with pytest.raises(ValueError, match=message):
+        store.get("job-1")
+
+
+def test_persisted_nonfinite_json_fails_closed(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            ('{"score":NaN}', "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="persisted payload is corrupt"):
+        store.get("job-1")
+
+
+def test_existing_corrupt_binding_cannot_be_overwritten(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            ('{"_nika_immutable_job_binding_v1":NaN}', "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="persisted payload is corrupt"):
+        store.upsert(_job(payload={IMMUTABLE_JOB_BINDING_KEY: "binding-1"}))
