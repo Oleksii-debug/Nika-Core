@@ -179,6 +179,44 @@ def test_concurrent_requests_share_one_load_transition() -> None:
     assert model.completion_count == 2
 
 
+def test_close_unloads_distinct_owned_objects_with_same_model_id() -> None:
+    first = LifecycleModel()
+    second = LifecycleModel()
+
+    class RotatingCatalog:
+        def __init__(self) -> None:
+            self._models = [first, second]
+
+        def get_model(self, alias: str) -> LifecycleModel:
+            assert alias == "test-model"
+            if not self._models:
+                raise AssertionError("unexpected extra catalog lookup")
+            return self._models.pop(0)
+
+    manager = SimpleNamespace(catalog=RotatingCatalog())
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: manager,
+    )
+
+    async def scenario() -> None:
+        await provider.complete(request("first-object"))
+        await provider.complete(request("second-object"))
+
+    asyncio.run(scenario())
+
+    assert first.id == second.id == "stable-model-id"
+    assert first.is_loaded is True
+    assert second.is_loaded is True
+
+    provider.close()
+
+    assert first.unload_count == 1
+    assert second.unload_count == 1
+    assert first.is_loaded is False
+    assert second.is_loaded is False
+
+
 def test_close_refuses_unload_while_inference_owns_model() -> None:
     model = LifecycleModel()
     model.block_chat_on.add(1)
