@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import asyncio
-from concurrent.futures import Future
 import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
