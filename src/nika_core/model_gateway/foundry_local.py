@@ -534,19 +534,19 @@ class FoundryLocalProvider:
         if not self._sdk_bool(model, "is_loaded"):
             try:
                 model.load()
+                if not self._sdk_bool(model, "is_loaded"):
+                    raise ModelGatewayError(
+                        ModelErrorCode.PROVIDER_ERROR,
+                        "Foundry Local model load completed without READY evidence",
+                        provider_id=self.capabilities.provider_id,
+                        retryable=False,
+                    )
+                self._validate_model_alias(model, model_alias)
+                self._validate_model_identity(model, self._expected_model_id)
+                model_id = self._sdk_text(model, "id")
             except Exception:
                 self._cleanup_failed_load(model)
                 raise
-            if not self._sdk_bool(model, "is_loaded"):
-                raise ModelGatewayError(
-                    ModelErrorCode.PROVIDER_ERROR,
-                    "Foundry Local model load completed without READY evidence",
-                    provider_id=self.capabilities.provider_id,
-                    retryable=False,
-                )
-            self._validate_model_alias(model, model_alias)
-            self._validate_model_identity(model, self._expected_model_id)
-            model_id = self._sdk_text(model, "id")
             self._tainted_loaded_models.pop(id(model), None)
             with self._owned_model_lock:
                 self._owned_loaded_models[model_id] = model
