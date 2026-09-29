@@ -203,3 +203,37 @@ def test_keymap_transport_does_not_swallow_base_exception(
     monkeypatch.setattr(Keymap, method_name, interrupt)
     with pytest.raises(KeyboardInterrupt):
         invoke(bridge)
+
+
+@pytest.mark.parametrize(
+    "outcome",
+    [
+        object(),
+        type(
+            "BehavioralText",
+            (str,),
+            {"__str__": lambda self: (_ for _ in ()).throw(AssertionError("must-not-run"))},
+        )("text"),
+    ],
+)
+def test_dispatch_rejects_noncanonical_handler_result_without_coercion(
+    tmp_path: Path, caplog, outcome
+) -> None:
+    bridge = _bridge(tmp_path, handler=lambda _payload: outcome)
+
+    response = bridge.dispatch(
+        {
+            "request_id": "invalid-result-1",
+            "action_id": "task.create",
+            "payload": {"command": "x"},
+        }
+    )
+
+    assert response == {
+        "request_id": "invalid-result-1",
+        "status": "failed",
+        "message": "Не вдалося виконати дію через внутрішню помилку.",
+        "focus_id": None,
+    }
+    assert "must-not-run" not in caplog.text
+    assert type(outcome).__name__ in caplog.text

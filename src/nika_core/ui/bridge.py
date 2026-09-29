@@ -93,10 +93,25 @@ class UIActionBridge:
                     focus_id=outcome.focus_id,
                 ).model_dump()
             return outcome.model_dump()
+        if outcome is None:
+            message = ""
+        elif type(outcome) is str:
+            message = outcome
+        else:
+            logger.error(
+                "UI action returned invalid result: action_id=%s result_type=%s",
+                command.action_id,
+                type(outcome).__name__,
+            )
+            return UIResult(
+                request_id=command.request_id,
+                status="failed",
+                message="Не вдалося виконати дію через внутрішню помилку.",
+            ).model_dump()
         return UIResult(
             request_id=command.request_id,
             status="completed",
-            message="" if outcome is None else str(outcome),
+            message=message,
         ).model_dump()
 
     @staticmethod
