@@ -173,7 +173,11 @@ class DesktopVoiceTurnController:
 
         submission_settled.set()
         future.add_done_callback(
-            lambda done, identity=request_id: self._finish(identity, done)
+            lambda done, identity=request_id, cancelled=cancel_requested: self._finish(
+                identity,
+                done,
+                cancellation_requested=cancelled,
+            )
         )
         if cancel_requested and not future.done():
             future.cancel()
@@ -338,7 +342,25 @@ class DesktopVoiceTurnController:
         self,
         request_id: str,
         future: Future[VoiceTurnResult],
+        *,
+        cancellation_requested: bool = False,
     ) -> None:
+        if type(cancellation_requested) is not bool:
+            raise TypeError("cancellation_requested must be an exact bool")
+        if cancellation_requested and not future.cancelled():
+            try:
+                future.result()
+            except BaseException:
+                pass
+            with self._lock:
+                if self._active is future:
+                    self._snapshot = DesktopVoiceSnapshot(
+                        status=DesktopVoiceStatus.CANCELLED,
+                        request_id=request_id,
+                        message="Голосовий ввід скасовано.",
+                    )
+                    self._clear_active_locked()
+            return
         if future.cancelled():
             with self._lock:
                 if self._active is not future:
