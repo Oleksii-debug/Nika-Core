@@ -842,10 +842,14 @@ def _validate_test_evidence_carrier(evidence: object) -> None:
             )
         if type(item.exit_code) is not int:
             raise CoordinatorError("test evidence exit code must be an exact integer")
-        if type(item.output_digest) is not str or not item.output_digest.strip():
+        if type(item.output_digest) is not str:
             raise CoordinatorError(
-                "test evidence output digest must be an exact non-empty string"
+                "test evidence output digest must be an exact string"
             )
+        _canonical_durable_text(
+            item.output_digest,
+            label="test evidence output digest",
+        )
 
 
 def _validate_artifact_evidence_carrier(artifacts: object) -> None:
@@ -856,11 +860,17 @@ def _validate_artifact_evidence_carrier(artifacts: object) -> None:
             raise CoordinatorError(
                 "artifact evidence entries must be exact ArtifactEvidence"
             )
-        values = (item.name, item.digest, item.media_type)
-        if any(type(value) is not str or not value.strip() for value in values):
-            raise CoordinatorError(
-                "artifact evidence fields must be exact non-empty strings"
-            )
+        values = (
+            ("artifact evidence name", item.name),
+            ("artifact evidence digest", item.digest),
+            ("artifact evidence media type", item.media_type),
+        )
+        for label, value in values:
+            if type(value) is not str:
+                raise CoordinatorError(
+                    "artifact evidence fields must be exact strings"
+                )
+            _canonical_durable_text(value, label=label)
 
 
 def _validate_recovery_state_carrier(recovery_state: object) -> None:
@@ -868,13 +878,16 @@ def _validate_recovery_state_carrier(recovery_state: object) -> None:
         return
     if type(recovery_state) is not RecoveryState:
         raise CoordinatorError("recovery state must be an exact RecoveryState")
-    if type(recovery_state.phase) is not str or not recovery_state.phase.strip():
-        raise CoordinatorError("recovery state phase must be an exact non-empty string")
-    if (
-        recovery_state.opaque_token is not None
-        and type(recovery_state.opaque_token) is not str
-    ):
-        raise CoordinatorError("recovery state opaque token must be an exact string")
+    if type(recovery_state.phase) is not str:
+        raise CoordinatorError("recovery state phase must be an exact string")
+    _canonical_durable_text(recovery_state.phase, label="recovery state phase")
+    if recovery_state.opaque_token is not None:
+        if type(recovery_state.opaque_token) is not str:
+            raise CoordinatorError("recovery state opaque token must be an exact string")
+        _canonical_durable_text(
+            recovery_state.opaque_token,
+            label="recovery state opaque token",
+        )
 
 
 def _validate_worker_failure_carrier(failure: object) -> None:
