@@ -587,7 +587,12 @@ def test_observation_bridge_fences_envelopes_before_behavior() -> None:
         policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
         permission_fingerprint="permissions-v1",
     )
-    report = _report(candidate, evaluation)
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 11.0),
+    )
 
     with pytest.raises(TypeError, match="report must be an exact CandidateBenchmarkReport"):
         benchmark_observations(
