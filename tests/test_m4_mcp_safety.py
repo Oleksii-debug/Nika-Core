@@ -8,7 +8,7 @@ import pytest
 from mcp.server import MCPServer
 
 from nika_core.mcp_boundary import MCPClientAdapter, MCPServerConfig
-from nika_core.tools import ToolCall, ToolRisk
+from nika_core.tools import ToolCall, ToolResult, ToolRisk
 
 
 class _BehavioralDict(dict[str, object]):
@@ -469,6 +469,7 @@ def test_list_tools_bounds_unique_cursor_pagination(
 
     assert seen_cursors == [None, "page-2"]
 
+
 def test_mcp_call_deep_snapshots_nested_arguments_before_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -478,7 +479,7 @@ def test_mcp_call_deep_snapshots_nested_arguments_before_transport(
     }
     seen_arguments: list[dict[str, object]] = []
 
-    async def exercise() -> object:
+    async def exercise() -> ToolResult:
         started = asyncio.Event()
         release = asyncio.Event()
 
@@ -536,7 +537,7 @@ def test_mcp_call_deep_snapshots_nested_arguments_before_transport(
 
     result = asyncio.run(exercise())
 
-    assert getattr(result, "ok") is True
+    assert result.ok is True
     assert seen_arguments == [{"payload": {"items": ["original"]}}]
     assert original_arguments == {"payload": {"items": ["mutated", "late"]}}
 
