@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import asyncio
+
+import pytest
+
+from nika_core.microphone_capture import (
+    MicrophoneCaptureAdapterError,
+    MicrophoneCaptureCapabilities,
+    MicrophoneCaptureFailureCode,
+    MicrophoneCapturePolicy,
+    MicrophoneCaptureRequest,
+    MicrophoneCaptureResponse,
+    MicrophoneCaptureService,
+)
+from nika_core.model_gateway.contracts import ProviderKind
+from nika_core.speech_to_text import (
+    SpeechToTextAdapterResponse,
+    SpeechToTextPolicy,
+    SpeechToTextRequest,
+    SpeechToTextService,
+)
+from nika_core.voice_turn import (
+    OneShotVoiceTurnService,
+    VoiceTurnRequest,
+    VoiceTurnStatus,
+)
+from nika_core.wake_activation import MAX_TRANSCRIPT_CHARS, WakeActivationDetector
+
+
+class _MicrophoneAdapter:
+    def __init__(self, *, fail: bool = False) -> None:
+        self.fail = fail
+        self.calls = 0
+        self._capabilities = MicrophoneCaptureCapabilities(
+            provider_id="sounddevice-wasapi",
+            device_id="wasapi-device-sha256:" + "a" * 64,
+        )
+
+    @property
+    def capabilities(self) -> MicrophoneCaptureCapabilities:
+        return self._capabilities
+
+    async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResponse:
+        self.calls += 1
+        if self.fail:
+            raise MicrophoneCaptureAdapterError(
+                MicrophoneCaptureFailureCode.UNAVAILABLE,
+                "synthetic microphone unavailable",
+                retryable=False,
+            )
+        return MicrophoneCaptureResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            device_id=request.device_id,
+            sample_rate_hz=request.sample_rate_hz,
+            pcm_s16le=b"\x01\x00" * request.sample_count,
+            latency_ms=1.0,
+        )
+
+
+class _SttAdapter:
+    provider_kind = ProviderKind.LOCAL
+    provider_id = "local-stt"
+    supported_models = ("uk-small-v1",)
+
+    def __init__(self, transcript: str = "Ніка, продовжуй") -> None:
+        self.transcript = transcript
+        self.calls: list[SpeechToTextRequest] = []
+
+    async def transcribe(self, request: SpeechToTextRequest) -> SpeechToTextAdapterResponse:
+        self.calls.append(request)
+        return SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text=self.transcript,
+            detected_language="uk",
+            latency_ms=2.0,
+        )
+
+
+def _request() -> VoiceTurnRequest:
+    device_id = "wasapi-device-sha256:" + "a" * 64
+    return VoiceTurnRequest(
+        request_id="voice-turn-1",
+        capture=MicrophoneCaptureRequest(
+            request_id="voice-turn-1",
+            provider_id="sounddevice-wasapi",
+            device_id=device_id,
+            sample_rate_hz=16_000,
+            sample_count=8,
+            policy=MicrophoneCapturePolicy(timeout_seconds=1.0),
+        ),
+        stt_provider_id="local-stt",
+        stt_model="uk-small-v1",
+        language="uk",
+        stt_policy=SpeechToTextPolicy(
+            max_audio_bytes=1024,
+            max_transcript_chars=MAX_TRANSCRIPT_CHARS,
+            timeout_seconds=1.0,
+        ),
+    )
+
+
+def _service(
+    microphone: _MicrophoneAdapter,
+    stt: _SttAdapter,
+) -> OneShotVoiceTurnService:
+    return OneShotVoiceTurnService(
+        microphone=MicrophoneCaptureService(microphone),
+        speech_to_text=SpeechToTextService(stt),
+        wake_detector=WakeActivationDetector(),
+    )
+
+
+def test_one_shot_turn_composes_capture_stt_and_wake_without_durable_content() -> None:
+    microphone = _MicrophoneAdapter()
+    stt = _SttAdapter("Ніка, продовжуй")
+    result = asyncio.run(_service(microphone, stt).run(_request()))
+
+    assert result.evidence.status is VoiceTurnStatus.COMPLETED
+    assert result.evidence.activated is True
+    assert result.transcript == "Ніка, продовжуй"
+    assert microphone.calls == 1
+    assert len(stt.calls) == 1
+
+    durable = result.evidence.as_dict()
+    rendered = repr(durable)
+    assert "Ніка, продовжуй" not in rendered
+    assert "\\x01\\x00" not in rendered
+    assert durable["capture"]["audio_sha256"] == durable["transcription"]["audio_sha256"]
+    assert (
+        durable["transcription"]["transcript_sha256"]
+        == durable["wake"]["transcript_sha256"]
+    )
+
+
+def test_capture_failure_stops_before_stt_and_wake() -> None:
+    microphone = _MicrophoneAdapter(fail=True)
+    stt = _SttAdapter()
+    result = asyncio.run(_service(microphone, stt).run(_request()))
+
+    assert result.evidence.status is VoiceTurnStatus.CAPTURE_FAILED
+    assert result.transcript is None
+    assert result.evidence.transcription is None
+    assert result.evidence.wake is None
+    assert result.evidence.activated is False
+    assert stt.calls == []
+
+
+def test_stt_route_failure_stops_before_wake() -> None:
+    microphone = _MicrophoneAdapter()
+    stt = _SttAdapter()
+    request = _request()
+    object.__setattr__(request, "stt_model", "wrong-model")
+
+    result = asyncio.run(_service(microphone, stt).run(request))
+
+    assert result.evidence.status is VoiceTurnStatus.TRANSCRIPTION_FAILED
+    assert result.transcript is None
+    assert result.evidence.wake is None
+    assert result.evidence.activated is False
+    assert stt.calls == []
+
+
+def test_non_wake_transcript_completes_without_activation() -> None:
+    microphone = _MicrophoneAdapter()
+    stt = _SttAdapter("сьогодні гарна погода")
+    result = asyncio.run(_service(microphone, stt).run(_request()))
+
+    assert result.evidence.status is VoiceTurnStatus.COMPLETED
+    assert result.evidence.activated is False
+    assert result.transcript == "сьогодні гарна погода"
+
+
+def test_turn_rejects_stt_transcript_bound_larger_than_wake_authority() -> None:
+    request = _request()
+    with pytest.raises(ValueError, match="exceeds wake activation bound"):
+        VoiceTurnRequest(
+            request_id=request.request_id,
+            capture=request.capture,
+            stt_provider_id=request.stt_provider_id,
+            stt_model=request.stt_model,
+            language=request.language,
+            stt_policy=SpeechToTextPolicy(
+                max_transcript_chars=MAX_TRANSCRIPT_CHARS + 1
+            ),
+        )
+
+
+def test_turn_requires_one_exact_request_identity_across_capture_and_composition() -> None:
+    base = _request()
+    with pytest.raises(ValueError, match="capture request_id"):
+        VoiceTurnRequest(
+            request_id="voice-turn-other",
+            capture=base.capture,
+            stt_provider_id=base.stt_provider_id,
+            stt_model=base.stt_model,
+        )
+
+
+def test_caller_cancellation_propagates_without_fabricated_turn_evidence() -> None:
+    class _BlockedStt(_SttAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+
+        async def transcribe(
+            self,
+            request: SpeechToTextRequest,
+        ) -> SpeechToTextAdapterResponse:
+            self.calls.append(request)
+            self.entered.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+    async def scenario() -> None:
+        microphone = _MicrophoneAdapter()
+        stt = _BlockedStt()
+        task = asyncio.create_task(_service(microphone, stt).run(_request()))
+        await stt.entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())

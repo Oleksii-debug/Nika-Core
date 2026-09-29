@@ -1,0 +1,260 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+
+from nika_core.microphone_capture import (
+    MicrophoneCaptureEvidence,
+    MicrophoneCaptureRequest,
+    MicrophoneCaptureService,
+    MicrophoneCaptureStatus,
+)
+from nika_core.model_gateway.contracts import PrivacyClass
+from nika_core.speech_to_text import (
+    SpeechAudio,
+    SpeechAudioFormat,
+    SpeechToTextEvidence,
+    SpeechToTextPolicy,
+    SpeechToTextRequest,
+    SpeechToTextService,
+    SpeechToTextStatus,
+)
+from nika_core.wake_activation import (
+    MAX_TRANSCRIPT_CHARS,
+    WakeActivationDetector,
+    WakeActivationEvidence,
+    WakeActivationOutcome,
+)
+
+
+class VoiceTurnStatus(StrEnum):
+    COMPLETED = "completed"
+    CAPTURE_FAILED = "capture_failed"
+    TRANSCRIPTION_FAILED = "transcription_failed"
+    INVALID_COMPOSITION = "invalid_composition"
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceTurnRequest:
+    request_id: str
+    capture: MicrophoneCaptureRequest
+    stt_provider_id: str
+    stt_model: str
+    language: str | None = None
+    stt_policy: SpeechToTextPolicy = field(
+        default_factory=lambda: SpeechToTextPolicy(
+            max_transcript_chars=MAX_TRANSCRIPT_CHARS
+        )
+    )
+
+    def __post_init__(self) -> None:
+        if type(self.request_id) is not str or not self.request_id:
+            raise TypeError("request_id must be exact non-empty text")
+        if type(self.capture) is not MicrophoneCaptureRequest:
+            raise TypeError("capture must be an exact MicrophoneCaptureRequest")
+        if self.capture.request_id != self.request_id:
+            raise ValueError("capture request_id must match voice turn request_id")
+        if type(self.stt_provider_id) is not str or not self.stt_provider_id:
+            raise TypeError("stt_provider_id must be exact non-empty text")
+        if type(self.stt_model) is not str or not self.stt_model:
+            raise TypeError("stt_model must be exact non-empty text")
+        if self.language is not None and type(self.language) is not str:
+            raise TypeError("language must be exact text or None")
+        if type(self.stt_policy) is not SpeechToTextPolicy:
+            raise TypeError("stt_policy must be an exact SpeechToTextPolicy")
+        if self.stt_policy.max_transcript_chars > MAX_TRANSCRIPT_CHARS:
+            raise ValueError(
+                "stt_policy.max_transcript_chars exceeds wake activation bound"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceTurnEvidence:
+    request_id: str
+    status: VoiceTurnStatus
+    capture: MicrophoneCaptureEvidence
+    transcription: SpeechToTextEvidence | None
+    wake: WakeActivationEvidence | None
+    activated: bool
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "schema": "nika.voice-turn-evidence:v1",
+            "request_id": self.request_id,
+            "status": self.status.value,
+            "capture": self.capture.as_dict(),
+            "transcription": (
+                self.transcription.as_dict() if self.transcription is not None else None
+            ),
+            "wake": (
+                {
+                    "request_id": self.wake.request_id,
+                    "outcome": self.wake.outcome.value,
+                    "transcript_sha256": self.wake.transcript_sha256,
+                    "token_count": self.wake.token_count,
+                    "matched_phrase_sha256": self.wake.matched_phrase_sha256,
+                    "match_start_token": self.wake.match_start_token,
+                    "match_end_token_exclusive": self.wake.match_end_token_exclusive,
+                }
+                if self.wake is not None
+                else None
+            ),
+            "activated": self.activated,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class VoiceTurnResult:
+    transcript: str | None
+    evidence: VoiceTurnEvidence
+
+
+class OneShotVoiceTurnService:
+    """Explicitly invoked local microphone -> STT -> wake composition.
+
+    This service has no loop, scheduler, persistence or privileged-action authority.
+    Each call represents one caller-authorized microphone turn.
+    """
+
+    def __init__(
+        self,
+        *,
+        microphone: MicrophoneCaptureService,
+        speech_to_text: SpeechToTextService,
+        wake_detector: WakeActivationDetector,
+    ) -> None:
+        if type(microphone) is not MicrophoneCaptureService:
+            raise TypeError("microphone must be an exact MicrophoneCaptureService")
+        if type(speech_to_text) is not SpeechToTextService:
+            raise TypeError("speech_to_text must be an exact SpeechToTextService")
+        if type(wake_detector) is not WakeActivationDetector:
+            raise TypeError("wake_detector must be an exact WakeActivationDetector")
+        self._microphone = microphone
+        self._speech_to_text = speech_to_text
+        self._wake_detector = wake_detector
+
+    async def run(self, request: VoiceTurnRequest) -> VoiceTurnResult:
+        trusted = _snapshot_request(request)
+        capture_result = await self._microphone.capture(trusted.capture)
+        if (
+            capture_result.evidence.status is not MicrophoneCaptureStatus.SUCCEEDED
+            or capture_result.pcm_s16le is None
+        ):
+            return VoiceTurnResult(
+                transcript=None,
+                evidence=VoiceTurnEvidence(
+                    request_id=trusted.request_id,
+                    status=VoiceTurnStatus.CAPTURE_FAILED,
+                    capture=capture_result.evidence,
+                    transcription=None,
+                    wake=None,
+                    activated=False,
+                ),
+            )
+
+        audio = SpeechAudio(
+            data=capture_result.pcm_s16le,
+            audio_format=SpeechAudioFormat.PCM_S16LE,
+            sample_rate_hz=trusted.capture.sample_rate_hz,
+            channels=1,
+        )
+        stt_request = SpeechToTextRequest(
+            request_id=trusted.request_id,
+            provider_id=trusted.stt_provider_id,
+            model=trusted.stt_model,
+            audio=audio,
+            language=trusted.language,
+            privacy=PrivacyClass.SENSITIVE,
+            policy=trusted.stt_policy,
+        )
+        transcription = await self._speech_to_text.transcribe(stt_request)
+        if (
+            transcription.evidence.status is not SpeechToTextStatus.SUCCEEDED
+            or transcription.text is None
+        ):
+            return VoiceTurnResult(
+                transcript=None,
+                evidence=VoiceTurnEvidence(
+                    request_id=trusted.request_id,
+                    status=VoiceTurnStatus.TRANSCRIPTION_FAILED,
+                    capture=capture_result.evidence,
+                    transcription=transcription.evidence,
+                    wake=None,
+                    activated=False,
+                ),
+            )
+
+        if (
+            capture_result.evidence.audio_sha256 is None
+            or transcription.evidence.audio_sha256
+            != capture_result.evidence.audio_sha256
+        ):
+            return VoiceTurnResult(
+                transcript=None,
+                evidence=VoiceTurnEvidence(
+                    request_id=trusted.request_id,
+                    status=VoiceTurnStatus.INVALID_COMPOSITION,
+                    capture=capture_result.evidence,
+                    transcription=transcription.evidence,
+                    wake=None,
+                    activated=False,
+                ),
+            )
+
+        wake = self._wake_detector.detect(
+            request_id=trusted.request_id,
+            transcript=transcription.text,
+        )
+        if (
+            transcription.evidence.transcript_sha256 is None
+            or wake.transcript_sha256 != transcription.evidence.transcript_sha256
+        ):
+            return VoiceTurnResult(
+                transcript=None,
+                evidence=VoiceTurnEvidence(
+                    request_id=trusted.request_id,
+                    status=VoiceTurnStatus.INVALID_COMPOSITION,
+                    capture=capture_result.evidence,
+                    transcription=transcription.evidence,
+                    wake=wake,
+                    activated=False,
+                ),
+            )
+
+        return VoiceTurnResult(
+            transcript=transcription.text,
+            evidence=VoiceTurnEvidence(
+                request_id=trusted.request_id,
+                status=VoiceTurnStatus.COMPLETED,
+                capture=capture_result.evidence,
+                transcription=transcription.evidence,
+                wake=wake,
+                activated=wake.outcome is WakeActivationOutcome.DETECTED,
+            ),
+        )
+
+
+def _snapshot_request(request: VoiceTurnRequest) -> VoiceTurnRequest:
+    if type(request) is not VoiceTurnRequest:
+        raise TypeError("request must be an exact VoiceTurnRequest")
+    capture = MicrophoneCaptureRequest(
+        request_id=request.capture.request_id,
+        provider_id=request.capture.provider_id,
+        device_id=request.capture.device_id,
+        sample_rate_hz=request.capture.sample_rate_hz,
+        sample_count=request.capture.sample_count,
+        policy=request.capture.policy,
+    )
+    policy = SpeechToTextPolicy(
+        max_audio_bytes=request.stt_policy.max_audio_bytes,
+        max_transcript_chars=request.stt_policy.max_transcript_chars,
+        timeout_seconds=request.stt_policy.timeout_seconds,
+    )
+    return VoiceTurnRequest(
+        request_id=request.request_id,
+        capture=capture,
+        stt_provider_id=request.stt_provider_id,
+        stt_model=request.stt_model,
+        language=request.language,
+        stt_policy=policy,
+    )
