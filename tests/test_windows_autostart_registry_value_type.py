@@ -47,6 +47,36 @@ class _Backend(WindowsRunKeyBackend):
         self._fake_winreg.value_type = self._fake_winreg.REG_SZ
 
 
+class _BehavioralStr(str):
+    encode_calls = 0
+    equality_calls = 0
+
+    def encode(self, *args, **kwargs):
+        type(self).encode_calls += 1
+        raise AssertionError("behavioral encode must not execute")
+
+    def __eq__(self, other):
+        type(self).equality_calls += 1
+        raise AssertionError("behavioral equality must not execute")
+
+
+class _ProtocolBackend:
+    def __init__(self, value: str | None = None) -> None:
+        self.value = value
+
+    def __bool__(self) -> bool:
+        raise AssertionError("backend truthiness must not be evaluated")
+
+    def read(self) -> str | None:
+        return self.value
+
+    def write(self, command: str) -> None:
+        self.value = command
+
+    def delete(self) -> None:
+        self.value = None
+
+
 def test_exact_reg_sz_value_can_match_percent_containing_executable() -> None:
     fake = _FakeWinreg("", _FakeWinreg.REG_SZ)
     service = WindowsAutostartService(Path(r"C:\%NIKA_HOME%\Nika.exe"), _Backend(fake))
@@ -80,3 +110,37 @@ def test_noncanonical_registry_type_carrier_is_rejected() -> None:
 
     with pytest.raises(RuntimeError, match="unsupported value type"):
         backend.read()
+
+
+@pytest.mark.parametrize("value_type", [_FakeWinreg.REG_SZ, _FakeWinreg.REG_EXPAND_SZ])
+def test_behavioral_registry_text_is_rejected_before_text_behavior(value_type: int) -> None:
+    _BehavioralStr.encode_calls = 0
+    _BehavioralStr.equality_calls = 0
+    fake = _FakeWinreg(_BehavioralStr(r"C:\Nika\Nika.exe"), value_type)
+    backend = _Backend(fake)
+
+    with pytest.raises(RuntimeError, match="registration is malformed"):
+        backend.read()
+
+    assert _BehavioralStr.encode_calls == 0
+    assert _BehavioralStr.equality_calls == 0
+
+
+def test_protocol_backend_text_is_exact_fenced_before_status_text_behavior() -> None:
+    _BehavioralStr.encode_calls = 0
+    _BehavioralStr.equality_calls = 0
+    backend = _ProtocolBackend(_BehavioralStr(r"C:\Nika\Nika.exe"))
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), backend)
+
+    with pytest.raises(RuntimeError, match="registration is malformed"):
+        service.status()
+
+    assert _BehavioralStr.encode_calls == 0
+    assert _BehavioralStr.equality_calls == 0
+
+
+def test_explicit_backend_is_selected_without_truthiness_dispatch() -> None:
+    backend = _ProtocolBackend()
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), backend)
+
+    assert service.status().state is AutostartState.DISABLED
