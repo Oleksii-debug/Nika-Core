@@ -238,6 +238,49 @@ def test_close_refuses_unload_while_inference_owns_model() -> None:
     assert model.is_loaded is False
 
 
+def test_close_continues_cleanup_after_one_owned_unload_failure() -> None:
+    first = LifecycleModel()
+    second = LifecycleModel()
+    first.sticky_unload = True
+
+    class RotatingCatalog:
+        def __init__(self) -> None:
+            self._models = [first, second]
+
+        def get_model(self, alias: str) -> LifecycleModel:
+            assert alias == "test-model"
+            if not self._models:
+                raise AssertionError("unexpected extra catalog lookup")
+            return self._models.pop(0)
+
+    manager = SimpleNamespace(catalog=RotatingCatalog())
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: manager,
+    )
+
+    async def scenario() -> None:
+        await provider.complete(request("first-object"))
+        await provider.complete(request("second-object"))
+
+    asyncio.run(scenario())
+
+    with pytest.raises(ModelGatewayError) as failed:
+        provider.close()
+
+    assert failed.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert first.unload_count == 1
+    assert first.is_loaded is True
+    assert second.unload_count == 1
+    assert second.is_loaded is False
+
+    first.sticky_unload = False
+    provider.close()
+
+    assert first.unload_count == 2
+    assert first.is_loaded is False
+
+
 def test_clean_failed_load_can_retry_without_stale_ready() -> None:
     model = LifecycleModel()
     model.clean_fail_load_on.add(1)
