@@ -194,6 +194,34 @@ def test_create_rejects_non_utf8_target_text_before_persistence(
     assert count == 0
 
 
+def test_create_rejects_circular_target_payload_before_persistence(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    circular: list[object] = []
+    circular.append(circular)
+    spec = BatchTargetSpec(target_id="target-0", payload={})
+    object.__setattr__(spec, "payload", {"circular": circular})
+
+    with pytest.raises(BatchCursorStateError, match="JSON-serializable"):
+        BatchCursor.create(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=[spec],
+            batch_size=1,
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memory_records WHERE namespace = ?",
+            ("v01.batch_cursor",),
+        ).fetchone()[0]
+    assert count == 0
+    assert ledger.list_for_task("task") == ()
+
+
 def test_effect_lookup_rejects_behavioral_target_identity_without_reservation(
     tmp_path: Path,
 ) -> None:
@@ -305,6 +333,33 @@ def test_effect_evidence_rejects_non_utf8_json_before_ledger_mutation(
 
     durable = ledger.require(grant.operation_key)
     assert durable.status is IdempotencyStatus.PENDING
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+
+@pytest.mark.parametrize("operation", ("confirm", "mark_uncertain"))
+def test_effect_evidence_rejects_circular_json_before_ledger_mutation(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    circular: list[object] = []
+    circular.append(circular)
+
+    with pytest.raises(BatchCursorStateError, match="JSON-serializable"):
+        getattr(cursor, operation)("target-0", {"circular": circular})
+
+    durable = ledger.require(grant.operation_key)
+    assert durable.status is IdempotencyStatus.PENDING
+    assert durable.result is None
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
 
 
