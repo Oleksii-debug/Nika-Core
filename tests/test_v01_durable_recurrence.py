@@ -861,6 +861,67 @@ def test_datetime_timezone_carrier_fails_before_behavior(tmp_path: Path) -> None
     assert calls == []
 
 
+def test_non_utf8_text_fails_before_hash_or_persistence(tmp_path: Path) -> None:
+    bad_text = "\ud800"
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        service.create(
+            recurrence_id=bad_text,
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+        )
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        service.create(
+            recurrence_id="bad-task-utf8",
+            task_id=bad_text,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+        )
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        service.create(
+            recurrence_id="bad-action-utf8",
+            task_id=TASK_ID,
+            action_id=bad_text,
+            interval_seconds=60,
+            start_at=clock.value,
+        )
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        service.create(
+            recurrence_id="bad-payload-value-utf8",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload={"text": bad_text},
+        )
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        service.create(
+            recurrence_id="bad-payload-key-utf8",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload={bad_text: "value"},
+        )
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        service.action_handler(
+            {
+                "recurrence_id": "missing",
+                bad_text: "ignored",
+            }
+        )
+
+    assert scheduler.upserts == []
+    assert calls == []
+
+
 def test_payload_carriers_are_exact_json_and_detached_before_persistence(tmp_path: Path) -> None:
     class BehavioralDict(dict[str, object]):
         def items(self):
