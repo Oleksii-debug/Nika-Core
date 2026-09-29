@@ -129,6 +129,40 @@ class _ChatCompletionIdentityDriftModel(_SubstitutedModel):
         return _Client()
 
 
+class _EvidenceAliasDriftModel:
+    def __init__(self) -> None:
+        self.id = "authorized-model-id"
+        self.alias = "authorized-model"
+        self.is_loaded = False
+        self.context_length = None
+        self.input_modalities = None
+        self.output_modalities = None
+        self.capabilities = None
+        self.supports_tool_calling = None
+
+    @property
+    def is_cached(self) -> bool:
+        self.alias = "substituted-model"
+        return False
+
+
+class _EvidenceIdentityDriftModel:
+    def __init__(self) -> None:
+        self.id = "authorized-model-id"
+        self.alias = "authorized-model"
+        self.is_loaded = False
+        self.context_length = None
+        self.input_modalities = None
+        self.output_modalities = None
+        self.capabilities = None
+        self.supports_tool_calling = None
+
+    @property
+    def is_cached(self) -> bool:
+        self.id = "substituted-model-id"
+        return False
+
+
 class _SubstitutingCatalog:
     def __init__(self, model: _SubstitutedModel) -> None:
         self.model = model
@@ -218,6 +252,37 @@ def test_foundry_inspect_rejects_catalog_alias_substitution() -> None:
     assert model.load_calls == 0
     assert model.download_calls == 0
     assert model.chat_calls == 0
+
+
+def test_foundry_inspect_rejects_alias_drift_during_evidence_collection() -> None:
+    model = _EvidenceAliasDriftModel()
+    manager = _Manager(model)  # type: ignore[arg-type]
+    provider = FoundryLocalProvider(
+        default_model="authorized-model",
+        manager_factory=lambda: manager,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        provider.inspect_model("authorized-model")
+
+    _assert_alias_substitution_failure(exc_info.value)
+
+
+def test_foundry_inspect_rejects_identity_drift_during_evidence_collection() -> None:
+    model = _EvidenceIdentityDriftModel()
+    manager = _Manager(model)  # type: ignore[arg-type]
+    provider = FoundryLocalProvider(
+        default_model="authorized-model",
+        expected_model_id="authorized-model-id",
+        manager_factory=lambda: manager,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        provider.inspect_model("authorized-model")
+
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.provider_id == "foundry-local"
+    assert exc_info.value.retryable is False
 
 
 def test_foundry_complete_rejects_alias_drift_after_native_load_before_chat() -> None:
