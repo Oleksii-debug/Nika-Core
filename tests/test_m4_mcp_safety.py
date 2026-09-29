@@ -470,9 +470,7 @@ def test_list_tools_bounds_unique_cursor_pagination(
     assert seen_cursors == [None, "page-2"]
 
 
-def test_mcp_call_deep_snapshots_nested_arguments_before_transport(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_mcp_call_deep_snapshots_nested_arguments_before_approval_wait() -> None:
     original_items = ["original"]
     original_arguments: dict[str, object] = {
         "payload": {"items": original_items},
@@ -483,42 +481,14 @@ def test_mcp_call_deep_snapshots_nested_arguments_before_transport(
         started = asyncio.Event()
         release = asyncio.Event()
 
-        class FakeClient:
-            def __init__(self, _target: object) -> None:
-                pass
+        async def approval(_spec: object, call: ToolCall) -> None:
+            started.set()
+            await release.wait()
+            seen_arguments.append(call.arguments)
 
-            async def __aenter__(self) -> Self:
-                return self
-
-            async def __aexit__(
-                self,
-                _exc_type: object,
-                _exc: object,
-                _tb: object,
-            ) -> None:
-                pass
-
-            async def call_tool(
-                self,
-                _tool_name: str,
-                arguments: dict[str, object],
-            ) -> SimpleNamespace:
-                started.set()
-                await release.wait()
-                seen_arguments.append(arguments)
-                return SimpleNamespace(
-                    is_error=False,
-                    structured_content={"ok": True},
-                    content=[],
-                )
-
-        monkeypatch.setattr("nika_core.mcp_boundary.Client", FakeClient)
         adapter = MCPClientAdapter(
-            MCPServerConfig(
-                server_id="safety",
-                target=object(),
-                default_risk=ToolRisk.READ_ONLY,
-            )
+            MCPServerConfig(server_id="safety", target=object()),
+            approval_policy=approval,
         )
         task = asyncio.create_task(
             adapter.call(
@@ -537,7 +507,7 @@ def test_mcp_call_deep_snapshots_nested_arguments_before_transport(
 
     result = asyncio.run(exercise())
 
-    assert result.ok is True
+    assert result.error == "approval required"
     assert seen_arguments == [{"payload": {"items": ["original"]}}]
     assert original_arguments == {"payload": {"items": ["mutated", "late"]}}
 
