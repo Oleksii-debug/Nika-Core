@@ -695,3 +695,144 @@ def test_clock_jump_persists_range_exhaustion_after_one_effect(tmp_path: Path) -
     restarted, _ = _service(store, clock, calls)
     restarted.action_handler({"recurrence_id": "range-exhaustion"})
     assert len(calls) == 1
+
+
+def test_behavioral_text_and_datetime_carriers_fail_before_behavior(tmp_path: Path) -> None:
+    class BehavioralText(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            del args, kwargs
+            raise AssertionError("behavioral text method must not run")
+
+    class BehavioralDatetime(datetime):
+        def astimezone(self, *args: object, **kwargs: object) -> datetime:
+            del args, kwargs
+            raise AssertionError("behavioral datetime method must not run")
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+
+    with pytest.raises(ValueError, match="recurrence_id"):
+        service.create(
+            recurrence_id=BehavioralText("hostile"),
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+        )
+    with pytest.raises(ValueError, match="timezone-aware"):
+        service.create(
+            recurrence_id="hostile-datetime",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=BehavioralDatetime(
+                2030,
+                1,
+                1,
+                12,
+                0,
+                tzinfo=UTC,
+            ),
+        )
+
+    assert scheduler.upserts == []
+    assert calls == []
+
+
+def test_payload_carriers_are_exact_json_and_detached_before_persistence(tmp_path: Path) -> None:
+    class BehavioralDict(dict[str, object]):
+        def items(self):
+            raise AssertionError("behavioral dict method must not run")
+
+    class BehavioralText(str):
+        def encode(self, *args: object, **kwargs: object) -> bytes:
+            del args, kwargs
+            raise AssertionError("behavioral text encode must not run")
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+
+    with pytest.raises(TypeError, match="exact dict"):
+        service.create(
+            recurrence_id="behavioral-dict",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload=BehavioralDict({"query": "rain"}),
+        )
+    with pytest.raises(TypeError, match="exact JSON-compatible"):
+        service.create(
+            recurrence_id="behavioral-nested-text",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload={"query": BehavioralText("rain")},
+        )
+
+    nested = ["original"]
+    service.create(
+        recurrence_id="detached-payload",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+        payload={"nested": nested},
+    )
+    nested.append("mutated-after-create")
+    service.action_handler({"recurrence_id": "detached-payload"})
+
+    assert calls[-1].payload == {"nested": ["original"]}
+    assert len(scheduler.upserts) >= 2
+
+
+def test_nonfinite_and_oversized_payloads_fail_before_persistence(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+
+    with pytest.raises(ValueError, match="non-finite"):
+        service.create(
+            recurrence_id="nonfinite-payload",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload={"score": float("nan")},
+        )
+    with pytest.raises(ValueError, match="size limit"):
+        service.create(
+            recurrence_id="oversized-payload",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload={"text": "x" * 262_145},
+        )
+
+    assert scheduler.upserts == []
+    assert calls == []
+
+
+def test_action_payload_requires_exact_dict_before_lookup(tmp_path: Path) -> None:
+    class BehavioralActionPayload(dict[str, object]):
+        def get(self, *args: object, **kwargs: object) -> object:
+            del args, kwargs
+            raise AssertionError("behavioral payload get must not run")
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, _ = _service(store, clock, calls)
+
+    with pytest.raises(TypeError, match="exact dict"):
+        service.action_handler(
+            BehavioralActionPayload({"recurrence_id": "does-not-matter"})
+        )
+    assert calls == []
