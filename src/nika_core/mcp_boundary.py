@@ -17,6 +17,8 @@ from nika_core.tools import (
 
 
 _MAX_MCP_SEGMENT_CHARS = 128
+_MAX_MCP_CURSOR_BYTES = 4096
+_MAX_MCP_LIST_PAGES = 1000
 
 
 def _exact_utf8_text(
@@ -47,6 +49,15 @@ def _exact_mcp_segment(value: object, *, field: str) -> str:
     if ":" in text:
         raise ValueError(f"{field} must not contain ':'")
     return text
+
+
+def _exact_mcp_cursor(value: object) -> str:
+    cursor = _exact_utf8_text(value, field="MCP next cursor")
+    if len(cursor.encode("utf-8")) > _MAX_MCP_CURSOR_BYTES:
+        raise ValueError(
+            f"MCP next cursor must contain at most {_MAX_MCP_CURSOR_BYTES} UTF-8 bytes"
+        )
+    return cursor
 
 
 def _exact_tool_risk(value: object) -> ToolRisk:
@@ -122,28 +133,50 @@ class MCPClientAdapter:
         self._effect_guard = effect_guard
 
     async def list_tools(self) -> tuple[ToolSpec, ...]:
-        async with Client(self._target) as client:
-            result = await client.list_tools()
         specs: list[ToolSpec] = []
         seen_tool_ids: set[str] = set()
-        for tool in result.tools:
-            tool_name = _exact_mcp_segment(
-                tool.name,
-                field="MCP tool name",
-            )
-            tool_id = f"mcp:{self._server_id}:{tool_name}"
-            if tool_id in seen_tool_ids:
-                raise ValueError(f"duplicate MCP tool id: {tool_id}")
-            seen_tool_ids.add(tool_id)
-            specs.append(
-                ToolSpec(
-                    tool_id=tool_id,
-                    description=tool.description or tool.title or tool_name,
-                    risk=self._default_risk,
-                    input_schema=dict(tool.input_schema or {}),
-                )
-            )
-        return tuple(specs)
+        seen_cursors: set[str] = set()
+        cursor: str | None = None
+        pages = 0
+
+        async with Client(self._target) as client:
+            while True:
+                pages += 1
+                if pages > _MAX_MCP_LIST_PAGES:
+                    raise ValueError("MCP tools pagination exceeded safe page limit")
+                result = await client.list_tools(cursor=cursor)
+                try:
+                    page_tools = result.tools
+                    next_cursor = result.next_cursor
+                except AttributeError as exc:
+                    raise ValueError("MCP tools page is incomplete") from exc
+                if type(page_tools) is not list:
+                    raise TypeError("MCP tools page must contain an exact list")
+
+                for tool in page_tools:
+                    tool_name = _exact_mcp_segment(
+                        tool.name,
+                        field="MCP tool name",
+                    )
+                    tool_id = f"mcp:{self._server_id}:{tool_name}"
+                    if tool_id in seen_tool_ids:
+                        raise ValueError(f"duplicate MCP tool id: {tool_id}")
+                    seen_tool_ids.add(tool_id)
+                    specs.append(
+                        ToolSpec(
+                            tool_id=tool_id,
+                            description=tool.description or tool.title or tool_name,
+                            risk=self._default_risk,
+                            input_schema=dict(tool.input_schema or {}),
+                        )
+                    )
+
+                if next_cursor is None:
+                    return tuple(specs)
+                cursor = _exact_mcp_cursor(next_cursor)
+                if cursor in seen_cursors:
+                    raise ValueError("MCP tools pagination cursor repeated")
+                seen_cursors.add(cursor)
 
     async def call(self, call: ToolCall) -> ToolResult:
         canonical_call = _snapshot_tool_call(call)
