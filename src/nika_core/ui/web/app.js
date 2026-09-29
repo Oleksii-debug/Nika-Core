@@ -459,12 +459,14 @@
     if (!allowedComparisonStatuses.includes(comparison.status)
         || typeof comparison.validated !== "boolean") return false;
     if (!Array.isArray(comparison.source_states)
-        || comparison.source_states.length !== 2
+        || ![0, 2].includes(comparison.source_states.length)
         || comparison.source_states.some((state) => (
           !["valid", "missing", "worker_error", "evidence_invalid"].includes(state)
         ))) return false;
     let expectedNoncomparisonStatus = null;
-    if (comparison.source_states.includes("evidence_invalid")) {
+    if (comparison.source_states.length === 0) {
+      expectedNoncomparisonStatus = "evidence_invalid";
+    } else if (comparison.source_states.includes("evidence_invalid")) {
       expectedNoncomparisonStatus = "evidence_invalid";
     } else if (comparison.source_states.includes("worker_error")) {
       expectedNoncomparisonStatus = "worker_error";
