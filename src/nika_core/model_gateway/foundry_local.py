@@ -319,6 +319,7 @@ class FoundryLocalProvider:
                     ) from exc
                 raise
 
+            self._validate_model_alias(model, authorization.model)
             evidence = self._model_evidence(model)
             self._validate_model_identity(model, expected_model_id)
             if not evidence.cached:
@@ -543,6 +544,7 @@ class FoundryLocalProvider:
                     provider_id=self.capabilities.provider_id,
                     retryable=False,
                 )
+            self._validate_model_alias(model, model_alias)
             self._validate_model_identity(model, self._expected_model_id)
             model_id = self._sdk_text(model, "id")
             self._tainted_loaded_models.pop(id(model), None)
@@ -598,14 +600,7 @@ class FoundryLocalProvider:
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             )
-        resolved_alias = self._sdk_text(model, "alias")
-        if resolved_alias != alias:
-            raise ModelGatewayError(
-                ModelErrorCode.PROVIDER_ERROR,
-                "Foundry Local catalog returned a model for a different alias",
-                provider_id=self.capabilities.provider_id,
-                retryable=False,
-            )
+        self._validate_model_alias(model, alias)
         return model
 
     def _model_evidence(self, model: Any) -> FoundryModelEvidence:
@@ -630,6 +625,16 @@ class FoundryLocalProvider:
             capability_tags=self._sdk_optional_text(model, "capabilities"),
             supports_tool_calling=self._sdk_optional_bool(model, "supports_tool_calling"),
         )
+
+    def _validate_model_alias(self, model: Any, expected_alias: str) -> None:
+        actual_alias = self._sdk_text(model, "alias")
+        if actual_alias != expected_alias:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "Foundry Local model alias changed across the native effect boundary",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
 
     def _validate_model_identity(self, model: Any, expected_model_id: str | None) -> None:
         if expected_model_id is None:
