@@ -674,6 +674,38 @@ def test_controller_composes_with_real_synchronous_ui_bridge(tmp_path: Any) -> N
         submitter.close()
 
 
+
+def test_behavioral_factory_request_id_fails_without_comparison_dispatch() -> None:
+    class BehavioralStr(str):
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("factory request identity equality must not execute")
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            raise AssertionError("factory request identity inequality must not execute")
+
+    def forged_request(request_id: str) -> VoiceTurnRequest:
+        request = _request(request_id)
+        object.__setattr__(request, "request_id", BehavioralStr(request_id))
+        return request
+
+    submitter = _LoopSubmitter()
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=forged_request,
+        submit=submitter.submit,
+    )
+    try:
+        controller.start({})
+        snapshot = _wait_status(controller, DesktopVoiceStatus.FAILED)
+        assert snapshot["active"] is False
+        assert snapshot["transcript"] is None
+    finally:
+        submitter.close()
+
+
+
 def test_action_payload_cannot_supply_hidden_voice_authority() -> None:
     submitter = _LoopSubmitter()
     controller = DesktopVoiceTurnController(
