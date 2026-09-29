@@ -121,6 +121,19 @@ def benchmark_observations(
     actual_case_ids = tuple(result.case_id for result in report.case_results)
     if actual_case_ids != expected_case_ids:
         raise ValueError("benchmark report case coverage/order does not match the evaluation set")
+    for case, result in zip(
+        evaluation_set.cases,
+        report.case_results,
+        strict=True,
+    ):
+        expected_pass = (
+            result.completion_succeeded
+            and result.score >= float(case.pass_score)
+        )
+        if result.passed is not expected_pass:
+            raise ValueError(
+                "benchmark case pass evidence does not match the evaluation threshold"
+            )
 
     candidate_refs = (definition.champion, *definition.challengers)
     matching_refs = tuple(
