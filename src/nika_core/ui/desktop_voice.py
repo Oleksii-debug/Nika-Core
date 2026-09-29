@@ -99,6 +99,8 @@ class DesktopVoiceTurnController:
         self._active: Future[VoiceTurnResult] | None = None
         self._active_started: threading.Event | None = None
         self._active_settled: threading.Event | None = None
+        self._submitting_request_id: str | None = None
+        self._cancel_requested_while_submitting = False
         self._snapshot = DesktopVoiceSnapshot(
             status=DesktopVoiceStatus.IDLE,
             request_id=None,
@@ -109,37 +111,54 @@ class DesktopVoiceTurnController:
         self._require_empty_payload(payload)
         with self._lock:
             self._reap_cancelled_settlement_locked()
-            if self._active is not None:
+            if self._active is not None or self._submitting_request_id is not None:
                 raise ValueError(
                     "Голосовий ввід уже виконується або завершує скасування."
                 )
             request_id = f"desktop-voice-{uuid.uuid4().hex}"
             started = threading.Event()
             settled = threading.Event()
+            self._submitting_request_id = request_id
+            self._cancel_requested_while_submitting = False
             self._snapshot = DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.RUNNING,
                 request_id=request_id,
                 message="Голосовий ввід розпочато. Говоріть після активації мікрофона.",
             )
-            coroutine = self._execute(request_id, started, settled)
-            try:
-                future = self._submit(coroutine)
-            except Exception as exc:
+
+        coroutine = self._execute(request_id, started, settled)
+        try:
+            future = self._submit(coroutine)
+        except Exception as exc:
+            coroutine.close()
+            with self._lock:
+                if self._submitting_request_id == request_id:
+                    self._clear_submission_locked()
+                    self._snapshot = DesktopVoiceSnapshot(
+                        status=DesktopVoiceStatus.FAILED,
+                        request_id=request_id,
+                        message="Не вдалося запустити голосовий ввід.",
+                    )
+            raise ValueError("Не вдалося запустити голосовий ввід.") from exc
+        if type(future) is not Future:
+            coroutine.close()
+            with self._lock:
+                if self._submitting_request_id == request_id:
+                    self._clear_submission_locked()
+                    self._snapshot = DesktopVoiceSnapshot(
+                        status=DesktopVoiceStatus.FAILED,
+                        request_id=request_id,
+                        message="Desktop runtime повернув некоректний voice future.",
+                    )
+            raise TypeError("submit must return concurrent.futures.Future")
+
+        with self._lock:
+            if self._submitting_request_id != request_id:
                 coroutine.close()
-                self._snapshot = DesktopVoiceSnapshot(
-                    status=DesktopVoiceStatus.FAILED,
-                    request_id=request_id,
-                    message="Не вдалося запустити голосовий ввід.",
-                )
-                raise ValueError("Не вдалося запустити голосовий ввід.") from exc
-            if type(future) is not Future:
-                coroutine.close()
-                self._snapshot = DesktopVoiceSnapshot(
-                    status=DesktopVoiceStatus.FAILED,
-                    request_id=request_id,
-                    message="Desktop runtime повернув некоректний voice future.",
-                )
-                raise TypeError("submit must return concurrent.futures.Future")
+                future.cancel()
+                raise RuntimeError("voice submission reservation was lost")
+            cancel_requested = self._cancel_requested_while_submitting
+            self._clear_submission_locked()
             self._active = future
             self._active_started = started
             self._active_settled = settled
@@ -147,6 +166,8 @@ class DesktopVoiceTurnController:
         future.add_done_callback(
             lambda done, identity=request_id: self._finish(identity, done)
         )
+        if cancel_requested and not future.done():
+            future.cancel()
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -157,6 +178,18 @@ class DesktopVoiceTurnController:
         self._require_empty_payload(payload)
         with self._lock:
             self._reap_cancelled_settlement_locked()
+            if self._submitting_request_id is not None:
+                self._cancel_requested_while_submitting = True
+                self._snapshot = DesktopVoiceSnapshot(
+                    status=DesktopVoiceStatus.CANCELLING,
+                    request_id=self._submitting_request_id,
+                    message="Скасування голосового вводу завершується.",
+                )
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="accepted",
+                    message="Запит на скасування голосового вводу прийнято.",
+                )
             active = self._active
             settled = self._active_settled
             if active is None:
@@ -208,6 +241,16 @@ class DesktopVoiceTurnController:
 
         with self._lock:
             self._reap_cancelled_settlement_locked()
+            if self._submitting_request_id is not None:
+                self._cancel_requested_while_submitting = True
+                self._snapshot = DesktopVoiceSnapshot(
+                    status=DesktopVoiceStatus.CANCELLING,
+                    request_id=self._submitting_request_id,
+                    message="Скасування голосового вводу завершується.",
+                )
+                raise RuntimeError(
+                    "voice submission remained in progress during desktop shutdown"
+                )
             active = self._active
             started = self._active_started
             settled = self._active_settled
@@ -337,6 +380,10 @@ class DesktopVoiceTurnController:
         self._active = None
         self._active_started = None
         self._active_settled = None
+
+    def _clear_submission_locked(self) -> None:
+        self._submitting_request_id = None
+        self._cancel_requested_while_submitting = False
 
     @staticmethod
     def _result_snapshot(
