@@ -7,11 +7,14 @@ from enum import StrEnum
 from typing import Protocol
 
 from nika_core.product_factory_orchestration import (
+    OwnershipLease,
     ProductComponent,
     ProductRepositoryGraph,
+    RepositoryGraphError,
     RepositoryRef,
 )
 from nika_core.toolsmith.contracts import (
+    ChangedFile,
     CodingResult,
     TestEvidence,
     WorkerFailure,
@@ -456,8 +459,11 @@ class ProductFactoryCoordinator:
             if not dependencies <= satisfied:
                 raise CoordinatorError("snapshot component state bypasses dependency acceptance")
 
-    @staticmethod
-    def _validate_result_identity(request: ComponentWorkRequest, envelope: WorkerResultEnvelope) -> None:
+    def _validate_result_identity(
+        self,
+        request: ComponentWorkRequest,
+        envelope: WorkerResultEnvelope,
+    ) -> None:
         _validate_work_request_scalar_authority(request)
         _validate_worker_result_scalar_authority(envelope)
         if envelope.component_id != request.component_id:
@@ -468,6 +474,23 @@ class ProductFactoryCoordinator:
             raise CoordinatorError("stale worker result base SHA does not match active request")
         if envelope.coding_result.job_id != request.work_id:
             raise CoordinatorError("coding result job id does not match Product Factory work id")
+        changed_files = envelope.coding_result.changed_files
+        if not changed_files:
+            return
+        try:
+            self.graph.assess_lease(
+                OwnershipLease(
+                    lease_id=f"result-scope:{request.work_id}",
+                    worker_id="product-factory-result",
+                    component_ids=(request.component_id,),
+                    allowed_paths=tuple(item.path for item in changed_files),
+                ),
+                (),
+            )
+        except RepositoryGraphError as exc:
+            raise CoordinatorError(
+                "worker result changed files exceed active request path scope"
+            ) from exc
 
     @staticmethod
     def _validate_success_evidence(
@@ -775,9 +798,28 @@ def _validate_worker_result_scalar_authority(envelope: WorkerResultEnvelope) -> 
         raise CoordinatorError("worker result coding result must be an exact CodingResult")
     if type(envelope.coding_result.job_id) is not str or not envelope.coding_result.job_id.strip():
         raise CoordinatorError("coding result job id must be an exact non-empty string")
+    _validate_changed_files_carrier(envelope.coding_result.changed_files)
     _validate_test_evidence_carrier(envelope.coding_result.test_evidence)
     if envelope.coding_result.failure is not None:
         _validate_worker_failure_carrier(envelope.coding_result.failure)
+
+
+def _validate_changed_files_carrier(changed_files: object) -> None:
+    if type(changed_files) is not tuple:
+        raise CoordinatorError("changed files must be an exact tuple")
+    for item in changed_files:
+        if type(item) is not ChangedFile:
+            raise CoordinatorError("changed file entries must be exact ChangedFile")
+        if type(item.path) is not str or not item.path:
+            raise CoordinatorError("changed file path must be an exact non-empty string")
+        if (
+            type(item.sha256) is not str
+            or len(item.sha256) != 64
+            or any(char not in "0123456789abcdef" for char in item.sha256.casefold())
+        ):
+            raise CoordinatorError("changed file sha256 must be an exact hexadecimal digest")
+        if type(item.size_bytes) is not int or item.size_bytes < 0:
+            raise CoordinatorError("changed file size must be an exact non-negative integer")
 
 
 def _validate_test_evidence_carrier(evidence: object) -> None:

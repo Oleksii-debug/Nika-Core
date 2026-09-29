@@ -13,6 +13,7 @@ from nika_core.product_factory_orchestration import (
     RepositoryRef,
 )
 from nika_core.toolsmith.contracts import (
+    ChangedFile,
     CodingResult,
     TestEvidence,
     WorkerFailure,
@@ -162,6 +163,95 @@ def test_pytest_wrapper_and_windows_target_normalization_remain_equivalent() -> 
     record = coordinator.record_result(envelope)
 
     assert record.state is WorkState.REVIEW_REQUIRED
+
+
+def test_worker_result_changed_files_must_stay_in_active_component_scope() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    result = CodingResult(
+        job_id=request.work_id,
+        changed_files=(ChangedFile("src/ui/escape.py", "e" * 64, 12),),
+        test_evidence=(
+            TestEvidence(("python", "-m", "pytest", "tests/core"), 0, "ok"),
+        ),
+    )
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        result,
+    )
+    before = coordinator.snapshot()
+
+    with pytest.raises(
+        CoordinatorError,
+        match="changed files exceed active request path scope",
+    ):
+        coordinator.record_result(envelope)
+
+    assert coordinator.snapshot() == before
+
+
+def test_worker_result_changed_file_inside_active_component_scope_is_accepted() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    result = CodingResult(
+        job_id=request.work_id,
+        changed_files=(ChangedFile("src/core/feature.py", "e" * 64, 12),),
+        test_evidence=(
+            TestEvidence(("python", "-m", "pytest", "tests/core"), 0, "ok"),
+        ),
+    )
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        result,
+    )
+
+    record = coordinator.record_result(envelope)
+
+    assert record.state is WorkState.REVIEW_REQUIRED
+
+
+class _BehavioralChangedPath(str):
+    def strip(self, *_args: object, **_kwargs: object) -> str:
+        raise AssertionError("behavioral changed-file path must not execute")
+
+
+def test_worker_result_revalidates_forged_changed_file_carrier_before_scope_access() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    changed = ChangedFile("src/core/feature.py", "e" * 64, 12)
+    result = CodingResult(
+        job_id=request.work_id,
+        changed_files=(changed,),
+        test_evidence=(
+            TestEvidence(("python", "-m", "pytest", "tests/core"), 0, "ok"),
+        ),
+    )
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        result,
+    )
+    object.__setattr__(changed, "path", _BehavioralChangedPath("src/core/feature.py"))
+    before = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match="exact non-empty string"):
+        coordinator.record_result(envelope)
+
+    assert coordinator.snapshot() == before
 
 
 class _FakePassingEvidence:
