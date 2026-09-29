@@ -204,3 +204,46 @@ def test_corrupt_existing_payload_cannot_be_silently_replaced(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="persisted payload is corrupt"):
         store.upsert(_job(payload={"replacement": True}))
+
+
+@pytest.mark.parametrize(
+    "stored_payload",
+    (
+        '{"_nika_immutable_job_binding_v1":7}',
+        '{"_nika_immutable_job_binding_v1":"   "}',
+    ),
+)
+def test_invalid_persisted_binding_fails_closed(
+    tmp_path: Path,
+    stored_payload: str,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            (stored_payload, "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="persisted scheduled job immutable binding"):
+        store.upsert(_job())
+
+
+def test_binding_can_be_introduced_when_existing_job_has_none(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.upsert(_job(payload={"task_id": "task-1"}))
+
+    store.upsert(
+        _job(
+            payload={
+                "task_id": "task-1",
+                IMMUTABLE_JOB_BINDING_KEY: "binding-1",
+            }
+        )
+    )
+
+    restored = store.get("job-1")
+    assert restored is not None
+    assert restored.payload[IMMUTABLE_JOB_BINDING_KEY] == "binding-1"
