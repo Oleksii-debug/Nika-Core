@@ -792,6 +792,55 @@ def test_behavioral_text_and_datetime_carriers_fail_before_behavior(tmp_path: Pa
     assert calls == []
 
 
+def test_optional_clock_is_selected_without_truthiness(tmp_path: Path) -> None:
+    class BehavioralClock:
+        def __init__(self, value: datetime) -> None:
+            self.value = value
+            self.calls = 0
+
+        def __bool__(self) -> bool:
+            raise AssertionError("clock truthiness must not run")
+
+        def __call__(self) -> datetime:
+            self.calls += 1
+            return self.value
+
+    store = _store(tmp_path)
+    start = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    clock = BehavioralClock(start)
+    calls: list[RecurrenceInvocation] = []
+    jobs = ScheduledJobStore(store)
+    scheduler = PersistingScheduler(jobs)
+
+    def resolve(action_id: str):
+        assert action_id == "monitor.check"
+
+        def handler(invocation: RecurrenceInvocation) -> None:
+            calls.append(invocation)
+
+        return handler
+
+    service = DurableRecurrenceService(
+        jobs=jobs,
+        scheduler=scheduler,
+        handler_resolver=resolve,
+        clock=clock,
+    )
+    created = service.create(
+        recurrence_id="behavioral-clock",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+        deadline_at=start + timedelta(hours=1),
+    )
+
+    assert created.status is RecurrenceStatus.ACTIVE
+    assert clock.calls == 1
+    assert len(scheduler.upserts) == 1
+    assert calls == []
+
+
 def test_datetime_timezone_carrier_fails_before_behavior(tmp_path: Path) -> None:
     class BehavioralTimezone(tzinfo):
         def utcoffset(self, dt: datetime | None) -> timedelta:
