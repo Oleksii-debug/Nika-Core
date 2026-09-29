@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 
 import pytest
 
@@ -22,9 +23,9 @@ from nika_core.speech_to_text import (
 )
 from nika_core.voice_turn import (
     OneShotVoiceTurnService,
-    build_windows_one_shot_voice_turn_service,
     VoiceTurnRequest,
     VoiceTurnStatus,
+    build_windows_one_shot_voice_turn_service,
 )
 from nika_core.wake_activation import MAX_TRANSCRIPT_CHARS, WakeActivationDetector
 
@@ -117,7 +118,7 @@ def _service(
 
 def test_windows_factory_composes_real_backend_types_without_network() -> None:
     class _OfflineRecognizer:
-        calls: list[dict[str, object]] = []
+        calls: ClassVar[list[dict[str, object]]] = []
 
         @classmethod
         def from_whisper(cls, **kwargs):
