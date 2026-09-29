@@ -75,6 +75,17 @@ class IncrementalSpeechStream:
         timeout_seconds: float = 120.0,
     ) -> None:
         settings = SpeechRequest("x", voice_id=voice_id, rate=rate, volume=volume)
+        if settings.voice_id is not None and (
+            settings.voice_id != settings.voice_id.strip()
+            or any(
+                unicodedata.category(char).startswith("C")
+                for char in settings.voice_id
+            )
+        ):
+            raise SpeechError(
+                SpeechErrorCode.INVALID_REQUEST,
+                "speech stream voice identity is invalid",
+            )
         if type(chunk_chars) is not int or not 1 <= chunk_chars <= MAX_SPEECH_TEXT_CHARS:
             raise SpeechError(
                 SpeechErrorCode.INVALID_REQUEST,
