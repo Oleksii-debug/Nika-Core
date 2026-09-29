@@ -350,3 +350,14 @@ def test_oversized_persisted_json_fails_closed(
 
     with pytest.raises(ValueError, match="exceeds durable JSON size limit"):
         store.get("job-1")
+
+
+def test_unicode_payload_uses_canonical_utf8_size(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    value = "ї" * 100_000
+
+    store.upsert(_job(payload={"value": value}))
+
+    restored = store.get("job-1")
+    assert restored is not None
+    assert restored.payload == {"value": value}

@@ -228,6 +228,7 @@ def _canonical_json_value(value: object, label: str, *, depth: int) -> Any:
 def _encode_json(value: dict[str, Any], label: str) -> str:
     encoded = json.dumps(
         value,
+        ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
