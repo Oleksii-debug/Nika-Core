@@ -287,6 +287,40 @@ def test_adapter_fails_closed_on_duplicate_voice_identity() -> None:
     assert error.value.code is SpeechErrorCode.INVALID_ENGINE_RESPONSE
 
 
+@pytest.mark.parametrize("voice_id", [" bad voice", "bad\u202evoice", "bad\ud800voice"])
+def test_adapter_rejects_malformed_enumerated_voice_identity(voice_id: str) -> None:
+    backend = FakeBackend()
+    backend.voice_payload = json.dumps(
+        [
+            {
+                "voice_id": voice_id,
+                "culture": "en-US",
+                "gender": "Female",
+                "age": "Adult",
+                "enabled": True,
+            }
+        ]
+    ).encode()
+    adapter = WindowsSystemSpeechAdapter(backend)
+
+    with pytest.raises(SpeechError) as error:
+        adapter.list_voices()
+
+    assert error.value.code is SpeechErrorCode.INVALID_ENGINE_RESPONSE
+
+
+@pytest.mark.parametrize("voice_id", ["bad voice ", "bad\u202evoice", "bad\ud800voice"])
+def test_adapter_rejects_malformed_completion_voice_identity(voice_id: str) -> None:
+    backend = FakeBackend()
+    backend.speak_payload = json.dumps({"voice_id": voice_id}).encode()
+    adapter = WindowsSystemSpeechAdapter(backend)
+
+    with pytest.raises(SpeechError) as error:
+        adapter.speak(SpeechRequest("hello"))
+
+    assert error.value.code is SpeechErrorCode.INVALID_ENGINE_RESPONSE
+
+
 def test_adapter_fails_closed_when_selected_voice_differs() -> None:
     backend = FakeBackend()
     backend.speak_payload = b'{"voice_id":"Other Voice"}'

@@ -7,12 +7,14 @@ import os
 import subprocess
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
 from typing import Any, Protocol
 
 from nika_core.speech.contracts import (
+    MAX_VOICE_ID_CHARS,
     SpeechError,
     SpeechErrorCode,
     SpeechReceipt,
@@ -358,13 +360,11 @@ def _parse_voice(value: Any) -> SpeechVoice:
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech engine voice entry must be an object",
         )
-    voice_id = value.get("voice_id")
+    voice_id = _validated_voice_identity(
+        value.get("voice_id"),
+        message="speech engine returned an invalid voice identity",
+    )
     enabled = value.get("enabled")
-    if not isinstance(voice_id, str) or not voice_id.strip():
-        raise SpeechError(
-            SpeechErrorCode.INVALID_ENGINE_RESPONSE,
-            "speech engine returned an invalid voice identity",
-        )
     if type(enabled) is not bool:
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
@@ -397,13 +397,26 @@ def _parse_speak_response(payload: object) -> str:
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech engine completion metadata must be an object",
         )
-    voice_id = raw.get("voice_id")
-    if not isinstance(voice_id, str) or not voice_id.strip():
-        raise SpeechError(
-            SpeechErrorCode.INVALID_ENGINE_RESPONSE,
-            "speech engine returned an invalid completion voice",
-        )
-    return voice_id
+    return _validated_voice_identity(
+        raw.get("voice_id"),
+        message="speech engine returned an invalid completion voice",
+    )
+
+
+def _validated_voice_identity(value: object, *, message: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value) > MAX_VOICE_ID_CHARS
+        or any(unicodedata.category(char).startswith("C") for char in value)
+    ):
+        raise SpeechError(SpeechErrorCode.INVALID_ENGINE_RESPONSE, message)
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise SpeechError(SpeechErrorCode.INVALID_ENGINE_RESPONSE, message) from None
+    return value
 
 
 def _optional_string(value: Any) -> str | None:
