@@ -53,6 +53,13 @@ class SpeechRequest:
             raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech text must not be empty")
         if "\x00" in self.text:
             raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech text must not contain NUL")
+        try:
+            self.text.encode("utf-8")
+        except UnicodeEncodeError:
+            raise SpeechError(
+                SpeechErrorCode.INVALID_REQUEST,
+                "speech text must be valid UTF-8 text",
+            ) from None
         if type(self.rate) is not int or not -10 <= self.rate <= 10:
             raise SpeechError(SpeechErrorCode.INVALID_REQUEST, "speech rate must be -10..10")
         if type(self.volume) is not int or not 0 <= self.volume <= 100:
@@ -78,6 +85,13 @@ class SpeechRequest:
                     SpeechErrorCode.INVALID_REQUEST,
                     "voice_id must not contain control characters",
                 )
+            try:
+                self.voice_id.encode("utf-8")
+            except UnicodeEncodeError:
+                raise SpeechError(
+                    SpeechErrorCode.INVALID_REQUEST,
+                    "voice_id must be valid UTF-8 text",
+                ) from None
 
 
 @dataclass(frozen=True, slots=True)

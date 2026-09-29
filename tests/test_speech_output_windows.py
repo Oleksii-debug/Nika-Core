@@ -129,12 +129,14 @@ def test_speech_request_accepts_unicode_and_bounded_settings(
         {"text": " "},
         {"text": "a" * (MAX_SPEECH_TEXT_CHARS + 1)},
         {"text": "bad\x00text"},
+        {"text": "bad\ud800text"},
         {"text": "hello", "rate": -11},
         {"text": "hello", "rate": True},
         {"text": "hello", "volume": 101},
         {"text": "hello", "volume": False},
         {"text": "hello", "voice_id": ""},
         {"text": "hello", "voice_id": "bad\nvoice"},
+        {"text": "hello", "voice_id": "bad\ud800voice"},
     ],
 )
 def test_speech_request_rejects_invalid_input(kwargs: dict[str, object]) -> None:
@@ -285,6 +287,40 @@ def test_adapter_fails_closed_on_duplicate_voice_identity() -> None:
     assert error.value.code is SpeechErrorCode.INVALID_ENGINE_RESPONSE
 
 
+@pytest.mark.parametrize("voice_id", [" bad voice", "bad\u202evoice", "bad\ud800voice"])
+def test_adapter_rejects_malformed_enumerated_voice_identity(voice_id: str) -> None:
+    backend = FakeBackend()
+    backend.voice_payload = json.dumps(
+        [
+            {
+                "voice_id": voice_id,
+                "culture": "en-US",
+                "gender": "Female",
+                "age": "Adult",
+                "enabled": True,
+            }
+        ]
+    ).encode()
+    adapter = WindowsSystemSpeechAdapter(backend)
+
+    with pytest.raises(SpeechError) as error:
+        adapter.list_voices()
+
+    assert error.value.code is SpeechErrorCode.INVALID_ENGINE_RESPONSE
+
+
+@pytest.mark.parametrize("voice_id", ["bad voice ", "bad\u202evoice", "bad\ud800voice"])
+def test_adapter_rejects_malformed_completion_voice_identity(voice_id: str) -> None:
+    backend = FakeBackend()
+    backend.speak_payload = json.dumps({"voice_id": voice_id}).encode()
+    adapter = WindowsSystemSpeechAdapter(backend)
+
+    with pytest.raises(SpeechError) as error:
+        adapter.speak(SpeechRequest("hello"))
+
+    assert error.value.code is SpeechErrorCode.INVALID_ENGINE_RESPONSE
+
+
 def test_adapter_fails_closed_when_selected_voice_differs() -> None:
     backend = FakeBackend()
     backend.speak_payload = b'{"voice_id":"Other Voice"}'
@@ -395,7 +431,9 @@ def test_adapter_rejects_invalid_timeout(timeout: object) -> None:
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
 
 
-def test_process_tree_termination_uses_supplied_trusted_taskkill_path(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_tree_termination_uses_supplied_trusted_taskkill_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     commands: list[tuple[str, ...]] = []
 
     class FakeProcess:
