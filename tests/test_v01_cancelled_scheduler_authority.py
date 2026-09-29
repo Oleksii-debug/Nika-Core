@@ -578,6 +578,44 @@ def test_pause_resyncs_enabled_replacement_before_return(tmp_path) -> None:
 
 
 
+
+
+def test_failed_replacement_install_removes_stale_runtime_job(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Install Failure Fence" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    run_at = datetime.now(UTC) + timedelta(days=1)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.upsert(
+        _date_job(
+            job_id="job-install-failure",
+            action_id="old",
+            run_at=run_at,
+            payload={},
+        )
+    )
+    adapter.start()
+    assert adapter.has_runtime_job("job-install-failure")
+
+    invalid = ScheduledJob(
+        job_id="job-install-failure",
+        action_id="new",
+        trigger_kind=TriggerKind.CRON,
+        trigger={"bogus_field": "*"},
+        payload={},
+    )
+    with pytest.raises(TypeError):
+        adapter.upsert(invalid)
+
+    durable = jobs.get("job-install-failure")
+    assert durable is not None
+    assert durable.action_id == "new"
+    assert durable.trigger_kind is TriggerKind.CRON
+    assert durable.trigger == {"bogus_field": "*"}
+    assert not adapter.has_runtime_job("job-install-failure")
+    adapter.shutdown(wait=False)
+
+
 def test_installed_callback_rejects_same_action_replacement_before_resolver(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Callback Entry Snapshot" / "nika core.db")
     store.initialize()

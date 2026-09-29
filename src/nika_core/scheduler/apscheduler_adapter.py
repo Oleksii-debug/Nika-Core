@@ -118,7 +118,12 @@ class APSchedulerAdapter(SchedulerPort):
             if self._scheduler.get_job(job_id) is not None:
                 self._scheduler.remove_job(job_id)
             return None
-        self._install(current)
+        try:
+            self._install(current)
+        except Exception:
+            if self._scheduler.get_job(job_id) is not None:
+                self._scheduler.remove_job(job_id)
+            raise
         return current
 
     def _install(self, job: ScheduledJob) -> None:
