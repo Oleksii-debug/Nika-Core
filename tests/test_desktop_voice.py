@@ -620,6 +620,11 @@ def test_close_running_future_masks_late_success_after_shutdown_timeout() -> Non
     with pytest.raises(RuntimeError, match="remained active"):
         controller.close(timeout_seconds=0.01)
 
+    pending = controller.snapshot()
+    assert pending["status"] == DesktopVoiceStatus.CANCELLING.value
+    assert pending["active"] is True
+    assert pending["transcript"] is None
+
     active.set_result(result)
     final = controller.snapshot()
     assert final["status"] == DesktopVoiceStatus.CANCELLED.value
@@ -832,7 +837,7 @@ def test_close_fails_closed_if_future_is_running_before_coroutine_start() -> Non
         with pytest.raises(RuntimeError, match="remained active"):
             controller.close(timeout_seconds=0.01)
         snapshot = controller.snapshot()
-        assert snapshot["status"] == DesktopVoiceStatus.RUNNING.value
+        assert snapshot["status"] == DesktopVoiceStatus.CANCELLING.value
         assert snapshot["active"] is True
     finally:
         active.set_exception(RuntimeError("synthetic shutdown release"))
