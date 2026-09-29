@@ -381,6 +381,54 @@ def test_short_callback_buffer_fails_closed() -> None:
     assert sd.streams[-1].closed is True
 
 
+def test_direct_adapter_snapshots_request_before_async_capture_effects() -> None:
+    async def scenario() -> None:
+        sd = _FakeSoundDevice()
+        sd.hold_open = True
+        adapter = _adapter(sd)
+        request = _request(adapter)
+        original_request_id = request.request_id
+        original_device_id = request.device_id
+        original_sample_count = request.sample_count
+
+        task = asyncio.create_task(adapter.capture(request))
+        await asyncio.sleep(0)
+        stream = sd.streams[-1]
+        assert stream.started is True
+
+        object.__setattr__(request, "request_id", "mutated-request")
+        object.__setattr__(request, "device_id", "mutated-device")
+        object.__setattr__(request, "sample_count", 1)
+
+        callback = stream.kwargs["callback"]
+        with pytest.raises(_CallbackStop):
+            callback(b"\x03\x00" * original_sample_count, original_sample_count, None, False)
+
+        response = await task
+
+        assert response.request_id == original_request_id
+        assert response.device_id == original_device_id
+        assert response.sample_rate_hz == 16_000
+        assert response.pcm_s16le == b"\x03\x00" * original_sample_count
+        assert stream.aborted is True
+        assert stream.closed is True
+
+    asyncio.run(scenario())
+
+
+def test_direct_adapter_rejects_noncanonical_request_identity_before_backend_use() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+    request = _request(adapter)
+    object.__setattr__(request, "request_id", "bad\nrequest")
+
+    with pytest.raises(ValueError, match="bounded machine token"):
+        asyncio.run(adapter.capture(request))
+
+    assert sd.check_calls == []
+    assert sd.streams == []
+
+
 def test_caller_cancellation_aborts_and_closes_physical_stream() -> None:
     async def scenario() -> None:
         sd = _FakeSoundDevice()
