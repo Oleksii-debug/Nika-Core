@@ -211,8 +211,8 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
     assert report.weighted_quality_score == pytest.approx(0.25)
     assert report.task_pass_rate == pytest.approx(0.5)
     assert report.completion_rate == pytest.approx(0.5)
-    assert report.mean_latency_ms == pytest.approx(150.0)
-    assert report.p95_latency_ms == pytest.approx(200.0)
+    assert report.mean_latency_ms == pytest.approx(100.0)
+    assert report.p95_latency_ms == pytest.approx(100.0)
     assert report.peak_cpu_percent == 50.0
     assert report.peak_memory_percent == 45.0
     assert report.min_available_memory_bytes == 5_000
@@ -318,3 +318,189 @@ def test_benchmark_suite_is_sequential_and_rejects_duplicate_candidate_ids() -> 
                 evaluation,
             )
         )
+
+
+def test_evaluation_set_identity_is_stable_and_order_bound() -> None:
+    original = _evaluation_set()
+    equivalent = _evaluation_set()
+    reversed_cases = EvaluationSet(
+        evaluation_set_id=original.evaluation_set_id,
+        version=original.version,
+        provenance_ref=original.provenance_ref,
+        license_ref=original.license_ref,
+        purpose=original.purpose,
+        privacy=original.privacy,
+        cases=tuple(reversed(original.cases)),
+    )
+
+    assert equivalent.content_sha256 == original.content_sha256
+    assert reversed_cases.content_sha256 != original.content_sha256
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("version", "2026-08-26.v2"),
+        ("provenance_ref", "dataset:changed"),
+        ("license_ref", "license:changed"),
+        ("purpose", EvaluationPurpose.DEVELOPMENT),
+        ("privacy", PrivacyClass.PUBLIC),
+    ),
+)
+def test_evaluation_set_identity_changes_for_bound_set_field(field, value) -> None:
+    original = _evaluation_set()
+    kwargs = {
+        "evaluation_set_id": original.evaluation_set_id,
+        "version": original.version,
+        "provenance_ref": original.provenance_ref,
+        "license_ref": original.license_ref,
+        "purpose": original.purpose,
+        "privacy": original.privacy,
+        "cases": original.cases,
+    }
+    kwargs[field] = value
+    changed = EvaluationSet(**kwargs)
+
+    assert changed.content_sha256 != original.content_sha256
+
+
+def test_evaluation_set_identity_binds_expected_score_and_weight() -> None:
+    original = _evaluation_set()
+    case = original.cases[0]
+    variants = (
+        EvaluationCase(
+            case_id=case.case_id,
+            messages=case.messages,
+            expected_text="different expected",
+            pass_score=case.pass_score,
+            weight=case.weight,
+        ),
+        EvaluationCase(
+            case_id=case.case_id,
+            messages=case.messages,
+            expected_text=case.expected_text,
+            pass_score=0.5,
+            weight=case.weight,
+        ),
+        EvaluationCase(
+            case_id=case.case_id,
+            messages=case.messages,
+            expected_text=case.expected_text,
+            pass_score=case.pass_score,
+            weight=2.0,
+        ),
+    )
+    for variant in variants:
+        changed = EvaluationSet(
+            evaluation_set_id=original.evaluation_set_id,
+            version=original.version,
+            provenance_ref=original.provenance_ref,
+            license_ref=original.license_ref,
+            purpose=original.purpose,
+            privacy=original.privacy,
+            cases=(variant, original.cases[1]),
+        )
+        assert changed.content_sha256 != original.content_sha256
+
+
+def test_evaluation_set_rejects_duplicate_case_ids() -> None:
+    original = _evaluation_set()
+    duplicate = EvaluationCase(
+        case_id=original.cases[0].case_id,
+        messages=(ModelMessage("user", "other"),),
+        expected_text="other",
+    )
+
+    with pytest.raises(ValueError, match="IDs must be unique"):
+        EvaluationSet(
+            evaluation_set_id=original.evaluation_set_id,
+            version=original.version,
+            provenance_ref=original.provenance_ref,
+            license_ref=original.license_ref,
+            purpose=original.purpose,
+            privacy=original.privacy,
+            cases=(original.cases[0], duplicate),
+        )
+
+
+class _ProviderKindSpyGateway:
+    def __init__(self) -> None:
+        self.seen_kind = None
+
+    async def complete(self, request):
+        self.seen_kind = request.provider_kind
+        return ModelResponse(
+            request_id=request.request_id,
+            text="answer",
+            provider_id=request.provider_id,
+            provider_kind=request.provider_kind,
+            model=request.model,
+        )
+
+
+def test_benchmark_binds_candidate_provider_kind_before_dispatch() -> None:
+    gateway = _ProviderKindSpyGateway()
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+
+    asyncio.run(ModelBenchmarkRunner(gateway, clock=_Clock((1.0, 1.1))).benchmark(
+        _candidate(), evaluation
+    ))
+
+    assert gateway.seen_kind is ProviderKind.LOCAL
+
+
+class _AlwaysFailGateway:
+    async def complete(self, request):
+        raise ModelGatewayError(
+            ModelErrorCode.UNAVAILABLE,
+            "synthetic",
+            provider_id=request.provider_id,
+        )
+
+
+def test_latency_aggregates_exclude_failures_and_report_unavailable_without_success() -> None:
+    runner = ModelBenchmarkRunner(_AlwaysFailGateway(), clock=_Clock((1.0, 1.2, 2.0, 2.4)))
+
+    report = asyncio.run(runner.benchmark(_candidate(), _evaluation_set()))
+
+    assert [item.latency_ms for item in report.case_results] == pytest.approx([200.0, 400.0])
+    assert report.mean_latency_ms is None
+    assert report.p95_latency_ms is None
+    assert "Mean latency ms: not measured" in render_text_report(report)
+    assert '"mean_latency_ms":null' in benchmark_report_json(report)
+
+
+def test_latency_clock_validation_happens_after_response_identity_and_usage() -> None:
+    runner = ModelBenchmarkRunner(_BadUsageGateway(), clock=_Clock((2.0, 1.0)))
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+
+    with pytest.raises(ModelBenchmarkError, match="non-negative integer"):
+        asyncio.run(runner.benchmark(_candidate(), evaluation))
