@@ -965,6 +965,18 @@ def _completion_envelope(
     }
 
 
+def _has_exact_string_keys(
+    value: dict[Any, Any],
+    expected: set[str],
+) -> bool:
+    keys: list[str] = []
+    for key in value:
+        if type(key) is not str:
+            return False
+        keys.append(key)
+    return set(keys) == expected
+
+
 def _decode_completion_result(
     raw: Any,
 ) -> tuple[dict[str, Any], datetime | None]:
@@ -973,12 +985,12 @@ def _decode_completion_result(
     if type(raw) is not dict:
         raise BatchCursorStateError("completed effect result is malformed")
 
-    if set(raw) == {_COMPLETION_ENVELOPE_KEY}:
+    if _has_exact_string_keys(raw, {_COMPLETION_ENVELOPE_KEY}):
         envelope = raw[_COMPLETION_ENVELOPE_KEY]
-        if type(envelope) is not dict or set(envelope) != {
-            "result",
-            "next_batch_not_before",
-        }:
+        if type(envelope) is not dict or not _has_exact_string_keys(
+            envelope,
+            {"result", "next_batch_not_before"},
+        ):
             raise BatchCursorStateError("completed effect envelope is malformed")
         result = envelope["result"]
         due = envelope["next_batch_not_before"]
