@@ -213,7 +213,13 @@ def test_invalid_cursor_performs_zero_model_health_effects(tmp_path: Path) -> No
 
 def test_missing_durable_task_never_becomes_ready_checkpoint(tmp_path: Path) -> None:
     store = _store(tmp_path)
-    runtime = _runtime(store)
+    factory_calls: list[ModelSelection] = []
+
+    def forbidden(selection: ModelSelection):
+        factory_calls.append(selection)
+        raise AssertionError("missing task must stop before model health")
+
+    runtime = _runtime(store, health_probe_factory=forbidden)
     task_id = "missing-task"
     thread_id = f"desktop-{task_id}"
     resume_token = runtime.initial_resume_token(
@@ -231,6 +237,7 @@ def test_missing_durable_task_never_becomes_ready_checkpoint(tmp_path: Path) -> 
 
     assert result.status is RuntimeResumeProbeStatus.UNVERIFIABLE
     assert result.checkpoint_id is None
+    assert factory_calls == []
 
 
 @pytest.mark.parametrize("selection", [_deterministic()])
