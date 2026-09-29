@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import RLock
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -34,34 +35,55 @@ class APSchedulerAdapter(SchedulerPort):
         self._scheduler = BackgroundScheduler(timezone="UTC")
         self._started = False
         self._starting = False
+        self._lifecycle_lock = RLock()
+        self._shutdown_requested = False
+        self._shutdown_wait = True
 
     def start(self) -> None:
-        if self._started or self._starting:
-            return
-        self._starting = True
-        try:
+        with self._lifecycle_lock:
+            if self._started or self._starting:
+                return
+            self._starting = True
+            self._shutdown_requested = False
+            self._shutdown_wait = True
             try:
-                for job in self._jobs.list_enabled():
-                    self._sync_runtime_job(job.job_id)
-            except Exception:
-                self._scheduler = BackgroundScheduler(timezone="UTC")
-                raise
-            try:
-                self._scheduler.start()
-            except Exception:
-                self._scheduler = BackgroundScheduler(timezone="UTC")
-                raise
-            self._started = True
-        finally:
-            self._starting = False
+                try:
+                    for job in self._jobs.list_enabled():
+                        self._sync_runtime_job(job.job_id)
+                except Exception:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    raise
+                if self._shutdown_requested:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    return
+                try:
+                    self._scheduler.start()
+                except Exception:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    raise
+                if self._shutdown_requested:
+                    replacement = BackgroundScheduler(timezone="UTC")
+                    self._scheduler.shutdown(wait=self._shutdown_wait)
+                    self._scheduler = replacement
+                    return
+                self._started = True
+            finally:
+                self._starting = False
+                self._shutdown_requested = False
+                self._shutdown_wait = True
 
     def shutdown(self, *, wait: bool = True) -> None:
-        if not self._started:
-            return
-        replacement = BackgroundScheduler(timezone="UTC")
-        self._scheduler.shutdown(wait=wait)
-        self._scheduler = replacement
-        self._started = False
+        with self._lifecycle_lock:
+            if self._starting:
+                self._shutdown_requested = True
+                self._shutdown_wait = wait
+                return
+            if not self._started:
+                return
+            replacement = BackgroundScheduler(timezone="UTC")
+            self._scheduler.shutdown(wait=wait)
+            self._scheduler = replacement
+            self._started = False
 
     def upsert(self, job: ScheduledJob) -> None:
         if type(job) is not ScheduledJob:
