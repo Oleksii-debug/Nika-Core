@@ -717,6 +717,19 @@ def test_forged_exact_success_result_cannot_project_unbound_transcript() -> None
     assert "доказові" in snapshot.message
 
 
+def test_forged_success_transcript_length_evidence_cannot_project() -> None:
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    assert result.evidence.transcription is not None
+    object.__setattr__(result.evidence.transcription, "transcript_chars", 1)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot("desktop-voice-test", result)
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
+
 def test_forged_exact_success_result_rejects_noncanonical_wake_outcome() -> None:
     result = asyncio.run(
         _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
