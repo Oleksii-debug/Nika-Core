@@ -255,7 +255,10 @@ class DesktopVoiceTurnController:
             request = await asyncio.shield(factory_future)
             if type(request) is not VoiceTurnRequest:
                 raise TypeError("request_factory must return exact VoiceTurnRequest")
-            if request.request_id != request_id:
+            if (
+                type(request.request_id) is not str
+                or request.request_id != request_id
+            ):
                 raise ValueError("voice request factory changed the generated request identity")
             return await self._service.run(request)
         finally:
