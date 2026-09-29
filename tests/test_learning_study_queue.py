@@ -809,3 +809,39 @@ def test_enqueue_revalidates_non_utf8_mutated_material_before_durable_write(
     assert task_count == 0
     assert event_count == 0
 
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "https://example.test/book.pdf?client_secret=oauth-secret",
+        "https://example.test/book.pdf#client-secret=oauth-secret",
+        "https://example.test/book.pdf?client%5Fsecret=oauth-secret",
+        "https://example.test/book.pdf?client_assertion=jwt-secret",
+        "https://example.test/book.pdf#client-assertion=jwt-secret",
+        "https://example.test/book.pdf?assertion=jwt-secret",
+        "clientsecret=oauth-secret",
+        "clientassertion=jwt-secret",
+        "assertion=jwt-secret",
+    ],
+)
+def test_study_material_rejects_oauth_client_credentials(source_ref: str) -> None:
+    with pytest.raises(ValueError, match="credential"):
+        _material(source_ref=source_ref)
+
+
+def test_study_material_keeps_nonsecret_oauth_metadata_across_restart(tmp_path) -> None:
+    safe_ref = (
+        "https://example.test/book.pdf?client_id=public-client"
+        "&client_assertion_type=jwt-bearer&client_secret_count=0"
+    )
+    path, _, queue = _services(tmp_path)
+    created = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="oauth-public-metadata", source_ref=safe_ref),
+    )
+    fresh_store = SQLiteStore(path)
+    fresh_store.initialize()
+    restored = StudyQueue(TaskQueue(fresh_store)).get(created.task_id)
+
+    assert restored.material.source_ref == safe_ref
+
