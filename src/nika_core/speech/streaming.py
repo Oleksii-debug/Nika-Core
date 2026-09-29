@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from dataclasses import dataclass
 from enum import StrEnum
 from threading import Condition, Event, Thread
@@ -464,7 +465,7 @@ def _validate_receipt(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid voice identity",
         )
-    if any(ord(char) < 32 for char in engine_id + voice_id):
+    if any(unicodedata.category(char).startswith("C") for char in engine_id + voice_id):
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid route identity",
