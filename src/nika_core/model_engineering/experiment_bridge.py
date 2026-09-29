@@ -11,6 +11,7 @@ from nika_core.experiments.contracts import (
     StrategyRef,
 )
 from nika_core.model_engineering.contracts import (
+    BenchmarkExecutionConfig,
     CandidateBenchmarkReport,
     EvaluationPurpose,
     EvaluationSet,
@@ -37,6 +38,7 @@ def build_experiment_definition(
     champion: ModelCandidate,
     challengers: Sequence[ModelCandidate],
     evaluation_set: EvaluationSet,
+    execution_config: BenchmarkExecutionConfig,
     policy: PromotionPolicy,
     permission_fingerprint: str,
 ) -> ExperimentDefinition:
@@ -56,9 +58,18 @@ def build_experiment_definition(
 
     return ExperimentDefinition(
         experiment_id=experiment_id,
-        champion=_strategy_ref(champion, permission_fingerprint),
+        champion=_strategy_ref(
+            champion,
+            permission_fingerprint,
+            execution_config.evidence_sha256,
+        ),
         challengers=tuple(
-            _strategy_ref(candidate, permission_fingerprint) for candidate in challengers
+            _strategy_ref(
+                candidate,
+                permission_fingerprint,
+                execution_config.evidence_sha256,
+            )
+            for candidate in challengers
         ),
         replays=_evaluation_replays(evaluation_set),
         policy=policy,
@@ -100,7 +111,11 @@ def benchmark_observations(
     if len(matching_refs) != 1:
         raise ValueError("benchmark candidate is not uniquely declared by the experiment")
     candidate_ref = matching_refs[0]
-    expected_ref = _strategy_ref(report.candidate, candidate_ref.permission_fingerprint)
+    expected_ref = _strategy_ref(
+        report.candidate,
+        candidate_ref.permission_fingerprint,
+        report.execution_config_sha256,
+    )
     if candidate_ref != expected_ref:
         raise ValueError("benchmark candidate evidence does not match the experiment strategy ref")
 
@@ -150,11 +165,18 @@ def _evaluation_replays(evaluation_set: EvaluationSet) -> tuple[ReplayCase, ...]
     )
 
 
-def _strategy_ref(candidate: ModelCandidate, permission_fingerprint: str) -> StrategyRef:
+def _strategy_ref(
+    candidate: ModelCandidate,
+    permission_fingerprint: str,
+    execution_config_sha256: str,
+) -> StrategyRef:
     return StrategyRef(
         candidate_id=candidate.candidate_id,
         version=f"sha256:{candidate.evidence_sha256}",
         artifact_kind=ArtifactKind.CONFIG,
-        artifact_ref=f"model-candidate:sha256:{candidate.evidence_sha256}",
+        artifact_ref=(
+            f"model-candidate:sha256:{candidate.evidence_sha256}:"
+            f"benchmark-config:sha256:{execution_config_sha256}"
+        ),
         permission_fingerprint=permission_fingerprint,
     )
