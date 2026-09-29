@@ -493,6 +493,8 @@ class FoundryLocalProvider:
         if self._inference_lock.locked() or self._model_management_lock.locked():
             raise RuntimeError("cannot close Foundry Local provider while native work is active")
 
+        first_failure: Exception | None = None
+
         with self._owned_model_lock:
             owned = tuple(self._owned_loaded_models.items())
         for marker, (model_id, model) in owned:
@@ -500,19 +502,13 @@ class FoundryLocalProvider:
                 if self._sdk_bool(model, "is_loaded"):
                     model.unload()
                     if self._sdk_bool(model, "is_loaded"):
-                        raise ModelGatewayError(
-                            ModelErrorCode.PROVIDER_ERROR,
-                            f"Foundry Local model '{model_id}' remained loaded after unload",
-                            provider_id=self.capabilities.provider_id,
-                            retryable=False,
+                        raise RuntimeError(
+                            f"Foundry Local model '{model_id}' remained loaded after unload"
                         )
             except Exception as exc:
-                raise ModelGatewayError(
-                    ModelErrorCode.PROVIDER_ERROR,
-                    f"Foundry Local model '{model_id}' could not be unloaded",
-                    provider_id=self.capabilities.provider_id,
-                    retryable=False,
-                ) from exc
+                if first_failure is None:
+                    first_failure = exc
+                continue
             with self._owned_model_lock:
                 self._owned_loaded_models.pop(marker, None)
 
@@ -521,20 +517,22 @@ class FoundryLocalProvider:
                 if self._sdk_bool(model, "is_loaded"):
                     model.unload()
                     if self._sdk_bool(model, "is_loaded"):
-                        raise ModelGatewayError(
-                            ModelErrorCode.PROVIDER_ERROR,
-                            "Foundry Local tainted model remained loaded after unload",
-                            provider_id=self.capabilities.provider_id,
-                            retryable=False,
+                        raise RuntimeError(
+                            "Foundry Local tainted model remained loaded after unload"
                         )
             except Exception as exc:
-                raise ModelGatewayError(
-                    ModelErrorCode.PROVIDER_ERROR,
-                    "Foundry Local tainted model could not be unloaded",
-                    provider_id=self.capabilities.provider_id,
-                    retryable=False,
-                ) from exc
+                if first_failure is None:
+                    first_failure = exc
+                continue
             self._tainted_loaded_models.pop(marker, None)
+
+        if first_failure is not None:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "Foundry Local provider could not unload every owned or tainted model",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            ) from first_failure
 
     def _release_slot_when_worker_finishes(
         self,
