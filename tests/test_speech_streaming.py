@@ -103,6 +103,25 @@ def _wait_for_request_count(port: FakeSpeechPort, count: int) -> None:
     assert len(port.requests) >= count
 
 
+def test_worker_start_failure_is_reported_as_bounded_speech_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingThread:
+        def __init__(self, **kwargs: object) -> None:
+            del kwargs
+
+        def start(self) -> None:
+            raise RuntimeError("CANARY_THREAD_DIAGNOSTIC")
+
+    monkeypatch.setattr(speech_streaming, "Thread", FailingThread)
+
+    with pytest.raises(SpeechError) as error:
+        IncrementalSpeechStream(FakeSpeechPort())
+
+    assert error.value.code is SpeechErrorCode.PROCESS_FAILED
+    assert "CANARY" not in str(error.value)
+
+
 def test_stream_speaks_complete_sentence_before_finish_and_flushes_tail() -> None:
     port = FakeSpeechPort()
     stream = IncrementalSpeechStream(port, chunk_chars=200)
