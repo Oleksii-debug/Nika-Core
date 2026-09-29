@@ -1272,6 +1272,68 @@ def test_presence_source_identity_is_bounded(tmp_path: Path) -> None:
 
 
 
+def test_runtime_identities_reject_non_utf8_before_durable_boundaries(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    store = _store(tmp_path)
+    bad = "identity-\ud800"
+
+    with pytest.raises(ValueError, match="source_id must be valid UTF-8 text"):
+        BackgroundDispatchGuard(
+            queue=TaskQueue(store),
+            audit=AuditLog(store),
+            resources=ResourceManager(store, SequenceResourceObserver()),
+            presence=SequencePresence([]),
+            source_id=bad,
+            clock=lambda: now,
+        )
+
+    with pytest.raises(ValueError, match="source_id must be valid UTF-8 text"):
+        OwnerPresenceObservation(
+            source_id=bad,
+            sequence=1,
+            presence=OwnerPresence.AWAY,
+            observed_at=now,
+        )
+
+    guard, queue, audit, _resources = _guard(
+        store=store,
+        observations=[],
+        now=now,
+    )
+    task_id = _ready_task(queue)
+    calls = 0
+
+    async def effect() -> object:
+        nonlocal calls
+        calls += 1
+        return "must-not-run"
+
+    with pytest.raises(ValueError, match="owner_id must be valid UTF-8 text"):
+        asyncio.run(
+            guard.dispatch(
+                task_id=task_id,
+                work_kind=BackgroundWorkKind.SELF_TEST,
+                effect=effect,
+                owner_id=bad,
+            )
+        )
+
+    with pytest.raises(ValueError, match="task_id must be valid UTF-8 text"):
+        asyncio.run(
+            guard.dispatch(
+                task_id=bad,
+                work_kind=BackgroundWorkKind.SELF_TEST,
+                effect=effect,
+            )
+        )
+
+    assert calls == 0
+    assert queue.get(task_id).state is TaskState.READY
+    assert audit.list_for(entity_type="task", entity_id=task_id) == ()
+
+
 class ExplodingResourceObserver:
     def snapshot(self) -> ResourceSnapshot:
         raise AssertionError("resource telemetry must not be read")
