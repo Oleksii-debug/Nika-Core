@@ -44,6 +44,21 @@ def test_invalid_config_fails_closed() -> None:
         AppConfig(log_level="verbose")
 
 
+def test_config_rejects_unknown_explicit_setting() -> None:
+    with pytest.raises(ValueError, match="Extra inputs are not permitted"):
+        AppConfig(model_provder="ollama")  # type: ignore[call-arg]
+
+
+def test_config_ignores_unrelated_unknown_environment_variable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NIKA_UNRELATED_PROCESS_SETTING", "present")
+
+    config = AppConfig.from_environment()
+
+    assert config.model_provider == "mock"
+
+
 def test_config_schema_version_accepts_canonical_environment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
