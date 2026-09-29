@@ -459,6 +459,59 @@ def test_resolver_deadline_crossing_blocks_late_handler_effect(tmp_path: Path) -
     assert calls == []
 
 
+
+def test_post_effect_deadline_terminalization_converges_without_false_failure(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    start = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    deadline = start + timedelta(minutes=1)
+    clock = FakeClock(start)
+    effects: list[str] = []
+    jobs = ScheduledJobStore(store)
+    scheduler = PersistingScheduler(jobs)
+    service_ref: dict[str, DurableRecurrenceService] = {}
+
+    def resolve(action_id: str):
+        assert action_id == "monitor.check"
+
+        def handler(invocation: RecurrenceInvocation) -> RecurrenceDecision:
+            effects.append(invocation.occurrence_id)
+            clock.advance(minutes=2)
+            service_ref["service"].action_handler(
+                {"recurrence_id": "post-effect-deadline"}
+            )
+            return RecurrenceDecision.CONTINUE
+
+        return handler
+
+    service = DurableRecurrenceService(
+        jobs=jobs,
+        scheduler=scheduler,
+        handler_resolver=resolve,
+        clock=clock,
+    )
+    service_ref["service"] = service
+    service.create(
+        recurrence_id="post-effect-deadline",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+        deadline_at=deadline,
+    )
+
+    service.action_handler({"recurrence_id": "post-effect-deadline"})
+
+    state = service.get("post-effect-deadline")
+    assert state is not None
+    assert state.status is RecurrenceStatus.COMPLETED
+    assert state.terminal_reason is RecurrenceTerminalReason.DEADLINE
+    assert state.next_due_at is None
+    assert state.next_occurrence_id is None
+    assert len(effects) == 1
+
+
 def test_pause_survives_restart_and_resume_keeps_one_coalesced_intent(tmp_path: Path) -> None:
     store = _store(tmp_path)
     start = datetime(2030, 1, 1, 12, 5, tzinfo=UTC)

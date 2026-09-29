@@ -306,7 +306,7 @@ class DurableRecurrenceService:
         stop: bool,
     ) -> RecurrenceState:
         current, payload = self._required(recurrence_id)
-        if current.status is RecurrenceStatus.CANCELLED:
+        if current.status in {RecurrenceStatus.CANCELLED, RecurrenceStatus.COMPLETED}:
             return current
         if current.last_completed_occurrence_id == invocation.occurrence_id:
             return current
