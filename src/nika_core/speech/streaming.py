@@ -295,10 +295,6 @@ class IncrementalSpeechStream:
                 )
                 return
 
-            if self._cancel_event.is_set():
-                self._cancel()
-                return
-
             try:
                 clean = _validate_receipt(
                     receipt,
@@ -327,6 +323,10 @@ class IncrementalSpeechStream:
                 self._selected_voice_id = clean.voice_id
                 self._spoken_characters += clean.character_count
                 self._chunk_count += 1
+
+            if self._cancel_event.is_set():
+                self._cancel()
+                return
 
     def _cancel(self) -> None:
         with self._condition:
@@ -375,13 +375,20 @@ def _pop_ready_chunk(
 
 
 def _first_sentence_boundary(text: str, *, limit: int) -> int | None:
+    closing = "\"'”’»)]}"
     for index, char in enumerate(text[:limit]):
         if char == "\n":
             return index + 1
-        if char in ".!?…":
-            next_index = index + 1
-            if next_index < len(text) and text[next_index].isspace():
-                return next_index
+        if char not in ".!?…":
+            continue
+        cursor = index + 1
+        while cursor < len(text) and text[cursor] in closing:
+            cursor += 1
+        if cursor >= len(text) or not text[cursor].isspace():
+            continue
+        while cursor < len(text) and text[cursor].isspace():
+            cursor += 1
+        return cursor
     return None
 
 
@@ -406,50 +413,57 @@ def _validate_receipt(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid receipt",
         )
+
+    engine_id = receipt.engine_id
+    voice_id = receipt.voice_id
+    character_count = receipt.character_count
+    rate = receipt.rate
+    volume = receipt.volume
+
     if (
-        type(receipt.engine_id) is not str
-        or not receipt.engine_id.strip()
-        or len(receipt.engine_id) > MAX_STREAM_ENGINE_ID_CHARS
+        type(engine_id) is not str
+        or not engine_id.strip()
+        or len(engine_id) > MAX_STREAM_ENGINE_ID_CHARS
     ):
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid engine identity",
         )
     if (
-        type(receipt.voice_id) is not str
-        or not receipt.voice_id.strip()
-        or len(receipt.voice_id) > MAX_VOICE_ID_CHARS
+        type(voice_id) is not str
+        or not voice_id.strip()
+        or len(voice_id) > MAX_VOICE_ID_CHARS
     ):
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid voice identity",
         )
-    if any(ord(char) < 32 for char in receipt.engine_id + receipt.voice_id):
+    if any(ord(char) < 32 for char in engine_id + voice_id):
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid route identity",
         )
-    if type(receipt.character_count) is not int or receipt.character_count != expected_characters:
+    if type(character_count) is not int or character_count != expected_characters:
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid character count",
         )
-    if type(receipt.rate) is not int or receipt.rate != expected_rate:
+    if type(rate) is not int or rate != expected_rate:
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid rate",
         )
-    if type(receipt.volume) is not int or receipt.volume != expected_volume:
+    if type(volume) is not int or volume != expected_volume:
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid volume",
         )
     return SpeechReceipt(
-        engine_id=receipt.engine_id,
-        voice_id=receipt.voice_id,
-        character_count=receipt.character_count,
-        rate=receipt.rate,
-        volume=receipt.volume,
+        engine_id=engine_id,
+        voice_id=voice_id,
+        character_count=character_count,
+        rate=rate,
+        volume=volume,
     )
 
 
