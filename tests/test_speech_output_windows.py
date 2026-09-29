@@ -129,12 +129,14 @@ def test_speech_request_accepts_unicode_and_bounded_settings(
         {"text": " "},
         {"text": "a" * (MAX_SPEECH_TEXT_CHARS + 1)},
         {"text": "bad\x00text"},
+        {"text": "bad\ud800text"},
         {"text": "hello", "rate": -11},
         {"text": "hello", "rate": True},
         {"text": "hello", "volume": 101},
         {"text": "hello", "volume": False},
         {"text": "hello", "voice_id": ""},
         {"text": "hello", "voice_id": "bad\nvoice"},
+        {"text": "hello", "voice_id": "bad\ud800voice"},
     ],
 )
 def test_speech_request_rejects_invalid_input(kwargs: dict[str, object]) -> None:
