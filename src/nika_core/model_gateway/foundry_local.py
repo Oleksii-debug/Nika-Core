@@ -486,6 +486,26 @@ class FoundryLocalProvider:
             with self._owned_model_lock:
                 self._owned_loaded_models.pop(model_id, None)
 
+        for marker, model in tuple(self._tainted_loaded_models.items()):
+            try:
+                if self._sdk_bool(model, "is_loaded"):
+                    model.unload()
+                    if self._sdk_bool(model, "is_loaded"):
+                        raise ModelGatewayError(
+                            ModelErrorCode.PROVIDER_ERROR,
+                            "Foundry Local tainted model remained loaded after unload",
+                            provider_id=self.capabilities.provider_id,
+                            retryable=False,
+                        )
+            except Exception as exc:
+                raise ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "Foundry Local tainted model could not be unloaded",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                ) from exc
+            self._tainted_loaded_models.pop(marker, None)
+
     def _release_slot_when_worker_finishes(
         self,
         worker: asyncio.Task[Any],
