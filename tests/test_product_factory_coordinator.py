@@ -13,8 +13,10 @@ from nika_core.product_factory_orchestration import (
     RepositoryRef,
 )
 from nika_core.toolsmith.contracts import (
+    ArtifactEvidence,
     ChangedFile,
     CodingResult,
+    RecoveryState,
     TestEvidence,
     WorkerFailure,
     WorkerFailureKind,
@@ -249,6 +251,68 @@ def test_worker_result_revalidates_forged_changed_file_carrier_before_scope_acce
     before = coordinator.snapshot()
 
     with pytest.raises(CoordinatorError, match="exact non-empty string"):
+        coordinator.record_result(envelope)
+
+    assert coordinator.snapshot() == before
+
+
+class _BehavioralArtifactText(str):
+    def strip(self, *_args: object, **_kwargs: object) -> str:
+        raise AssertionError("behavioral artifact text must not execute")
+
+
+def test_worker_result_revalidates_forged_artifact_carrier_before_state_effect() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    artifact = ArtifactEvidence("report", "artifact-digest", "text/plain")
+    result = CodingResult(
+        job_id=request.work_id,
+        test_evidence=(
+            TestEvidence(("python", "-m", "pytest", "tests/core"), 0, "ok"),
+        ),
+        artifacts=(artifact,),
+    )
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        result,
+    )
+    object.__setattr__(artifact, "name", _BehavioralArtifactText("report"))
+    before = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match="artifact evidence fields"):
+        coordinator.record_result(envelope)
+
+    assert coordinator.snapshot() == before
+
+
+def test_worker_result_revalidates_forged_recovery_state_before_state_effect() -> None:
+    coordinator = _coordinator()
+    request = coordinator.start("core")
+    result = CodingResult(
+        job_id=request.work_id,
+        test_evidence=(
+            TestEvidence(("python", "-m", "pytest", "tests/core"), 0, "ok"),
+        ),
+        recovery_state=RecoveryState("checkpoint", "opaque"),
+    )
+    envelope = WorkerResultEnvelope(
+        request.work_id,
+        request.component_id,
+        request.repository_id,
+        request.base_sha,
+        SHA_B,
+        DIGEST,
+        result,
+    )
+    object.__setattr__(result, "recovery_state", object())
+    before = coordinator.snapshot()
+
+    with pytest.raises(CoordinatorError, match="exact RecoveryState"):
         coordinator.record_result(envelope)
 
     assert coordinator.snapshot() == before

@@ -14,8 +14,10 @@ from nika_core.product_factory_orchestration import (
     RepositoryRef,
 )
 from nika_core.toolsmith.contracts import (
+    ArtifactEvidence,
     ChangedFile,
     CodingResult,
+    RecoveryState,
     TestEvidence,
     WorkerFailure,
     WorkerFailureKind,
@@ -800,6 +802,8 @@ def _validate_worker_result_scalar_authority(envelope: WorkerResultEnvelope) -> 
         raise CoordinatorError("coding result job id must be an exact non-empty string")
     _validate_changed_files_carrier(envelope.coding_result.changed_files)
     _validate_test_evidence_carrier(envelope.coding_result.test_evidence)
+    _validate_artifact_evidence_carrier(envelope.coding_result.artifacts)
+    _validate_recovery_state_carrier(envelope.coding_result.recovery_state)
     if envelope.coding_result.failure is not None:
         _validate_worker_failure_carrier(envelope.coding_result.failure)
 
@@ -842,6 +846,35 @@ def _validate_test_evidence_carrier(evidence: object) -> None:
             raise CoordinatorError(
                 "test evidence output digest must be an exact non-empty string"
             )
+
+
+def _validate_artifact_evidence_carrier(artifacts: object) -> None:
+    if type(artifacts) is not tuple:
+        raise CoordinatorError("artifact evidence must be an exact tuple")
+    for item in artifacts:
+        if type(item) is not ArtifactEvidence:
+            raise CoordinatorError(
+                "artifact evidence entries must be exact ArtifactEvidence"
+            )
+        values = (item.name, item.digest, item.media_type)
+        if any(type(value) is not str or not value.strip() for value in values):
+            raise CoordinatorError(
+                "artifact evidence fields must be exact non-empty strings"
+            )
+
+
+def _validate_recovery_state_carrier(recovery_state: object) -> None:
+    if recovery_state is None:
+        return
+    if type(recovery_state) is not RecoveryState:
+        raise CoordinatorError("recovery state must be an exact RecoveryState")
+    if type(recovery_state.phase) is not str or not recovery_state.phase.strip():
+        raise CoordinatorError("recovery state phase must be an exact non-empty string")
+    if (
+        recovery_state.opaque_token is not None
+        and type(recovery_state.opaque_token) is not str
+    ):
+        raise CoordinatorError("recovery state opaque token must be an exact string")
 
 
 def _validate_worker_failure_carrier(failure: object) -> None:
