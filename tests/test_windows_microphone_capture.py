@@ -89,7 +89,7 @@ class _FakeSoundDevice:
             "default_samplerate": 48_000.0,
         }
 
-    def WasapiSettings(self, **kwargs):  # noqa: N802 - mirrors sounddevice API
+    def WasapiSettings(self, **kwargs):
         self.settings_calls.append(dict(kwargs))
         return ("wasapi-settings", dict(kwargs))
 
@@ -100,7 +100,7 @@ class _FakeSoundDevice:
         if self.fail_check:
             raise RuntimeError(f"unsupported format on {self.raw_device_name}")
 
-    def RawInputStream(self, **kwargs):  # noqa: N802 - mirrors sounddevice API
+    def RawInputStream(self, **kwargs):
         stream = _FakeRawInputStream(self, **kwargs)
         self.streams.append(stream)
         return stream
