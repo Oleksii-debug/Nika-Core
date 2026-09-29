@@ -73,7 +73,7 @@ class ModelCandidate:
         ):
             _identity(value, name)
         if not isinstance(self.provider_kind, ProviderKind):
-            raise ValueError("provider_kind must be a ProviderKind")
+            raise TypeError("provider_kind must be a ProviderKind")
         _optional_sha256(self.model_sha256, "model_sha256")
 
     @property
@@ -110,7 +110,7 @@ class EvaluationCase:
         if not self.messages:
             raise ValueError("evaluation case requires at least one message")
         if any(not isinstance(message, ModelMessage) for message in self.messages):
-            raise ValueError("evaluation messages must use ModelMessage")
+            raise TypeError("evaluation messages must use ModelMessage")
         if not self.expected_text:
             raise ValueError("expected_text must not be empty")
         if isinstance(self.pass_score, bool):
@@ -144,9 +144,9 @@ class EvaluationSet:
         ):
             _identity(value, name)
         if not isinstance(self.purpose, EvaluationPurpose):
-            raise ValueError("purpose must be an EvaluationPurpose")
+            raise TypeError("purpose must be an EvaluationPurpose")
         if not isinstance(self.privacy, PrivacyClass):
-            raise ValueError("privacy must be a PrivacyClass")
+            raise TypeError("privacy must be a PrivacyClass")
         if not self.cases:
             raise ValueError("evaluation set requires at least one case")
         case_ids = [case.case_id for case in self.cases]
