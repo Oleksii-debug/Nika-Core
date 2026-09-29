@@ -1862,6 +1862,7 @@ def test_unexpected_heartbeat_failure_cancels_inflight_effect_and_marks_uncertai
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.UNCERTAIN
 
+
 def _seed_durable_result_pending_for_reconcile(store, binding, task_id, coordinator):
     host = ProductFactoryProgramHost(store, FakeProgramWorker())
     request = coordinator.start("component-0")
