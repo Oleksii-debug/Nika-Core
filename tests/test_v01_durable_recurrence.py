@@ -1126,6 +1126,106 @@ def test_persisted_timeline_and_terminal_semantics_fail_closed(tmp_path: Path) -
     assert calls == []
 
 
+def test_persisted_deadline_semantics_fail_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    start = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    deadline = start + timedelta(minutes=5)
+    clock = FakeClock(start)
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="deadline-authority",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+        deadline_at=deadline,
+    )
+    job = scheduler.upserts[-1]
+
+    late_next_payload = dict(job.payload)
+    late_next_metadata = dict(late_next_payload["_nika_recurrence_v1"])
+    late_next_metadata["next_due_at"] = deadline.isoformat()
+    late_next_metadata["next_occurrence_id"] = recurrence_module._occurrence_id(
+        "deadline-authority",
+        deadline,
+    )
+    late_next_payload["_nika_recurrence_v1"] = late_next_metadata
+    with pytest.raises(ValueError, match="next intent must be before deadline"):
+        recurrence_module._decode_job(
+            replace(
+                job,
+                payload=late_next_payload,
+                trigger={"run_date": deadline.isoformat()},
+            ),
+            expected_recurrence_id="deadline-authority",
+        )
+
+    late_last_payload = dict(job.payload)
+    late_last_metadata = dict(late_last_payload["_nika_recurrence_v1"])
+    late_last_metadata.update(
+        {
+            "status": "cancelled",
+            "next_due_at": None,
+            "next_occurrence_id": None,
+            "last_completed_due_at": deadline.isoformat(),
+            "last_completed_occurrence_id": recurrence_module._occurrence_id(
+                "deadline-authority",
+                deadline,
+            ),
+        }
+    )
+    late_last_payload["_nika_recurrence_v1"] = late_last_metadata
+    with pytest.raises(ValueError, match="completion cursor must be before deadline"):
+        recurrence_module._decode_job(
+            replace(
+                job,
+                payload=late_last_payload,
+                enabled=False,
+                trigger={"run_date": deadline.isoformat()},
+            ),
+            expected_recurrence_id="deadline-authority",
+        )
+
+    service.create(
+        recurrence_id="missing-deadline-authority",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+    )
+    no_deadline_job = scheduler.upserts[-1]
+    missing_payload = dict(no_deadline_job.payload)
+    missing_metadata = dict(missing_payload["_nika_recurrence_v1"])
+    missing_metadata.update(
+        {
+            "status": "completed",
+            "next_due_at": None,
+            "next_occurrence_id": None,
+            "terminal_reason": "deadline",
+        }
+    )
+    missing_payload["_nika_recurrence_v1"] = missing_metadata
+    with pytest.raises(ValueError, match="terminal reason is missing deadline"):
+        recurrence_module._decode_job(
+            replace(no_deadline_job, payload=missing_payload, enabled=False),
+            expected_recurrence_id="missing-deadline-authority",
+        )
+
+    immediate = service.create(
+        recurrence_id="immediate-deadline",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+        deadline_at=start,
+    )
+    assert immediate.status is RecurrenceStatus.COMPLETED
+    assert immediate.terminal_reason is RecurrenceTerminalReason.DEADLINE
+    assert service.get("immediate-deadline") == immediate
+    assert calls == []
+
+
 def test_persisted_mapping_keys_fail_before_lookup_behavior(tmp_path: Path) -> None:
     class BehavioralKey(str):
         __hash__ = str.__hash__
