@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.action_registry import ActionDefinition, ActionRegistry, Keymap
 from nika_core.microphone_capture import (
     MicrophoneCaptureCapabilities,
     MicrophoneCaptureRequest,
@@ -21,6 +23,7 @@ from nika_core.speech_to_text import (
     SpeechToTextRequest,
     SpeechToTextService,
 )
+from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.desktop_voice import DesktopVoiceStatus, DesktopVoiceTurnController
 from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest, VoiceTurnResult
 from nika_core.wake_activation import WakeActivationDetector
@@ -357,6 +360,71 @@ def test_request_factory_must_return_exact_voice_request() -> None:
         assert controller.start({}).status == "accepted"
         _wait_status(controller, DesktopVoiceStatus.FAILED)
         assert microphone.calls == 0
+    finally:
+        submitter.close()
+
+
+def test_controller_composes_with_real_synchronous_ui_bridge(tmp_path: Any) -> None:
+    submitter = _LoopSubmitter()
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=submitter.submit,
+    )
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    actions = ActionRegistry()
+    actions.register(
+        ActionDefinition(
+            "voice.turn.start",
+            "Почати голосовий ввід",
+            "Voice",
+            None,
+        )
+    )
+    actions.register(
+        ActionDefinition(
+            "voice.turn.cancel",
+            "Скасувати голосовий ввід",
+            "Voice",
+            None,
+        )
+    )
+    bridge = UIActionBridge(
+        actions,
+        Keymap(store, actions),
+        handlers={
+            "voice.turn.start": controller.start,
+            "voice.turn.cancel": controller.cancel,
+        },
+        state_provider=lambda: {"voice_turn": controller.snapshot()},
+    )
+    try:
+        started = bridge.dispatch(
+            {
+                "request_id": "voice-ui-start",
+                "action_id": "voice.turn.start",
+                "payload": {},
+            }
+        )
+        assert started["status"] == "accepted"
+        snapshot = _wait_status(controller, DesktopVoiceStatus.COMPLETED)
+        assert snapshot["transcript"] == "ніка виконай команду"
+
+        state = bridge.get_state()
+        assert state["ok"] is True
+        assert state["state"]["voice_turn"]["status"] == "completed"
+        assert state["state"]["voice_turn"]["activated"] is True
+
+        rejected = bridge.dispatch(
+            {
+                "request_id": "voice-ui-forged",
+                "action_id": "voice.turn.start",
+                "payload": {"model": "forged"},
+            }
+        )
+        assert rejected["status"] == "rejected"
+        assert "payload authority" in rejected["message"]
     finally:
         submitter.close()
 
