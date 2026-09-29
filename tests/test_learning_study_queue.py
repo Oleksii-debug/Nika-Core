@@ -846,3 +846,36 @@ def test_study_material_keeps_nonsecret_oauth_metadata_across_restart(tmp_path) 
 
     assert restored.material.source_ref == safe_ref
 
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "https://example.test/book.pdf?oauth_token=temp-token",
+        "https://example.test/book.pdf?oauth_token_secret=temp-secret",
+        "https://example.test/book.pdf#oauth_signature=request-signature",
+        "https://example.test/book.pdf?oauth%5Ftoken%5Fsecret=temp-secret",
+        "oauth-token-secret=temp-secret",
+        "oauthsignature=request-signature",
+    ],
+)
+def test_study_material_rejects_oauth1_credentials(source_ref: str) -> None:
+    with pytest.raises(ValueError, match="credential"):
+        _material(source_ref=source_ref)
+
+
+def test_study_material_keeps_nonsecret_oauth1_metadata_across_restart(tmp_path) -> None:
+    safe_ref = (
+        "https://example.test/book.pdf?oauth_consumer_key=public-client"
+        "&oauth_signature_method=HMAC-SHA1&oauth_token_count=0"
+    )
+    path, _, queue = _services(tmp_path)
+    created = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="oauth1-public-metadata", source_ref=safe_ref),
+    )
+    fresh_store = SQLiteStore(path)
+    fresh_store.initialize()
+    restored = StudyQueue(TaskQueue(fresh_store)).get(created.task_id)
+
+    assert restored.material.source_ref == safe_ref
+
