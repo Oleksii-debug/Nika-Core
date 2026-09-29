@@ -488,11 +488,8 @@ def _settle_late_factory_future(
     settled: threading.Event,
 ) -> None:
     try:
-        future.result()
+        future.exception()
     except asyncio.CancelledError:
+        pass
+    finally:
         settled.set()
-        return
-    except Exception:  # noqa: BLE001 - late factory result is intentionally discarded
-        settled.set()
-        return
-    settled.set()
