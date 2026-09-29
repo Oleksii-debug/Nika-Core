@@ -44,6 +44,8 @@ def build_experiment_definition(
 ) -> ExperimentDefinition:
     """Build an Experiment Engine definition without creating or promoting it."""
 
+    if type(execution_config) is not BenchmarkExecutionConfig:
+        raise TypeError("execution_config must be an exact BenchmarkExecutionConfig")
     if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
         raise ValueError("model promotion experiments require a held-out evaluation set")
     if not challengers:
