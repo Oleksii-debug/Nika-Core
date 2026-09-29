@@ -511,6 +511,12 @@ def _decode_job(
         raise ValueError("durable recurrence next intent is incomplete")
     if (last_due is None) != (last_id is None):
         raise ValueError("durable recurrence completion cursor is incomplete")
+    _validate_persisted_timeline(
+        anchor=anchor,
+        interval_seconds=interval,
+        next_due=next_due,
+        last_due=last_due,
+    )
     if next_due is not None and next_id != _occurrence_id(recurrence_id, next_due):
         raise ValueError("durable recurrence next occurrence identity is corrupt")
     if last_due is not None and last_id != _occurrence_id(recurrence_id, last_due):
@@ -519,6 +525,20 @@ def _decode_job(
         raise ValueError("non-terminal recurrence is missing its next durable intent")
     if status in {RecurrenceStatus.CANCELLED, RecurrenceStatus.COMPLETED} and next_due is not None:
         raise ValueError("terminal recurrence cannot retain a next durable intent")
+    if status is RecurrenceStatus.COMPLETED:
+        if terminal_reason is None:
+            raise ValueError("completed recurrence is missing its terminal reason")
+        if (
+            terminal_reason
+            in {
+                RecurrenceTerminalReason.CONDITION_MET,
+                RecurrenceTerminalReason.RANGE_EXHAUSTED,
+            }
+            and last_due is None
+        ):
+            raise ValueError("completed recurrence terminal reason requires completion evidence")
+    elif terminal_reason is not None:
+        raise ValueError("non-completed recurrence cannot retain a terminal reason")
     if type(job.enabled) is not bool:
         raise ValueError("durable recurrence enabled state is corrupt")
     if job.enabled != (status is RecurrenceStatus.ACTIVE and next_due is not None):
@@ -612,6 +632,27 @@ def _validate_interval(value: object) -> int:
     if type(value) is not int or value <= 0:
         raise ValueError("interval_seconds must be a positive integer")
     return value
+
+
+def _validate_persisted_timeline(
+    *,
+    anchor: datetime,
+    interval_seconds: int,
+    next_due: datetime | None,
+    last_due: datetime | None,
+) -> None:
+    interval = timedelta(seconds=interval_seconds)
+    for label, due_at in (
+        ("next_due_at", next_due),
+        ("last_completed_due_at", last_due),
+    ):
+        if due_at is None:
+            continue
+        offset = due_at - anchor
+        if offset < timedelta(0) or offset % interval:
+            raise ValueError(f"durable recurrence {label} is outside the recurrence grid")
+    if next_due is not None and last_due is not None and next_due <= last_due:
+        raise ValueError("durable recurrence cursor chronology is corrupt")
 
 
 def _validate_interval_origin(
