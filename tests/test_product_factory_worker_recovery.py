@@ -134,7 +134,6 @@ def test_restart_recovery_returns_running_component_to_independent_review() -> N
     assert "ui" not in ready
 
 
-
 def test_missing_worker_state_retains_running_authority_and_blocks_replay() -> None:
     coordinator = _coordinator()
     coordinator.start("core")
@@ -146,6 +145,8 @@ def test_missing_worker_state_retains_running_authority_and_blocks_replay() -> N
     assert outcome.record.state is WorkState.RUNNING
     assert outcome.record.blocker is None
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
+
+
 def test_recovered_cancelled_result_preserves_typed_repair_evidence() -> None:
     coordinator = _coordinator()
     coordinator.start("core")
