@@ -385,7 +385,6 @@ def test_uncertain_worker_is_recovered_by_exact_work_id_without_redispatch(tmp_p
     ).status is IdempotencyStatus.COMPLETED
 
 
-
 def test_missing_worker_state_retains_running_authority_and_forbids_replay(
     tmp_path,
 ) -> None:
@@ -431,6 +430,8 @@ def test_missing_worker_state_retains_running_authority_and_forbids_replay(
     assert IdempotencyLedger(restarted_store).require(
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.UNCERTAIN
+
+
 def test_invalid_worker_evidence_remains_running_and_marks_operation_uncertain(tmp_path) -> None:
     store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
     worker = FakeProgramWorker()
