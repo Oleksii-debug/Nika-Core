@@ -340,6 +340,25 @@ def test_constructor_rejects_invalid_stream_bounds(kwargs: dict[str, object]) ->
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
 
 
+def test_feed_after_cancel_is_rejected_without_accepting_more_text() -> None:
+    port = BlockingSpeechPort()
+    stream = IncrementalSpeechStream(port)
+
+    stream.feed("Початок.")
+    assert port.started.wait(timeout=1)
+    accepted_before_cancel = stream.snapshot().accepted_characters
+
+    stream.cancel()
+    with pytest.raises(SpeechError) as error:
+        stream.feed(" Запізнілий текст.")
+
+    assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+    assert stream.snapshot().accepted_characters == accepted_before_cancel
+    port.release.set()
+    assert stream.wait(1)
+    assert stream.snapshot().state is SpeechStreamState.CANCELLED
+
+
 def test_feed_after_finish_fails_before_new_effect() -> None:
     port = FakeSpeechPort()
     stream = IncrementalSpeechStream(port)
