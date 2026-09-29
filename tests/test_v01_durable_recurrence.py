@@ -364,6 +364,101 @@ def test_completed_occurrence_is_not_repeated_and_missed_runs_coalesce_once(
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize(
+    ("transition", "expected_status"),
+    (
+        ("pause", RecurrenceStatus.PAUSED),
+        ("cancel", RecurrenceStatus.CANCELLED),
+    ),
+)
+def test_resolver_lifecycle_change_blocks_stale_handler_effect(
+    tmp_path: Path,
+    transition: str,
+    expected_status: RecurrenceStatus,
+) -> None:
+    store = _store(tmp_path)
+    start = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    clock = FakeClock(start)
+    calls: list[RecurrenceInvocation] = []
+    jobs = ScheduledJobStore(store)
+    scheduler = PersistingScheduler(jobs)
+    service_ref: dict[str, DurableRecurrenceService] = {}
+
+    def resolve(action_id: str):
+        assert action_id == "monitor.check"
+        service = service_ref["service"]
+        getattr(service, transition)("resolver-lifecycle-fence")
+
+        def handler(invocation: RecurrenceInvocation) -> None:
+            calls.append(invocation)
+
+        return handler
+
+    service = DurableRecurrenceService(
+        jobs=jobs,
+        scheduler=scheduler,
+        handler_resolver=resolve,
+        clock=clock,
+    )
+    service_ref["service"] = service
+    service.create(
+        recurrence_id="resolver-lifecycle-fence",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+    )
+
+    service.action_handler({"recurrence_id": "resolver-lifecycle-fence"})
+
+    state = service.get("resolver-lifecycle-fence")
+    assert state is not None
+    assert state.status is expected_status
+    assert calls == []
+
+
+def test_resolver_deadline_crossing_blocks_late_handler_effect(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    start = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    deadline = start + timedelta(minutes=1)
+    clock = FakeClock(start)
+    calls: list[RecurrenceInvocation] = []
+    jobs = ScheduledJobStore(store)
+    scheduler = PersistingScheduler(jobs)
+
+    def resolve(action_id: str):
+        assert action_id == "monitor.check"
+        clock.advance(minutes=2)
+
+        def handler(invocation: RecurrenceInvocation) -> None:
+            calls.append(invocation)
+
+        return handler
+
+    service = DurableRecurrenceService(
+        jobs=jobs,
+        scheduler=scheduler,
+        handler_resolver=resolve,
+        clock=clock,
+    )
+    service.create(
+        recurrence_id="resolver-deadline-fence",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+        deadline_at=deadline,
+    )
+
+    service.action_handler({"recurrence_id": "resolver-deadline-fence"})
+
+    state = service.get("resolver-deadline-fence")
+    assert state is not None
+    assert state.status is RecurrenceStatus.COMPLETED
+    assert state.terminal_reason is RecurrenceTerminalReason.DEADLINE
+    assert calls == []
+
+
 def test_pause_survives_restart_and_resume_keeps_one_coalesced_intent(tmp_path: Path) -> None:
     store = _store(tmp_path)
     start = datetime(2030, 1, 1, 12, 5, tzinfo=UTC)
