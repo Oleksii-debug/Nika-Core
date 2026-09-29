@@ -323,11 +323,7 @@ def test_cli_json_output_is_machine_readable_and_returns_health_code(
     _write_healthy_database(database)
     config = _config(database)
     observer = _StaticObserver(ResourceSnapshot(10.0, 20.0, 1024))
-    monkeypatch.setattr(
-        diagnostics_cli.AppConfig,
-        "from_environment",
-        classmethod(lambda cls: config),
-    )
+    monkeypatch.setattr(diagnostics_cli, "_load_config", lambda: config)
     monkeypatch.setattr(diagnostics_cli, "_resource_observer", lambda: observer)
 
     exit_code = diagnostics_cli.main(["--json"])
@@ -345,11 +341,7 @@ def test_cli_configuration_failure_uses_stable_sanitized_message(
     def _fail(cls):
         raise ValueError(f"bad env {_SECRET_CANARY}")
 
-    monkeypatch.setattr(
-        diagnostics_cli.AppConfig,
-        "from_environment",
-        classmethod(_fail),
-    )
+    monkeypatch.setattr(diagnostics_cli, "_load_config", lambda: _fail(AppConfig))
 
     exit_code = diagnostics_cli.main([])
 
@@ -357,3 +349,21 @@ def test_cli_configuration_failure_uses_stable_sanitized_message(
     assert exit_code == 2
     assert "Nika Core health: FAIL" in output
     assert _SECRET_CANARY not in output
+
+
+
+def test_cli_config_loader_does_not_use_startup_legacy_preparation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _forbidden(cls):
+        raise AssertionError("health must not invoke startup legacy preparation")
+
+    monkeypatch.setattr(
+        diagnostics_cli.AppConfig,
+        "from_environment",
+        classmethod(_forbidden),
+    )
+
+    config = diagnostics_cli._load_config()
+
+    assert type(config) is AppConfig
