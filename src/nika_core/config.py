@@ -38,8 +38,15 @@ class AppConfig(BaseSettings):
     def validate_schema_version(cls, value: object) -> int:
         if type(value) is int:
             version = value
-        elif type(value) is str and value == str(APP_CONFIG_SCHEMA_VERSION):
-            version = APP_CONFIG_SCHEMA_VERSION
+        elif type(value) is str:
+            if value == str(APP_CONFIG_SCHEMA_VERSION):
+                version = APP_CONFIG_SCHEMA_VERSION
+            elif value.isascii() and value.isdecimal() and not value.startswith("0"):
+                raise ValueError(
+                    f"unsupported schema_version: expected {APP_CONFIG_SCHEMA_VERSION}"
+                )
+            else:
+                raise ValueError("schema_version must be the canonical supported version")
         else:
             raise ValueError("schema_version must be the canonical supported version")
         if version != APP_CONFIG_SCHEMA_VERSION:
