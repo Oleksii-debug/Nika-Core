@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.batch_cursor as batch_cursor_module
+
 from nika_core.batch_cursor import (
     AttemptState,
     BatchCursor,
@@ -343,7 +345,7 @@ def test_canonical_utc_deadline_and_released_frontier_still_round_trip(
     grant = cursor.begin_effect("target-0")
     assert grant.execute is True
     cursor.confirm("target-0", {"ok": True}, next_batch_not_before=due)
-    cursor.release_inter_batch_wait(now=due)
+    cursor.release_inter_batch_wait()
 
     restarted = BatchCursor.restore(
         memory,
@@ -407,7 +409,7 @@ def test_stale_mark_uncertain_on_confirmed_target_preserves_scheduler_wait(
     assert cursor.state.targets[0].attempt_state is AttemptState.CONFIRMED
     assert ledger.require(grant.operation_key).status is IdempotencyStatus.COMPLETED
     with pytest.raises(BatchCursorBlockedError, match="deadline has not been reached"):
-        cursor.release_inter_batch_wait(now=due - timedelta(seconds=1))
+        cursor.release_inter_batch_wait()
 
 
 def test_mark_uncertain_rejects_confirmed_target_with_noncompleted_ledger_without_mutation(
@@ -899,7 +901,7 @@ def test_post_commit_put_exception_reconciles_authoritative_future_wait(
     assert intent.not_before == due.isoformat()
 
     with pytest.raises(BatchCursorBlockedError, match="deadline has not been reached"):
-        cursor.release_inter_batch_wait(now=due - timedelta(minutes=1))
+        cursor.release_inter_batch_wait()
 
     durable = MemoryService(store).get(
         scope=MemoryScope.TASK,
@@ -955,7 +957,7 @@ def test_post_commit_json_alias_conflict_fail_stops_live_cursor(
         cursor.schedule_inter_batch_wait(due)
 
     with pytest.raises(BatchCursorBlockedError, match="restore is required"):
-        cursor.release_inter_batch_wait(now=due + timedelta(hours=1))
+        cursor.release_inter_batch_wait()
     with pytest.raises(BatchCursorBlockedError, match="restore is required"):
         cursor.begin_effect("target-1")
 
@@ -1067,7 +1069,7 @@ def test_unreadable_post_commit_outcome_fail_stops_live_cursor_until_restore(
         cursor.schedule_inter_batch_wait(due)
 
     with pytest.raises(BatchCursorBlockedError, match="restore is required"):
-        cursor.release_inter_batch_wait(now=due + timedelta(hours=1))
+        cursor.release_inter_batch_wait()
     with pytest.raises(BatchCursorBlockedError, match="restore is required"):
         cursor.next_target()
     with pytest.raises(BatchCursorBlockedError, match="restore is required"):
@@ -1854,3 +1856,39 @@ def test_create_rejects_forged_nested_behavioral_payload_before_persistence(
             ("v01.batch_cursor",),
         ).fetchone()[0]
     assert count == 0
+
+def test_inter_batch_release_uses_internal_clock_and_rejects_caller_time_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True}, next_batch_not_before=due)
+
+    monkeypatch.setattr(
+        batch_cursor_module,
+        "_utc_now",
+        lambda: due - timedelta(microseconds=1),
+    )
+    with pytest.raises(BatchCursorBlockedError, match="deadline has not been reached"):
+        cursor.release_inter_batch_wait()
+
+    with pytest.raises(TypeError, match="unexpected keyword argument 'now'"):
+        cursor.release_inter_batch_wait(now=due)  # type: ignore[call-arg]
+
+    assert cursor.state.ready_batch_index == 0
+    monkeypatch.setattr(batch_cursor_module, "_utc_now", lambda: due)
+    cursor.release_inter_batch_wait()
+    assert cursor.state.ready_batch_index == 1
+    assert cursor.next_target() is not None
+    assert cursor.next_target().target_id == "target-1"
+

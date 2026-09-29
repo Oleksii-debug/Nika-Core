@@ -476,14 +476,13 @@ class BatchCursor:
         intent.deadline_source = "scheduler"
         self._persist()
 
-    def release_inter_batch_wait(self, *, now: datetime | None = None) -> None:
+    def release_inter_batch_wait(self) -> None:
         self._require_persistence_authority()
         intent = self._state.next_scheduled_intent
         if intent is None or intent.kind is not IntentKind.INTER_BATCH_WAIT:
             raise BatchCursorBlockedError("cursor is not waiting between batches")
         if intent.not_before is not None:
-            current = _as_utc(now) if now is not None else datetime.now(UTC)
-            if current < _parse_utc(intent.not_before):
+            if _utc_now() < _parse_utc(intent.not_before):
                 raise BatchCursorBlockedError("inter-batch wait deadline has not been reached")
         self._state.ready_batch_index = intent.batch_index
         self._state.next_scheduled_intent = _derive_intent(self._state)
@@ -1111,6 +1110,10 @@ def _positive_batch_size(value: int) -> int:
     if value <= 0:
         raise ValueError("batch_size must be greater than zero")
     return value
+
+
+def _utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
 def _as_utc(value: datetime) -> datetime:
