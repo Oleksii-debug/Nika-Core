@@ -235,7 +235,7 @@ def test_pause_rejects_unproven_resume_before_reservation_or_effect(tmp_path) ->
             resume_token="durable-token",
         )
 
-        with pytest.raises(ValueError, match="checkpoint proof"):
+        with pytest.raises(TypeError, match="checkpoint proof"):
             await coordinator.pause(runtime, task_id=task_id, thread_id=thread_id)
 
         assert runtime.cancel_calls == 0
