@@ -138,3 +138,29 @@ def test_mcp_config_rejects_behavioral_identity_and_plain_risk() -> None:
         )
 
     assert events == []
+
+
+def test_mcp_routing_segments_reject_delimiter_collisions() -> None:
+    called: list[dict[str, object]] = []
+
+    with pytest.raises(ValueError, match="server_id must not contain ':'"):
+        MCPServerConfig(server_id="team:prod", target=_server(called))
+
+    adapter = MCPClientAdapter(MCPServerConfig(server_id="team", target=_server(called)))
+    with pytest.raises(ValueError, match="MCP tool name must not contain ':'"):
+        asyncio.run(
+            adapter.call(
+                ToolCall(
+                    call_id="mcp-delimiter-1",
+                    tool_id="mcp:team:group:publish",
+                    arguments={"value": "blocked"},
+                )
+            )
+        )
+
+    assert called == []
+
+
+def test_mcp_server_identity_rejects_edge_whitespace() -> None:
+    with pytest.raises(ValueError, match="server_id must not contain edge whitespace"):
+        MCPServerConfig(server_id=" safety", target=object())
