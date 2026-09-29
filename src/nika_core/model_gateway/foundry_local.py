@@ -302,11 +302,19 @@ class FoundryLocalProvider:
             expected_model_id = authorization.expected_model_id or self._expected_model_id
             self._validate_model_identity(model, expected_model_id)
             if self._sdk_bool(model, "is_cached"):
-                return self._model_evidence(
+                evidence = self._model_evidence(
                     model,
                     expected_alias=authorization.model,
                     expected_model_id=expected_model_id,
                 )
+                if effective_cancel_event.is_set():
+                    raise ModelGatewayError(
+                        ModelErrorCode.CANCELLED,
+                        f"Foundry Local model '{authorization.model}' download was cancelled",
+                        provider_id=self.capabilities.provider_id,
+                        retryable=False,
+                    )
+                return evidence
 
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -378,6 +386,13 @@ class FoundryLocalProvider:
                 expected_model_id=expected_model_id,
             )
             self._validate_model_identity(model, expected_model_id)
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    f"Foundry Local model '{authorization.model}' download was cancelled",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
             if not evidence.cached:
                 if effective_cancel_event.is_set():
                     raise ModelGatewayError(
