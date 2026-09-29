@@ -442,6 +442,46 @@ def test_foundry_local_inference_never_downloads_uncached_model() -> None:
     assert model.is_loaded is False
 
 
+def test_foundry_provider_rejects_behavioral_legacy_download_flag() -> None:
+    class BehavioralFlag:
+        def __bool__(self) -> bool:
+            raise AssertionError("legacy flag truthiness must not execute")
+
+    with pytest.raises(TypeError, match="allow_download must be boolean"):
+        FoundryLocalProvider(
+            default_model="test-model",
+            allow_download=BehavioralFlag(),  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize(
+    "app_name",
+    (
+        "",
+        " NikaCore",
+        "NikaCore\n",
+    ),
+)
+def test_foundry_provider_rejects_noncanonical_app_name(app_name: str) -> None:
+    with pytest.raises(ValueError):
+        FoundryLocalProvider(
+            default_model="test-model",
+            app_name=app_name,
+        )
+
+
+def test_foundry_provider_rejects_behavioral_app_name() -> None:
+    class BehavioralText(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("behavioral app_name methods must not execute")
+
+    with pytest.raises(TypeError, match="app_name must be text"):
+        FoundryLocalProvider(
+            default_model="test-model",
+            app_name=BehavioralText("NikaCore"),
+        )
+
+
 def test_legacy_provider_download_flag_is_rejected_fail_closed() -> None:
     with pytest.raises(ValueError, match="download_model"):
         FoundryLocalProvider(default_model="test-model", allow_download=True)
