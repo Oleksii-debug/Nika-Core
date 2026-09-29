@@ -80,6 +80,27 @@ def test_behavioral_job_carriers_fail_before_behavior(tmp_path: Path) -> None:
     assert store.get("job-1") is None
 
 
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("max_instances", 1 << 63),
+        ("misfire_grace_seconds", 1 << 63),
+    ),
+)
+def test_scheduler_integer_overflow_is_rejected_before_sqlite_bind(
+    tmp_path: Path,
+    field: str,
+    value: int,
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(ValueError, match="within SQLite range"):
+        store.upsert(_job(**{field: value}))
+
+    assert store.get("job-1") is None
+
+
 def test_nested_payload_is_exact_finite_json_and_detached(tmp_path: Path) -> None:
     class BehavioralText(str):
         def encode(self, *args: object, **kwargs: object) -> bytes:

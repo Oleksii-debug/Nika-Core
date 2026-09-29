@@ -14,6 +14,7 @@ IMMUTABLE_JOB_BINDING_KEY = "_nika_immutable_job_binding_v1"
 _MAX_JSON_DEPTH = 32
 _MAX_JSON_BYTES = 262_144
 _MAX_RAW_JSON_BYTES = _MAX_JSON_BYTES * 6
+_MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
 
 
 class ScheduledJobStore:
@@ -161,14 +162,21 @@ def _validated_job_data(job: ScheduledJob) -> tuple[dict[str, Any], dict[str, An
         raise TypeError("trigger_kind must be an exact TriggerKind")
     if type(job.enabled) is not bool or type(job.coalesce) is not bool:
         raise TypeError("enabled and coalesce must be exact bool values")
-    if type(job.max_instances) is not int or job.max_instances <= 0:
-        raise ValueError("max_instances must be a positive exact integer")
+    if (
+        type(job.max_instances) is not int
+        or job.max_instances <= 0
+        or job.max_instances > _MAX_SQLITE_INTEGER
+    ):
+        raise ValueError(
+            "max_instances must be a positive exact integer within SQLite range"
+        )
     if job.misfire_grace_seconds is not None and (
         type(job.misfire_grace_seconds) is not int
         or job.misfire_grace_seconds <= 0
+        or job.misfire_grace_seconds > _MAX_SQLITE_INTEGER
     ):
         raise ValueError(
-            "misfire_grace_seconds must be a positive exact integer or None"
+            "misfire_grace_seconds must be a positive exact integer within SQLite range or None"
         )
     trigger = _canonical_json_object(job.trigger, "trigger", depth=0)
     if not trigger:
