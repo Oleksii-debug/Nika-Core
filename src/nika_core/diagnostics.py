@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import sys
+import time
 from contextlib import closing
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -14,6 +15,10 @@ from nika_core.config import AppConfig
 from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
+
+_SQLITE_DIAGNOSTIC_SECONDS = 2.0
+_SQLITE_PROGRESS_OPCODES = 1000
+_PUBLIC_TEXT_LIMIT = 96
 
 
 class CheckStatus(StrEnum):
@@ -70,6 +75,15 @@ class DiagnosticReport:
         return "\n".join(lines)
 
 
+def _safe_public_text(value: object) -> str:
+    text = str(value)
+    safe = "".join(character if character.isprintable() else " " for character in text)
+    normalized = " ".join(safe.split())
+    if len(normalized) <= _PUBLIC_TEXT_LIMIT:
+        return normalized
+    return normalized[: _PUBLIC_TEXT_LIMIT - 3] + "..."
+
+
 def _python_check() -> DiagnosticCheck:
     version = (sys.version_info.major, sys.version_info.minor)
     supported = (3, 12) <= version < (3, 14)
@@ -82,7 +96,6 @@ def _python_check() -> DiagnosticCheck:
             else f"Python {version[0]}.{version[1]} runtime is outside supported 3.12-3.13."
         ),
     )
-
 
 
 def _schema_check(
@@ -102,9 +115,7 @@ def _schema_check(
             CheckStatus.FAIL,
             "Required schema migration history is missing.",
         )
-    row = connection.execute(
-        f"SELECT MAX(version) FROM {table}"
-    ).fetchone()
+    row = connection.execute(f"SELECT MAX(version) FROM {table}").fetchone()
     current = int(row[0] or 0) if row else 0
     if current > supported:
         return DiagnosticCheck(
@@ -169,7 +180,12 @@ def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
     try:
         uri = f"{path.absolute().as_uri()}?mode=ro"
         with closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as connection:
-            result = connection.execute("PRAGMA quick_check").fetchone()
+            deadline = time.monotonic() + _SQLITE_DIAGNOSTIC_SECONDS
+            connection.set_progress_handler(
+                lambda: int(time.monotonic() >= deadline),
+                _SQLITE_PROGRESS_OPCODES,
+            )
+            result = connection.execute("PRAGMA quick_check(1)").fetchone()
             tables = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
             ).fetchone()
@@ -193,11 +209,12 @@ def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
                     check_id="product_project_schema",
                 ),
             )
+            connection.set_progress_handler(None, 0)
     except (OSError, sqlite3.Error, ValueError):
         yield DiagnosticCheck(
             "database",
             CheckStatus.FAIL,
-            "Database could not be opened read-only or failed integrity inspection.",
+            "Database could not be opened read-only or failed bounded integrity inspection.",
         )
         return
     if result != ("ok",):
@@ -247,11 +264,11 @@ def collect_diagnostics(config: AppConfig | None = None) -> DiagnosticReport:
         DiagnosticCheck(
             "model_provider",
             CheckStatus.PASS,
-            f"Configured model provider: {config.model_provider}.",
+            f"Configured model provider: {_safe_public_text(config.model_provider)}.",
         )
     )
     return DiagnosticReport(
-        app_version=config.app_version,
+        app_version=_safe_public_text(config.app_version),
         runtime_mode=runtime_mode,
         checks=tuple(checks),
     )
