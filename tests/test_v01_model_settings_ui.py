@@ -185,6 +185,12 @@ def test_actual_renderer_model_settings_accessibility_races_and_secret_boundary(
 def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport() -> None:
     proof = (ROOT / "scripts/m5_uia_proof.ps1").read_text(encoding="utf-8")
     wrapper = (ROOT / "scripts/v01_autostart_uia_proof.ps1").read_text(encoding="utf-8")
+    m11_workflow = (ROOT / ".github/workflows/m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    m12_workflow = (
+        ROOT / ".github/workflows/m12-prehuman-release-gate.yml"
+    ).read_text(encoding="utf-8")
     assert "'Модель для нових завдань'" in proof
     assert "'Тип маршруту моделі'" in proof
     assert "'Назва моделі'" in proof
@@ -202,8 +208,49 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     assert "hashlib.sha256(body.encode('utf-8')).hexdigest() != selection_id" in proof
     assert "'credential_ref': None" in proof
 
+    terminal_result = proof.index(
+        "Wait-BoundTextEvidence 'Командне завдання завершено; "
+        "збережені результати учасників доступні.'"
+    )
+    sequence_start = proof.index("Wait-BoundTextSequence @(", terminal_result)
+    expected_sequence = (
+        "'Відповідь моделі',",
+        "$expectedModelResult,",
+        "'Постачальник моделі',",
+        "'ollama',",
+        "'Модель',",
+        "'uia-proof-model'",
+    )
+    sequence_cursor = sequence_start
+    for expected_line in expected_sequence:
+        sequence_cursor = proof.index(expected_line, sequence_cursor) + len(expected_line)
+    binding_probe = proof.index("$modelBindingProbe = @'", sequence_cursor)
+    assert terminal_result < sequence_start < sequence_cursor < binding_probe
+
+    assert "function Wait-BoundTextSequence(" in proof
+    assert "foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow))" in proof
+    assert "[System.Windows.Automation.TreeScope]::Descendants" in proof
+    assert "if ($name -ceq $ExpectedSequence[$sequenceIndex])" in proof
+    assert "did not appear in one bound search root" in proof
+    assert "Wait-BoundTextSequence @(" in proof
+    assert "Wait-BoundTextEvidence $expectedModelResult" not in proof
+    assert "Wait-BoundTextEvidence 'ollama'" not in proof
+    assert "Wait-BoundTextEvidence 'uia-proof-model'" not in proof
+    assert "NIKA_UIA_MODEL_RESULT_CANARY" in proof
+    assert "^NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}$" in proof
+    assert "controlled loopback response" not in proof
+
     assert "ThreadingHTTPServer" in wrapper
     assert '("127.0.0.1", 11434)' in wrapper
+    assert (
+        "$resultCanary = 'NIKA_UIA_MODEL_RESULT_' + [guid]::NewGuid().ToString('N')"
+        in wrapper
+    )
+    assert "$env:NIKA_UIA_MODEL_RESULT_CANARY = $resultCanary" in wrapper
+    assert "RESULT_TEXT = sys.argv[3]" in wrapper
+    assert 're.fullmatch(r"NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}", RESULT_TEXT)' in wrapper
+    assert '"content": RESULT_TEXT' in wrapper
+    assert "controlled loopback response" not in wrapper
     assert "'/api/chat'" in wrapper
     assert "'uia-proof-model'" in wrapper
     assert "$lines.Count -ne 3" in wrapper
@@ -213,6 +260,13 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     assert "Physical Ollama/model inference remains unverified." in wrapper
 
     invocation = "-WindowTitle $WindowTitle -VerifySourceSetup"
+    canary_assignment = wrapper.index(
+        "$env:NIKA_UIA_MODEL_RESULT_CANARY = $resultCanary"
+    )
+    server_start = wrapper.index(
+        "$qaServer = Start-Process",
+        canary_assignment,
+    )
     first_generic = wrapper.index(invocation)
     retry_generic = wrapper.index(invocation, first_generic + len(invocation))
     reset_log = wrapper.index(
@@ -221,4 +275,16 @@ def test_packaged_uia_proof_covers_model_controls_and_selected_model_transport()
     )
     transport_assertion = wrapper.index("Assert-SelectedModelRequests", retry_generic)
     first_enable = wrapper.index("-AutostartPhase Enable", transport_assertion)
+    restore_canary = wrapper.index(
+        "$previousResultCanary,",
+        first_enable,
+    )
+    assert canary_assignment < server_start < first_generic
     assert first_generic < reset_log < retry_generic < transport_assertion < first_enable
+    assert first_enable < restore_canary
+
+    packaged_proof = "./scripts/v01_autostart_uia_proof.ps1"
+    assert m11_workflow.count(packaged_proof) == 1
+    assert '- "scripts/v01_autostart_uia_proof.ps1"' in m11_workflow
+    assert m12_workflow.count(packaged_proof) == 2
+    assert f"{packaged_proof} -ExePath $extractedExe" in m12_workflow
