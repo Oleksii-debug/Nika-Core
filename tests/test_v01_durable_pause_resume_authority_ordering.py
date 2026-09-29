@@ -37,8 +37,8 @@ class PauseGateRuntime:
     def __init__(self, *, gate_probe: bool = False) -> None:
         self.probe_started = threading.Event()
         self.probe_release = threading.Event()
-        if not gate_probe:
-            self.probe_release.set()
+        self.gate_first_probe = gate_probe
+        self.probe_calls = 0
         self.cancel_started = threading.Event()
         self.cancel_release = threading.Event()
         self.resume_calls = 0
@@ -71,10 +71,13 @@ class PauseGateRuntime:
         resume_token: str,
     ) -> RuntimeResumeProbe:
         del task_id, thread_id
+        self.probe_calls += 1
+        probe_call = self.probe_calls
         self.probe_started.set()
-        released = await asyncio.to_thread(self.probe_release.wait, 5)
-        if not released:
-            raise AssertionError("probe gate was not released")
+        if self.gate_first_probe and probe_call == 1:
+            released = await asyncio.to_thread(self.probe_release.wait, 5)
+            if not released:
+                raise AssertionError("probe gate was not released")
         return RuntimeResumeProbe(
             status=RuntimeResumeProbeStatus.READY,
             reason="checkpoint ready",
