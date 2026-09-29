@@ -355,6 +355,37 @@ def test_unsupported_input_format_is_minimized_and_has_no_stream_effect() -> Non
     assert sd.streams == []
 
 
+def test_malformed_native_stream_cleanup_cannot_escape_sanitized_boundary() -> None:
+    sd = _FakeSoundDevice()
+    adapter = _adapter(sd)
+    request = _request(adapter)
+    canary = r"C:\\private\\SECRET-STREAM-DIAGNOSTIC"
+
+    class _MalformedNativeStream:
+        def start(self) -> None:
+            raise RuntimeError(canary)
+
+        @property
+        def abort(self):
+            raise OSError(f"abort leaked {canary}")
+
+    def raw_input_stream(**kwargs):
+        del kwargs
+        return _MalformedNativeStream()
+
+    sd.RawInputStream = raw_input_stream
+
+    with pytest.raises(MicrophoneCaptureAdapterError) as caught:
+        asyncio.run(adapter.capture(request))
+
+    assert caught.value.code is MicrophoneCaptureFailureCode.ADAPTER_ERROR
+    assert str(caught.value) == "Windows microphone capture backend failed."
+    assert caught.value.__suppress_context__ is True
+    assert caught.value.__cause__ is None
+    assert canary not in str(caught.value)
+    assert canary not in repr(caught.value)
+
+
 def test_callback_status_fails_closed_without_returning_partial_audio() -> None:
     sd = _FakeSoundDevice()
     sd.callback_blocks = [(b"\x01\x00" * 5, 5, True)]
