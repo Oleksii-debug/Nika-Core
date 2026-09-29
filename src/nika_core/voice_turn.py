@@ -137,6 +137,7 @@ class OneShotVoiceTurnService:
 
     async def run(self, request: VoiceTurnRequest) -> VoiceTurnResult:
         trusted = _snapshot_request(request)
+        stt_authority = _preflight_stt_authority(trusted)
         capture_result = await self._microphone.capture(trusted.capture)
         if (
             capture_result.evidence.status is not MicrophoneCaptureStatus.SUCCEEDED
@@ -161,13 +162,13 @@ class OneShotVoiceTurnService:
             channels=1,
         )
         stt_request = SpeechToTextRequest(
-            request_id=trusted.request_id,
-            provider_id=trusted.stt_provider_id,
-            model=trusted.stt_model,
+            request_id=stt_authority.request_id,
+            provider_id=stt_authority.provider_id,
+            model=stt_authority.model,
             audio=audio,
-            language=trusted.language,
-            privacy=PrivacyClass.SENSITIVE,
-            policy=trusted.stt_policy,
+            language=stt_authority.language,
+            privacy=stt_authority.privacy,
+            policy=stt_authority.policy,
         )
         transcription = await self._speech_to_text.transcribe(stt_request)
         if (
@@ -259,6 +260,24 @@ def _snapshot_request(request: VoiceTurnRequest) -> VoiceTurnRequest:
         stt_model=request.stt_model,
         language=request.language,
         stt_policy=policy,
+    )
+
+
+def _preflight_stt_authority(request: VoiceTurnRequest) -> SpeechToTextRequest:
+    placeholder_audio = SpeechAudio(
+        data=b"\x00\x00",
+        audio_format=SpeechAudioFormat.PCM_S16LE,
+        sample_rate_hz=request.capture.sample_rate_hz,
+        channels=1,
+    )
+    return SpeechToTextRequest(
+        request_id=request.request_id,
+        provider_id=request.stt_provider_id,
+        model=request.stt_model,
+        audio=placeholder_audio,
+        language=request.language,
+        privacy=PrivacyClass.SENSITIVE,
+        policy=request.stt_policy,
     )
 
 

@@ -188,6 +188,31 @@ def test_capture_failure_stops_before_stt_and_wake() -> None:
     assert stt.calls == []
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("stt_provider_id", "bad provider", "provider_id"),
+        ("stt_model", "bad model", "model"),
+        ("language", "not a valid language tag", "language"),
+    ),
+)
+def test_malformed_stt_authority_fails_before_microphone_effect(
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    microphone = _MicrophoneAdapter()
+    stt = _SttAdapter()
+    request = _request()
+    object.__setattr__(request, field, value)
+
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(_service(microphone, stt).run(request))
+
+    assert microphone.calls == 0
+    assert stt.calls == []
+
+
 def test_stt_route_failure_stops_before_wake() -> None:
     microphone = _MicrophoneAdapter()
     stt = _SttAdapter()
