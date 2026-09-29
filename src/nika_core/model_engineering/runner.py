@@ -22,6 +22,8 @@ from nika_core.model_gateway.contracts import (
     ModelGatewayError,
     ModelRequest,
     ModelResponse,
+    ModelUsage,
+    ProviderKind,
 )
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
@@ -66,7 +68,7 @@ class ModelBenchmarkRunner:
         clock: Callable[[], float] = perf_counter,
     ) -> None:
         self._gateway = gateway
-        self._scorer = scorer or ExactMatchScorer()
+        self._scorer = ExactMatchScorer() if scorer is None else scorer
         self._resource_observer = resource_observer
         self._accelerator_observer = accelerator_observer
         self._clock = clock
@@ -111,8 +113,12 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> BenchmarkSuiteReport:
+        if type(candidates) is not tuple:
+            raise TypeError("benchmark suite candidates must be a canonical tuple")
         if not candidates:
             raise ValueError("benchmark suite requires at least one candidate")
+        if any(type(candidate) is not ModelCandidate for candidate in candidates):
+            raise TypeError("benchmark suite candidates must use exact ModelCandidate values")
         ids = [candidate.candidate_id for candidate in candidates]
         if len(ids) != len(set(ids)):
             raise ValueError("benchmark suite candidate IDs must be unique")
@@ -247,6 +253,18 @@ class ModelBenchmarkRunner:
     ) -> None:
         if type(response) is not ModelResponse:
             raise ModelBenchmarkError("gateway returned an invalid response carrier")
+        for value, name in (
+            (response.request_id, "request_id"),
+            (response.text, "text"),
+            (response.provider_id, "provider_id"),
+            (response.model, "model"),
+        ):
+            if type(value) is not str:
+                raise ModelBenchmarkError(f"response {name} must be canonical text")
+        if not any(response.provider_kind is member for member in ProviderKind):
+            raise ModelBenchmarkError("response provider_kind must be canonical")
+        if type(response.usage) is not ModelUsage:
+            raise ModelBenchmarkError("response usage must be an exact ModelUsage")
         if response.request_id != request.request_id:
             raise ModelBenchmarkIdentityError("response request identity mismatch")
         if response.provider_id != candidate.provider_id:
@@ -266,9 +284,7 @@ class ModelBenchmarkRunner:
             response.usage.total_tokens,
         )
         for value in values:
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
+            if value is not None and (type(value) is not int or value < 0):
                 raise ModelBenchmarkError("model usage must use non-negative integer counts")
         input_tokens, output_tokens, total_tokens = values
         if (
