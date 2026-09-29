@@ -537,6 +537,14 @@ def _decode_job(
         next_due=next_due,
         last_due=last_due,
     )
+    _validate_persisted_deadline(
+        anchor=anchor,
+        deadline=deadline,
+        status=status,
+        terminal_reason=terminal_reason,
+        next_due=next_due,
+        last_due=last_due,
+    )
     if next_due is not None and next_id != _occurrence_id(recurrence_id, next_due):
         raise ValueError("durable recurrence next occurrence identity is corrupt")
     if last_due is not None and last_id != _occurrence_id(recurrence_id, last_due):
@@ -673,6 +681,31 @@ def _validate_persisted_timeline(
             raise ValueError(f"durable recurrence {label} is outside the recurrence grid")
     if next_due is not None and last_due is not None and next_due <= last_due:
         raise ValueError("durable recurrence cursor chronology is corrupt")
+
+
+def _validate_persisted_deadline(
+    *,
+    anchor: datetime,
+    deadline: datetime | None,
+    status: RecurrenceStatus,
+    terminal_reason: RecurrenceTerminalReason | None,
+    next_due: datetime | None,
+    last_due: datetime | None,
+) -> None:
+    if terminal_reason is RecurrenceTerminalReason.DEADLINE and deadline is None:
+        raise ValueError("durable recurrence deadline terminal reason is missing deadline")
+    if deadline is None:
+        return
+    if next_due is not None and next_due >= deadline:
+        raise ValueError("durable recurrence next intent must be before deadline")
+    if last_due is not None and last_due >= deadline:
+        raise ValueError("durable recurrence completion cursor must be before deadline")
+    if deadline <= anchor and (
+        status is not RecurrenceStatus.COMPLETED
+        or terminal_reason is not RecurrenceTerminalReason.DEADLINE
+        or last_due is not None
+    ):
+        raise ValueError("durable recurrence deadline lifecycle is corrupt")
 
 
 def _validate_interval_origin(
