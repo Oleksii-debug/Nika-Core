@@ -283,7 +283,7 @@ def _snapshot_request(request: SpeechToTextRequest) -> SpeechToTextRequest:
 
 def _load_sherpa_onnx() -> Any:
     try:
-        import sherpa_onnx  # type: ignore[import-not-found]  # noqa: PLC0415
+        import sherpa_onnx  # type: ignore[import-not-found]
     except Exception:  # noqa: BLE001 - dependency/native-load boundary
         raise SpeechToTextAdapterError(
             SpeechToTextFailureCode.UNAVAILABLE,
@@ -295,7 +295,7 @@ def _load_sherpa_onnx() -> Any:
 
 def _load_numpy() -> Any:
     try:
-        import numpy  # type: ignore[import-not-found]  # noqa: PLC0415
+        import numpy  # type: ignore[import-not-found]
     except Exception:  # noqa: BLE001 - dependency/native-load boundary
         raise SpeechToTextAdapterError(
             SpeechToTextFailureCode.UNAVAILABLE,
