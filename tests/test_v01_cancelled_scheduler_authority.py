@@ -262,6 +262,45 @@ def test_upsert_audits_final_suppressed_durable_state(tmp_path) -> None:
     adapter.shutdown(wait=False)
 
 
+
+
+def test_upsert_enforces_task_authority_while_stopped(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Stopped Upsert Authority" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    terminal_id = _task(queue, terminal=TaskState.CANCELLED)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda _action_id: lambda _payload: None,
+        audit=audit,
+    )
+
+    adapter.upsert(
+        _date_job(
+            job_id="job-stopped-terminal",
+            action_id="terminal",
+            run_at=datetime.now(UTC) + timedelta(days=1),
+            payload={"task_id": terminal_id},
+        )
+    )
+
+    durable = jobs.get("job-stopped-terminal")
+    events = audit.list_for(
+        entity_type="scheduled_job",
+        entity_id="job-stopped-terminal",
+    )
+    assert durable is not None
+    assert durable.enabled is False
+    assert not adapter.has_runtime_job("job-stopped-terminal")
+    assert [event.event_type for event in events] == [
+        "scheduler.job_suppressed_task_authority",
+        "scheduler.job_upserted",
+    ]
+    assert events[-1].payload["enabled"] is False
+
+
 def test_start_reloads_durable_job_before_live_install(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Start Install Fence" / "nika core.db")
     store.initialize()
@@ -423,17 +462,27 @@ def test_remove_resyncs_durable_recreation_before_return(tmp_path) -> None:
             payload={},
         )
     )
-    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    audit = AuditLog(store)
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda _action_id: lambda _payload: None,
+        audit=audit,
+    )
     adapter.start()
 
     assert adapter.remove("job-remove-race") is True
 
     durable = jobs.get("job-remove-race")
     runtime = adapter._scheduler.get_job("job-remove-race")
+    events = audit.list_for(
+        entity_type="scheduled_job",
+        entity_id="job-remove-race",
+    )
     assert durable is not None
     assert durable.enabled is True
     assert runtime is not None
     assert runtime.trigger.run_date == replacement_at
+    assert all(event.event_type != "scheduler.job_removed" for event in events)
     adapter.shutdown(wait=False)
 
 

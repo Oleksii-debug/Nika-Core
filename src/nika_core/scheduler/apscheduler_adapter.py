@@ -57,6 +57,8 @@ class APSchedulerAdapter(SchedulerPort):
         if self._started:
             self._sync_runtime_job(job_id)
             effective_job = self._required_job(job_id)
+        elif not self._task_authority_allows(effective_job):
+            effective_job = self._required_job(job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
 
     def remove(self, job_id: str) -> bool:
@@ -64,7 +66,8 @@ class APSchedulerAdapter(SchedulerPort):
         removed = self._jobs.delete(job_id)
         if self._started:
             self._sync_runtime_job(job_id)
-        if removed and self._audit is not None:
+        remaining = self._jobs.get(job_id)
+        if removed and remaining is None and self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_removed",
                 entity_type="scheduled_job",
