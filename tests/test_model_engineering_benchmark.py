@@ -923,7 +923,6 @@ def test_benchmark_binds_execution_config_to_request_and_report() -> None:
     assert report.execution_config_sha256 == config.evidence_sha256
 
 
-
 def test_custom_scorer_requires_stable_identity_before_execution() -> None:
     with pytest.raises(TypeError, match="custom scorer requires a canonical scorer_id"):
         ModelBenchmarkRunner(_FakeGateway(), scorer=_FalseyScorer())
