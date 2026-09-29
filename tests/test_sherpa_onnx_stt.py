@@ -373,7 +373,6 @@ def test_factory_binds_whisper_files_language_threads_and_cpu_provider() -> None
     ]
 
 
-
 @pytest.mark.parametrize(
     "bad_path",
     [
