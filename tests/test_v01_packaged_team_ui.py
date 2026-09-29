@@ -788,6 +788,49 @@ def test_renderer_accepts_canonical_noncomparison_source_state_precedence(
     assert rendered["summary_hidden"] is False
 
 
+def test_renderer_accepts_canonical_evidence_invalid_without_source_details() -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status="evidence_invalid",
+        validated=False,
+        source_states=[],
+        agreement_count=0,
+        difference_count=0,
+    )
+
+    rendered = _rendered_team_snapshot(live_projection=projection)
+
+    assert rendered["ready"] == "true"
+    assert rendered["summary_hidden"] is False
+
+
+@pytest.mark.parametrize("status", ["agree", "missing", "worker_error"])
+def test_renderer_rejects_empty_source_details_for_other_statuses(status: str) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status=status,
+        validated=False,
+        source_states=[],
+        agreement_count=0,
+        difference_count=0,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
 def test_renderer_rejects_terminal_member_count_not_matching_roster_state() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
