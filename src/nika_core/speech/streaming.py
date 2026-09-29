@@ -273,7 +273,17 @@ class IncrementalSpeechStream:
                             )
                         )
                     else:
-                        self._complete()
+                        with self._condition:
+                            has_spoken_chunks = self._chunk_count > 0
+                        if has_spoken_chunks:
+                            self._complete()
+                        else:
+                            self._fail(
+                                SpeechError(
+                                    SpeechErrorCode.INVALID_REQUEST,
+                                    "speech stream contained no speakable text",
+                                )
+                            )
                     return
                 continue
             if not chunk:

@@ -376,11 +376,46 @@ def test_finish_with_only_whitespace_has_no_audio_effect() -> None:
     stream.finish()
     assert stream.wait(1)
 
+    assert stream.snapshot().state is SpeechStreamState.FAILED
     with pytest.raises(SpeechError) as error:
         stream.result()
 
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
     assert port.requests == []
+
+
+def test_finish_without_any_fragment_fails_with_consistent_terminal_state() -> None:
+    port = FakeSpeechPort()
+    stream = IncrementalSpeechStream(port)
+
+    stream.finish()
+    assert stream.wait(1)
+
+    snapshot = stream.snapshot()
+    assert snapshot.state is SpeechStreamState.FAILED
+    assert snapshot.accepted_characters == 0
+    assert snapshot.spoken_characters == 0
+    assert snapshot.chunk_count == 0
+    with pytest.raises(SpeechError) as error:
+        stream.result()
+
+    assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+    assert port.requests == []
+
+
+def test_spoken_chunk_then_trailing_whitespace_still_completes() -> None:
+    port = FakeSpeechPort()
+    stream = IncrementalSpeechStream(port)
+
+    stream.feed("Готово. ")
+    _wait_for_request_count(port, 1)
+    stream.feed("   ")
+    stream.finish()
+    assert stream.wait(1)
+
+    assert stream.snapshot().state is SpeechStreamState.COMPLETED
+    assert stream.result().chunk_count == 1
+    assert [request.text for request in port.requests] == ["Готово."]
 
 
 def test_result_before_completion_is_retryable_busy() -> None:
