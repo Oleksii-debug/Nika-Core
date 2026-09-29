@@ -504,3 +504,129 @@ def test_latency_clock_validation_happens_after_response_identity_and_usage() ->
 
     with pytest.raises(ModelBenchmarkError, match="non-negative integer"):
         asyncio.run(runner.benchmark(_candidate(), evaluation))
+
+
+
+class _HostileText(str):
+    def strip(self, chars=None):
+        raise AssertionError("hostile text behavior executed")
+
+
+class _HostileFloat(float):
+    def __float__(self):
+        raise AssertionError("hostile numeric behavior executed")
+
+
+class _TupleAlias(tuple):
+    pass
+
+
+class _MessageAlias(ModelMessage):
+    pass
+
+
+def test_model_candidate_rejects_behavioral_identity_before_string_methods() -> None:
+    with pytest.raises(TypeError, match="candidate_id must be canonical text"):
+        ModelCandidate(
+            candidate_id=_HostileText("candidate"),
+            provider_id="local",
+            provider_kind=ProviderKind.LOCAL,
+            request_model="model",
+            expected_response_model="model",
+            engine_provenance_ref="engine",
+            engine_license_ref="engine-license",
+            model_provenance_ref="model-ref",
+            model_license_ref="model-license",
+        )
+
+    with pytest.raises(TypeError, match="ProviderKind"):
+        ModelCandidate(
+            candidate_id="candidate",
+            provider_id="local",
+            provider_kind="local",
+            request_model="model",
+            expected_response_model="model",
+            engine_provenance_ref="engine",
+            engine_license_ref="engine-license",
+            model_provenance_ref="model-ref",
+            model_license_ref="model-license",
+        )
+
+
+def test_evaluation_case_rejects_behavioral_numeric_before_float_conversion() -> None:
+    with pytest.raises(TypeError, match="pass_score must be numeric"):
+        EvaluationCase(
+            case_id="case",
+            messages=(ModelMessage("user", "prompt"),),
+            expected_text="answer",
+            pass_score=_HostileFloat(1.0),
+        )
+
+
+def test_evaluation_case_requires_exact_message_tuple_and_values() -> None:
+    message = ModelMessage("user", "prompt")
+
+    with pytest.raises(TypeError, match="canonical tuple"):
+        EvaluationCase(
+            case_id="case",
+            messages=_TupleAlias((message,)),
+            expected_text="answer",
+        )
+
+    with pytest.raises(TypeError, match="exact ModelMessage"):
+        EvaluationCase(
+            case_id="case",
+            messages=(_MessageAlias("user", "prompt"),),
+            expected_text="answer",
+        )
+
+
+def test_evaluation_set_requires_exact_enum_and_case_carriers() -> None:
+    case = EvaluationCase(
+        case_id="case",
+        messages=(ModelMessage("user", "prompt"),),
+        expected_text="answer",
+    )
+
+    with pytest.raises(TypeError, match="EvaluationPurpose"):
+        EvaluationSet(
+            evaluation_set_id="set",
+            version="1",
+            provenance_ref="dataset:set",
+            license_ref="license:set",
+            purpose="held_out",
+            privacy=PrivacyClass.PUBLIC,
+            cases=(case,),
+        )
+
+    with pytest.raises(TypeError, match="canonical tuple"):
+        EvaluationSet(
+            evaluation_set_id="set",
+            version="1",
+            provenance_ref="dataset:set",
+            license_ref="license:set",
+            purpose=EvaluationPurpose.HELD_OUT,
+            privacy=PrivacyClass.PUBLIC,
+            cases=_TupleAlias((case,)),
+        )
+
+
+def test_case_result_rejects_behavioral_metrics_before_conversion() -> None:
+    with pytest.raises(TypeError, match="score must be numeric"):
+        CaseBenchmarkResult(
+            candidate_id="candidate",
+            case_id="case",
+            score=_HostileFloat(1.0),
+            passed=True,
+            completion_succeeded=True,
+            latency_ms=1.0,
+            response_sha256="a" * 64,
+            error_code=None,
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+            resource_before=None,
+            resource_after=None,
+            accelerator_before=None,
+            accelerator_after=None,
+        )
