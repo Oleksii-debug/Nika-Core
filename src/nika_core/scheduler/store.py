@@ -15,6 +15,9 @@ _MAX_JSON_DEPTH = 32
 _MAX_JSON_BYTES = 262_144
 _MAX_RAW_JSON_BYTES = _MAX_JSON_BYTES * 6
 _MAX_SQLITE_INTEGER = 9_223_372_036_854_775_807
+_TERMINAL_TASK_STATES = frozenset(
+    {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.ARCHIVED}
+)
 
 
 class ScheduledJobStore:
@@ -147,16 +150,56 @@ class ScheduledJobStore:
         """Read canonical task authority for scheduler dispatch without mutating it."""
         task_key = _stable_identity(task_id, "task_id")
         with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT state FROM tasks WHERE task_id = ?",
-                (task_key,),
-            ).fetchone()
+            return self.task_state_with_connection(conn, task_key)
+
+    def task_state_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        task_id: str,
+    ) -> TaskState | None:
+        """Read task authority inside a caller-owned transaction."""
+        task_key = _stable_identity(task_id, "task_id")
+        row = conn.execute(
+            "SELECT state FROM tasks WHERE task_id = ?",
+            (task_key,),
+        ).fetchone()
         if row is None:
             return None
         raw_state = row["state"]
         if type(raw_state) is not str:
             raise ValueError("persisted task state is corrupt")
         return TaskState(raw_state)
+
+    def authorize_dispatch(self, expected_job: ScheduledJob) -> ScheduledJob | None:
+        """Linearize one dispatch against durable scheduler and task mutations.
+
+        The BEGIN IMMEDIATE boundary orders this authorization against writers without
+        holding SQLite open across the external handler effect. A mutation that commits
+        first makes authorization fail; a mutation that follows authorization applies to
+        future occurrences and does not revoke the already-authorized occurrence.
+        """
+        expected = _canonical_job(expected_job)
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            current = self.get_with_connection(conn, expected.job_id)
+            if current is None or not current.enabled or current != expected:
+                return None
+            if not self._task_authority_allows_with_connection(conn, current):
+                return None
+            return current
+
+    def _task_authority_allows_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        job: ScheduledJob,
+    ) -> bool:
+        if "task_id" not in job.payload:
+            return True
+        task_id = job.payload["task_id"]
+        if type(task_id) is not str or not task_id or task_id != task_id.strip():
+            return False
+        task_state = self.task_state_with_connection(conn, task_id)
+        return task_state is not None and task_state not in _TERMINAL_TASK_STATES
 
 
 def _canonical_job(job: ScheduledJob) -> ScheduledJob:
