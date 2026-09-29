@@ -164,7 +164,7 @@ class HealthService:
         self._app_version = app_version
         self._database_path = database_path
         self._resource_observer = resource_observer
-        self._clock = clock or (lambda: datetime.now(UTC))
+        self._clock = clock if clock is not None else (lambda: datetime.now(UTC))
 
     def run(self) -> HealthReport:
         checks = [self._check_configuration()]
