@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Iterable
 
 from nika_core.config import AppConfig
+from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
+from nika_core.data.schema import SCHEMA_VERSION
+from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 
 
 class CheckStatus(StrEnum):
@@ -81,6 +84,47 @@ def _python_check() -> DiagnosticCheck:
     )
 
 
+
+def _schema_check(
+    connection: sqlite3.Connection,
+    *,
+    table: str,
+    supported: int,
+    check_id: str,
+) -> DiagnosticCheck:
+    exists = connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table,),
+    ).fetchone()
+    if exists is None:
+        return DiagnosticCheck(
+            check_id,
+            CheckStatus.FAIL,
+            "Required schema migration history is missing.",
+        )
+    row = connection.execute(
+        f"SELECT MAX(version) FROM {table}"
+    ).fetchone()
+    current = int(row[0] or 0) if row else 0
+    if current > supported:
+        return DiagnosticCheck(
+            check_id,
+            CheckStatus.FAIL,
+            f"Database schema version {current} is newer than supported {supported}.",
+        )
+    if current < supported:
+        return DiagnosticCheck(
+            check_id,
+            CheckStatus.WARN,
+            f"Database schema version {current} can be upgraded to supported {supported}.",
+        )
+    return DiagnosticCheck(
+        check_id,
+        CheckStatus.PASS,
+        f"Database schema version {current} matches supported {supported}.",
+    )
+
+
 def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
     parent = path.parent
     if not parent.exists():
@@ -129,6 +173,26 @@ def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
             tables = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
             ).fetchone()
+            schema_checks = (
+                _schema_check(
+                    connection,
+                    table="schema_migrations",
+                    supported=SCHEMA_VERSION,
+                    check_id="core_schema",
+                ),
+                _schema_check(
+                    connection,
+                    table="multi_agent_state_schema_migrations",
+                    supported=MULTI_AGENT_STATE_SCHEMA_VERSION,
+                    check_id="multi_agent_schema",
+                ),
+                _schema_check(
+                    connection,
+                    table="product_project_schema_migrations",
+                    supported=PRODUCT_PROJECT_SCHEMA_VERSION,
+                    check_id="product_project_schema",
+                ),
+            )
     except (OSError, sqlite3.Error, ValueError):
         yield DiagnosticCheck(
             "database",
@@ -149,6 +213,7 @@ def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
         CheckStatus.PASS,
         f"Database opens read-only and passes integrity check; tables={table_count}.",
     )
+    yield from schema_checks
 
 
 def collect_diagnostics(config: AppConfig | None = None) -> DiagnosticReport:
