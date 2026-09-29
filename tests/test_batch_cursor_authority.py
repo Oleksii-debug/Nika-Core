@@ -1469,7 +1469,6 @@ def test_explicit_inter_batch_schedule_survives_restore_as_scheduler_authority(
     assert restored_intent.not_before == due.isoformat()
 
 
-
 def test_idempotent_confirm_rejects_conflicting_replay_result_without_mutation(
     tmp_path: Path,
 ) -> None:
