@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from nika_core.microphone_capture import MicrophoneCaptureEvidence, MicrophoneCaptureStatus
 from nika_core.model_gateway.contracts import PrivacyClass
+from nika_core.microphone_capture import MicrophoneCaptureEvidence, MicrophoneCaptureStatus
 from nika_core.speech_to_text import (
     SpeechAudioFormat,
     SpeechToTextEvidence,
