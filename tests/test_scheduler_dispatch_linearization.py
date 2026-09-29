@@ -233,3 +233,55 @@ def test_runtime_sync_bounds_continuous_stale_suppression_churn(
     assert current.enabled is True
     assert not adapter.has_runtime_job(initial.job_id)
     adapter.shutdown(wait=False)
+
+
+def test_dispatch_suppression_cannot_remove_replacement_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    queue = TaskQueue(sqlite)
+    jobs = ScheduledJobStore(sqlite)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "suppression runtime replacement"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    stale = _job(payload={"task_id": task.task_id, "generation": "old"})
+    replacement = replace(stale, payload={"generation": "new"})
+    jobs.upsert(stale)
+    handled: list[dict[str, object]] = []
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda _action_id: lambda payload: handled.append(payload),
+    )
+    adapter.start()
+    old_runtime = adapter._scheduler.get_job(stale.job_id)
+    assert old_runtime is not None
+    old_args = tuple(old_runtime.args)
+    queue.transition(task.task_id, TaskState.CANCELLED)
+    original_disable = jobs.disable_if_current
+    replaced = False
+
+    def disable_then_replace(expected: ScheduledJob) -> bool:
+        nonlocal replaced
+        disabled = original_disable(expected)
+        if disabled and not replaced:
+            replaced = True
+            adapter.upsert(replacement)
+        return disabled
+
+    monkeypatch.setattr(jobs, "disable_if_current", disable_then_replace)
+
+    adapter._dispatch(*old_args)
+
+    current = jobs.get(stale.job_id)
+    runtime = adapter._scheduler.get_job(stale.job_id)
+    assert handled == []
+    assert current == replacement
+    assert current.enabled is True
+    assert runtime is not None
+    assert tuple(runtime.args)[1] == replacement
+    adapter.shutdown(wait=False)
