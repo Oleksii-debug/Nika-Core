@@ -11,6 +11,16 @@ from nika_core.mcp_boundary import MCPClientAdapter, MCPServerConfig
 from nika_core.tools import ToolCall, ToolRisk
 
 
+class _BehavioralDict(dict[str, object]):
+    def __init__(self, events: list[str]) -> None:
+        super().__init__({"value": "original"})
+        self.events = events
+
+    def items(self):
+        self.events.append("items")
+        return super().items()
+
+
 class _BehavioralToolId(str):
     def __new__(cls, value: str, events: list[str]) -> Self:
         instance = super().__new__(cls, value)
@@ -458,3 +468,122 @@ def test_list_tools_bounds_unique_cursor_pagination(
         asyncio.run(adapter.list_tools())
 
     assert seen_cursors == [None, "page-2"]
+
+def test_mcp_call_deep_snapshots_nested_arguments_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_items = ["original"]
+    original_arguments: dict[str, object] = {
+        "payload": {"items": original_items},
+    }
+    seen_arguments: list[dict[str, object]] = []
+
+    async def exercise() -> object:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        class FakeClient:
+            def __init__(self, _target: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(
+                self,
+                _exc_type: object,
+                _exc: object,
+                _tb: object,
+            ) -> None:
+                pass
+
+            async def call_tool(
+                self,
+                _tool_name: str,
+                arguments: dict[str, object],
+            ) -> SimpleNamespace:
+                started.set()
+                await release.wait()
+                seen_arguments.append(arguments)
+                return SimpleNamespace(
+                    is_error=False,
+                    structured_content={"ok": True},
+                    content=[],
+                )
+
+        monkeypatch.setattr("nika_core.mcp_boundary.Client", FakeClient)
+        adapter = MCPClientAdapter(
+            MCPServerConfig(
+                server_id="safety",
+                target=object(),
+                default_risk=ToolRisk.READ_ONLY,
+            )
+        )
+        task = asyncio.create_task(
+            adapter.call(
+                ToolCall(
+                    call_id="mcp-nested-snapshot-1",
+                    tool_id="mcp:safety:publish",
+                    arguments=original_arguments,
+                )
+            )
+        )
+        await started.wait()
+        original_items[0] = "mutated"
+        original_items.append("late")
+        release.set()
+        return await task
+
+    result = asyncio.run(exercise())
+
+    assert getattr(result, "ok") is True
+    assert seen_arguments == [{"payload": {"items": ["original"]}}]
+    assert original_arguments == {"payload": {"items": ["mutated", "late"]}}
+
+
+def test_mcp_call_rejects_behavioral_nested_argument_before_transport() -> None:
+    events: list[str] = []
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    with pytest.raises(TypeError, match="arguments"):
+        asyncio.run(
+            adapter.call(
+                ToolCall(
+                    call_id="mcp-behavioral-argument-1",
+                    tool_id="mcp:safety:publish",
+                    arguments={"nested": _BehavioralDict(events)},
+                )
+            )
+        )
+
+    assert events == []
+
+
+def test_mcp_call_rejects_recursive_nested_argument_before_transport() -> None:
+    recursive: list[object] = []
+    recursive.append(recursive)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    with pytest.raises(ValueError, match="recursive containers"):
+        asyncio.run(
+            adapter.call(
+                ToolCall(
+                    call_id="mcp-recursive-argument-1",
+                    tool_id="mcp:safety:publish",
+                    arguments={"nested": recursive},
+                )
+            )
+        )
+

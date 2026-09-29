@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -19,6 +20,7 @@ from nika_core.tools import (
 _MAX_MCP_SEGMENT_CHARS = 128
 _MAX_MCP_CURSOR_BYTES = 4096
 _MAX_MCP_LIST_PAGES = 1000
+_MAX_MCP_ARGUMENT_DEPTH = 64
 _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -76,21 +78,80 @@ def _exact_tool_risk(value: object) -> ToolRisk:
     return value
 
 
+def _snapshot_mcp_json(
+    value: object,
+    *,
+    path: str,
+    depth: int = 0,
+    active: set[int] | None = None,
+) -> object:
+    if depth > _MAX_MCP_ARGUMENT_DEPTH:
+        raise ValueError("MCP arguments exceed safe nesting depth")
+    if value is None or type(value) is bool or type(value) is int:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{path} must not contain NaN or infinity")
+        return value
+    if type(value) is str:
+        return _exact_utf8_text(value, field=path)
+    if type(value) is not dict and type(value) is not list:
+        raise TypeError(f"{path} must contain only exact JSON values")
+
+    if active is None:
+        active = set()
+    identity = id(value)
+    if identity in active:
+        raise ValueError("MCP arguments must not contain recursive containers")
+    active.add(identity)
+    try:
+        if type(value) is list:
+            return [
+                _snapshot_mcp_json(
+                    item,
+                    path=f"{path}[{index}]",
+                    depth=depth + 1,
+                    active=active,
+                )
+                for index, item in enumerate(value)
+            ]
+
+        snapshot: dict[str, object] = {}
+        for index, (raw_key, item) in enumerate(value.items()):
+            key = _exact_utf8_text(raw_key, field=f"{path} key {index}")
+            snapshot[key] = _snapshot_mcp_json(
+                item,
+                path=f"{path}.{key}",
+                depth=depth + 1,
+                active=active,
+            )
+        return snapshot
+    finally:
+        active.remove(identity)
+
+
+def _snapshot_mcp_arguments(arguments: object) -> dict[str, object]:
+    if type(arguments) is not dict:
+        raise TypeError("arguments must be an exact dict")
+    snapshot = _snapshot_mcp_json(arguments, path="arguments")
+    if type(snapshot) is not dict:
+        raise TypeError("arguments must be an exact dict")
+    return snapshot
+
+
 def _snapshot_tool_call(call: ToolCall) -> ToolCall:
     if type(call) is not ToolCall:
         raise TypeError("call must be an exact ToolCall")
     try:
         call_id = _exact_utf8_text(call.call_id, field="call_id")
         tool_id = _exact_utf8_text(call.tool_id, field="tool_id", non_empty=True)
-        arguments = call.arguments
+        arguments = _snapshot_mcp_arguments(call.arguments)
         approved = call.approved
         task_id = call.task_id
         authorization = call.authorization
     except AttributeError as exc:
         raise ValueError("call is incomplete") from exc
 
-    if type(arguments) is not dict:
-        raise TypeError("arguments must be an exact dict")
     if type(approved) is not bool:
         raise TypeError("approved must be an exact bool")
     if task_id is not None:
@@ -99,7 +160,7 @@ def _snapshot_tool_call(call: ToolCall) -> ToolCall:
     return ToolCall(
         call_id=call_id,
         tool_id=tool_id,
-        arguments=dict(arguments),
+        arguments=arguments,
         approved=approved,
         task_id=task_id,
         authorization=authorization,
