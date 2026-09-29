@@ -55,6 +55,14 @@ class _BehavioralPath:
         raise AssertionError("behavioral path must not execute")
 
 
+class _BehavioralClock:
+    def __bool__(self) -> bool:
+        raise AssertionError("clock truthiness must not execute")
+
+    def __call__(self) -> datetime:
+        return _NOW
+
+
 class _AppConfigSubclass(AppConfig):
     pass
 
@@ -235,6 +243,17 @@ def test_health_report_snapshots_canonical_checks() -> None:
         }
     ]
 
+
+
+def test_health_service_does_not_evaluate_injected_clock_truthiness(
+    tmp_path: Path,
+) -> None:
+    service = HealthService(
+        AppConfig(database_path=tmp_path / "nika.db"),
+        clock=_BehavioralClock(),
+    )
+
+    assert service._normalized_now() == _NOW
 
 
 def test_health_service_rejects_app_config_subclass(tmp_path: Path) -> None:
