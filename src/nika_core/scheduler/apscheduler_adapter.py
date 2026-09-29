@@ -120,11 +120,17 @@ class APSchedulerAdapter(SchedulerPort):
         job = self._required_job(job_id)
         if not job.enabled or not self._task_authority_allows(job):
             return
-        handler = self._handler_resolver(job.action_id)
-        # Authority can change after a due job is loaded/resolved. Re-read the
-        # canonical durable task state at the last scheduler-owned boundary
-        # before any handler (and therefore any external effect) is invoked.
-        if not self._task_authority_allows(job):
+        action_id = job.action_id
+        handler = self._handler_resolver(action_id)
+        # Resolver work can race with pause/remove/upsert. Re-read the durable
+        # job at the last scheduler-owned boundary before any external effect.
+        job = self._jobs.get(job_id)
+        if (
+            job is None
+            or not job.enabled
+            or job.action_id != action_id
+            or not self._task_authority_allows(job)
+        ):
             return
         if self._audit is not None:
             self._audit.append(
