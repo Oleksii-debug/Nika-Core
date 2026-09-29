@@ -11,6 +11,7 @@ from nika_core.product_factory_coordinator import (
 from tests.test_product_factory_coordinator import _success
 from tests.test_product_factory_work_lifecycle import _coordinator, _core_record, _graph
 
+
 class _BehavioralEvidenceRefs:
     def __bool__(self) -> bool:
         raise AssertionError("evidence refs behavior must not execute before exact-type validation")
