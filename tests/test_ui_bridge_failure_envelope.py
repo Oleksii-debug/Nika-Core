@@ -180,3 +180,26 @@ def test_dispatch_preserves_canonical_request_id_on_other_validation_failure(
 
     assert response["request_id"] == "request-17"
     assert response["status"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    ("method_name", "invoke"),
+    [
+        ("resolve", lambda bridge: bridge.list_actions()),
+        ("set_binding", lambda bridge: bridge.set_binding("nav.agents", "Alt+9")),
+        ("restore_default", lambda bridge: bridge.restore_default("nav.agents")),
+        ("export_json", lambda bridge: bridge.export_keymap()),
+        ("import_json", lambda bridge: bridge.import_keymap('{"format_version": 1, "bindings": {}}')),
+    ],
+)
+def test_keymap_transport_does_not_swallow_base_exception(
+    tmp_path: Path, monkeypatch, method_name, invoke
+) -> None:
+    bridge = _bridge(tmp_path)
+
+    def interrupt(_self: Keymap, *_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(Keymap, method_name, interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        invoke(bridge)
