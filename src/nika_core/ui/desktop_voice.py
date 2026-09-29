@@ -232,10 +232,26 @@ class DesktopVoiceTurnController:
 
         accepted = active.cancel()
         if not accepted:
+            if active.done():
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Голосовий ввід уже завершився.",
+                )
+            with self._lock:
+                if self._active is active:
+                    self._snapshot = DesktopVoiceSnapshot(
+                        status=DesktopVoiceStatus.CANCELLING,
+                        request_id=self._snapshot.request_id,
+                        message=(
+                            "Скасування не підтверджено runtime; "
+                            "результат голосового вводу буде приховано."
+                        ),
+                    )
             return UIResult(
                 request_id="desktop-handler",
-                status="completed",
-                message="Голосовий ввід уже завершився.",
+                status="accepted",
+                message="Запит на скасування збережено до завершення голосового вводу.",
             )
         return UIResult(
             request_id="desktop-handler",
@@ -289,6 +305,9 @@ class DesktopVoiceTurnController:
         if active is None:
             return
         if not active.done():
+            with self._lock:
+                if self._active is active:
+                    self._active_cancel_intent = True
             active.cancel()
 
         remaining = max(0.0, deadline - time.monotonic())
