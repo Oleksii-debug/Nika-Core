@@ -171,3 +171,21 @@ def test_action_revalidates_live_semantic_authority_after_focus(
             adapter.act(validated, InteractionAction.INVOKE, None)
 
     assert backend.invoked is False
+
+def test_public_node_mutation_cannot_launder_live_semantic_drift() -> None:
+    backend = DriftAfterFocusBackend({})
+    adapter = WindowsUIAInteractionAdapter(
+        process_id=77,
+        window_title="Nika Fixture",
+        backend=backend,
+    )
+    validated = adapter.observe().controls[0]
+
+    object.__setattr__(validated, "name", "Delete account")
+    backend.record = replace(backend.record, name="Delete account")
+
+    with pytest.raises(StaleSnapshotError, match="semantic action authority changed"):
+        adapter.act(validated, InteractionAction.INVOKE, None)
+
+    assert backend.invoked is False
+

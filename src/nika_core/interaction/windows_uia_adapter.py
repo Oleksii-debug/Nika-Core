@@ -191,13 +191,24 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             backend=backend if backend is not None else PywinautoUIABackend(),
         )
 
+    def _semantic_authority(self, node: ControlNode) -> ControlNode:
+        if type(node.node_id) is not str:
+            raise ValueError("UIA control node_id must be an exact string")
+        expected = self._semantic_by_node.get(node.node_id)
+        if expected is None:
+            raise StaleSnapshotError(
+                "control does not belong to the current semantic observation"
+            )
+        return expected
+
     def _revalidate_action_authority(
         self,
         node: ControlNode,
         action: InteractionAction,
-    ) -> tuple[int, tuple[int, ...], int]:
+    ) -> tuple[int, tuple[int, ...], int, ControlNode]:
+        expected = self._semantic_authority(node)
         hwnd = self._live_hwnd()
-        runtime_id, generation = self._control_identity(node)
+        runtime_id, generation = self._control_identity(expected)
         matches = [
             record
             for record in self.backend.enumerate_controls(hwnd, self.view)
@@ -214,11 +225,11 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             )
 
         live = matches[0]
-        if live.role != node.role or live.name != node.name:
+        if live.role != expected.role or live.name != expected.name:
             raise StaleSnapshotError(
                 "UIA semantic action authority changed: accessible role/name drifted"
             )
-        if live.enabled != node.enabled or live.visible != node.visible:
+        if live.enabled != expected.enabled or live.visible != expected.visible:
             raise StaleSnapshotError(
                 "UIA semantic action authority changed: enabled/visible state drifted"
             )
@@ -229,17 +240,18 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
 
         required_pattern = _REQUIRED_PATTERN.get(action)
         if required_pattern is not None:
-            observed_patterns = self.pattern_capabilities(node)
+            observed_patterns = self.pattern_capabilities(expected)
             if required_pattern not in observed_patterns:
                 raise UnsupportedInteractionError(
                     f"{required_pattern} pattern was not present in validated semantic authority"
                 )
             if required_pattern not in live.patterns:
                 raise UnsupportedInteractionError(
-                    f"{required_pattern} pattern changed before UIA effect; semantic authority is stale"
+                    f"{required_pattern} pattern changed before UIA effect; "
+                    "semantic authority is stale"
                 )
 
-        return hwnd, runtime_id, generation
+        return hwnd, runtime_id, generation, expected
 
     def _exact_live_focus_match(
         self,
@@ -266,7 +278,7 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
 
     def _await_focus_acknowledgement(
         self,
-        node: ControlNode,
+        expected: ControlNode,
         *,
         hwnd: int,
         runtime_id: tuple[int, ...],
@@ -286,11 +298,11 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
                 runtime_id=runtime_id,
                 generation=generation,
             )
-            if live.role != node.role or live.name != node.name:
+            if live.role != expected.role or live.name != expected.name:
                 raise StaleSnapshotError(
                     "UIA focus authority changed: accessible role/name drifted"
                 )
-            if live.enabled != node.enabled or live.visible != node.visible:
+            if live.enabled != expected.enabled or live.visible != expected.visible:
                 raise StaleSnapshotError(
                     "UIA focus authority changed: enabled/visible state drifted"
                 )
@@ -315,13 +327,13 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
 
         if type(node) is not ControlNode:
             raise ValueError("UIA focus target must be an exact ControlNode")
-        hwnd, runtime_id, generation = self._revalidate_action_authority(
+        hwnd, runtime_id, generation, expected = self._revalidate_action_authority(
             node,
             InteractionAction.FOCUS,
         )
         self.backend.focus(hwnd, runtime_id, generation)
         self._await_focus_acknowledgement(
-            node,
+            expected,
             hwnd=hwnd,
             runtime_id=runtime_id,
             generation=generation,
@@ -410,7 +422,7 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             self.focus(node)
             return
 
-        hwnd, runtime_id, generation = self._revalidate_action_authority(
+        hwnd, runtime_id, generation, _ = self._revalidate_action_authority(
             node,
             action,
         )
