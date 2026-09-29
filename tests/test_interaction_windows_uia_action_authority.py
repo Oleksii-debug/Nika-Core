@@ -172,6 +172,7 @@ def test_action_revalidates_live_semantic_authority_after_focus(
 
     assert backend.invoked is False
 
+
 def test_public_node_mutation_cannot_launder_live_semantic_drift() -> None:
     backend = DriftAfterFocusBackend({})
     adapter = WindowsUIAInteractionAdapter(
