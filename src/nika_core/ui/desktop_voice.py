@@ -139,7 +139,7 @@ class DesktopVoiceTurnController:
         coroutine = self._execute(request_id, started, settled)
         try:
             future = self._submit(coroutine)
-        except BaseException as exc:
+        except Exception as exc:
             coroutine.close()
             with self._lock:
                 if self._submitting_request_id == request_id:
@@ -150,8 +150,18 @@ class DesktopVoiceTurnController:
                         message="Не вдалося запустити голосовий ввід.",
                     )
             submission_settled.set()
-            if isinstance(exc, Exception):
-                raise RuntimeError("Не вдалося запустити голосовий ввід.") from exc
+            raise RuntimeError("Не вдалося запустити голосовий ввід.") from exc
+        except BaseException:
+            coroutine.close()
+            with self._lock:
+                if self._submitting_request_id == request_id:
+                    self._clear_submission_locked()
+                    self._snapshot = DesktopVoiceSnapshot(
+                        status=DesktopVoiceStatus.FAILED,
+                        request_id=request_id,
+                        message="Не вдалося запустити голосовий ввід.",
+                    )
+            submission_settled.set()
             raise
         if type(future) is not Future:
             coroutine.close()
