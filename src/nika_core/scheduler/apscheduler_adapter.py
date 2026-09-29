@@ -61,8 +61,8 @@ class APSchedulerAdapter(SchedulerPort):
     def remove(self, job_id: str) -> bool:
         job_id = _require_job_id(job_id)
         removed = self._jobs.delete(job_id)
-        if self._started and self._scheduler.get_job(job_id) is not None:
-            self._scheduler.remove_job(job_id)
+        if self._started:
+            self._sync_runtime_job(job_id)
         if removed and self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_removed",
@@ -74,9 +74,11 @@ class APSchedulerAdapter(SchedulerPort):
     def pause(self, job_id: str) -> None:
         job = self._required_job(_require_job_id(job_id))
         self._jobs.set_enabled(job.job_id, False)
+        if self._started:
+            self._sync_runtime_job(job.job_id)
         paused_job = self._required_job(job.job_id)
-        if self._started and self._scheduler.get_job(paused_job.job_id) is not None:
-            self._scheduler.remove_job(paused_job.job_id)
+        if paused_job.enabled:
+            return
         self._audit_change("scheduler.job_paused", paused_job)
 
     def resume(self, job_id: str) -> None:
