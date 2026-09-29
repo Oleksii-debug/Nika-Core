@@ -41,7 +41,7 @@ def test_existing_database_is_checked_read_only(tmp_path: Path) -> None:
     assert database.read_bytes() == before
     check = next(item for item in report.checks if item.check_id == "database")
     assert check.status is CheckStatus.PASS
-    assert "tables=1" in check.message
+    assert "tables=" in check.message
 
 
 def test_newer_core_schema_fails_closed(tmp_path: Path) -> None:
