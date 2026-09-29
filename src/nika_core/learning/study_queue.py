@@ -473,11 +473,27 @@ def _contains_secret_fields(value: str) -> bool:
     )
 
 
+def _contains_secret_assignments(value: str) -> bool:
+    boundaries = frozenset("?&#;=: \t\r\n")
+    for equals_index, character in enumerate(value):
+        if character != "=":
+            continue
+        start = equals_index
+        while start > 0 and value[start - 1] not in boundaries:
+            start -= 1
+        key = urllib.parse.unquote_plus(value[start:equals_index])
+        if _normalized_query_key(key) in _SECRET_QUERY_KEYS:
+            return True
+    return False
+
+
 def _reject_secret_bearing_reference(value: str) -> None:
     for view in _decoded_views(value):
         lowered = view.casefold()
         if any(marker in lowered for marker in _SECRET_TEXT_MARKERS):
             raise ValueError("source_ref must not contain credential material")
+        if _contains_secret_assignments(view):
+            raise ValueError("source_ref must not contain credential assignment fields")
         parsed = urllib.parse.urlsplit(view)
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("source_ref must not contain URL credentials")
