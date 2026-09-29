@@ -12,6 +12,25 @@ class TriggerKind(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class ScheduleIdentity:
+    scope: str
+    owner_id: str
+    dedup_key: str
+    product_project_id: str | None = None
+
+    def __post_init__(self) -> None:
+        for name, value in (
+            ("scope", self.scope),
+            ("owner_id", self.owner_id),
+            ("dedup_key", self.dedup_key),
+        ):
+            if not value.strip():
+                raise ValueError(f"{name} must not be empty")
+        if self.product_project_id is not None and not self.product_project_id.strip():
+            raise ValueError("product_project_id must not be empty when provided")
+
+
+@dataclass(frozen=True, slots=True)
 class ScheduledJob:
     job_id: str
     action_id: str
@@ -22,6 +41,7 @@ class ScheduledJob:
     coalesce: bool = True
     max_instances: int = 1
     misfire_grace_seconds: int | None = 60
+    identity: ScheduleIdentity | None = None
 
 
 class SchedulerPort(Protocol):
