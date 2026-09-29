@@ -174,6 +174,59 @@ def test_non_wake_transcript_completes_without_activation() -> None:
     assert result.transcript == "сьогодні гарна погода"
 
 
+def test_caller_mutation_after_turn_start_cannot_retarget_stt_authority() -> None:
+    class _HeldMicrophone(_MicrophoneAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.entered = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def capture(
+            self,
+            request: MicrophoneCaptureRequest,
+        ) -> MicrophoneCaptureResponse:
+            self.calls += 1
+            self.entered.set()
+            await self.release.wait()
+            return MicrophoneCaptureResponse(
+                request_id=request.request_id,
+                provider_id=request.provider_id,
+                device_id=request.device_id,
+                sample_rate_hz=request.sample_rate_hz,
+                pcm_s16le=b"\x01\x00" * request.sample_count,
+                latency_ms=1.0,
+            )
+
+    async def scenario() -> None:
+        microphone = _HeldMicrophone()
+        stt = _SttAdapter()
+        request = _request()
+        task = asyncio.create_task(_service(microphone, stt).run(request))
+        await microphone.entered.wait()
+
+        object.__setattr__(request, "stt_provider_id", "forged-provider")
+        object.__setattr__(request, "stt_model", "forged-model")
+        object.__setattr__(request, "language", "en")
+        object.__setattr__(
+            request.stt_policy,
+            "max_transcript_chars",
+            1,
+        )
+        microphone.release.set()
+
+        result = await task
+
+        assert result.evidence.status is VoiceTurnStatus.COMPLETED
+        assert result.evidence.activated is True
+        assert len(stt.calls) == 1
+        assert stt.calls[0].provider_id == "local-stt"
+        assert stt.calls[0].model == "uk-small-v1"
+        assert stt.calls[0].language == "uk"
+        assert stt.calls[0].policy.max_transcript_chars == MAX_TRANSCRIPT_CHARS
+
+    asyncio.run(scenario())
+
+
 def test_turn_rejects_stt_transcript_bound_larger_than_wake_authority() -> None:
     request = _request()
     with pytest.raises(ValueError, match="exceeds wake activation bound"):
