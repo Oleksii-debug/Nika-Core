@@ -61,10 +61,15 @@ class BlockingSpeechPort(FakeSpeechPort):
         self.started.set()
         if not self.release.wait(timeout=2):
             raise AssertionError("test did not release speech")
-        return super().speak(
-            request,
-            timeout_seconds=timeout_seconds,
-            cancel_event=cancel_event,
+        del timeout_seconds, cancel_event
+        self.requests.append(request)
+        voice_id = request.voice_id or self.voice_id
+        return SpeechReceipt(
+            engine_id="test-engine",
+            voice_id=voice_id,
+            character_count=len(request.text),
+            rate=request.rate,
+            volume=request.volume,
         )
 
 
