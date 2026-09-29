@@ -498,6 +498,8 @@ def test_unexpected_port_failure_is_privacy_minimized() -> None:
         lambda receipt: object.__setattr__(receipt, "voice_id", "bad\nvoice"),
         lambda receipt: object.__setattr__(receipt, "engine_id", "bad\u202eengine"),
         lambda receipt: object.__setattr__(receipt, "voice_id", "bad\ud800voice"),
+        lambda receipt: object.__setattr__(receipt, "engine_id", " test-engine"),
+        lambda receipt: object.__setattr__(receipt, "voice_id", "voice-id "),
         lambda receipt: object.__setattr__(receipt, "rate", True),
         lambda receipt: object.__setattr__(receipt, "engine_id", "e" * 201),
         lambda receipt: object.__setattr__(receipt, "voice_id", "v" * 201),

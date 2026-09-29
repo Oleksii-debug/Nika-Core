@@ -450,6 +450,7 @@ def _validate_receipt(
     if (
         type(engine_id) is not str
         or not engine_id.strip()
+        or engine_id != engine_id.strip()
         or len(engine_id) > MAX_STREAM_ENGINE_ID_CHARS
     ):
         raise SpeechError(
@@ -459,6 +460,7 @@ def _validate_receipt(
     if (
         type(voice_id) is not str
         or not voice_id.strip()
+        or voice_id != voice_id.strip()
         or len(voice_id) > MAX_VOICE_ID_CHARS
     ):
         raise SpeechError(
