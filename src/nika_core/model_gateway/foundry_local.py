@@ -292,7 +292,11 @@ class FoundryLocalProvider:
             expected_model_id = authorization.expected_model_id or self._expected_model_id
             self._validate_model_identity(model, expected_model_id)
             if self._sdk_bool(model, "is_cached"):
-                return self._model_evidence(model)
+                return self._model_evidence(
+                    model,
+                    expected_alias=authorization.model,
+                    expected_model_id=expected_model_id,
+                )
 
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -358,7 +362,11 @@ class FoundryLocalProvider:
                     retryable=False,
                 )
             self._validate_model_alias(model, authorization.model)
-            evidence = self._model_evidence(model)
+            evidence = self._model_evidence(
+                model,
+                expected_alias=authorization.model,
+                expected_model_id=expected_model_id,
+            )
             self._validate_model_identity(model, expected_model_id)
             if not evidence.cached:
                 if effective_cancel_event.is_set():
@@ -487,7 +495,11 @@ class FoundryLocalProvider:
         model = self._get_model(alias)
         if self._expected_model_id is not None:
             self._validate_model_identity(model, self._expected_model_id)
-        return self._model_evidence(model)
+        return self._model_evidence(
+            model,
+            expected_alias=alias,
+            expected_model_id=self._expected_model_id,
+        )
 
     def close(self) -> None:
         """Unload only models loaded by this provider instance.
@@ -663,7 +675,13 @@ class FoundryLocalProvider:
         self._validate_model_alias(model, alias)
         return model
 
-    def _model_evidence(self, model: Any) -> FoundryModelEvidence:
+    def _model_evidence(
+        self,
+        model: Any,
+        *,
+        expected_alias: str,
+        expected_model_id: str | None,
+    ) -> FoundryModelEvidence:
         model_id = self._sdk_text(model, "id")
         cached = self._sdk_bool(model, "is_cached")
         path: str | None = None
@@ -672,7 +690,7 @@ class FoundryLocalProvider:
                 path = str(model.get_path())
             except Exception:  # noqa: BLE001 - metadata collection must not break inference use.
                 path = None
-        return FoundryModelEvidence(
+        evidence = FoundryModelEvidence(
             model_id=model_id,
             model_version=self._version_from_model_id(model_id),
             alias=self._sdk_text(model, "alias"),
@@ -685,6 +703,23 @@ class FoundryLocalProvider:
             capability_tags=self._sdk_optional_text(model, "capabilities"),
             supports_tool_calling=self._sdk_optional_bool(model, "supports_tool_calling"),
         )
+        if evidence.alias != expected_alias:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "Foundry Local model alias changed while collecting evidence",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+        if expected_model_id is not None and evidence.model_id != expected_model_id:
+            raise ModelGatewayError(
+                ModelErrorCode.INVALID_REQUEST,
+                "Foundry Local model identity changed while collecting evidence",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
+        self._validate_model_alias(model, expected_alias)
+        self._validate_model_identity(model, expected_model_id)
+        return evidence
 
     def _validate_model_alias(self, model: Any, expected_alias: str) -> None:
         actual_alias = self._sdk_text(model, "alias")
