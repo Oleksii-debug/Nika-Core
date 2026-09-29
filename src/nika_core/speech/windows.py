@@ -247,7 +247,11 @@ class WindowsPowerShellSpeechBackend:
 
 class WindowsSystemSpeechAdapter:
     def __init__(self, backend: WindowsSpeechBackendPort | None = None) -> None:
-        self._backend = backend if backend is not None else WindowsPowerShellSpeechBackend.discover()
+        self._backend = (
+            backend
+            if backend is not None
+            else WindowsPowerShellSpeechBackend.discover()
+        )
 
     def list_voices(self, *, timeout_seconds: float = 10.0) -> tuple[SpeechVoice, ...]:
         timeout = _validate_timeout(timeout_seconds)

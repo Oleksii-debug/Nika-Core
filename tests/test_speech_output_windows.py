@@ -431,7 +431,9 @@ def test_adapter_rejects_invalid_timeout(timeout: object) -> None:
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
 
 
-def test_process_tree_termination_uses_supplied_trusted_taskkill_path(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_process_tree_termination_uses_supplied_trusted_taskkill_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     commands: list[tuple[str, ...]] = []
 
     class FakeProcess:
