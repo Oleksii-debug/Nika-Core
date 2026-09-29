@@ -25,6 +25,8 @@ def test_missing_data_directory_warns_without_creating_it(tmp_path: Path) -> Non
     report = collect_diagnostics(_config(database))
 
     assert report.status is CheckStatus.WARN
+    assert report.exit_code() == 0
+    assert report.exit_code(strict=True) == 1
     assert not database.parent.exists()
     assert "missing" not in report.to_text()
     assert str(database) not in report.to_json()
@@ -119,6 +121,8 @@ def test_invalid_environment_configuration_fails_without_echoing_value(
     report = collect_diagnostics()
 
     assert report.status is CheckStatus.FAIL
+    assert report.exit_code() == 2
+    assert report.exit_code(strict=True) == 2
     assert report.checks[0].check_id == "configuration"
     assert "relative-secret.db" not in report.to_text()
     assert "relative-secret.db" not in report.to_json()
