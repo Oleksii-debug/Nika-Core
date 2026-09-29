@@ -38,6 +38,10 @@ def _require_exact_text(value: object, *, field_name: str) -> str:
         raise TypeError(f"{field_name} must be exact text")
     if not value.strip():
         raise ValueError(f"{field_name} must not be empty")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 text") from exc
     return value
 
 
@@ -90,9 +94,18 @@ def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
     if not isinstance(result, Mapping):
         raise TypeError("idempotency result must be a mapping when provided")
     try:
-        return json.dumps(dict(result), ensure_ascii=False, sort_keys=True, allow_nan=False)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("idempotency result must be JSON serializable") from exc
+        serialized = json.dumps(
+            dict(result),
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        serialized.encode("utf-8", errors="strict")
+        return serialized
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError(
+            "idempotency result must be JSON serializable valid UTF-8"
+        ) from exc
 
 
 def _stored_result(row: sqlite3.Row) -> Mapping[str, Any] | None:

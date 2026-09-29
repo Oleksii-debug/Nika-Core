@@ -61,6 +61,31 @@ def test_completed_result_is_immutable_and_identical_replay_is_noop(tmp_path) ->
     assert persisted.result == {"message_id": "m-1"}
 
 
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        {"value": "\ud800"},
+        {"key-\ud800": "value"},
+        {"nested": ["ok", {"value": "\ud800"}]},
+    ),
+)
+def test_complete_rejects_non_utf8_result_without_status_mutation(
+    tmp_path,
+    result: dict[str, object],
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        ledger.complete("effect:1", result)
+
+    persisted = ledger.require("effect:1")
+    assert persisted.status is IdempotencyStatus.PENDING
+    assert persisted.result is None
+
+
 def test_concurrent_conflicting_completions_have_one_durable_winner(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
@@ -131,6 +156,33 @@ def test_reserve_rejects_behavioral_identity_carriers_without_write(
     values[field_name] = value_factory(task_id)
 
     with pytest.raises(TypeError, match=field_name):
+        ledger.reserve(**values)
+
+    with store.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM idempotency_records").fetchone()[0]
+    assert count == 0
+
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("operation_key", "task_id", "operation_type", "input_fingerprint"),
+)
+def test_reserve_rejects_non_utf8_identity_without_write(
+    tmp_path,
+    field_name: str,
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    values = {
+        "operation_key": "effect:utf8",
+        "task_id": task_id,
+        "operation_type": "fixture.effect",
+        "input_fingerprint": "sha256:utf8",
+    }
+    values[field_name] = "\ud800"
+
+    with pytest.raises(ValueError, match=rf"{field_name} must be valid UTF-8 text"):
         ledger.reserve(**values)
 
     with store.connection() as conn:
