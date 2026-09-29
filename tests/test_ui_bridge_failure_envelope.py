@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
 from nika_core.kernel.default_actions import build_default_action_registry
@@ -80,3 +82,53 @@ def test_restore_default_expected_conflict_returns_bounded_error(tmp_path: Path,
 
     assert response["ok"] is False
     assert response["message"] == "shortcut conflict with nav.tasks"
+
+
+def test_list_actions_contains_unexpected_failure_without_exposing_details(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    secret_canary = "list-actions-secret-canary-do-not-expose"
+    bridge = _bridge(tmp_path)
+
+    def fail_resolve(_self: Keymap, _action_id: str) -> str | None:
+        raise RuntimeError(secret_canary)
+
+    monkeypatch.setattr(Keymap, "resolve", fail_resolve)
+
+    with pytest.raises(RuntimeError) as raised:
+        bridge.list_actions()
+
+    assert str(raised.value) == "Не вдалося завантажити список дій через внутрішню помилку."
+    assert secret_canary not in str(raised.value)
+    assert secret_canary not in caplog.text
+    assert "RuntimeError" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("method_name", "invoke"),
+    [
+        ("set_binding", lambda bridge: bridge.set_binding("nav.agents", "Alt+9")),
+        ("restore_default", lambda bridge: bridge.restore_default("nav.agents")),
+        ("export_json", lambda bridge: bridge.export_keymap()),
+        ("import_json", lambda bridge: bridge.import_keymap('{"schema_version": 1}')),
+    ],
+)
+def test_keymap_transport_contains_unexpected_failures_without_exposing_details(
+    tmp_path: Path, monkeypatch, caplog, method_name, invoke
+) -> None:
+    secret_canary = f"{method_name}-secret-canary-do-not-expose"
+    bridge = _bridge(tmp_path)
+
+    def fail_unexpectedly(_self: Keymap, *_args, **_kwargs):
+        raise OSError(secret_canary)
+
+    monkeypatch.setattr(Keymap, method_name, fail_unexpectedly)
+    response = invoke(bridge)
+
+    assert response == {
+        "ok": False,
+        "message": "Не вдалося змінити комбінації клавіш через внутрішню помилку.",
+    }
+    assert secret_canary not in response["message"]
+    assert secret_canary not in caplog.text
+    assert "OSError" in caplog.text
