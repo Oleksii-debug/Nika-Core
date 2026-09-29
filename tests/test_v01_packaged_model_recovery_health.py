@@ -211,6 +211,28 @@ def test_invalid_cursor_performs_zero_model_health_effects(tmp_path: Path) -> No
     assert factory_calls == []
 
 
+def test_missing_durable_task_never_becomes_ready_checkpoint(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    runtime = _runtime(store)
+    task_id = "missing-task"
+    thread_id = f"desktop-{task_id}"
+    resume_token = runtime.initial_resume_token(
+        task_id=task_id,
+        thread_id=thread_id,
+    )
+
+    result = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=resume_token,
+        )
+    )
+
+    assert result.status is RuntimeResumeProbeStatus.UNVERIFIABLE
+    assert result.checkpoint_id is None
+
+
 @pytest.mark.parametrize("selection", [_deterministic()])
 def test_explicit_deterministic_recovery_preserves_ready_contract(
     tmp_path: Path,
