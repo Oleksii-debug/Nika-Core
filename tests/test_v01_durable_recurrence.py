@@ -903,7 +903,6 @@ def test_persisted_enum_carriers_fail_before_enum_behavior(tmp_path: Path) -> No
     assert calls == []
 
 
-
 def test_durable_transport_authority_rejects_scheduler_drift(tmp_path: Path) -> None:
     store = _store(tmp_path)
     clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
