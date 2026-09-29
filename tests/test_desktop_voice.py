@@ -729,6 +729,39 @@ def test_behavioral_nested_evidence_scalars_fail_closed_without_dispatch() -> No
     assert snapshot.transcript is None
 
 
+@pytest.mark.parametrize("component", ["transcription", "wake"])
+def test_behavioral_completed_request_ids_fail_closed_without_dispatch(
+    component: str,
+) -> None:
+    class BehavioralStr(str):
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral request-id equality must not execute")
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral request-id inequality must not execute")
+
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    target = getattr(result.evidence, component)
+    assert target is not None
+    object.__setattr__(
+        target,
+        "request_id",
+        BehavioralStr("desktop-voice-test"),
+    )
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
+
 def test_behavioral_nested_digest_fails_closed_without_dispatch() -> None:
     class BehavioralStr(str):
         def __eq__(self, other: object) -> bool:
