@@ -320,6 +320,14 @@ class IncrementalSpeechStream:
                     )
                 )
                 return
+            except BaseException:  # noqa: B036 - worker boundary must terminalize
+                self._fail(
+                    SpeechError(
+                        SpeechErrorCode.PROCESS_FAILED,
+                        "streaming speech output failed",
+                    )
+                )
+                return
 
             try:
                 clean = _validate_receipt(
