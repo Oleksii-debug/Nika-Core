@@ -91,6 +91,7 @@ class IncrementalSpeechStream:
 
         self._condition = Condition()
         self._cancel_event = Event()
+        self._cancellation_requested = False
         self._incoming = ""
         self._buffered_characters = 0
         self._finish_requested = False
@@ -129,7 +130,7 @@ class IncrementalSpeechStream:
         with self._condition:
             if (
                 self._state is not SpeechStreamState.RUNNING
-                or self._cancel_event.is_set()
+                or self._cancellation_requested
             ):
                 raise SpeechError(
                     SpeechErrorCode.INVALID_REQUEST,
@@ -174,6 +175,7 @@ class IncrementalSpeechStream:
                 SpeechStreamState.FAILED,
             ):
                 return
+            self._cancellation_requested = True
             self._cancel_event.set()
             self._finish_requested = True
             self._condition.notify_all()
@@ -191,7 +193,7 @@ class IncrementalSpeechStream:
                 spoken_characters=self._spoken_characters,
                 chunk_count=self._chunk_count,
                 pending_characters=self._buffered_characters,
-                cancellation_requested=self._cancel_event.is_set(),
+                cancellation_requested=self._cancellation_requested,
             )
 
     def result(self) -> StreamingSpeechReceipt:
@@ -240,12 +242,13 @@ class IncrementalSpeechStream:
                 while (
                     not self._incoming
                     and not self._finish_requested
-                    and not self._cancel_event.is_set()
+                    and not self._cancellation_requested
                     and not _has_ready_chunk(pending, chunk_chars=self._chunk_chars)
                 ):
                     self._condition.wait()
 
-                if self._cancel_event.is_set():
+                if self._cancellation_requested:
+                    self._cancel_event.set()
                     self._state = SpeechStreamState.CANCELLED
                     self._condition.notify_all()
                     return
@@ -302,13 +305,31 @@ class IncrementalSpeechStream:
                     cancel_event=self._cancel_event,
                 )
             except SpeechError as exc:
+                with self._condition:
+                    cancellation_requested = self._cancellation_requested
+                    if cancellation_requested:
+                        self._cancel_event.set()
+                    else:
+                        self._cancel_event.clear()
                 if (
-                    self._cancel_event.is_set()
+                    cancellation_requested
                     and type(exc) is SpeechError
                     and type(exc.code) is SpeechErrorCode
                     and exc.code is SpeechErrorCode.PROCESS_CANCELLED
                 ):
                     self._cancel()
+                    return
+                if (
+                    type(exc) is SpeechError
+                    and type(exc.code) is SpeechErrorCode
+                    and exc.code is SpeechErrorCode.PROCESS_CANCELLED
+                ):
+                    self._fail(
+                        SpeechError(
+                            SpeechErrorCode.PROCESS_FAILED,
+                            "streaming speech output failed",
+                        )
+                    )
                     return
                 self._fail(_sanitize_speech_error(exc))
                 return
@@ -357,8 +378,13 @@ class IncrementalSpeechStream:
                 self._selected_voice_id = clean.voice_id
                 self._spoken_characters += clean.character_count
                 self._chunk_count += 1
+                cancellation_requested = self._cancellation_requested
+                if cancellation_requested:
+                    self._cancel_event.set()
+                else:
+                    self._cancel_event.clear()
 
-            if self._cancel_event.is_set():
+            if cancellation_requested:
                 self._cancel()
                 return
 
