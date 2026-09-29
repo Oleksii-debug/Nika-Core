@@ -276,7 +276,67 @@ def test_cancel_reaches_active_speak_and_prevents_later_output() -> None:
 
 
 def test_successful_chunk_is_accounted_before_late_cancellation_stops_stream() -> None:
-    class LateCancelPort(FakeSpeechPort):
+    port = BlockingSpeechPort()
+    text = "Вже озвучено."
+    stream = IncrementalSpeechStream(port)
+    stream.feed(text)
+    stream.finish()
+    assert port.started.wait(timeout=1)
+
+    stream.cancel()
+    port.release.set()
+    assert stream.wait(1)
+
+    snapshot = stream.snapshot()
+    assert snapshot.state is SpeechStreamState.CANCELLED
+    assert snapshot.chunk_count == 1
+    assert snapshot.spoken_characters == len(text)
+
+    with pytest.raises(SpeechError) as error:
+        stream.result()
+
+    assert error.value.code is SpeechErrorCode.PROCESS_CANCELLED
+
+
+def test_cancel_signal_does_not_mask_non_cancel_speech_failure() -> None:
+    class FailingOnCancelPort(FakeSpeechPort):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+
+        def speak(
+            self,
+            request: SpeechRequest,
+            *,
+            timeout_seconds: float = 120.0,
+            cancel_event: threading.Event | None = None,
+        ) -> SpeechReceipt:
+            del request, timeout_seconds
+            self.started.set()
+            assert cancel_event is not None
+            assert cancel_event.wait(timeout=2)
+            raise SpeechError(
+                SpeechErrorCode.PROCESS_FAILED,
+                "CANARY_ENGINE_FAILURE",
+            )
+
+    port = FailingOnCancelPort()
+    stream = IncrementalSpeechStream(port)
+    stream.feed("Помилка. ")
+    assert port.started.wait(timeout=1)
+    stream.cancel()
+    assert stream.wait(1)
+
+    assert stream.snapshot().state is SpeechStreamState.FAILED
+    with pytest.raises(SpeechError) as error:
+        stream.result()
+
+    assert error.value.code is SpeechErrorCode.PROCESS_FAILED
+    assert "CANARY" not in str(error.value)
+
+
+def test_output_port_cannot_forge_cancellation_by_setting_signal() -> None:
+    class ForgingPort(FakeSpeechPort):
         def speak(
             self,
             request: SpeechRequest,
@@ -293,25 +353,25 @@ def test_successful_chunk_is_accounted_before_late_cancellation_stops_stream() -
             cancel_event.set()
             return receipt
 
-    text = "Вже озвучено."
-    stream = IncrementalSpeechStream(LateCancelPort())
-    stream.feed(text)
+    port = ForgingPort()
+    stream = IncrementalSpeechStream(port, chunk_chars=200)
+    stream.feed("Перше. Друге. ")
+    _wait_for_request_count(port, 2)
     stream.finish()
     assert stream.wait(1)
 
     snapshot = stream.snapshot()
-    assert snapshot.state is SpeechStreamState.CANCELLED
-    assert snapshot.chunk_count == 1
-    assert snapshot.spoken_characters == len(text)
-
-    with pytest.raises(SpeechError) as error:
-        stream.result()
-
-    assert error.value.code is SpeechErrorCode.PROCESS_CANCELLED
+    assert snapshot.state is SpeechStreamState.COMPLETED
+    assert snapshot.cancellation_requested is False
+    assert stream.result().chunk_count == 2
 
 
-def test_cancel_signal_does_not_mask_non_cancel_speech_failure() -> None:
-    class FailingOnCancelPort(FakeSpeechPort):
+def test_output_port_cannot_clear_user_cancellation_authority() -> None:
+    class ClearingPort(FakeSpeechPort):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = threading.Event()
+
         def speak(
             self,
             request: SpeechRequest,
@@ -319,19 +379,56 @@ def test_cancel_signal_does_not_mask_non_cancel_speech_failure() -> None:
             timeout_seconds: float = 120.0,
             cancel_event: threading.Event | None = None,
         ) -> SpeechReceipt:
-            del request, timeout_seconds
+            del timeout_seconds
+            self.started.set()
             assert cancel_event is not None
-            cancel_event.set()
-            raise SpeechError(
-                SpeechErrorCode.PROCESS_FAILED,
-                "CANARY_ENGINE_FAILURE",
+            assert cancel_event.wait(timeout=2)
+            cancel_event.clear()
+            self.requests.append(request)
+            return SpeechReceipt(
+                engine_id="test-engine",
+                voice_id=request.voice_id or self.voice_id,
+                character_count=len(request.text),
+                rate=request.rate,
+                volume=request.volume,
             )
 
-    stream = IncrementalSpeechStream(FailingOnCancelPort())
-    stream.feed("Помилка. ")
+    port = ClearingPort()
+    stream = IncrementalSpeechStream(port)
+    stream.feed("Вже озвучено. ")
+    assert port.started.wait(timeout=1)
+
+    stream.cancel()
     assert stream.wait(1)
 
-    assert stream.snapshot().state is SpeechStreamState.FAILED
+    snapshot = stream.snapshot()
+    assert snapshot.state is SpeechStreamState.CANCELLED
+    assert snapshot.cancellation_requested is True
+    assert snapshot.chunk_count == 1
+
+
+def test_unsolicited_port_cancel_error_is_a_stream_failure() -> None:
+    class UnsolicitedCancelPort(FakeSpeechPort):
+        def speak(
+            self,
+            request: SpeechRequest,
+            *,
+            timeout_seconds: float = 120.0,
+            cancel_event: threading.Event | None = None,
+        ) -> SpeechReceipt:
+            del request, timeout_seconds, cancel_event
+            raise SpeechError(
+                SpeechErrorCode.PROCESS_CANCELLED,
+                "CANARY_UNSOLICITED_CANCEL",
+            )
+
+    stream = IncrementalSpeechStream(UnsolicitedCancelPort())
+    stream.feed("Текст. ")
+    assert stream.wait(1)
+
+    snapshot = stream.snapshot()
+    assert snapshot.state is SpeechStreamState.FAILED
+    assert snapshot.cancellation_requested is False
     with pytest.raises(SpeechError) as error:
         stream.result()
 
