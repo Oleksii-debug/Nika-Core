@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from nika_core.diagnostics import CheckStatus, collect_diagnostics
+from nika_core.diagnostics import collect_diagnostics
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -26,11 +26,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     report = collect_diagnostics()
     print(report.to_json() if args.json else report.to_text())
-    if report.status is CheckStatus.FAIL:
-        return 2
-    if args.strict and report.status is CheckStatus.WARN:
-        return 1
-    return 0
+    return report.exit_code(strict=args.strict)
 
 
 if __name__ == "__main__":
