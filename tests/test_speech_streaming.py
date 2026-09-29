@@ -659,6 +659,27 @@ def test_invalid_port_receipt_fails_closed(mutator: object) -> None:
 
 
 @pytest.mark.parametrize(
+    "voice_id",
+    [
+        " leading-space",
+        "trailing-space ",
+        "bidi-\\u202evoice",
+        "surrogate-" + chr(0xD800),
+    ],
+)
+def test_constructor_rejects_invalid_voice_identity_before_audio_effect(
+    voice_id: str,
+) -> None:
+    port = FakeSpeechPort()
+
+    with pytest.raises(SpeechError) as error:
+        IncrementalSpeechStream(port, voice_id=voice_id)
+
+    assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+    assert port.requests == []
+
+
+@pytest.mark.parametrize(
     "kwargs",
     [
         {"chunk_chars": 0},
