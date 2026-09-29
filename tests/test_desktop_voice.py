@@ -515,6 +515,18 @@ def test_forged_exact_success_result_cannot_project_unbound_transcript() -> None
     assert "доказові" in snapshot.message
 
 
+def test_forged_exact_success_result_rejects_noncanonical_wake_outcome() -> None:
+    result = _completed_voice_result("desktop-voice-test")
+    assert result.evidence.wake is not None
+    object.__setattr__(result.evidence.wake, "outcome", "detected")
+    object.__setattr__(result.evidence, "activated", False)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot("desktop-voice-test", result)
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
+
 def test_forged_exact_success_result_cannot_project_unbound_stt_digest() -> None:
     async def scenario() -> VoiceTurnResult:
         return await _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
