@@ -881,11 +881,13 @@ def test_execution_config_identity_binds_timeout_and_temperature() -> None:
 class _ConfigMetadataGateway:
     def __init__(self) -> None:
         self.config_sha256 = None
+        self.request_id = None
         self.timeout_seconds = None
         self.temperature = None
 
     async def complete(self, request):
         self.config_sha256 = request.metadata["benchmark_execution_config_sha256"]
+        self.request_id = request.request_id
         self.timeout_seconds = request.timeout_seconds
         self.temperature = request.temperature
         return ModelResponse(
@@ -928,6 +930,56 @@ def test_benchmark_binds_execution_config_to_request_and_report() -> None:
     assert gateway.timeout_seconds == config.timeout_seconds
     assert gateway.temperature == config.temperature
     assert report.execution_config_sha256 == config.evidence_sha256
+
+
+def test_request_identity_changes_with_bound_execution_config() -> None:
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+    baseline_gateway = _ConfigMetadataGateway()
+    changed_gateway = _ConfigMetadataGateway()
+    baseline = BenchmarkExecutionConfig(timeout_seconds=60.0, temperature=0.0)
+    changed = BenchmarkExecutionConfig(timeout_seconds=30.0, temperature=0.5)
+
+    baseline_report = asyncio.run(
+        ModelBenchmarkRunner(
+            baseline_gateway,
+            clock=_Clock((1.0, 1.1)),
+        ).benchmark(
+            _candidate(),
+            evaluation,
+            timeout_seconds=baseline.timeout_seconds,
+            temperature=baseline.temperature,
+        )
+    )
+    changed_report = asyncio.run(
+        ModelBenchmarkRunner(
+            changed_gateway,
+            clock=_Clock((2.0, 2.1)),
+        ).benchmark(
+            _candidate(),
+            evaluation,
+            timeout_seconds=changed.timeout_seconds,
+            temperature=changed.temperature,
+        )
+    )
+
+    assert baseline_gateway.request_id != changed_gateway.request_id
+    assert baseline_gateway.config_sha256 == baseline_report.execution_config_sha256
+    assert changed_gateway.config_sha256 == changed_report.execution_config_sha256
+    assert baseline_report.execution_config_sha256 != changed_report.execution_config_sha256
 
 
 def test_custom_scorer_requires_stable_identity_before_execution() -> None:
