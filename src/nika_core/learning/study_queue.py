@@ -418,6 +418,10 @@ def _validate_limit(limit: int) -> None:
 def _require_text(value: str, name: str, *, maximum: int) -> None:
     if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must not be empty")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
     if len(value) > maximum:
         raise ValueError(f"{name} exceeds maximum length")
     if "\x00" in value:
