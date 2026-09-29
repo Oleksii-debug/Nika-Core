@@ -58,8 +58,8 @@ serialized into benchmark result evidence or accessible reports.
 ## Execution configuration identity
 
 `BenchmarkExecutionConfig` binds the result-affecting runner settings currently owned by this
-foundation: request timeout, temperature and scorer identity. Its canonical JSON representation is hashed with
-SHA-256. That digest is carried in ModelRequest metadata, candidate and suite benchmark reports,
+foundation: request timeout, temperature and scorer identity. Its canonical JSON representation
+is hashed with SHA-256. That digest is carried in ModelRequest metadata, candidate and suite benchmark reports,
 machine/text evidence, and the Experiment Engine strategy reference.
 
 A report produced with one timeout/temperature/scorer combination therefore cannot be rebound to
