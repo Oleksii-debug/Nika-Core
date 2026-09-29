@@ -50,6 +50,8 @@ class APSchedulerAdapter(SchedulerPort):
         self._started = False
 
     def upsert(self, job: ScheduledJob) -> None:
+        if type(job) is not ScheduledJob:
+            raise TypeError("job must be an exact ScheduledJob")
         job_id = job.job_id
         self._jobs.upsert(job)
         effective_job = self._required_job(job_id)
