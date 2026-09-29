@@ -31,17 +31,14 @@ class ScheduledJobStore:
         trigger, payload = _validated_job_data(job)
         now = datetime.now(UTC).isoformat()
         existing = conn.execute(
-            "SELECT created_at, payload_json FROM scheduled_jobs WHERE job_id = ?",
+            "SELECT * FROM scheduled_jobs WHERE job_id = ?",
             (job.job_id,),
         ).fetchone()
         if existing is not None:
-            existing_payload = _decode_json_object(
-                existing["payload_json"],
-                "persisted payload",
-            )
+            existing_job = _from_row(existing)
             incoming_binding = payload.get(IMMUTABLE_JOB_BINDING_KEY)
             existing_binding = _validated_binding(
-                existing_payload.get(IMMUTABLE_JOB_BINDING_KEY),
+                existing_job.payload.get(IMMUTABLE_JOB_BINDING_KEY),
                 "persisted scheduled job immutable binding",
             )
             if existing_binding is not None and incoming_binding != existing_binding:

@@ -276,6 +276,50 @@ def test_persisted_nonfinite_json_fails_closed(tmp_path: Path) -> None:
         store.get("job-1")
 
 
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    (
+        ("action_id", " bad.action", "persisted action_id.*whitespace-stable"),
+        ("trigger_kind", "unsupported", "persisted trigger_kind is corrupt"),
+        ("trigger_json", '{"broken":', "persisted trigger is corrupt"),
+        ("enabled", 2, "persisted enabled is corrupt"),
+        ("coalesce", -1, "persisted coalesce is corrupt"),
+        ("max_instances", 0, "persisted max_instances is corrupt"),
+        (
+            "misfire_grace_seconds",
+            0,
+            "persisted misfire_grace_seconds is corrupt",
+        ),
+    ),
+)
+def test_corrupt_existing_row_cannot_be_laundered_by_upsert(
+    tmp_path: Path,
+    column: str,
+    value: object,
+    message: str,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            f"UPDATE scheduled_jobs SET {column} = ? WHERE job_id = ?",
+            (value, "job-1"),
+        )
+
+    with pytest.raises(ValueError, match=message):
+        store.upsert(_job(payload={IMMUTABLE_JOB_BINDING_KEY: "binding-1"}))
+
+    with sqlite.connection() as conn:
+        raw = conn.execute(
+            f"SELECT {column} FROM scheduled_jobs WHERE job_id = ?",
+            ("job-1",),
+        ).fetchone()[0]
+    assert raw == value
+
+
 def test_existing_corrupt_binding_cannot_be_overwritten(tmp_path: Path) -> None:
     sqlite = _sqlite(tmp_path)
     store = ScheduledJobStore(sqlite)
