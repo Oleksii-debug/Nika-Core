@@ -82,22 +82,53 @@ def test_replacement_before_authorization_blocks_old_occurrence(
     replacement = replace(installed, payload={"generation": "new"})
     jobs.upsert(installed)
     original_authorize = jobs.authorize_dispatch
+    resolver_calls: list[str] = []
     calls: list[dict[str, object]] = []
 
     def replace_before_authorize(expected: ScheduledJob) -> ScheduledJob | None:
         jobs.upsert(replacement)
         return original_authorize(expected)
 
+    def resolve(action_id: str):
+        resolver_calls.append(action_id)
+        return lambda payload: calls.append(payload)
+
     monkeypatch.setattr(jobs, "authorize_dispatch", replace_before_authorize)
+    adapter = APSchedulerAdapter(jobs, resolve)
+
+    adapter._dispatch(installed.job_id, installed)
+
+    assert resolver_calls == []
+    assert calls == []
+    assert jobs.get(installed.job_id) == replacement
+
+
+def test_disabled_before_authorization_never_resolves_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs = ScheduledJobStore(_sqlite(tmp_path))
+    installed = _job(payload={"generation": "disabled"})
+    jobs.upsert(installed)
+    original_authorize = jobs.authorize_dispatch
+    resolver_calls: list[str] = []
+
+    def disable_before_authorize(expected: ScheduledJob) -> ScheduledJob | None:
+        jobs.set_enabled(expected.job_id, False)
+        return original_authorize(expected)
+
+    monkeypatch.setattr(jobs, "authorize_dispatch", disable_before_authorize)
     adapter = APSchedulerAdapter(
         jobs,
-        lambda _action_id: lambda payload: calls.append(payload),
+        lambda action_id: resolver_calls.append(action_id) or (lambda _payload: None),
     )
 
     adapter._dispatch(installed.job_id, installed)
 
-    assert calls == []
-    assert jobs.get(installed.job_id) == replacement
+    assert resolver_calls == []
+    persisted = jobs.get(installed.job_id)
+    assert persisted is not None
+    assert persisted.enabled is False
 
 
 def test_authorization_before_pause_preserves_only_claimed_occurrence(
