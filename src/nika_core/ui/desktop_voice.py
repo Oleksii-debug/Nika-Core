@@ -436,25 +436,11 @@ class DesktopVoiceTurnController:
                 request_id=request_id,
                 message="Голосовий сервіс повернув дані, несумісні зі станом помилки.",
             )
-        if evidence.transcription is not None and (
-            type(evidence.transcription) is not SpeechToTextEvidence
-            or type(evidence.transcription.request_id) is not str
-            or evidence.transcription.request_id != request_id
-        ):
+        if not _is_valid_failure_evidence(evidence, request_id):
             return DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.FAILED,
                 request_id=request_id,
-                message="Голосовий сервіс повернув некоректні STT evidence.",
-            )
-        if evidence.wake is not None and (
-            type(evidence.wake) is not WakeActivationEvidence
-            or type(evidence.wake.request_id) is not str
-            or evidence.wake.request_id != request_id
-        ):
-            return DesktopVoiceSnapshot(
-                status=DesktopVoiceStatus.FAILED,
-                request_id=request_id,
-                message="Голосовий сервіс повернув некоректні wake evidence.",
+                message="Голосовий сервіс повернув неузгоджені failure evidence.",
             )
 
         messages = {
@@ -479,6 +465,56 @@ class DesktopVoiceTurnController:
             raise TypeError("voice desktop action payload must be an exact dict")
         if payload:
             raise ValueError("voice desktop action does not accept payload authority")
+
+
+def _is_valid_failure_evidence(
+    evidence: VoiceTurnEvidence,
+    request_id: str,
+) -> bool:
+    capture_status = evidence.capture.status
+    if type(capture_status) is not MicrophoneCaptureStatus:
+        return False
+
+    transcription = evidence.transcription
+    if transcription is not None:
+        if (
+            type(transcription) is not SpeechToTextEvidence
+            or type(transcription.request_id) is not str
+            or type(transcription.status) is not SpeechToTextStatus
+            or transcription.request_id != request_id
+        ):
+            return False
+
+    wake = evidence.wake
+    if wake is not None:
+        if (
+            type(wake) is not WakeActivationEvidence
+            or type(wake.request_id) is not str
+            or type(wake.outcome) is not WakeActivationOutcome
+            or wake.request_id != request_id
+        ):
+            return False
+
+    if evidence.status is VoiceTurnStatus.CAPTURE_FAILED:
+        return (
+            capture_status is not MicrophoneCaptureStatus.SUCCEEDED
+            and transcription is None
+            and wake is None
+        )
+    if evidence.status is VoiceTurnStatus.TRANSCRIPTION_FAILED:
+        return (
+            capture_status is MicrophoneCaptureStatus.SUCCEEDED
+            and transcription is not None
+            and transcription.status is not SpeechToTextStatus.SUCCEEDED
+            and wake is None
+        )
+    if evidence.status is VoiceTurnStatus.INVALID_COMPOSITION:
+        return (
+            capture_status is MicrophoneCaptureStatus.SUCCEEDED
+            and transcription is not None
+            and transcription.status is SpeechToTextStatus.SUCCEEDED
+        )
+    return False
 
 
 def _is_public_transcript(value: object) -> bool:
