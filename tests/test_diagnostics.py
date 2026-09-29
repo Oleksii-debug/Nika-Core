@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.diagnostics as diagnostics
 from nika_core.config import AppConfig
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
@@ -113,6 +114,31 @@ def test_database_symlink_is_rejected(tmp_path: Path) -> None:
     assert check.status is CheckStatus.FAIL
 
 
+def test_bounded_database_inspection_fails_closed_on_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "nika_core.db"
+    SQLiteStore(database).initialize()
+    calls = 0
+
+    def monotonic() -> float:
+        nonlocal calls
+        calls += 1
+        return 0.0 if calls == 1 else 10.0
+
+    monkeypatch.setattr(diagnostics, "_SQLITE_DIAGNOSTIC_SECONDS", 1.0)
+    monkeypatch.setattr(diagnostics, "_SQLITE_PROGRESS_OPCODES", 1)
+    monkeypatch.setattr(diagnostics.time, "monotonic", monotonic)
+
+    report = collect_diagnostics(_config(database))
+
+    check = next(item for item in report.checks if item.check_id == "database")
+    assert check.status is CheckStatus.FAIL
+    assert report.exit_code() == 2
+    assert "bounded integrity inspection" in check.message
+
+
 def test_invalid_environment_configuration_fails_without_echoing_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -126,6 +152,23 @@ def test_invalid_environment_configuration_fails_without_echoing_value(
     assert report.checks[0].check_id == "configuration"
     assert "relative-secret.db" not in report.to_text()
     assert "relative-secret.db" not in report.to_json()
+
+
+def test_public_text_normalizes_control_characters(tmp_path: Path) -> None:
+    config = AppConfig(
+        database_path=tmp_path / "nika_core.db",
+        app_version="0.0.2\r\nforged-version-line",
+        model_provider="mock\nforged-provider-line",
+    )
+
+    report = collect_diagnostics(config)
+    text = report.to_text()
+
+    assert "\r" not in text
+    assert "Version: 0.0.2 forged-version-line" in text
+    provider = next(item for item in report.checks if item.check_id == "model_provider")
+    assert "\n" not in provider.message
+    assert "mock forged-provider-line" in provider.message
 
 
 def test_json_report_has_stable_public_shape(tmp_path: Path) -> None:
