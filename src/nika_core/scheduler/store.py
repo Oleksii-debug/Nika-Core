@@ -241,7 +241,7 @@ def _decode_json_object(raw: object, label: str) -> dict[str, Any]:
             parse_constant=lambda _: _reject_json_constant(label),
             object_pairs_hook=lambda pairs: _strict_json_object(pairs, label),
         )
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise ValueError(f"{label} is corrupt") from exc
     try:
         return _canonical_json_object(decoded, label, depth=0)
