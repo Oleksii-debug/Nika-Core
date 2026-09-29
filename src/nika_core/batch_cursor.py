@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -994,10 +995,37 @@ def _decode_completion_result(
                 ) from exc
         else:
             raise BatchCursorStateError("completed effect wake deadline is malformed")
-        return _json_copy(result), parsed_due
+        return _durable_json_object(result), parsed_due
 
     # Backward compatibility for already-durable pre-envelope V0.1 records.
-    return _json_copy(raw), None
+    return _durable_json_object(raw), None
+
+
+def _durable_json_object(value: dict[str, Any]) -> dict[str, Any]:
+    copied = _durable_json_value(value)
+    if type(copied) is not dict:
+        raise BatchCursorStateError("completed effect result is malformed")
+    return copied
+
+
+def _durable_json_value(value: Any) -> Any:
+    value_type = type(value)
+    if value is None or value_type in {bool, str, int}:
+        return value
+    if value_type is float:
+        if not math.isfinite(value):
+            raise BatchCursorStateError("completed effect result is malformed")
+        return value
+    if value_type is list:
+        return [_durable_json_value(item) for item in value]
+    if value_type is dict:
+        copied: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise BatchCursorStateError("completed effect result is malformed")
+            copied[key] = _durable_json_value(item)
+        return copied
+    raise BatchCursorStateError("completed effect result is malformed")
 
 
 def _json_copy(value: Any) -> Any:
