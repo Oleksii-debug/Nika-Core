@@ -36,6 +36,7 @@ class _LateAfterCancellationAdapter:
             device_id="default-input",
         )
         self.calls = 0
+        self.capture_started = asyncio.Event()
         self.cleanup_started = asyncio.Event()
         self.cleanup_finished = asyncio.Event()
 
@@ -46,6 +47,7 @@ class _LateAfterCancellationAdapter:
     async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResponse:
         self.calls += 1
         if self.calls == 1:
+            self.capture_started.set()
             try:
                 await asyncio.sleep(60)
             except asyncio.CancelledError:
@@ -106,7 +108,7 @@ def test_caller_cancel_returns_without_waiting_for_slow_adapter_cleanup() -> Non
         adapter = _LateAfterCancellationAdapter()
         service = MicrophoneCaptureService(adapter)
         task = asyncio.create_task(service.capture(_request(timeout=1.0)))
-        await asyncio.sleep(0)
+        await asyncio.wait_for(adapter.capture_started.wait(), timeout=0.5)
         loop = asyncio.get_running_loop()
         started = loop.time()
         task.cancel()
