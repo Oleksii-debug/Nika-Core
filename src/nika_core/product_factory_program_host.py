@@ -1112,7 +1112,7 @@ class ProductFactoryProgramHost:
         except asyncio.CancelledError:
             await _cancel_semaphore_admission(admission, semaphore)
             raise
-        except Exception:  # noqa: BLE001 - never leak an admitted semaphore permit
+        except Exception:
             await _cancel_semaphore_admission(admission, semaphore)
             raise
 
@@ -1147,7 +1147,7 @@ class ProductFactoryProgramHost:
         except asyncio.CancelledError:
             await _cancel_effect_task(task)
             raise
-        except Exception:  # noqa: BLE001 - never leave an admitted effect orphaned
+        except Exception:
             await _cancel_effect_task(task)
             raise
 
