@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
-from nika_core.model_gateway.contracts import PrivacyClass
 from nika_core.microphone_capture import MicrophoneCaptureEvidence, MicrophoneCaptureStatus
+from nika_core.model_gateway.contracts import PrivacyClass
 from nika_core.speech_to_text import (
     SpeechAudioFormat,
     SpeechToTextEvidence,
@@ -151,7 +151,7 @@ class DesktopVoiceTurnController:
                     )
             submission_settled.set()
             if isinstance(exc, Exception):
-                raise ValueError("Не вдалося запустити голосовий ввід.") from exc
+                raise RuntimeError("Не вдалося запустити голосовий ввід.") from exc
             raise
         if type(future) is not Future:
             coroutine.close()
@@ -382,10 +382,7 @@ class DesktopVoiceTurnController:
                 self._active is future and self._active_cancel_intent
             )
         if cancellation_requested and not future.cancelled():
-            try:
-                future.result()
-            except BaseException:
-                pass
+            future.exception()
             with self._lock:
                 if self._active is future:
                     self._snapshot = DesktopVoiceSnapshot(
@@ -421,16 +418,15 @@ class DesktopVoiceTurnController:
                 self._clear_active_locked()
             return
         else:
-            try:
-                result = future.result()
-            except BaseException:
+            failure = future.exception()
+            if failure is not None:
                 snapshot = DesktopVoiceSnapshot(
                     status=DesktopVoiceStatus.FAILED,
                     request_id=request_id,
                     message="Голосовий ввід завершився помилкою.",
                 )
             else:
-                snapshot = self._result_snapshot(request_id, result)
+                snapshot = self._result_snapshot(request_id, future.result())
 
         with self._lock:
             if self._active is future:
@@ -617,24 +613,22 @@ def _is_valid_failure_evidence(
         return False
 
     transcription = evidence.transcription
-    if transcription is not None:
-        if (
-            type(transcription) is not SpeechToTextEvidence
-            or type(transcription.request_id) is not str
-            or type(transcription.status) is not SpeechToTextStatus
-            or transcription.request_id != request_id
-        ):
-            return False
+    if transcription is not None and (
+        type(transcription) is not SpeechToTextEvidence
+        or type(transcription.request_id) is not str
+        or type(transcription.status) is not SpeechToTextStatus
+        or transcription.request_id != request_id
+    ):
+        return False
 
     wake = evidence.wake
-    if wake is not None:
-        if (
-            type(wake) is not WakeActivationEvidence
-            or type(wake.request_id) is not str
-            or type(wake.outcome) is not WakeActivationOutcome
-            or wake.request_id != request_id
-        ):
-            return False
+    if wake is not None and (
+        type(wake) is not WakeActivationEvidence
+        or type(wake.request_id) is not str
+        or type(wake.outcome) is not WakeActivationOutcome
+        or wake.request_id != request_id
+    ):
+        return False
 
     if evidence.status is VoiceTurnStatus.CAPTURE_FAILED:
         return (
