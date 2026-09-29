@@ -243,3 +243,124 @@ def test_caller_cancel_during_capability_discovery_propagates_and_fences_reentry
         await _wait_for_cleanup(service)
 
     asyncio.run(scenario())
+
+
+class _HeldCaptureAdapter:
+    def __init__(self) -> None:
+        self._capabilities = MicrophoneCaptureCapabilities(
+            provider_id="local-microphone",
+            device_id="default-input",
+        )
+        self.capture_calls = 0
+        self.active_captures = 0
+        self.max_active_captures = 0
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    @property
+    def capabilities(self) -> MicrophoneCaptureCapabilities:
+        return self._capabilities
+
+    async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResponse:
+        self.capture_calls += 1
+        call_number = self.capture_calls
+        self.active_captures += 1
+        self.max_active_captures = max(self.max_active_captures, self.active_captures)
+        try:
+            if call_number == 1:
+                self.first_started.set()
+                await self.release_first.wait()
+            return MicrophoneCaptureResponse(
+                request_id=request.request_id,
+                provider_id=request.provider_id,
+                device_id=request.device_id,
+                sample_rate_hz=request.sample_rate_hz,
+                pcm_s16le=b"\x05\x00" * request.sample_count,
+            )
+        finally:
+            self.active_captures -= 1
+
+
+def test_concurrent_short_waiter_times_out_without_second_microphone_effect() -> None:
+    async def scenario() -> None:
+        adapter = _HeldCaptureAdapter()
+        service = MicrophoneCaptureService(adapter)
+        first = asyncio.create_task(
+            service.capture(_request(request_id="capture-first", timeout=0.5))
+        )
+        await asyncio.wait_for(adapter.first_started.wait(), timeout=0.2)
+
+        second = await service.capture(_request(request_id="capture-second", timeout=0.02))
+
+        assert second.evidence.error_code is MicrophoneCaptureFailureCode.TIMEOUT
+        assert second.pcm_s16le is None
+        assert adapter.capture_calls == 1
+        assert adapter.max_active_captures == 1
+
+        adapter.release_first.set()
+        first_result = await asyncio.wait_for(first, timeout=0.2)
+        assert first_result.evidence.status is MicrophoneCaptureStatus.SUCCEEDED
+        assert adapter.active_captures == 0
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_long_waiter_runs_only_after_first_capture_releases() -> None:
+    async def scenario() -> None:
+        adapter = _HeldCaptureAdapter()
+        service = MicrophoneCaptureService(adapter)
+        first = asyncio.create_task(
+            service.capture(_request(request_id="capture-first", timeout=0.5))
+        )
+        await asyncio.wait_for(adapter.first_started.wait(), timeout=0.2)
+        second = asyncio.create_task(
+            service.capture(_request(request_id="capture-second", timeout=0.5))
+        )
+        await asyncio.sleep(0.02)
+
+        assert adapter.capture_calls == 1
+        assert adapter.max_active_captures == 1
+
+        adapter.release_first.set()
+        first_result, second_result = await asyncio.gather(first, second)
+
+        assert first_result.evidence.status is MicrophoneCaptureStatus.SUCCEEDED
+        assert second_result.evidence.status is MicrophoneCaptureStatus.SUCCEEDED
+        assert adapter.capture_calls == 2
+        assert adapter.max_active_captures == 1
+        assert adapter.active_captures == 0
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_lock_waiter_cannot_run_after_active_capture_releases() -> None:
+    async def scenario() -> None:
+        adapter = _HeldCaptureAdapter()
+        service = MicrophoneCaptureService(adapter)
+        first = asyncio.create_task(
+            service.capture(_request(request_id="capture-first", timeout=0.5))
+        )
+        await asyncio.wait_for(adapter.first_started.wait(), timeout=0.2)
+        second = asyncio.create_task(
+            service.capture(_request(request_id="capture-second", timeout=0.5))
+        )
+        await asyncio.sleep(0)
+
+        second.cancel()
+        try:
+            await second
+        except asyncio.CancelledError:
+            pass
+        else:
+            raise AssertionError("cancelled lock waiter must propagate cancellation")
+
+        adapter.release_first.set()
+        first_result = await asyncio.wait_for(first, timeout=0.2)
+        await asyncio.sleep(0)
+
+        assert first_result.evidence.status is MicrophoneCaptureStatus.SUCCEEDED
+        assert adapter.capture_calls == 1
+        assert adapter.max_active_captures == 1
+        assert adapter.active_captures == 0
+
+    asyncio.run(scenario())

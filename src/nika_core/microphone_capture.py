@@ -222,6 +222,7 @@ class MicrophoneCaptureService:
 
     def __init__(self, adapter: MicrophoneCaptureAdapter) -> None:
         self._adapter = adapter
+        self._capture_lock = asyncio.Lock()
         self._cleanup_futures: set[asyncio.Future[object]] = set()
 
     @property
@@ -231,7 +232,29 @@ class MicrophoneCaptureService:
 
     async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResult:
         request = _snapshot_request(request)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + request.policy.timeout_seconds
+        try:
+            await asyncio.wait_for(
+                self._capture_lock.acquire(),
+                timeout=max(0.0, deadline - loop.time()),
+            )
+        except TimeoutError:
+            return self._failure(
+                request,
+                code=MicrophoneCaptureFailureCode.TIMEOUT,
+                retryable=True,
+            )
+        try:
+            return await self._capture_serialized(request, deadline)
+        finally:
+            self._capture_lock.release()
 
+    async def _capture_serialized(
+        self,
+        request: MicrophoneCaptureRequest,
+        deadline: float,
+    ) -> MicrophoneCaptureResult:
         if self.cleanup_pending:
             return self._failure(
                 request,
@@ -241,7 +264,6 @@ class MicrophoneCaptureService:
             )
 
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + request.policy.timeout_seconds
 
         if request.expected_audio_bytes > request.policy.max_audio_bytes:
             return self._failure(
