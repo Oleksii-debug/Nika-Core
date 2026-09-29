@@ -351,7 +351,6 @@ def test_cli_configuration_failure_uses_stable_sanitized_message(
     assert _SECRET_CANARY not in output
 
 
-
 def test_cli_config_loader_does_not_use_startup_legacy_preparation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
