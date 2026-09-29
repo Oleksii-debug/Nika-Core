@@ -176,6 +176,40 @@ def test_registry_blocks_post_registration_noncallable_effect_drift(
         registry.describe()
 
 
+@pytest.mark.parametrize("effect_name", ("run", "resume", "cancel"))
+def test_registry_blocks_post_registration_callable_effect_replacement(
+    effect_name: str,
+) -> None:
+    class _MutableRuntime:
+        runtime_id = "mutable-callable"
+        capabilities = frozenset({RuntimeCapability.DETERMINISTIC_NO_LLM})
+
+        async def run(self, request) -> None:
+            del request
+
+        async def resume(self, request) -> None:
+            del request
+
+        async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+            del task_id, thread_id
+            return False
+
+    async def replacement(*args, **kwargs) -> None:
+        del args, kwargs
+
+    runtime = _MutableRuntime()
+    registry = RuntimeRegistry()
+    registry.register(runtime)
+    setattr(runtime, effect_name, replacement)
+
+    with pytest.raises(RuntimeError, match="runtime effects changed"):
+        registry.get("mutable-callable")
+    with pytest.raises(RuntimeError, match="runtime effects changed"):
+        registry.select({RuntimeCapability.DETERMINISTIC_NO_LLM})
+    with pytest.raises(RuntimeError, match="runtime effects changed"):
+        registry.describe()
+
+
 def test_registry_returns_stable_snapshot_descriptors() -> None:
     registry = RuntimeRegistry()
     first = ReferenceRuntime()

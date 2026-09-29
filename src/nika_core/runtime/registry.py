@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from inspect import getattr_static
 
 from nika_core.runtime.contracts import AgentRuntimePort, RuntimeCapability
 
@@ -18,6 +19,7 @@ class RuntimeDescriptor:
 class _RegisteredRuntime:
     runtime: AgentRuntimePort
     descriptor: RuntimeDescriptor
+    effects: tuple[object, object, object]
 
 
 def _canonical_runtime_id(value: object) -> str:
@@ -58,6 +60,20 @@ def _require_effect_callables(runtime: AgentRuntimePort) -> None:
             raise TypeError(f"runtime effect must be callable: {effect_name}")
 
 
+_EFFECT_NOT_STATIC = object()
+
+
+def _snapshot_effects(runtime: AgentRuntimePort) -> tuple[object, object, object]:
+    snapshots: list[object] = []
+    for effect_name in ("run", "resume", "cancel"):
+        effect = getattr(runtime, effect_name, None)
+        if not callable(effect):
+            raise TypeError(f"runtime effect must be callable: {effect_name}")
+        static_effect = getattr_static(runtime, effect_name, _EFFECT_NOT_STATIC)
+        snapshots.append(effect if static_effect is _EFFECT_NOT_STATIC else static_effect)
+    return snapshots[0], snapshots[1], snapshots[2]
+
+
 class RuntimeRegistry:
     def __init__(self) -> None:
         self._runtimes: dict[str, _RegisteredRuntime] = {}
@@ -66,12 +82,13 @@ class RuntimeRegistry:
         if not isinstance(runtime, AgentRuntimePort):
             raise TypeError("runtime must implement AgentRuntimePort")
         descriptor = _snapshot_runtime(runtime)
-        _require_effect_callables(runtime)
+        effects = _snapshot_effects(runtime)
         if descriptor.runtime_id in self._runtimes:
             raise ValueError(f"Runtime already registered: {descriptor.runtime_id}")
         self._runtimes[descriptor.runtime_id] = _RegisteredRuntime(
             runtime=runtime,
             descriptor=descriptor,
+            effects=effects,
         )
 
     def get(self, runtime_id: str) -> AgentRuntimePort:
@@ -118,9 +135,18 @@ class RuntimeRegistry:
                 "registered runtime identity or capabilities became invalid"
             ) from exc
         try:
-            _require_effect_callables(registered.runtime)
+            current_effects = _snapshot_effects(registered.runtime)
         except TypeError as exc:
             raise RuntimeError("registered runtime effects became invalid") from exc
         if current != registered.descriptor:
             raise RuntimeError("registered runtime identity or capabilities changed")
+        if any(
+            current_effect is not registered_effect
+            for current_effect, registered_effect in zip(
+                current_effects,
+                registered.effects,
+                strict=True,
+            )
+        ):
+            raise RuntimeError("registered runtime effects changed")
         return registered.runtime
