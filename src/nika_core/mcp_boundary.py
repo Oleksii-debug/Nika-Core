@@ -33,6 +33,15 @@ def _exact_utf8_text(
     return value
 
 
+def _exact_mcp_segment(value: object, *, field: str) -> str:
+    text = _exact_utf8_text(value, field=field, non_empty=True)
+    if text != text.strip():
+        raise ValueError(f"{field} must not contain edge whitespace")
+    if ":" in text:
+        raise ValueError(f"{field} must not contain ':'")
+    return text
+
+
 def _exact_tool_risk(value: object) -> ToolRisk:
     if type(value) is not ToolRisk:
         raise TypeError("default_risk must be an exact ToolRisk")
@@ -76,7 +85,7 @@ class MCPServerConfig:
     default_risk: ToolRisk = ToolRisk.EXTERNAL_SIDE_EFFECT
 
     def __post_init__(self) -> None:
-        _exact_utf8_text(self.server_id, field="server_id", non_empty=True)
+        _exact_mcp_segment(self.server_id, field="server_id")
         _exact_tool_risk(self.default_risk)
 
 
@@ -93,11 +102,7 @@ class MCPClientAdapter:
         if type(config) is not MCPServerConfig:
             raise TypeError("config must be an exact MCPServerConfig")
         try:
-            server_id = _exact_utf8_text(
-                config.server_id,
-                field="server_id",
-                non_empty=True,
-            )
+            server_id = _exact_mcp_segment(config.server_id, field="server_id")
             target = config.target
             default_risk = _exact_tool_risk(config.default_risk)
         except AttributeError as exc:
@@ -114,10 +119,9 @@ class MCPClientAdapter:
             result = await client.list_tools()
         specs: list[ToolSpec] = []
         for tool in result.tools:
-            tool_name = _exact_utf8_text(
+            tool_name = _exact_mcp_segment(
                 tool.name,
                 field="MCP tool name",
-                non_empty=True,
             )
             specs.append(
                 ToolSpec(
@@ -145,7 +149,7 @@ class MCPClientAdapter:
                 tool_id=canonical_call.tool_id,
                 error="invalid MCP tool id",
             )
-        _exact_utf8_text(tool_name, field="MCP tool name", non_empty=True)
+        tool_name = _exact_mcp_segment(tool_name, field="MCP tool name")
         spec = ToolSpec(
             tool_id=canonical_call.tool_id,
             description=f"MCP tool {tool_name}",
