@@ -357,6 +357,14 @@ def test_terminal_parent_task_suppresses_durable_job_on_fresh_host_start(
     try:
         assert not restarted.runtime_job_installed("host-read")
         assert restarted._jobs.list_enabled() == ()
+
+        reconciled = restarted.get("host-read")
+        assert reconciled is not None
+        assert reconciled.status is RecurrenceStatus.CANCELLED
+        assert reconciled.next_due_at is None
+        assert reconciled.next_occurrence_id is None
+        assert restarted.get("host-read") == reconciled
+
         events = audit.list_for(entity_type="scheduled_job", entity_id=job_id)
         suppressed = [
             event
