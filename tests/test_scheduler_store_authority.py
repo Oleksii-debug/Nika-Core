@@ -149,6 +149,41 @@ def test_persisted_numeric_corruption_fails_closed(
         store.get("job-1")
 
 
+@pytest.mark.parametrize("stored_enabled", (2, -1))
+def test_list_enabled_rejects_corrupt_enabled_state(
+    tmp_path: Path,
+    stored_enabled: int,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            "UPDATE scheduled_jobs SET enabled = ? WHERE job_id = ?",
+            (stored_enabled, "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="persisted enabled is corrupt"):
+        store.list_enabled()
+
+
+def test_list_enabled_still_skips_valid_disabled_job_payload(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+    assert store.set_enabled("job-1", False) is True
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            ('{"broken":[1,2,3}', "job-1"),
+        )
+
+    assert store.list_enabled() == ()
+
+
 def test_persisted_nonfinite_json_fails_closed(tmp_path: Path) -> None:
     sqlite = _sqlite(tmp_path)
     store = ScheduledJobStore(sqlite)
