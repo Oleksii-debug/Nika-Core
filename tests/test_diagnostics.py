@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 
 from nika_core.config import AppConfig
+from nika_core.data.schema import SCHEMA_VERSION
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import CheckStatus, collect_diagnostics
 
 
@@ -30,10 +32,7 @@ def test_missing_data_directory_warns_without_creating_it(tmp_path: Path) -> Non
 
 def test_existing_database_is_checked_read_only(tmp_path: Path) -> None:
     database = tmp_path / "nika_core.db"
-    connection = sqlite3.connect(database)
-    connection.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY)")
-    connection.commit()
-    connection.close()
+    SQLiteStore(database).initialize()
     before = database.read_bytes()
 
     report = collect_diagnostics(_config(database))
@@ -43,6 +42,44 @@ def test_existing_database_is_checked_read_only(tmp_path: Path) -> None:
     check = next(item for item in report.checks if item.check_id == "database")
     assert check.status is CheckStatus.PASS
     assert "tables=1" in check.message
+
+
+def test_newer_core_schema_fails_closed(tmp_path: Path) -> None:
+    database = tmp_path / "nika_core.db"
+    SQLiteStore(database).initialize()
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+        (SCHEMA_VERSION + 1, "future"),
+    )
+    connection.commit()
+    connection.close()
+
+    report = collect_diagnostics(_config(database))
+
+    check = next(item for item in report.checks if item.check_id == "core_schema")
+    assert check.status is CheckStatus.FAIL
+    assert report.status is CheckStatus.FAIL
+
+
+def test_older_core_schema_warns_without_migrating(tmp_path: Path) -> None:
+    database = tmp_path / "nika_core.db"
+    SQLiteStore(database).initialize()
+    connection = sqlite3.connect(database)
+    connection.execute(
+        "DELETE FROM schema_migrations WHERE version = ?",
+        (SCHEMA_VERSION,),
+    )
+    connection.commit()
+    connection.close()
+    before = database.read_bytes()
+
+    report = collect_diagnostics(_config(database))
+
+    check = next(item for item in report.checks if item.check_id == "core_schema")
+    assert check.status is CheckStatus.WARN
+    assert report.status is CheckStatus.WARN
+    assert database.read_bytes() == before
 
 
 def test_corrupt_database_fails_without_echoing_path(tmp_path: Path) -> None:
