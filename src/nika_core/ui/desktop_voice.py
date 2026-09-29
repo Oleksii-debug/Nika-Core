@@ -13,6 +13,7 @@ from typing import Any
 from nika_core.microphone_capture import MicrophoneCaptureEvidence, MicrophoneCaptureStatus
 from nika_core.speech_to_text import SpeechToTextEvidence, SpeechToTextStatus
 from nika_core.ui.bridge_models import UIResult
+from nika_core.wake_activation import WakeActivationEvidence, WakeActivationOutcome
 from nika_core.voice_turn import (
     OneShotVoiceTurnService,
     VoiceTurnEvidence,
