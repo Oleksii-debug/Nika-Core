@@ -564,7 +564,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 (task_id,),
             ).fetchone()
         if row is None:
-            return False
+            raise KeyError(f"task not found: {task_id}")
         payload = json.loads(row["payload_json"])
         if not isinstance(payload, dict):
             raise TypeError("task payload must be an object")
