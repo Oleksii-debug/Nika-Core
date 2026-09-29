@@ -490,6 +490,34 @@ def test_unexpected_port_failure_is_privacy_minimized() -> None:
     assert "CANARY" not in str(error.value)
 
 
+def test_fatal_port_failure_terminalizes_worker_state() -> None:
+    class FatalPort(FakeSpeechPort):
+        def speak(
+            self,
+            request: SpeechRequest,
+            *,
+            timeout_seconds: float = 120.0,
+            cancel_event: threading.Event | None = None,
+        ) -> SpeechReceipt:
+            del request, timeout_seconds, cancel_event
+            raise KeyboardInterrupt("CANARY_FATAL_PORT_DETAIL")
+
+    stream = IncrementalSpeechStream(FatalPort())
+    stream.feed("Приватний текст.")
+    stream.finish()
+    assert stream.wait(1)
+
+    snapshot = stream.snapshot()
+    assert snapshot.state is SpeechStreamState.FAILED
+    assert snapshot.cancellation_requested is False
+
+    with pytest.raises(SpeechError) as error:
+        stream.result()
+
+    assert error.value.code is SpeechErrorCode.PROCESS_FAILED
+    assert "CANARY" not in str(error.value)
+
+
 @pytest.mark.parametrize(
     "mutator",
     [
