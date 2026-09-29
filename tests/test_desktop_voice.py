@@ -684,7 +684,7 @@ def test_close_waits_for_submission_then_cancels_resulting_future() -> None:
     def close_voice() -> None:
         try:
             controller.close(timeout_seconds=1.0)
-        except Exception as exc:
+        except RuntimeError as exc:
             close_errors.append(exc)
         finally:
             close_done.set()
