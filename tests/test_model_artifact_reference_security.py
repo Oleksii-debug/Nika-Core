@@ -44,6 +44,16 @@ def _descriptor() -> ModelArtifactDescriptor:
         "subscription_key=MODEL_CANARY",
         "subscriptionkey=MODEL_CANARY",
         "Ocp-Apim-Subscription-Key: MODEL_CANARY",
+        "SharedAccessSignature=MODEL_CANARY",
+        (
+            "urn:model:azure:"
+            "sv=2022-11-02&sp=r&se=2030-01-01T00:00:00Z&sr=b&sig=MODEL_CANARY"
+        ),
+        (
+            "urn:model:azure:"
+            "%73v%3D2022-11-02%26%73p%3Dr%26%73e%3D2030-01-01T00%3A00%3A00Z"
+            "%26%73r%3Db%26%73ig%3DMODEL_CANARY"
+        ),
         "urn:model:provider-public:id_token=MODEL_CANARY",
         "urn:model:provider-public:id_token_hint=MODEL_CANARY",
         "urn:model:provider-public:subscription-key=MODEL_CANARY",
@@ -69,6 +79,8 @@ def test_public_reference_rejects_encoded_or_bare_credentials(reference: str) ->
         "urn:model:provider-public:subscription-key-count=3",
         "urn:model:provider-public:subscription_key_count=3",
         "urn:model:provider-public:subscriptionkey_count=3",
+        "urn:model:provider-public:sig=public-detached-signature",
+        "urn:model:provider-public:sv=1&sig=public-signature",
     ),
 )
 def test_opaque_public_reference_preserves_benign_id_token_metadata(reference: str) -> None:
