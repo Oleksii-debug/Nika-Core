@@ -832,6 +832,7 @@ def test_study_material_keeps_nonsecret_oauth_metadata_across_restart(tmp_path) 
     safe_ref = (
         "https://example.test/book.pdf?client_id=public-client"
         "&client_assertion_type=jwt-bearer&client_secret_count=0"
+        "&reassertion=public-label"
     )
     path, _, queue = _services(tmp_path)
     created = queue.enqueue(
