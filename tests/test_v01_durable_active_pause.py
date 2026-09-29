@@ -614,6 +614,19 @@ def test_late_non_cancelled_runtime_outcome_keeps_pause_uncertain(tmp_path) -> N
             await coordinator.resume_saved(runtime, task_id=task_id)
         assert runtime.resume_calls == 0
 
+        assert runtime.cancel_calls == 1
+        with pytest.raises(IdempotencyConflictError, match="pause is pending or uncertain"):
+            await coordinator.cancel(runtime, task_id=task_id, thread_id=thread_id)
+        assert runtime.cancel_calls == 1
+        assert queue.get(task_id).state is TaskState.PAUSED
+        assert coordinator.sessions.get(task_id) is not None
+        cancel_records = tuple(
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.cancel"
+        )
+        assert cancel_records == ()
+
     asyncio.run(scenario())
 
 
