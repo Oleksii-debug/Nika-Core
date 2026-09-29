@@ -367,6 +367,8 @@ class DesktopVoiceTurnController:
                 or transcription.status is not SpeechToTextStatus.SUCCEEDED
                 or type(wake) is not WakeActivationEvidence
                 or type(wake.outcome) is not WakeActivationOutcome
+                or type(transcription.request_id) is not str
+                or type(wake.request_id) is not str
                 or transcription.request_id != request_id
                 or wake.request_id != request_id
                 or type(result.transcript) is not str
@@ -378,9 +380,7 @@ class DesktopVoiceTurnController:
                     message="Голосовий сервіс повернув неузгоджений успішний результат.",
                 )
             if (
-                type(transcription.request_id) is not str
-                or type(wake.request_id) is not str
-                or not _is_sha256(evidence.capture.audio_sha256)
+                not _is_sha256(evidence.capture.audio_sha256)
                 or not _is_sha256(transcription.audio_sha256)
                 or not _is_sha256(transcription.transcript_sha256)
                 or not _is_sha256(wake.transcript_sha256)
