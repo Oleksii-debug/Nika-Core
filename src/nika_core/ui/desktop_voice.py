@@ -14,7 +14,12 @@ from enum import StrEnum
 from typing import Any
 
 from nika_core.microphone_capture import MicrophoneCaptureEvidence, MicrophoneCaptureStatus
-from nika_core.speech_to_text import SpeechToTextEvidence, SpeechToTextStatus
+from nika_core.model_gateway.contracts import PrivacyClass
+from nika_core.speech_to_text import (
+    SpeechAudioFormat,
+    SpeechToTextEvidence,
+    SpeechToTextStatus,
+)
 from nika_core.ui.bridge_models import UIResult
 from nika_core.voice_turn import (
     OneShotVoiceTurnService,
@@ -510,6 +515,17 @@ class DesktopVoiceTurnController:
                 or not _is_public_transcript(result.transcript)
                 or type(transcription.transcript_chars) is not int
                 or transcription.transcript_chars != len(result.transcript)
+                or type(evidence.capture.audio_byte_count) is not int
+                or type(evidence.capture.sample_rate_hz) is not int
+                or type(transcription.audio_bytes) is not int
+                or type(transcription.sample_rate_hz) is not int
+                or type(transcription.channels) is not int
+                or transcription.audio_bytes != evidence.capture.audio_byte_count
+                or transcription.sample_rate_hz != evidence.capture.sample_rate_hz
+                or transcription.channels != 1
+                or transcription.audio_format is not SpeechAudioFormat.PCM_S16LE
+                or transcription.privacy is not PrivacyClass.SENSITIVE
+                or not _is_valid_wake_evidence(wake)
             ):
                 return DesktopVoiceSnapshot(
                     status=DesktopVoiceStatus.FAILED,
@@ -650,6 +666,26 @@ def _is_valid_failure_evidence(
             and wake.transcript_sha256 != transcription.transcript_sha256
         )
     return False
+
+
+def _is_valid_wake_evidence(evidence: WakeActivationEvidence) -> bool:
+    if type(evidence.token_count) is not int or evidence.token_count < 0:
+        return False
+    if evidence.outcome is WakeActivationOutcome.NOT_DETECTED:
+        return (
+            evidence.matched_phrase_sha256 is None
+            and evidence.match_start_token is None
+            and evidence.match_end_token_exclusive is None
+        )
+    if evidence.outcome is not WakeActivationOutcome.DETECTED:
+        return False
+    return (
+        _is_sha256(evidence.matched_phrase_sha256)
+        and type(evidence.match_start_token) is int
+        and type(evidence.match_end_token_exclusive) is int
+        and 0 <= evidence.match_start_token < evidence.match_end_token_exclusive
+        and evidence.match_end_token_exclusive <= evidence.token_count
+    )
 
 
 def _is_public_transcript(value: object) -> bool:
