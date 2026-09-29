@@ -132,3 +132,51 @@ def test_keymap_transport_contains_unexpected_failures_without_exposing_details(
     assert secret_canary not in response["message"]
     assert secret_canary not in caplog.text
     assert "OSError" in caplog.text
+
+
+@pytest.mark.parametrize("raw", [None, [], 42, "not-a-command"])
+def test_dispatch_rejects_non_mapping_payload_without_transport_escape(
+    tmp_path: Path, raw
+) -> None:
+    bridge = _bridge(tmp_path)
+
+    response = bridge.dispatch(raw)
+
+    assert response["request_id"] == "invalid"
+    assert response["status"] == "rejected"
+    assert response["message"].startswith("Invalid UI command:")
+
+
+@pytest.mark.parametrize("request_id", [None, 7, "", "x" * 121])
+def test_dispatch_does_not_coerce_invalid_request_id_on_rejection(
+    tmp_path: Path, request_id
+) -> None:
+    bridge = _bridge(tmp_path)
+
+    response = bridge.dispatch(
+        {
+            "request_id": request_id,
+            "action_id": "INVALID ACTION",
+            "payload": {},
+        }
+    )
+
+    assert response["request_id"] == "invalid"
+    assert response["status"] == "rejected"
+
+
+def test_dispatch_preserves_canonical_request_id_on_other_validation_failure(
+    tmp_path: Path,
+) -> None:
+    bridge = _bridge(tmp_path)
+
+    response = bridge.dispatch(
+        {
+            "request_id": "request-17",
+            "action_id": "INVALID ACTION",
+            "payload": {},
+        }
+    )
+
+    assert response["request_id"] == "request-17"
+    assert response["status"] == "rejected"

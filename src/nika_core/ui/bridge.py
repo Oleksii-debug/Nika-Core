@@ -35,12 +35,12 @@ class UIActionBridge:
         self._handlers = dict(handlers or {})
         self._state_provider = state_provider
 
-    def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
+    def dispatch(self, raw: object) -> dict[str, Any]:
         try:
             command = UICommand.model_validate(raw)
         except ValidationError as exc:
             return UIResult(
-                request_id=str(raw.get("request_id", "invalid")),
+                request_id=self._rejected_request_id(raw),
                 status="rejected",
                 message=f"Invalid UI command: {exc.errors()[0]['msg']}",
             ).model_dump()
@@ -98,6 +98,17 @@ class UIActionBridge:
             status="completed",
             message="" if outcome is None else str(outcome),
         ).model_dump()
+
+    @staticmethod
+    def _rejected_request_id(raw: object) -> str:
+        if type(raw) is not dict:
+            return "invalid"
+        request_id = raw.get("request_id")
+        if type(request_id) is not str:
+            return "invalid"
+        if not request_id or len(request_id) > 120:
+            return "invalid"
+        return request_id
 
     def get_state(self) -> dict[str, Any]:
         if self._state_provider is None:
