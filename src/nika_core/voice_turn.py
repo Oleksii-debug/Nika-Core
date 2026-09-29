@@ -20,7 +20,6 @@ from nika_core.speech_to_text import (
     SpeechToTextService,
     SpeechToTextStatus,
 )
-from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureAdapter
 from nika_core.wake_activation import (
     MAX_TRANSCRIPT_CHARS,
     WakeActivationDetector,
@@ -28,6 +27,7 @@ from nika_core.wake_activation import (
     WakeActivationEvidence,
     WakeActivationOutcome,
 )
+from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureAdapter
 
 
 class VoiceTurnStatus(StrEnum):
