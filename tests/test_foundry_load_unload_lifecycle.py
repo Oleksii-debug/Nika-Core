@@ -268,6 +268,32 @@ def test_failed_load_that_reports_loaded_is_not_promoted_to_ready() -> None:
     asyncio.run(scenario())
 
 
+def test_close_retries_cleanup_for_tainted_partial_load() -> None:
+    model = LifecycleModel()
+    model.dirty_fail_load_on.add(1)
+    model.sticky_unload = True
+    provider = provider_for(model)
+
+    with pytest.raises(ModelGatewayError):
+        asyncio.run(provider.complete(request("dirty-failure")))
+
+    assert model.is_loaded is True
+    assert model.unload_count == 1
+
+    with pytest.raises(ModelGatewayError) as still_tainted:
+        provider.close()
+
+    assert still_tainted.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert model.unload_count == 2
+    assert model.is_loaded is True
+
+    model.sticky_unload = False
+    provider.close()
+
+    assert model.unload_count == 3
+    assert model.is_loaded is False
+
+
 def test_load_must_establish_ready_before_chat() -> None:
     model = LifecycleModel()
     model.not_ready_load_on.add(1)
