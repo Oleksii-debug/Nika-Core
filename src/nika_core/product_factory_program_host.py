@@ -272,6 +272,11 @@ class ProductFactoryProgramHost:
                 with self.store.connection() as connection:
                     connection.execute("BEGIN IMMEDIATE")
                     self._assert_lease(connection, lease)
+                    self._clear_stale_recovery_claim_for_reconciliation(
+                        connection,
+                        operation_key,
+                        lease,
+                    )
                     try:
                         current = self._ledger._require_with_connection(
                             connection,
@@ -872,6 +877,37 @@ class ProductFactoryProgramHost:
                         "active recovery claim belongs to another authority generation"
                     )
             return current
+
+    def _clear_stale_recovery_claim_for_reconciliation(
+        self,
+        connection,
+        operation_key: str,
+        lease: WorkOwnershipLease,
+    ) -> None:
+        row = connection.execute(
+            "SELECT project_id, work_id, owner_id, fence "
+            "FROM product_factory_recovery_claims WHERE operation_key = ?",
+            (operation_key,),
+        ).fetchone()
+        if row is None:
+            return
+        same_work = (
+            row["project_id"] == lease.project_id
+            and row["work_id"] == lease.work_id
+        )
+        stale_claim = (
+            same_work
+            and type(row["fence"]) is int
+            and row["fence"] < lease.fence
+        )
+        if not stale_claim:
+            raise ProductFactoryProgramError(
+                "active recovery claim blocks terminal reconciliation"
+            )
+        connection.execute(
+            "DELETE FROM product_factory_recovery_claims WHERE operation_key = ?",
+            (operation_key,),
+        )
 
     def _drop_recovery_claim(
         self,
