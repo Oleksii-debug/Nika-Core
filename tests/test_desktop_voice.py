@@ -774,3 +774,41 @@ def test_non_hex_audio_digest_cannot_satisfy_success_evidence_binding() -> None:
     assert snapshot.status is DesktopVoiceStatus.FAILED
     assert snapshot.transcript is None
 
+def test_behavioral_digest_cannot_strand_precompleted_future_callback() -> None:
+    class BehavioralStr(str):
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral digest equality must not execute")
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral digest inequality must not execute")
+
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-forged"))
+    )
+    assert result.evidence.transcription is not None
+    object.__setattr__(
+        result.evidence.transcription,
+        "audio_sha256",
+        BehavioralStr(result.evidence.transcription.audio_sha256 or ""),
+    )
+
+    def immediate_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        coroutine.close()
+        future: Future[Any] = Future()
+        future.set_result(result)
+        return future
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=immediate_submit,
+    )
+
+    assert controller.start({}).status == "accepted"
+    snapshot = controller.snapshot()
+    assert snapshot["status"] == DesktopVoiceStatus.FAILED.value
+    assert snapshot["active"] is False
+    assert snapshot["transcript"] is None
+
