@@ -910,7 +910,7 @@ def test_installed_callback_rejects_same_action_replacement_before_resolver(tmp_
     adapter.shutdown(wait=False)
 
 
-def test_installed_callback_rejects_same_action_replacement_during_resolver(tmp_path) -> None:
+def test_authorized_callback_allows_current_effect_when_resolver_replaces_future_job(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Callback Resolver Snapshot" / "nika core.db")
     store.initialize()
     jobs = ScheduledJobStore(store)
@@ -953,7 +953,7 @@ def test_installed_callback_rejects_same_action_replacement_during_resolver(tmp_
 
     durable = jobs.get("job-resolver-snapshot")
     runtime = adapter._scheduler.get_job("job-resolver-snapshot")
-    assert handled == []
+    assert handled == [{"generation": "old"}]
     assert durable is not None
     assert durable.payload == {"generation": "new"}
     assert runtime is not None
@@ -961,7 +961,7 @@ def test_installed_callback_rejects_same_action_replacement_during_resolver(tmp_
     adapter.shutdown(wait=False)
 
 
-def test_dispatch_rechecks_durable_job_after_resolver_pause(tmp_path) -> None:
+def test_authorized_callback_allows_current_effect_when_resolver_pauses_future_job(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Dispatch Fence" / "nika core.db")
     store.initialize()
     queue = TaskQueue(store)
@@ -997,7 +997,7 @@ def test_dispatch_rechecks_durable_job_after_resolver_pause(tmp_path) -> None:
     assert durable is not None
     assert durable.enabled is False
     assert not adapter.has_runtime_job("job-live-race")
-    assert calls == []
+    assert calls == ["live-race"]
     adapter.shutdown(wait=False)
 
 
