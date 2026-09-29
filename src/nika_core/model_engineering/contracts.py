@@ -249,6 +249,18 @@ class CaseBenchmarkResult:
         if not isfinite(latency) or latency < 0:
             raise ValueError("latency_ms must be finite and non-negative")
         _optional_sha256(self.response_sha256, "response_sha256")
+        for snapshot, name in (
+            (self.resource_before, "resource_before"),
+            (self.resource_after, "resource_after"),
+        ):
+            if snapshot is not None and type(snapshot) is not ResourceSnapshot:
+                raise TypeError(f"{name} must be an exact ResourceSnapshot")
+        for snapshot, name in (
+            (self.accelerator_before, "accelerator_before"),
+            (self.accelerator_after, "accelerator_after"),
+        ):
+            if snapshot is not None and type(snapshot) is not AcceleratorSnapshot:
+                raise TypeError(f"{name} must be an exact AcceleratorSnapshot")
         for value, name in (
             (self.input_tokens, "input_tokens"),
             (self.output_tokens, "output_tokens"),
