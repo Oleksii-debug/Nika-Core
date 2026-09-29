@@ -739,7 +739,8 @@ def test_begin_effect_revalidates_already_confirmed_durable_result_without_mutat
                             "result": {"ok": False},
                             "next_batch_not_before": None,
                         }
-                    }
+                    },
+                    sort_keys=True,
                 ),
                 grant.operation_key,
             ),
