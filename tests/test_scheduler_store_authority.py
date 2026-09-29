@@ -311,3 +311,42 @@ def test_non_utf8_surrogate_text_is_rejected_before_persistence(
         store.upsert(_job(**overrides))
 
     assert store.get("job-1") is None
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    (
+        {"payload": {"value": "x" * 270_000}},
+        {"trigger": {"run_date": "x" * 270_000}},
+    ),
+)
+def test_oversized_incoming_json_is_rejected(
+    tmp_path: Path,
+    overrides: dict[str, object],
+) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(ValueError, match="exceeds durable JSON size limit"):
+        store.upsert(_job(**overrides))
+
+    assert store.get("job-1") is None
+
+
+@pytest.mark.parametrize("column", ("payload_json", "trigger_json"))
+def test_oversized_persisted_json_fails_closed(
+    tmp_path: Path,
+    column: str,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    oversized = '{"value":"' + ("x" * 270_000) + '"}'
+    with sqlite.connection() as conn:
+        conn.execute(
+            f"UPDATE scheduled_jobs SET {column} = ? WHERE job_id = ?",
+            (oversized, "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="exceeds durable JSON size limit"):
+        store.get("job-1")

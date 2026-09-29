@@ -12,6 +12,7 @@ from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
 
 IMMUTABLE_JOB_BINDING_KEY = "_nika_immutable_job_binding_v1"
 _MAX_JSON_DEPTH = 32
+_MAX_JSON_BYTES = 262_144
 
 
 class ScheduledJobStore:
@@ -64,8 +65,8 @@ class ScheduledJobStore:
                 job.job_id,
                 job.action_id,
                 job.trigger_kind.value,
-                _encode_json(trigger),
-                _encode_json(payload),
+                _encode_json(trigger, "trigger"),
+                _encode_json(payload, "payload"),
                 int(job.enabled),
                 int(job.coalesce),
                 job.max_instances,
@@ -224,18 +225,27 @@ def _canonical_json_value(value: object, label: str, *, depth: int) -> Any:
     raise TypeError(f"{label} must contain only exact JSON-compatible values")
 
 
-def _encode_json(value: dict[str, Any]) -> str:
-    return json.dumps(
+def _encode_json(value: dict[str, Any], label: str) -> str:
+    encoded = json.dumps(
         value,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
     )
+    if len(encoded.encode("utf-8")) > _MAX_JSON_BYTES:
+        raise ValueError(f"{label} exceeds durable JSON size limit")
+    return encoded
 
 
 def _decode_json_object(raw: object, label: str) -> dict[str, Any]:
     if type(raw) is not str:
         raise ValueError(f"{label} is corrupt")
+    try:
+        raw_bytes = raw.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} is corrupt") from exc
+    if len(raw_bytes) > _MAX_JSON_BYTES:
+        raise ValueError(f"{label} exceeds durable JSON size limit")
     try:
         decoded = json.loads(
             raw,
