@@ -38,8 +38,7 @@ class APSchedulerAdapter(SchedulerPort):
         if self._started:
             return
         for job in self._jobs.list_enabled():
-            if self._task_authority_allows(job):
-                self._install(job)
+            self._sync_runtime_job(job.job_id)
         self._scheduler.start()
         self._started = True
 
@@ -56,11 +55,7 @@ class APSchedulerAdapter(SchedulerPort):
         self._jobs.upsert(job)
         effective_job = self._required_job(job_id)
         if self._started:
-            allowed = effective_job.enabled and self._task_authority_allows(effective_job)
-            if allowed:
-                self._install(effective_job)
-            elif self._scheduler.get_job(effective_job.job_id) is not None:
-                self._scheduler.remove_job(effective_job.job_id)
+            self._sync_runtime_job(job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
 
     def remove(self, job_id: str) -> bool:
@@ -88,15 +83,35 @@ class APSchedulerAdapter(SchedulerPort):
         job = self._required_job(_require_job_id(job_id))
         self._jobs.set_enabled(job.job_id, True)
         enabled_job = self._required_job(job.job_id)
-        if not enabled_job.enabled or not self._task_authority_allows(enabled_job):
+        if not enabled_job.enabled:
             return
         if self._started:
-            self._install(enabled_job)
+            installed_job = self._sync_runtime_job(enabled_job.job_id)
+            if installed_job is None:
+                return
+            enabled_job = installed_job
+        elif not self._task_authority_allows(enabled_job):
+            return
         self._audit_change("scheduler.job_resumed", enabled_job)
 
     def has_runtime_job(self, job_id: str) -> bool:
         job_id = _require_job_id(job_id)
         return self._scheduler.get_job(job_id) is not None
+
+    def _sync_runtime_job(self, job_id: str) -> ScheduledJob | None:
+        job_id = _require_job_id(job_id)
+        job = self._jobs.get(job_id)
+        if job is None or not job.enabled or not self._task_authority_allows(job):
+            if self._scheduler.get_job(job_id) is not None:
+                self._scheduler.remove_job(job_id)
+            return None
+        current = self._jobs.get(job_id)
+        if current is None or not current.enabled or not self._task_authority_allows(current):
+            if self._scheduler.get_job(job_id) is not None:
+                self._scheduler.remove_job(job_id)
+            return None
+        self._install(current)
+        return current
 
     def _install(self, job: ScheduledJob) -> None:
         self._scheduler.add_job(
