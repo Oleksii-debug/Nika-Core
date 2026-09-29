@@ -117,15 +117,14 @@ class IncrementalSpeechStream:
                 SpeechErrorCode.INVALID_REQUEST,
                 "speech stream fragment must not contain NUL",
             )
-        if not fragment:
-            return
-
         with self._condition:
             if self._state is not SpeechStreamState.RUNNING:
                 raise SpeechError(
                     SpeechErrorCode.INVALID_REQUEST,
                     "speech stream no longer accepts input",
                 )
+            if not fragment:
+                return
             next_total = self._accepted_characters + len(fragment)
             if next_total > MAX_STREAM_TOTAL_CHARS:
                 raise SpeechError(
@@ -156,8 +155,14 @@ class IncrementalSpeechStream:
             self._condition.notify_all()
 
     def cancel(self) -> None:
-        self._cancel_event.set()
         with self._condition:
+            if self._state in (
+                SpeechStreamState.COMPLETED,
+                SpeechStreamState.CANCELLED,
+                SpeechStreamState.FAILED,
+            ):
+                return
+            self._cancel_event.set()
             self._finish_requested = True
             self._condition.notify_all()
 
