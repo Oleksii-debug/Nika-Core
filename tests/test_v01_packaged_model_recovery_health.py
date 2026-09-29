@@ -212,6 +212,15 @@ def test_invalid_cursor_performs_zero_model_health_effects(tmp_path: Path) -> No
     assert factory_calls == []
 
 
+def test_missing_task_is_only_strict_for_recovery_context(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    runtime = _runtime(store)
+
+    assert runtime._task_has_model_selection("fresh-task") is False
+    with pytest.raises(KeyError, match="task not found: fresh-task"):
+        runtime._task_has_model_selection("fresh-task", require_existing=True)
+
+
 def test_missing_durable_task_never_becomes_ready_checkpoint(tmp_path: Path) -> None:
     store = _store(tmp_path)
     factory_calls: list[ModelSelection] = []
