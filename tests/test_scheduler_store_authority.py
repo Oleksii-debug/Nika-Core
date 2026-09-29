@@ -139,6 +139,7 @@ def test_persisted_numeric_corruption_fails_closed(
     store.upsert(_job())
 
     with sqlite.connection() as conn:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
         conn.execute(
             f"UPDATE scheduled_jobs SET {column} = ? WHERE job_id = ?",
             (value, "job-1"),
