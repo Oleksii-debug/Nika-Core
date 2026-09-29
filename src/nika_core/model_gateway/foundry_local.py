@@ -560,12 +560,16 @@ class FoundryLocalProvider:
             )
 
         client = model.get_chat_client()
+        self._validate_model_alias(model, model_alias)
+        self._validate_model_identity(model, self._expected_model_id)
         if request.temperature is not None and hasattr(client, "settings"):
             client.settings.temperature = request.temperature
 
         response = client.complete_chat(
             [{"role": message.role, "content": message.content} for message in request.messages]
         )
+        self._validate_model_alias(model, model_alias)
+        self._validate_model_identity(model, self._expected_model_id)
         raw_text = response.choices[0].message.content
         if type(raw_text) is not str:
             raise TypeError("Foundry Local response content must be text")
