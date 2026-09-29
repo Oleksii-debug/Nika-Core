@@ -1157,3 +1157,52 @@ def test_behavioral_digest_cannot_strand_precompleted_future_callback() -> None:
     assert snapshot["active"] is False
     assert snapshot["transcript"] is None
 
+
+
+def test_invalid_composition_rejects_completed_evidence_relabel() -> None:
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    assert result.evidence.transcription is not None
+    assert result.evidence.wake is not None
+    object.__setattr__(
+        result.evidence,
+        "status",
+        type(result.evidence.status).INVALID_COMPOSITION,
+    )
+    object.__setattr__(result, "transcript", None)
+    object.__setattr__(result.evidence, "activated", False)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "failure evidence" in snapshot.message
+
+
+def test_invalid_composition_rejects_noncanonical_success_digest_carrier() -> None:
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    assert result.evidence.transcription is not None
+    object.__setattr__(
+        result.evidence,
+        "status",
+        type(result.evidence.status).INVALID_COMPOSITION,
+    )
+    object.__setattr__(result, "transcript", None)
+    object.__setattr__(result.evidence, "wake", None)
+    object.__setattr__(result.evidence, "activated", False)
+    object.__setattr__(result.evidence.transcription, "transcript_sha256", "g" * 64)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "failure evidence" in snapshot.message
