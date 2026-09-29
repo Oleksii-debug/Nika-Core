@@ -31,6 +31,37 @@ class _StaticHealthProbe:
         return self._snapshot
 
 
+class _BehavioralSnapshot:
+    def __init__(self, accesses: list[str]) -> None:
+        object.__setattr__(self, "_accesses", accesses)
+
+    def __getattribute__(self, name: str):
+        if name in {
+            "configured",
+            "reachable",
+            "model_present",
+            "model_ready",
+            "inference_proven",
+        }:
+            accesses = object.__getattribute__(self, "_accesses")
+            accesses.append(name)
+            raise AssertionError("noncanonical health carrier behavior must not execute")
+        return object.__getattribute__(self, name)
+
+
+class _BehavioralFactory:
+    def __init__(self, probe: _StaticHealthProbe) -> None:
+        self._probe = probe
+        self.calls = 0
+
+    def __bool__(self) -> bool:
+        raise AssertionError("health factory truthiness must not execute")
+
+    def __call__(self, _selection: ModelSelection) -> _StaticHealthProbe:
+        self.calls += 1
+        return self._probe
+
+
 class _ExplodingModelFactory:
     def __init__(self) -> None:
         self.calls = 0
@@ -335,6 +366,45 @@ def test_routes_without_canonical_recovery_health_never_gain_ready_authority(
     assert result.checkpoint_id is None
     assert factory_calls == []
     assert model_factory.calls == 0
+
+
+def test_health_factory_selection_does_not_execute_caller_truthiness(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _task_with_selection(store, _ollama())
+    health = _StaticHealthProbe(
+        _snapshot(
+            reachable=ModelHealthFact.YES,
+            present=ModelHealthFact.YES,
+            ready=ModelHealthFact.YES,
+        )
+    )
+    factory = _BehavioralFactory(health)
+
+    result = _probe(_runtime(store, health_probe_factory=factory), task_id)
+
+    assert result.status is RuntimeResumeProbeStatus.READY
+    assert factory.calls == 1
+    assert health.calls == 1
+
+
+def test_noncanonical_health_carrier_is_rejected_before_attribute_behavior(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _task_with_selection(store, _ollama())
+    accesses: list[str] = []
+    health = _StaticHealthProbe(_BehavioralSnapshot(accesses))
+
+    result = _probe(
+        _runtime(store, health_probe_factory=lambda _selection: health),
+        task_id,
+    )
+
+    assert result.status is RuntimeResumeProbeStatus.UNVERIFIABLE
+    assert accesses == []
+    assert health.calls == 1
 
 
 @pytest.mark.parametrize(
