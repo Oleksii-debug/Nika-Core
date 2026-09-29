@@ -160,7 +160,7 @@ def test_health_report_rejects_noncanonical_timestamp_carriers(value: object) ->
 
 def test_health_report_rejects_naive_timestamp() -> None:
     naive = datetime(2026, 9, 27, 21, 0, tzinfo=UTC).replace(tzinfo=None)
-    with pytest.raises(TypeError, match="generated_at timezone must be canonical"):
+    with pytest.raises(ValueError, match="generated_at must be timezone-aware"):
         HealthReport(generated_at=naive, checks=())
 
 
