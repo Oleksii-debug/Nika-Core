@@ -268,7 +268,7 @@ class WindowsWasapiMicrophoneCaptureAdapter:
         if self._sounddevice_module is not None:
             return self._sounddevice_module
         try:
-            import sounddevice  # type: ignore[import-not-found]  # noqa: PLC0415
+            import sounddevice  # type: ignore[import-not-found]
         except Exception:  # noqa: BLE001 - minimize Python/native dependency-load diagnostics
             raise MicrophoneCaptureAdapterError(
                 MicrophoneCaptureFailureCode.UNAVAILABLE,
@@ -328,7 +328,7 @@ def _logical_device_id(host_api_index: int, device_index: int, raw_name: str) ->
     ):
         raise ValueError("WASAPI endpoint identity is invalid")
     try:
-        material = f"{host_api_index}\x00{device_index}\x00{raw_name}".encode("utf-8")
+        material = f"{host_api_index}\x00{device_index}\x00{raw_name}".encode()
     except UnicodeEncodeError:
         raise ValueError("WASAPI endpoint identity is invalid") from None
     digest = hashlib.sha256(material).hexdigest()
