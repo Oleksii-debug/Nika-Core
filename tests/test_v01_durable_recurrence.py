@@ -1075,3 +1075,56 @@ def test_persisted_timeline_and_terminal_semantics_fail_closed(tmp_path: Path) -
             expected_recurrence_id="timeline-authority",
         )
     assert calls == []
+
+
+def test_persisted_mapping_keys_fail_before_lookup_behavior(tmp_path: Path) -> None:
+    class BehavioralKey(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral persisted key comparison must not run")
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="key-authority",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    job = scheduler.upserts[-1]
+
+    trigger = dict(job.trigger)
+    run_date = trigger.pop("run_date")
+    trigger[BehavioralKey("run_date")] = run_date
+    with pytest.raises(TypeError, match="durable recurrence trigger keys"):
+        recurrence_module._decode_job(
+            replace(job, trigger=trigger),
+            expected_recurrence_id="key-authority",
+        )
+
+    payload = dict(job.payload)
+    recurrence_value = payload.pop("recurrence_id")
+    payload[BehavioralKey("recurrence_id")] = recurrence_value
+    with pytest.raises(TypeError, match="durable recurrence payload keys"):
+        recurrence_module._decode_job(
+            replace(job, payload=payload),
+            expected_recurrence_id="key-authority",
+        )
+
+    metadata_payload = dict(job.payload)
+    metadata = dict(metadata_payload["_nika_recurrence_v1"])
+    version = metadata.pop("version")
+    metadata[BehavioralKey("version")] = version
+    metadata_payload["_nika_recurrence_v1"] = metadata
+    with pytest.raises(TypeError, match="durable recurrence metadata keys"):
+        recurrence_module._decode_job(
+            replace(job, payload=metadata_payload),
+            expected_recurrence_id="key-authority",
+        )
+
+    assert calls == []
