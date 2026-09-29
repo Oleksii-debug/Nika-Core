@@ -1051,7 +1051,11 @@ def _json_copy(value: Any) -> Any:
     return _public_json_value(value)
 
 
-def _public_json_value(value: Any) -> Any:
+def _public_json_value(
+    value: Any,
+    *,
+    active_containers: set[int] | None = None,
+) -> Any:
     value_type = type(value)
     if value is None or value_type in {bool, int}:
         return value
@@ -1061,18 +1065,37 @@ def _public_json_value(value: Any) -> Any:
         if not math.isfinite(value):
             raise BatchCursorStateError("batch cursor values must be JSON-serializable")
         return value
-    if value_type is list:
-        return [_public_json_value(item) for item in value]
-    if value_type is dict:
+    if value_type not in {list, dict}:
+        raise BatchCursorStateError("batch cursor values must be JSON-serializable")
+
+    active_containers = active_containers if active_containers is not None else set()
+    container_id = id(value)
+    if container_id in active_containers:
+        raise BatchCursorStateError("batch cursor values must be JSON-serializable")
+    active_containers.add(container_id)
+    try:
+        if value_type is list:
+            return [
+                _public_json_value(item, active_containers=active_containers)
+                for item in value
+            ]
         copied: dict[str, Any] = {}
         for key, item in value.items():
             if type(key) is not str:
                 raise BatchCursorStateError(
                     "batch cursor values must be JSON-serializable"
                 )
-            copied[_public_utf8_text(key)] = _public_json_value(item)
+            copied[_public_utf8_text(key)] = _public_json_value(
+                item,
+                active_containers=active_containers,
+            )
         return copied
-    raise BatchCursorStateError("batch cursor values must be JSON-serializable")
+    except RecursionError as exc:
+        raise BatchCursorStateError(
+            "batch cursor values must be JSON-serializable"
+        ) from exc
+    finally:
+        active_containers.remove(container_id)
 
 
 def _json_object(name: str, value: dict[str, Any]) -> dict[str, Any]:
