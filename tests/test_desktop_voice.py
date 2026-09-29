@@ -190,6 +190,59 @@ def test_start_returns_immediately_and_projects_bounded_success_state() -> None:
         submitter.close()
 
 
+def test_precompleted_future_callback_does_not_deadlock_start() -> None:
+    def immediate_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        coroutine.close()
+        future: Future[Any] = Future()
+        future.set_exception(RuntimeError("synthetic immediate failure"))
+        return future
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=immediate_submit,
+    )
+
+    started_at = time.monotonic()
+    result = controller.start({})
+    elapsed = time.monotonic() - started_at
+
+    assert result.status == "accepted"
+    assert elapsed < 0.25
+    assert controller.snapshot()["status"] == DesktopVoiceStatus.FAILED.value
+
+
+def test_cancel_callback_does_not_deadlock_controller_lock() -> None:
+    submitter = _LoopSubmitter()
+    entered = threading.Event()
+    microphone = _MicrophoneAdapter(transcript_gate=entered)
+    controller = DesktopVoiceTurnController(
+        service=_service(microphone),
+        request_factory=_request,
+        submit=submitter.submit,
+    )
+    try:
+        controller.start({})
+        assert entered.wait(timeout=2)
+
+        done = threading.Event()
+        outcome: list[str] = []
+
+        def cancel_from_thread() -> None:
+            outcome.append(controller.cancel({}).status)
+            done.set()
+
+        thread = threading.Thread(target=cancel_from_thread, daemon=True)
+        thread.start()
+        assert done.wait(timeout=1), "cancel deadlocked while Future callback reacquired lock"
+        thread.join(timeout=1)
+        assert thread.is_alive() is False
+        assert outcome == ["accepted"]
+        _wait_status(controller, DesktopVoiceStatus.CANCELLED)
+    finally:
+        submitter.close()
+
+
 def test_second_turn_is_rejected_while_first_turn_is_active() -> None:
     submitter = _LoopSubmitter()
     entered = threading.Event()
