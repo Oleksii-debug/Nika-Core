@@ -88,30 +88,52 @@ def _stored_timestamp(row: sqlite3.Row, field_name: str) -> str:
     return value
 
 
-def _snapshot_json_value(value: Any) -> Any:
+def _snapshot_json_value(
+    value: Any,
+    *,
+    active_containers: set[int] | None = None,
+) -> Any:
     value_type = type(value)
-    if value_type is dict:
-        copied: dict[str, Any] = {}
-        for key, item in value.items():
-            if type(key) is not str:
-                raise ValueError("idempotency result object keys must be exact text")
-            try:
-                key.encode("utf-8", errors="strict")
-            except UnicodeEncodeError as exc:
-                raise ValueError(
-                    "idempotency result object keys must be valid UTF-8 text"
-                ) from exc
-            copied[key] = _snapshot_json_value(item)
-        return copied
-    if value_type is list:
-        return [_snapshot_json_value(item) for item in value]
-    if value_type is tuple:
-        return tuple(_snapshot_json_value(item) for item in value)
-    if isinstance(value, (dict, list, tuple)):
-        raise ValueError(
-            "idempotency result containers must use exact built-in types"
+    if value_type not in {dict, list, tuple}:
+        if isinstance(value, (dict, list, tuple)):
+            raise ValueError(
+                "idempotency result containers must use exact built-in types"
+            )
+        return value
+
+    active_containers = active_containers if active_containers is not None else set()
+    container_id = id(value)
+    if container_id in active_containers:
+        raise ValueError("idempotency result must not contain circular containers")
+    active_containers.add(container_id)
+    try:
+        if value_type is dict:
+            copied: dict[str, Any] = {}
+            for key, item in value.items():
+                if type(key) is not str:
+                    raise ValueError("idempotency result object keys must be exact text")
+                try:
+                    key.encode("utf-8", errors="strict")
+                except UnicodeEncodeError as exc:
+                    raise ValueError(
+                        "idempotency result object keys must be valid UTF-8 text"
+                    ) from exc
+                copied[key] = _snapshot_json_value(
+                    item,
+                    active_containers=active_containers,
+                )
+            return copied
+        if value_type is list:
+            return [
+                _snapshot_json_value(item, active_containers=active_containers)
+                for item in value
+            ]
+        return tuple(
+            _snapshot_json_value(item, active_containers=active_containers)
+            for item in value
         )
-    return value
+    finally:
+        active_containers.remove(container_id)
 
 
 def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
@@ -129,7 +151,7 @@ def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
         )
         serialized.encode("utf-8", errors="strict")
         return serialized
-    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
         raise ValueError(
             "idempotency result must be JSON serializable valid UTF-8"
         ) from exc
