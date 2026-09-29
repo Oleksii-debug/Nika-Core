@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.scheduler.recurrence as recurrence_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.apscheduler_adapter import APSchedulerAdapter
@@ -870,4 +871,33 @@ def test_restart_rejects_nonfinite_persisted_target_payload(tmp_path: Path) -> N
     restarted, _ = _service(store, clock, calls)
     with pytest.raises(ValueError, match="non-finite"):
         restarted.get("corrupt-payload")
+    assert calls == []
+
+
+def test_persisted_enum_carriers_fail_before_enum_behavior(tmp_path: Path) -> None:
+    class BehavioralText(str):
+        def __hash__(self) -> int:
+            raise AssertionError("behavioral enum carrier must not be hashed")
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="hostile-enum-state",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    job = scheduler.upserts[-1]
+    metadata = job.payload["_nika_recurrence_v1"]
+    assert type(metadata) is dict
+    metadata["status"] = BehavioralText("active")
+
+    with pytest.raises(ValueError, match="enum state is corrupt"):
+        recurrence_module._decode_job(
+            job,
+            expected_recurrence_id="hostile-enum-state",
+        )
     assert calls == []
