@@ -32,6 +32,7 @@ VoiceSubmitter = Callable[
 class DesktopVoiceStatus(StrEnum):
     IDLE = "idle"
     RUNNING = "running"
+    CANCELLING = "cancelling"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
@@ -53,7 +54,10 @@ class DesktopVoiceSnapshot:
             "message": self.message,
             "activated": self.activated,
             "transcript": self.transcript,
-            "active": self.status is DesktopVoiceStatus.RUNNING,
+            "active": self.status in {
+                DesktopVoiceStatus.RUNNING,
+                DesktopVoiceStatus.CANCELLING,
+            },
         }
 
 
@@ -87,6 +91,8 @@ class DesktopVoiceTurnController:
         self._submit = submit
         self._lock = threading.Lock()
         self._active: Future[VoiceTurnResult] | None = None
+        self._active_started: threading.Event | None = None
+        self._active_settled: threading.Event | None = None
         self._snapshot = DesktopVoiceSnapshot(
             status=DesktopVoiceStatus.IDLE,
             request_id=None,
@@ -96,16 +102,20 @@ class DesktopVoiceTurnController:
     def start(self, payload: Mapping[str, Any]) -> UIResult:
         self._require_empty_payload(payload)
         with self._lock:
-            active = self._active
-            if active is not None and not active.done():
-                raise ValueError("Голосовий ввід уже виконується.")
+            self._reap_cancelled_settlement_locked()
+            if self._active is not None:
+                raise ValueError(
+                    "Голосовий ввід уже виконується або завершує скасування."
+                )
             request_id = f"desktop-voice-{uuid.uuid4().hex}"
+            started = threading.Event()
+            settled = threading.Event()
             self._snapshot = DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.RUNNING,
                 request_id=request_id,
                 message="Голосовий ввід розпочато. Говоріть після активації мікрофона.",
             )
-            coroutine = self._execute(request_id)
+            coroutine = self._execute(request_id, started, settled)
             try:
                 future = self._submit(coroutine)
             except Exception as exc:
@@ -125,6 +135,8 @@ class DesktopVoiceTurnController:
                 )
                 raise TypeError("submit must return concurrent.futures.Future")
             self._active = future
+            self._active_started = started
+            self._active_settled = settled
 
         future.add_done_callback(
             lambda done, identity=request_id: self._finish(identity, done)
@@ -138,12 +150,26 @@ class DesktopVoiceTurnController:
     def cancel(self, payload: Mapping[str, Any]) -> UIResult:
         self._require_empty_payload(payload)
         with self._lock:
+            self._reap_cancelled_settlement_locked()
             active = self._active
-            if active is None or active.done():
+            settled = self._active_settled
+            if active is None:
                 return UIResult(
                     request_id="desktop-handler",
                     status="completed",
                     message="Активного голосового вводу немає.",
+                )
+            if active.cancelled() and settled is not None and not settled.is_set():
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="accepted",
+                    message="Скасування голосового вводу ще завершується.",
+                )
+            if active.done():
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Голосовий ввід уже завершився.",
                 )
 
         accepted = active.cancel()
@@ -161,15 +187,25 @@ class DesktopVoiceTurnController:
 
     def snapshot(self) -> dict[str, object]:
         with self._lock:
+            self._reap_cancelled_settlement_locked()
             return self._snapshot.as_dict()
 
-    async def _execute(self, request_id: str) -> VoiceTurnResult:
-        request = await asyncio.to_thread(self._request_factory, request_id)
-        if type(request) is not VoiceTurnRequest:
-            raise TypeError("request_factory must return exact VoiceTurnRequest")
-        if request.request_id != request_id:
-            raise ValueError("voice request factory changed the generated request identity")
-        return await self._service.run(request)
+    async def _execute(
+        self,
+        request_id: str,
+        started: threading.Event,
+        settled: threading.Event,
+    ) -> VoiceTurnResult:
+        started.set()
+        try:
+            request = await asyncio.to_thread(self._request_factory, request_id)
+            if type(request) is not VoiceTurnRequest:
+                raise TypeError("request_factory must return exact VoiceTurnRequest")
+            if request.request_id != request_id:
+                raise ValueError("voice request factory changed the generated request identity")
+            return await self._service.run(request)
+        finally:
+            settled.set()
 
     def _finish(
         self,
@@ -177,11 +213,30 @@ class DesktopVoiceTurnController:
         future: Future[VoiceTurnResult],
     ) -> None:
         if future.cancelled():
-            snapshot = DesktopVoiceSnapshot(
-                status=DesktopVoiceStatus.CANCELLED,
-                request_id=request_id,
-                message="Голосовий ввід скасовано.",
-            )
+            with self._lock:
+                if self._active is not future:
+                    return
+                started = self._active_started
+                settled = self._active_settled
+                if (
+                    started is not None
+                    and started.is_set()
+                    and settled is not None
+                    and not settled.is_set()
+                ):
+                    self._snapshot = DesktopVoiceSnapshot(
+                        status=DesktopVoiceStatus.CANCELLING,
+                        request_id=request_id,
+                        message="Скасування голосового вводу завершується.",
+                    )
+                    return
+                self._snapshot = DesktopVoiceSnapshot(
+                    status=DesktopVoiceStatus.CANCELLED,
+                    request_id=request_id,
+                    message="Голосовий ввід скасовано.",
+                )
+                self._clear_active_locked()
+            return
         else:
             try:
                 result = future.result()
@@ -197,7 +252,29 @@ class DesktopVoiceTurnController:
         with self._lock:
             if self._active is future:
                 self._snapshot = snapshot
-                self._active = None
+                self._clear_active_locked()
+
+    def _reap_cancelled_settlement_locked(self) -> None:
+        active = self._active
+        settled = self._active_settled
+        if (
+            active is None
+            or not active.cancelled()
+            or settled is None
+            or not settled.is_set()
+        ):
+            return
+        self._snapshot = DesktopVoiceSnapshot(
+            status=DesktopVoiceStatus.CANCELLED,
+            request_id=self._snapshot.request_id,
+            message="Голосовий ввід скасовано.",
+        )
+        self._clear_active_locked()
+
+    def _clear_active_locked(self) -> None:
+        self._active = None
+        self._active_started = None
+        self._active_settled = None
 
     @staticmethod
     def _result_snapshot(
