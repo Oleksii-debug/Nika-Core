@@ -157,7 +157,7 @@ class SherpaOnnxWhisperSpeechToTextAdapter:
             stream.accept_waveform(sample_rate_hz, samples)
             self._recognizer.decode_stream(stream)
             result = stream.result
-            text = result.text
+            text = _validated_transcript(result.text)
         except SpeechToTextAdapterError:
             raise
         except Exception:  # noqa: BLE001 - isolate sherpa/onnx/native diagnostics
@@ -166,12 +166,6 @@ class SherpaOnnxWhisperSpeechToTextAdapter:
                 "Sherpa ONNX STT native decode failed.",
                 retryable=True,
             ) from None
-        if type(text) is not str:
-            raise SpeechToTextAdapterError(
-                SpeechToTextFailureCode.PROVIDER_ERROR,
-                "Sherpa ONNX STT result text is invalid.",
-                retryable=False,
-            )
         return text
 
     def _reap_inflight(self) -> None:
@@ -329,9 +323,37 @@ def _bounded_path(value: object, field: str) -> str:
         or not value
         or len(value) > _MAX_PATH_CHARS
         or "\x00" in value
+        or any(ord(character) < 32 for character in value)
+        or value.startswith(("\\\\", "//"))
+        or re.match(r"^[A-Za-z][A-Za-z0-9+.-]*://", value) is not None
     ):
         raise ValueError(f"{field} must be a bounded local path")
     return value
+
+
+def _validated_transcript(value: object) -> str:
+    if type(value) is not str:
+        raise SpeechToTextAdapterError(
+            SpeechToTextFailureCode.PROVIDER_ERROR,
+            "Sherpa ONNX STT result text is invalid.",
+            retryable=False,
+        )
+    normalized = value.strip()
+    if not normalized or "\x00" in normalized:
+        raise SpeechToTextAdapterError(
+            SpeechToTextFailureCode.PROVIDER_ERROR,
+            "Sherpa ONNX STT result text is invalid.",
+            retryable=False,
+        )
+    try:
+        normalized.encode("utf-8")
+    except UnicodeEncodeError:
+        raise SpeechToTextAdapterError(
+            SpeechToTextFailureCode.PROVIDER_ERROR,
+            "Sherpa ONNX STT result text is invalid.",
+            retryable=False,
+        ) from None
+    return normalized
 
 
 def _consume_future(future: asyncio.Future[str]) -> None:
