@@ -145,6 +145,49 @@ def authorization(**overrides: object) -> ModelDownloadAuthorization:
     return ModelDownloadAuthorization(**values)  # type: ignore[arg-type]
 
 
+def test_foundry_manager_initialization_is_singleton_under_thread_race() -> None:
+    model = FakeFoundryModel()
+    manager = FakeManager(model)
+    factory_started = threading.Event()
+    release_factory = threading.Event()
+    calls: list[str] = []
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def manager_factory() -> object:
+        calls.append("factory")
+        factory_started.set()
+        if not release_factory.wait(timeout=2.0):
+            raise RuntimeError("manager factory barrier was not released")
+        return manager
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=manager_factory,
+    )
+
+    def inspect() -> None:
+        try:
+            results.append(provider.inspect_model().model_id)
+        except BaseException as exc:  # noqa: BLE001 - test thread must preserve failures.
+            errors.append(exc)
+
+    first = threading.Thread(target=inspect)
+    second = threading.Thread(target=inspect)
+    first.start()
+    assert factory_started.wait(timeout=2.0)
+    second.start()
+    release_factory.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert first.is_alive() is False
+    assert second.is_alive() is False
+    assert errors == []
+    assert calls == ["factory"]
+    assert results == ["test-model-id", "test-model-id"]
+
+
 def test_foundry_local_runs_through_existing_gateway_without_cloud() -> None:
     model = FakeFoundryModel()
     manager = FakeManager(model)
