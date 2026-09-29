@@ -104,6 +104,42 @@ class BlockingDurableRuntime:
         )
 
 
+class UnprovenDurableRuntime:
+    runtime_id = "v01-durable-active-pause-unproven"
+    capabilities = frozenset(
+        {RuntimeCapability.DURABLE_RESUME, RuntimeCapability.CANCELLATION}
+    )
+
+    def __init__(self) -> None:
+        self.cancel_calls = 0
+
+    async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        raise AssertionError(f"run is not part of this scenario: {request.task_id}")
+
+    async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
+        raise AssertionError(f"resume is not part of this scenario: {request.task_id}")
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        del task_id, thread_id
+        self.cancel_calls += 1
+        return True
+
+
+class MissingCheckpointRuntime(BlockingDurableRuntime):
+    async def probe_resume(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        resume_token: str,
+    ) -> RuntimeResumeProbe:
+        del task_id, thread_id, resume_token
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.MISSING,
+            reason="checkpoint missing",
+        )
+
+
 class AckedExternalPauseRuntime(BlockingDurableRuntime):
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         raise AssertionError(f"fresh run is not part of this scenario: {request.task_id}")
@@ -147,6 +183,74 @@ def ready_task(store: SQLiteStore) -> tuple[TaskQueue, str]:
     )
     queue.transition(task.task_id, TaskState.READY)
     return queue, task.task_id
+
+
+def test_pause_rejects_missing_checkpoint_before_reservation_or_effect(tmp_path) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "missing durable checkpoint.db")
+        store.initialize()
+        queue, task_id = ready_task(store)
+        queue.transition(task_id, TaskState.RUNNING)
+        runtime = MissingCheckpointRuntime()
+        coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+        thread_id = "thread-missing-checkpoint"
+        coordinator.sessions.record_active(
+            task_id=task_id,
+            runtime_id=runtime.runtime_id,
+            thread_id=thread_id,
+            resume_token="durable-token",
+        )
+
+        with pytest.raises(ValueError, match="checkpoint is not readable: missing"):
+            await coordinator.pause(runtime, task_id=task_id, thread_id=thread_id)
+
+        assert runtime.cancel_calls == 0
+        assert queue.get(task_id).state is TaskState.RUNNING
+        session = coordinator.sessions.get(task_id)
+        assert session is not None
+        assert session.outcome is None
+        pause_records = [
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.pause"
+        ]
+        assert pause_records == []
+
+    asyncio.run(scenario())
+
+
+def test_pause_rejects_unproven_resume_before_reservation_or_effect(tmp_path) -> None:
+    async def scenario() -> None:
+        store = SQLiteStore(tmp_path / "unproven durable pause.db")
+        store.initialize()
+        queue, task_id = ready_task(store)
+        queue.transition(task_id, TaskState.RUNNING)
+        runtime = UnprovenDurableRuntime()
+        coordinator = TaskRuntimeCoordinator(queue, AuditLog(store))
+        thread_id = "thread-unproven"
+        coordinator.sessions.record_active(
+            task_id=task_id,
+            runtime_id=runtime.runtime_id,
+            thread_id=thread_id,
+            resume_token="durable-token",
+        )
+
+        with pytest.raises(TypeError, match="checkpoint proof"):
+            await coordinator.pause(runtime, task_id=task_id, thread_id=thread_id)
+
+        assert runtime.cancel_calls == 0
+        assert queue.get(task_id).state is TaskState.RUNNING
+        session = coordinator.sessions.get(task_id)
+        assert session is not None
+        assert session.outcome is None
+        pause_records = [
+            record
+            for record in IdempotencyLedger(store).list_for_task(task_id)
+            if record.operation_type == "runtime.pause"
+        ]
+        assert pause_records == []
+
+    asyncio.run(scenario())
 
 
 def test_pause_rejects_hostile_identity_subclasses_before_reservation_or_effect(
