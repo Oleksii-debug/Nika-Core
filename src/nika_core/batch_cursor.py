@@ -472,7 +472,16 @@ class BatchCursor:
         intent = self._state.next_scheduled_intent
         if intent is None or intent.kind is not IntentKind.INTER_BATCH_WAIT:
             raise BatchCursorBlockedError("cursor is not waiting between batches")
-        intent.not_before = _as_utc(not_before).isoformat()
+        proposed = _as_utc(not_before)
+        if intent.not_before is not None:
+            current = _parse_utc(intent.not_before)
+            if proposed < current:
+                raise BatchCursorBlockedError(
+                    "inter-batch wait deadline cannot move earlier"
+                )
+            if proposed == current:
+                return
+        intent.not_before = proposed.isoformat()
         intent.deadline_source = "scheduler"
         self._persist()
 
