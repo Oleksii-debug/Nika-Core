@@ -397,6 +397,9 @@ def test_close_fails_closed_when_started_coroutine_does_not_settle() -> None:
             request_id="desktop-voice-close-timeout",
             message="running",
         )
+    active.add_done_callback(
+        lambda done: controller._finish("desktop-voice-close-timeout", done)
+    )
 
     with pytest.raises(RuntimeError, match="did not settle"):
         controller.close(timeout_seconds=0.01)
