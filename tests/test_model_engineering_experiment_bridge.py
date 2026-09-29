@@ -505,3 +505,23 @@ def test_bridge_rejects_cross_execution_config_rebinding() -> None:
             definition=definition,
             evaluation_set=evaluation,
         )
+
+
+
+class _ExecutionConfigAlias(BenchmarkExecutionConfig):
+    @property
+    def evidence_sha256(self):
+        raise AssertionError("behavioral config property executed")
+
+
+def test_bridge_rejects_execution_config_subclass_before_digest_access() -> None:
+    with pytest.raises(TypeError, match="exact BenchmarkExecutionConfig"):
+        build_experiment_definition(
+            experiment_id="config-carrier",
+            champion=_candidate("champion", "m1"),
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=_evaluation(),
+            execution_config=_ExecutionConfigAlias(),
+            policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+            permission_fingerprint="permissions-v1",
+        )
