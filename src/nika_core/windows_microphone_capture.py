@@ -350,12 +350,15 @@ def _snapshot_request(request: MicrophoneCaptureRequest) -> MicrophoneCaptureReq
 def _abort_and_close(stream: Any | None) -> None:
     if stream is None:
         return
-    _best_effort_cleanup(stream.abort)
-    _best_effort_cleanup(stream.close)
+    _best_effort_cleanup(stream, "abort")
+    _best_effort_cleanup(stream, "close")
 
 
-def _best_effort_cleanup(operation: Any) -> None:
+def _best_effort_cleanup(stream: Any, operation_name: str) -> None:
     try:
+        operation = getattr(stream, operation_name)
+        if not callable(operation):
+            return
         operation(ignore_errors=True)
     except Exception:  # noqa: BLE001 - teardown errors must not expose native diagnostics
         return
