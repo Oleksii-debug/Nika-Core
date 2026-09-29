@@ -747,6 +747,7 @@ def test_runner_rejects_behavioral_scorer_result_before_conversion() -> None:
     runner = ModelBenchmarkRunner(
         _ProviderKindSpyGateway(),
         scorer=_HostileScorer(),
+        scorer_id="hostile-test-v1",
         clock=_Clock((1.0, 1.1)),
     )
 
@@ -793,6 +794,7 @@ def test_runner_does_not_invoke_scorer_truthiness() -> None:
     runner = ModelBenchmarkRunner(
         _ProviderKindSpyGateway(),
         scorer=_FalseyScorer(),
+        scorer_id="falsey-test-v1",
         clock=_Clock((1.0, 1.1, 2.0, 2.1)),
     )
 
@@ -867,9 +869,11 @@ def test_execution_config_identity_binds_timeout_and_temperature() -> None:
     baseline = BenchmarkExecutionConfig(timeout_seconds=60.0, temperature=0.0)
     changed_timeout = BenchmarkExecutionConfig(timeout_seconds=30.0, temperature=0.0)
     changed_temperature = BenchmarkExecutionConfig(timeout_seconds=60.0, temperature=0.5)
+    changed_scorer = BenchmarkExecutionConfig(scorer_id="semantic-scorer-v2")
 
     assert baseline.evidence_sha256 != changed_timeout.evidence_sha256
     assert baseline.evidence_sha256 != changed_temperature.evidence_sha256
+    assert baseline.evidence_sha256 != changed_scorer.evidence_sha256
     assert changed_timeout.evidence_sha256 != changed_temperature.evidence_sha256
 
 
@@ -917,3 +921,14 @@ def test_benchmark_binds_execution_config_to_request_and_report() -> None:
 
     assert gateway.config_sha256 == config.evidence_sha256
     assert report.execution_config_sha256 == config.evidence_sha256
+
+
+
+def test_custom_scorer_requires_stable_identity_before_execution() -> None:
+    with pytest.raises(TypeError, match="custom scorer requires a canonical scorer_id"):
+        ModelBenchmarkRunner(_FakeGateway(), scorer=_FalseyScorer())
+
+
+def test_execution_config_rejects_behavioral_scorer_id_before_string_methods() -> None:
+    with pytest.raises(TypeError, match="scorer_id must be canonical text"):
+        BenchmarkExecutionConfig(scorer_id=_HostileText("scorer-v1"))
