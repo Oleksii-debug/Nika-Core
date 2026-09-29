@@ -338,6 +338,13 @@ def _snapshot_request(request: MicrophoneCaptureRequest) -> MicrophoneCaptureReq
         )
     except AttributeError:
         raise TypeError("microphone capture request is incomplete") from None
+    except ValueError as error:
+        message = str(error)
+        if message.startswith("sample_rate_hz "):
+            raise TypeError("sample_rate_hz must be an exact supported integer") from None
+        if message.startswith("sample_count "):
+            raise TypeError("sample_count must be an exact supported positive integer") from None
+        raise
 
 
 def _abort_and_close(stream: Any | None) -> None:
