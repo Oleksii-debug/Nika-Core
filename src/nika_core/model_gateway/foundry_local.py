@@ -598,6 +598,14 @@ class FoundryLocalProvider:
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             )
+        resolved_alias = self._sdk_text(model, "alias")
+        if resolved_alias != alias:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "Foundry Local catalog returned a model for a different alias",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
         return model
 
     def _model_evidence(self, model: Any) -> FoundryModelEvidence:
