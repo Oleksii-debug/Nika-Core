@@ -229,6 +229,10 @@ class DurableRecurrenceService:
     def action_handler(self, payload: dict[str, Any]) -> None:
         if type(payload) is not dict:
             raise TypeError("recurrence action payload must be an exact dict")
+        payload = _detached_exact_key_dict(
+            payload,
+            label="recurrence action payload",
+        )
         recurrence_id = _required_text(payload.get("recurrence_id"), "recurrence_id")
         state, target_payload = self._required(recurrence_id)
         if state.status is not RecurrenceStatus.ACTIVE:
