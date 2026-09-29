@@ -14,7 +14,6 @@ from typing import Any
 from nika_core.microphone_capture import MicrophoneCaptureEvidence, MicrophoneCaptureStatus
 from nika_core.speech_to_text import SpeechToTextEvidence, SpeechToTextStatus
 from nika_core.ui.bridge_models import UIResult
-from nika_core.wake_activation import WakeActivationEvidence, WakeActivationOutcome
 from nika_core.voice_turn import (
     OneShotVoiceTurnService,
     VoiceTurnEvidence,
@@ -22,6 +21,7 @@ from nika_core.voice_turn import (
     VoiceTurnResult,
     VoiceTurnStatus,
 )
+from nika_core.wake_activation import WakeActivationEvidence, WakeActivationOutcome
 
 VoiceRequestFactory = Callable[[str], VoiceTurnRequest]
 VoiceSubmitter = Callable[
@@ -288,7 +288,7 @@ class DesktopVoiceTurnController:
         else:
             try:
                 result = future.result()
-            except Exception:
+            except Exception:  # noqa: BLE001 - isolate desktop async boundary
                 snapshot = DesktopVoiceSnapshot(
                     status=DesktopVoiceStatus.FAILED,
                     request_id=request_id,
