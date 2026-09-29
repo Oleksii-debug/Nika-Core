@@ -1047,11 +1047,33 @@ def _json_copy(value: Any) -> Any:
         raise BatchCursorStateError("batch cursor values must be JSON-serializable") from exc
 
 
+def _public_json_value(value: Any) -> Any:
+    value_type = type(value)
+    if value is None or value_type in {bool, str, int}:
+        return value
+    if value_type is float:
+        if not math.isfinite(value):
+            raise BatchCursorStateError("batch cursor values must be JSON-serializable")
+        return value
+    if value_type is list:
+        return [_public_json_value(item) for item in value]
+    if value_type is dict:
+        copied: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise BatchCursorStateError(
+                    "batch cursor values must be JSON-serializable"
+                )
+            copied[key] = _public_json_value(item)
+        return copied
+    raise BatchCursorStateError("batch cursor values must be JSON-serializable")
+
+
 def _json_object(name: str, value: dict[str, Any]) -> dict[str, Any]:
     if type(value) is not dict:
         raise TypeError(f"{name} must be an exact JSON object")
-    copied = _json_copy(value)
-    if not isinstance(copied, dict):
+    copied = _public_json_value(value)
+    if type(copied) is not dict:
         raise BatchCursorStateError(f"{name} must remain a JSON object")
     return copied
 
