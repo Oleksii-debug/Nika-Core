@@ -8,6 +8,7 @@ import pytest
 
 from nika_core.model_engineering import (
     AcceleratorSnapshot,
+    BenchmarkExecutionConfig,
     EvaluationCase,
     EvaluationPurpose,
     EvaluationSet,
@@ -208,6 +209,7 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
 
     report = asyncio.run(runner.benchmark(_candidate(), _evaluation_set()))
 
+    assert report.execution_config_sha256 == BenchmarkExecutionConfig().evidence_sha256
     assert report.weighted_quality_score == pytest.approx(0.25)
     assert report.task_pass_rate == pytest.approx(0.5)
     assert report.completion_rate == pytest.approx(0.5)
@@ -239,6 +241,8 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
         assert secret not in machine
         assert secret not in accessible
     assert len(benchmark_report_sha256(report)) == 64
+    assert report.execution_config_sha256 in machine
+    assert f"Execution config SHA-256: {report.execution_config_sha256}" in accessible
     assert "Cases:" in accessible
     assert "provider-failure: FAIL" in accessible
 
@@ -857,3 +861,60 @@ def test_benchmark_suite_requires_canonical_candidate_tuple() -> None:
                 _evaluation_set(),
             )
         )
+
+
+
+def test_execution_config_identity_binds_timeout_and_temperature() -> None:
+    baseline = BenchmarkExecutionConfig(timeout_seconds=60.0, temperature=0.0)
+    changed_timeout = BenchmarkExecutionConfig(timeout_seconds=30.0, temperature=0.0)
+    changed_temperature = BenchmarkExecutionConfig(timeout_seconds=60.0, temperature=0.5)
+
+    assert baseline.evidence_sha256 != changed_timeout.evidence_sha256
+    assert baseline.evidence_sha256 != changed_temperature.evidence_sha256
+    assert changed_timeout.evidence_sha256 != changed_temperature.evidence_sha256
+
+
+class _ConfigMetadataGateway:
+    def __init__(self) -> None:
+        self.config_sha256 = None
+
+    async def complete(self, request):
+        self.config_sha256 = request.metadata["benchmark_execution_config_sha256"]
+        return ModelResponse(
+            request_id=request.request_id,
+            text="answer",
+            provider_id=request.provider_id,
+            provider_kind=request.provider_kind,
+            model=request.model,
+        )
+
+
+def test_benchmark_binds_execution_config_to_request_and_report() -> None:
+    config = BenchmarkExecutionConfig(timeout_seconds=17.0, temperature=0.25)
+    gateway = _ConfigMetadataGateway()
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+    report = asyncio.run(
+        ModelBenchmarkRunner(gateway, clock=_Clock((1.0, 1.1))).benchmark(
+            _candidate(),
+            evaluation,
+            timeout_seconds=config.timeout_seconds,
+            temperature=config.temperature,
+        )
+    )
+
+    assert gateway.config_sha256 == config.evidence_sha256
+    assert report.execution_config_sha256 == config.evidence_sha256
