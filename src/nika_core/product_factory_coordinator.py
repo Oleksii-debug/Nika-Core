@@ -160,6 +160,10 @@ class ProductFactoryCoordinator:
     _trusted_plan_fingerprint: str | None = field(default=None, init=False, repr=False)
 
     @property
+    def revision(self) -> int:
+        return self._revision
+
+    @property
     def trusted_plan_fingerprint(self) -> str:
         if self._trusted_plan_fingerprint is None:
             raise CoordinatorError("coordinator has no established trusted plan authority")
