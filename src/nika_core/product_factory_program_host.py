@@ -848,7 +848,7 @@ class ProductFactoryProgramHost:
                     ),
                 )
             else:
-                same_work = row["project_id"] == lease.project_id and row["work_id"] == lease.work_id
+                same_work = (\n                    row["project_id"] == lease.project_id\n                    and row["work_id"] == lease.work_id\n                )
                 same_claim = (
                     same_work
                     and row["owner_id"] == lease.owner_id
