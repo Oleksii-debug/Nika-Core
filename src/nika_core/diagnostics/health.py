@@ -8,7 +8,7 @@ import stat
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from functools import cache
 from pathlib import Path
@@ -68,8 +68,8 @@ class HealthReport:
     def __post_init__(self) -> None:
         if type(self.generated_at) is not datetime:
             raise TypeError("generated_at must be a canonical datetime")
-        if self.generated_at.tzinfo is None or self.generated_at.utcoffset() is None:
-            raise ValueError("generated_at must be timezone-aware")
+        if type(self.generated_at.tzinfo) is not timezone:
+            raise TypeError("generated_at timezone must be canonical")
         object.__setattr__(self, "generated_at", self.generated_at.astimezone(UTC))
         if type(self.checks) is not tuple:
             raise TypeError("checks must be an immutable tuple")
@@ -176,8 +176,8 @@ class HealthService:
         value = self._clock()
         if type(value) is not datetime:
             raise TypeError("health clock must return a canonical datetime")
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise ValueError("health clock must return a timezone-aware datetime")
+        if type(value.tzinfo) is not timezone:
+            raise TypeError("health clock timezone must be canonical")
         return value.astimezone(UTC)
 
     def _check_configuration(self) -> HealthCheck:
