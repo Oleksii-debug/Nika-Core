@@ -222,12 +222,12 @@ class MicrophoneCaptureService:
 
     def __init__(self, adapter: MicrophoneCaptureAdapter) -> None:
         self._adapter = adapter
-        self._cleanup_tasks: set[asyncio.Task[MicrophoneCaptureResponse]] = set()
+        self._cleanup_futures: set[asyncio.Future[object]] = set()
 
     @property
     def cleanup_pending(self) -> bool:
-        self._reap_cleanup_tasks()
-        return bool(self._cleanup_tasks)
+        self._reap_cleanup_futures()
+        return bool(self._cleanup_futures)
 
     async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResult:
         request = _snapshot_request(request)
@@ -240,13 +240,30 @@ class MicrophoneCaptureService:
                 cleanup_pending=True,
             )
 
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + request.policy.timeout_seconds
+
+        if request.expected_audio_bytes > request.policy.max_audio_bytes:
+            return self._failure(
+                request,
+                code=MicrophoneCaptureFailureCode.RESOURCE_LIMIT,
+                retryable=False,
+            )
+
         try:
-            before = self._read_capabilities()
+            before = await self._read_capabilities_bounded(deadline)
         except MicrophoneCaptureAdapterError:
             return self._failure(
                 request,
                 code=MicrophoneCaptureFailureCode.ADAPTER_ERROR,
                 retryable=False,
+            )
+        if before is None:
+            return self._failure(
+                request,
+                code=MicrophoneCaptureFailureCode.TIMEOUT,
+                retryable=True,
+                cleanup_pending=self.cleanup_pending,
             )
         route_error = self._validate_route(request, before)
         if route_error is not None:
@@ -256,21 +273,12 @@ class MicrophoneCaptureService:
                 retryable=False,
             )
 
-        if request.expected_audio_bytes > request.policy.max_audio_bytes:
-            return self._failure(
-                request,
-                code=MicrophoneCaptureFailureCode.RESOURCE_LIMIT,
-                retryable=False,
-            )
-
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + request.policy.timeout_seconds
         adapter_request = _snapshot_request(request)
         capture_task = asyncio.create_task(self._adapter.capture(adapter_request))
         try:
             done, _ = await asyncio.wait(
                 {capture_task},
-                timeout=float(request.policy.timeout_seconds),
+                timeout=max(0.0, deadline - loop.time()),
                 return_when=asyncio.FIRST_COMPLETED,
             )
         except asyncio.CancelledError:
@@ -318,12 +326,19 @@ class MicrophoneCaptureService:
             )
 
         try:
-            after = self._read_capabilities()
+            after = await self._read_capabilities_bounded(deadline)
         except MicrophoneCaptureAdapterError:
             return self._failure(
                 request,
                 code=MicrophoneCaptureFailureCode.ADAPTER_ERROR,
                 retryable=False,
+            )
+        if after is None:
+            return self._failure(
+                request,
+                code=MicrophoneCaptureFailureCode.TIMEOUT,
+                retryable=True,
+                cleanup_pending=self.cleanup_pending,
             )
         if after != before:
             return self._failure(
@@ -378,19 +393,44 @@ class MicrophoneCaptureService:
         )
         return MicrophoneCaptureResult(pcm_s16le=audio, evidence=evidence)
 
-    def _track_cleanup(self, task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
-        self._cleanup_tasks.add(task)
-        task.add_done_callback(self._on_cleanup_done)
+    def _track_cleanup(self, future: asyncio.Future[object]) -> None:
+        self._cleanup_futures.add(future)
+        future.add_done_callback(self._on_cleanup_done)
 
-    def _on_cleanup_done(self, task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
-        self._cleanup_tasks.discard(task)
-        _consume_task_result(task)
+    def _on_cleanup_done(self, future: asyncio.Future[object]) -> None:
+        self._cleanup_futures.discard(future)
+        _consume_future_result(future)
 
-    def _reap_cleanup_tasks(self) -> None:
-        done = tuple(task for task in self._cleanup_tasks if task.done())
-        for task in done:
-            self._cleanup_tasks.discard(task)
-            _consume_task_result(task)
+    def _reap_cleanup_futures(self) -> None:
+        done = tuple(future for future in self._cleanup_futures if future.done())
+        for future in done:
+            self._cleanup_futures.discard(future)
+            _consume_future_result(future)
+
+    async def _read_capabilities_bounded(
+        self,
+        deadline: float,
+    ) -> MicrophoneCaptureCapabilities | None:
+        loop = asyncio.get_running_loop()
+        remaining = deadline - loop.time()
+        if remaining <= 0.0:
+            return None
+        future = loop.run_in_executor(None, self._read_capabilities)
+        try:
+            done, _ = await asyncio.wait(
+                {future},
+                timeout=remaining,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            if not future.done():
+                self._track_cleanup(future)
+            raise
+        if future not in done or loop.time() >= deadline:
+            if not future.done():
+                self._track_cleanup(future)
+            return None
+        return future.result()
 
     def _read_capabilities(self) -> MicrophoneCaptureCapabilities:
         try:
@@ -532,9 +572,9 @@ def _normalized_adapter_error(
     return code, retryable
 
 
-def _consume_task_result(task: asyncio.Task[MicrophoneCaptureResponse]) -> None:
+def _consume_future_result(future: asyncio.Future[object]) -> None:
     try:
-        task.result()
+        future.result()
     except asyncio.CancelledError:
         return
     except Exception:  # noqa: BLE001 - late adapter result is intentionally discarded
