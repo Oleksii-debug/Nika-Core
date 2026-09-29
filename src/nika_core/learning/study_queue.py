@@ -27,6 +27,8 @@ _SECRET_QUERY_KEYS = frozenset(
         "idtoken",
         "subscriptionkey",
         "xapikey",
+        "sig",
+        "signature",
         "xamzcredential",
         "xamzsignature",
         "xamzsecuritytoken",
