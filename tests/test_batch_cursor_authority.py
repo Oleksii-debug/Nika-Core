@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 import nika_core.batch_cursor as batch_cursor_module
-
 from nika_core.batch_cursor import (
     AttemptState,
     BatchCursor,
