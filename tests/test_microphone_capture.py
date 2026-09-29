@@ -399,7 +399,6 @@ def test_invalid_latency_is_rejected() -> None:
     assert result.evidence.error_code is MicrophoneCaptureFailureCode.INVALID_RESPONSE
 
 
-
 def test_in_place_capability_mutation_cannot_launder_route_drift() -> None:
     result = asyncio.run(
         MicrophoneCaptureService(_InPlaceCapabilityDriftAdapter()).capture(_request())
