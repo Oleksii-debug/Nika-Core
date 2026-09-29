@@ -354,6 +354,89 @@ def test_cancel_propagates_to_active_async_capture() -> None:
         submitter.close()
 
 
+def test_close_cancels_active_turn_and_waits_for_coroutine_settlement() -> None:
+    submitter = _LoopSubmitter()
+    entered = threading.Event()
+    microphone = _MicrophoneAdapter(transcript_gate=entered)
+    controller = DesktopVoiceTurnController(
+        service=_service(microphone),
+        request_factory=_request,
+        submit=submitter.submit,
+    )
+    try:
+        controller.start({})
+        assert entered.wait(timeout=2)
+        controller.close(timeout_seconds=1.0)
+
+        snapshot = controller.snapshot()
+        assert snapshot["status"] == DesktopVoiceStatus.CANCELLED.value
+        assert snapshot["active"] is False
+        assert microphone.cancelled.wait(timeout=2)
+    finally:
+        submitter.close()
+
+
+def test_close_fails_closed_when_started_coroutine_does_not_settle() -> None:
+    submitter = _LoopSubmitter()
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=submitter.submit,
+    )
+    active: Future[VoiceTurnResult] = Future()
+    started = threading.Event()
+    settled = threading.Event()
+    started.set()
+
+    with controller._lock:
+        controller._active = active
+        controller._active_started = started
+        controller._active_settled = settled
+        controller._snapshot = DesktopVoiceSnapshot(
+            status=DesktopVoiceStatus.RUNNING,
+            request_id="desktop-voice-close-timeout",
+            message="running",
+        )
+
+    with pytest.raises(RuntimeError, match="did not settle"):
+        controller.close(timeout_seconds=0.01)
+
+    pending = controller.snapshot()
+    assert pending["status"] == DesktopVoiceStatus.CANCELLING.value
+    assert pending["active"] is True
+
+    settled.set()
+    assert controller.snapshot()["status"] == DesktopVoiceStatus.CANCELLED.value
+    controller.close(timeout_seconds=0.01)
+    submitter.close()
+
+
+def test_close_rejects_behavioral_or_unbounded_timeout_before_cancel() -> None:
+    class BehavioralFloat(float):
+        def __float__(self) -> float:
+            raise AssertionError("behavioral timeout conversion must not execute")
+
+    submitter = _LoopSubmitter()
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=submitter.submit,
+    )
+    try:
+        for value, error in (
+            (BehavioralFloat(1.0), TypeError),
+            (float("nan"), ValueError),
+            (float("inf"), ValueError),
+            (0.0, ValueError),
+            (30.1, ValueError),
+        ):
+            with pytest.raises(error):
+                controller.close(timeout_seconds=value)  # type: ignore[arg-type]
+        assert controller.snapshot()["status"] == DesktopVoiceStatus.IDLE.value
+    finally:
+        submitter.close()
+
+
 def test_cancel_is_idempotent_when_no_turn_is_active() -> None:
     submitter = _LoopSubmitter()
     controller = DesktopVoiceTurnController(
