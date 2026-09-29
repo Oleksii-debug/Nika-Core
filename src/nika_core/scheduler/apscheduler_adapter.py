@@ -46,7 +46,11 @@ class APSchedulerAdapter(SchedulerPort):
             except Exception:
                 self._scheduler = BackgroundScheduler(timezone="UTC")
                 raise
-            self._scheduler.start()
+            try:
+                self._scheduler.start()
+            except Exception:
+                self._scheduler = BackgroundScheduler(timezone="UTC")
+                raise
             self._started = True
         finally:
             self._starting = False

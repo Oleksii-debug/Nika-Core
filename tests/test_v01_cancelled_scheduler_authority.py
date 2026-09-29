@@ -328,6 +328,45 @@ def test_failed_start_rehydration_discards_stale_pending_state(tmp_path) -> None
     adapter.shutdown(wait=False)
 
 
+
+
+def test_scheduler_start_failure_discards_generation_and_retries(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Start Failure Reset" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    run_at = datetime.now(UTC) + timedelta(days=1)
+    jobs.upsert(
+        _date_job(
+            job_id="job-start-failure",
+            action_id="start-failure",
+            run_at=run_at,
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    failed_scheduler = adapter._scheduler
+
+    def fail_start(*_args, **_kwargs):
+        raise RuntimeError("injected scheduler start failure")
+
+    adapter._scheduler.start = fail_start
+
+    with pytest.raises(RuntimeError, match="injected scheduler start failure"):
+        adapter.start()
+
+    assert adapter._starting is False
+    assert adapter._started is False
+    assert adapter._scheduler is not failed_scheduler
+    assert not adapter.has_runtime_job("job-start-failure")
+
+    adapter.start()
+
+    runtime = adapter._scheduler.get_job("job-start-failure")
+    assert runtime is not None
+    assert runtime.trigger.run_date == run_at
+    adapter.shutdown(wait=False)
+
+
 def test_adapter_restart_rebuilds_apscheduler_executor(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Restart Lifecycle" / "nika core.db")
     store.initialize()
