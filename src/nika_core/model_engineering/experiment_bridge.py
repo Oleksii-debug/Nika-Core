@@ -73,6 +73,8 @@ def benchmark_observations(
 ) -> tuple[MetricObservation, ...]:
     """Project exact benchmark evidence into its exact Experiment Engine definition."""
 
+    if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
+        raise ValueError("model promotion observations require held-out evidence")
     metrics = _validate_policy_metrics(definition.policy)
     expected_replays = _evaluation_replays(evaluation_set)
     if definition.replays != expected_replays:
@@ -118,6 +120,7 @@ def benchmark_observations(
                 value=values[metric],
             )
             for metric in metrics
+            if metric != LATENCY_METRIC or result.completion_succeeded
         )
     return tuple(observations)
 
