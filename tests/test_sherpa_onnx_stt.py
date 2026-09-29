@@ -372,6 +372,59 @@ def test_factory_binds_whisper_files_language_threads_and_cpu_provider() -> None
     ]
 
 
+
+@pytest.mark.parametrize(
+    "bad_path",
+    [
+        "https://example.com/model.onnx",
+        "file://server/share/model.onnx",
+        r"\\server\share\model.onnx",
+    ],
+)
+def test_factory_rejects_nonlocal_model_paths_before_module_use(bad_path: str) -> None:
+    class _OfflineRecognizer:
+        @classmethod
+        def from_whisper(cls, **kwargs):
+            raise AssertionError(f"native factory must not run: {kwargs}")
+
+    class _SherpaModule:
+        OfflineRecognizer = _OfflineRecognizer
+
+    with pytest.raises(ValueError, match="bounded local path"):
+        SherpaOnnxWhisperSpeechToTextAdapter.from_whisper_files(
+            encoder=bad_path,
+            decoder="decoder.onnx",
+            tokens="tokens.txt",
+            model_id="whisper-uk-v1",
+            language="uk",
+            sherpa_module=_SherpaModule,
+        )
+
+
+@pytest.mark.parametrize(
+    "bad_text",
+    [
+        "bad\x00transcript",
+        "bad" + chr(0xD800) + "transcript",
+    ],
+)
+def test_native_transcript_invalid_unicode_is_rejected(
+    fake_numpy: None,
+    bad_text: str,
+) -> None:
+    recognizer = _Recognizer(text=bad_text)
+    adapter = SherpaOnnxWhisperSpeechToTextAdapter(
+        recognizer=recognizer,
+        model_id="whisper-uk-v1",
+        language="uk",
+    )
+
+    with pytest.raises(SpeechToTextAdapterError) as caught:
+        asyncio.run(adapter.transcribe(_request()))
+
+    assert caught.value.code is SpeechToTextFailureCode.PROVIDER_ERROR
+    assert str(caught.value) == "Sherpa ONNX STT result text is invalid."
+
 def test_factory_native_initialization_error_is_sanitized() -> None:
     canary = r"C:\private\SECRET-DECODER.onnx"
 
