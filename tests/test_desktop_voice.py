@@ -1278,6 +1278,47 @@ def test_behavioral_nested_digest_fails_closed_without_dispatch() -> None:
     assert snapshot.transcript is None
 
 
+def test_completed_result_rejects_capture_stt_audio_metadata_mismatch() -> None:
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    assert result.evidence.transcription is not None
+    object.__setattr__(
+        result.evidence.transcription,
+        "audio_bytes",
+        result.evidence.capture.audio_byte_count + 2,
+    )
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
+
+def test_completed_result_rejects_impossible_detected_wake_span() -> None:
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    assert result.evidence.wake is not None
+    assert result.evidence.wake.match_end_token_exclusive is not None
+    object.__setattr__(
+        result.evidence.wake,
+        "match_end_token_exclusive",
+        result.evidence.wake.token_count + 1,
+    )
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
+
 def test_non_hex_audio_digest_cannot_satisfy_success_evidence_binding() -> None:
     result = asyncio.run(
         _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
