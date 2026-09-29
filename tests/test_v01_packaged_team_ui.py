@@ -86,6 +86,7 @@ def _rendered_team_snapshot(
     live_projection: dict[str, object] | None = None,
     next_projection: dict[str, object] | None = None,
     next_recovery: dict[str, object] | None = None,
+    stale_projection: dict[str, object] | None = None,
 ) -> dict[str, object]:
     if _NODE is None:
         pytest.skip("Node.js is required for the packaged team renderer canary regression")
@@ -155,6 +156,7 @@ const fs = require("fs");
 const PROJECTION = {json.dumps(projection, ensure_ascii=False)};
 const NEXT_PROJECTION = {json.dumps(next_projection, ensure_ascii=False)};
 const NEXT_RECOVERY = {json.dumps(next_recovery, ensure_ascii=False)};
+const STALE_PROJECTION = {json.dumps(stale_projection, ensure_ascii=False)};
 let getStateCalls = 0;
 
 class Element {{}}
@@ -209,22 +211,18 @@ global.document = {{
 global.window = {{
   addEventListener: () => {{}},
   setInterval: (callback) => {{
-    if (NEXT_PROJECTION !== null) {{
+    if (STALE_PROJECTION !== null) {{
+      setTimeout(() => {{ void callback(); }}, 5);
+      setTimeout(() => {{ void callback(); }}, 10);
+    }} else if (NEXT_PROJECTION !== null) {{
       setTimeout(() => {{ void callback(); }}, 5);
     }}
     return 1;
   }},
   clearInterval: () => {{}},
 }};
-function currentProjection() {{
-  const value = getStateCalls === 0 || NEXT_PROJECTION === null
-    ? PROJECTION
-    : NEXT_PROJECTION;
-  getStateCalls += 1;
-  return value;
-}}
-function currentRecovery() {{
-  const initial = {{
+function initialRecovery() {{
+  return {{
     schema_version: 1,
     status: "ready",
     auto_resume_count: 0,
@@ -234,23 +232,40 @@ function currentRecovery() {{
     blocked_count: 0,
     resume_failed_count: 0,
   }};
-  return getStateCalls === 0 || NEXT_RECOVERY === null ? initial : NEXT_RECOVERY;
+}}
+async function getState() {{
+  const call = getStateCalls;
+  getStateCalls += 1;
+  let projection = PROJECTION;
+  let recovery = initialRecovery();
+  let delay = 0;
+  if (call > 0) {{
+    if (STALE_PROJECTION !== null && call === 1) {{
+      projection = STALE_PROJECTION;
+      delay = 40;
+    }} else if (NEXT_PROJECTION !== null) {{
+      projection = NEXT_PROJECTION;
+    }}
+    if (NEXT_RECOVERY !== null) recovery = NEXT_RECOVERY;
+  }}
+  if (delay > 0) await new Promise((resolve) => setTimeout(resolve, delay));
+  return {{
+    ok: true,
+    state: {{
+      tasks: [],
+      agents: [],
+      workspaces: [],
+      startup_recovery: recovery,
+      product_project: null,
+      v01_team_task: projection,
+    }},
+  }};
 }}
 global.crypto = {{ randomUUID: () => "team-ui-request-id" }};
 global.pywebview = {{
   api: {{
     list_actions: async () => [],
-    get_state: async () => ({{
-      ok: true,
-      state: {{
-        tasks: [],
-        agents: [],
-        workspaces: [],
-        startup_recovery: currentRecovery(),
-        product_project: null,
-        v01_team_task: currentProjection(),
-      }},
-    }}),
+    get_state: getState,
   }},
 }};
 
@@ -283,7 +298,7 @@ setTimeout(() => {{
     summary_hidden: element("team-task-summary").hidden,
     rendered,
   }}));
-}}, 50);
+}}, STALE_PROJECTION !== null ? 90 : 50);
 """
     result = subprocess.run(
         (_NODE, "-e", harness, str(_WEB_ROOT / "app.js")),
@@ -923,6 +938,41 @@ def test_polling_preserves_model_result_announcement_during_recovery_transition(
     assert (
         "Перевірена відповідь моделі доступна в підсумку командного завдання."
         in rendered["rendered"]
+    )
+
+
+def test_polling_discards_older_state_response_after_newer_model_result() -> None:
+    before = _model_result_projection()
+    final_before = before["final_result"]
+    assert isinstance(final_before, dict)
+    comparison_before = final_before["comparison"]
+    assert isinstance(comparison_before, dict)
+    comparison_before.pop("model_result")
+
+    stale = json.loads(json.dumps(before, ensure_ascii=False))
+    stale_task = stale["task"]
+    assert isinstance(stale_task, dict)
+    stale_task["command"] = "STALE_STATE_MUST_NOT_WIN"
+
+    latest = _model_result_projection()
+    latest_task = latest["task"]
+    assert isinstance(latest_task, dict)
+    latest_task["command"] = "LATEST_STATE_MUST_WIN"
+
+    rendered = _rendered_team_snapshot(
+        live_projection=before,
+        next_projection=latest,
+        stale_projection=stale,
+    )
+    text = str(rendered["rendered"])
+
+    assert rendered["ready"] == "true"
+    assert "LATEST_STATE_MUST_WIN" in text
+    assert "STALE_STATE_MUST_NOT_WIN" not in text
+    assert "Перевірена відповідь <b>лишається текстом</b> & не HTML." in text
+    assert (
+        "Перевірена відповідь моделі доступна в підсумку командного завдання."
+        in text
     )
 
 

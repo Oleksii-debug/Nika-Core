@@ -179,6 +179,8 @@
   let actionsReady = false;
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
+  let stateRefreshGeneration = 0;
+  let lastStateReady = false;
   let teamStateSignature = null;
   let teamModelResultAvailable = null;
 
@@ -1217,11 +1219,14 @@
   });
 
   async function refreshState({ announceTeamTransitions = true } = {}) {
+    const stateReadGeneration = ++stateRefreshGeneration;
+    const isCurrentStateRead = () => stateReadGeneration === stateRefreshGeneration;
     const autostartReadGeneration = autostartGeneration;
     const modelReadGeneration = modelGeneration;
     if (!globalThis.pywebview?.api?.get_state) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      lastStateReady = false;
       reportStateUnavailable();
       return false;
     }
@@ -1229,14 +1234,18 @@
     try {
       response = await globalThis.pywebview.api.get_state();
     } catch {
+      if (!isCurrentStateRead()) return lastStateReady;
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      lastStateReady = false;
       reportStateUnavailable();
       return false;
     }
+    if (!isCurrentStateRead()) return lastStateReady;
     if (!response?.ok) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      lastStateReady = false;
       reportStateUnavailable();
       return false;
     }
@@ -1256,14 +1265,19 @@
     const productReady = renderProductProject(state.product_project ?? null);
     const teamRender = renderTeamTask(state.v01_team_task ?? null);
     if (!recoveryRender.ok) {
+      lastStateReady = false;
       announce(recoveryRender.message, true);
       return false;
     }
     if (!teamRender.ok) {
+      lastStateReady = false;
       announce(teamTaskUnavailableMessage, true);
       return false;
     }
-    if (!productReady) return false;
+    if (!productReady) {
+      lastStateReady = false;
+      return false;
+    }
     if (announceTeamTransitions && recoveryRender.changed) {
       announce(
         teamRender.modelResultBecameAvailable
@@ -1278,6 +1292,7 @@
           : "Стан командного завдання оновлено.",
       );
     }
+    lastStateReady = true;
     return true;
   }
 
