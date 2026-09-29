@@ -371,6 +371,50 @@ def test_bridge_rejects_same_candidate_id_with_different_model_evidence() -> Non
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("weighted_quality_score", 0.25),
+        ("task_pass_rate", 0.25),
+        ("completion_rate", 0.25),
+        ("mean_latency_ms", 999.0),
+        ("p95_latency_ms", 999.0),
+    ],
+)
+def test_observation_bridge_rejects_incoherent_report_aggregates(
+    field: str,
+    value: float,
+) -> None:
+    candidate = _candidate("candidate", "m")
+    evaluation = _evaluation()
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 20.0),
+    )
+    forged = replace(report, **{field: value})
+    definition = build_experiment_definition(
+        experiment_id="aggregate-binding",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=_execution_config(),
+        policy=PromotionPolicy(
+            primary_metric=QUALITY_METRIC,
+            minimum_replays=2,
+        ),
+        permission_fingerprint="permissions-v1",
+    )
+
+    with pytest.raises(ValueError, match="aggregate metrics"):
+        benchmark_observations(
+            forged,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
+
+
 def test_observation_bridge_rejects_pass_flag_that_conflicts_with_threshold() -> None:
     candidate = _candidate("candidate", "m")
     evaluation = _evaluation()
@@ -495,7 +539,15 @@ def test_failure_attempt_latency_is_not_projected_as_promotion_latency() -> None
         output_tokens=None,
         total_tokens=None,
     )
-    report = replace(report, case_results=(report.case_results[0], failed))
+    report = replace(
+        report,
+        case_results=(report.case_results[0], failed),
+        weighted_quality_score=0.5,
+        task_pass_rate=0.5,
+        completion_rate=0.5,
+        mean_latency_ms=10.0,
+        p95_latency_ms=10.0,
+    )
 
     observations = benchmark_observations(
         report,
@@ -568,6 +620,22 @@ class _HostilePermission(str):
     def strip(self, *args, **kwargs):
         del args, kwargs
         raise AssertionError("permission string behavior executed")
+
+
+def test_definition_bridge_fences_experiment_id_before_behavior() -> None:
+    with pytest.raises(TypeError, match="experiment_id must be canonical text"):
+        build_experiment_definition(
+            experiment_id=_HostilePermission("promotion"),
+            champion=_candidate("champion", "m1"),
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=_evaluation(),
+            execution_config=_execution_config(),
+            policy=PromotionPolicy(
+                primary_metric=QUALITY_METRIC,
+                minimum_replays=2,
+            ),
+            permission_fingerprint="permissions-v1",
+        )
 
 
 def test_definition_bridge_fences_envelopes_before_behavior() -> None:
