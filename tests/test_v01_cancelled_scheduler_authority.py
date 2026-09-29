@@ -156,6 +156,50 @@ def test_terminal_task_authority_suppresses_rehydrated_wakes(tmp_path) -> None:
     third.shutdown(wait=False)
 
 
+def test_upsert_uses_durable_job_after_caller_payload_mutation(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Canonical Upsert" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    live_id = _task(queue)
+
+    class PostPersistMutatingJobs(ScheduledJobStore):
+        def upsert(self, job: ScheduledJob) -> None:
+            super().upsert(job)
+            job.payload["task_id"] = "missing-task-after-persist"
+
+    jobs = PostPersistMutatingJobs(store)
+    calls: list[str] = []
+
+    def resolve(action_id: str):
+        def handler(_payload: dict[str, object]) -> None:
+            calls.append(action_id)
+
+        return handler
+
+    adapter = APSchedulerAdapter(jobs, resolve)
+    adapter.start()
+    caller_job = _date_job(
+        job_id="job-live-race",
+        action_id="live-race",
+        run_at=datetime.now(UTC) + timedelta(days=1),
+        payload={"task_id": live_id},
+    )
+
+    adapter.upsert(caller_job)
+
+    durable = jobs.get("job-live-race")
+    assert caller_job.payload["task_id"] == "missing-task-after-persist"
+    assert durable is not None
+    assert durable.payload == {"task_id": live_id}
+    assert durable.enabled is True
+    assert adapter.has_runtime_job("job-live-race")
+
+    adapter._dispatch("job-live-race")
+
+    assert calls == ["live-race"]
+    adapter.shutdown(wait=False)
+
+
 def test_repeated_stop_of_one_cancelled_task_is_idempotent(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Repeated Stop" / "nika core.db")
     store.initialize()
