@@ -280,7 +280,6 @@ def build_windows_one_shot_voice_turn_service(
     """
     microphone_adapter = WindowsWasapiMicrophoneCaptureAdapter(
         sounddevice_module=sounddevice_module,
-        platform_name="win32",
     )
     stt_adapter = SherpaOnnxWhisperSpeechToTextAdapter.from_whisper_files(
         encoder=encoder,
