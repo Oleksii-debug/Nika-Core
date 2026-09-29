@@ -182,7 +182,12 @@ class ModelBenchmarkRunner:
         resource_before = self._resource_snapshot()
         accelerator_before = self._accelerator_snapshot()
         request = ModelRequest(
-            request_id=self._request_id(candidate, evaluation_set, case),
+            request_id=self._request_id(
+                candidate,
+                evaluation_set,
+                case,
+                execution_config,
+            ),
             messages=case.messages,
             model=candidate.request_model,
             provider_id=candidate.provider_id,
@@ -269,10 +274,12 @@ class ModelBenchmarkRunner:
         candidate: ModelCandidate,
         evaluation_set: EvaluationSet,
         case: EvaluationCase,
+        execution_config: BenchmarkExecutionConfig,
     ) -> str:
         raw = (
-            f"nika-model-benchmark-v1\0{candidate.evidence_sha256}\0"
-            f"{evaluation_set.content_sha256}\0{case.case_id}"
+            f"nika-model-benchmark-v2\0{candidate.evidence_sha256}\0"
+            f"{evaluation_set.content_sha256}\0{case.case_id}\0"
+            f"{execution_config.evidence_sha256}"
         ).encode()
         return f"model-bench-{hashlib.sha256(raw).hexdigest()[:32]}"
 
