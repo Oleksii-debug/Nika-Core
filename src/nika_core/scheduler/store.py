@@ -98,9 +98,14 @@ class ScheduledJobStore:
     def list_enabled(self) -> tuple[ScheduledJob, ...]:
         with self._store.connection() as conn:
             rows = conn.execute(
-                "SELECT * FROM scheduled_jobs WHERE enabled = 1 ORDER BY job_id"
+                "SELECT * FROM scheduled_jobs ORDER BY job_id"
             ).fetchall()
-        return tuple(_from_row(row) for row in rows)
+        enabled_jobs: list[ScheduledJob] = []
+        for row in rows:
+            if not _stored_bool(row["enabled"], "persisted enabled"):
+                continue
+            enabled_jobs.append(_from_row(row))
+        return tuple(enabled_jobs)
 
     def set_enabled(self, job_id: str, enabled: bool) -> bool:
         with self._store.connection() as conn:
