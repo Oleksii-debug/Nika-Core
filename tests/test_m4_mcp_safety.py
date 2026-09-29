@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from typing import Self
 
 import pytest
 from mcp.server import MCPServer
@@ -11,7 +12,7 @@ from nika_core.tools import ToolCall, ToolRisk
 
 
 class _BehavioralToolId(str):
-    def __new__(cls, value: str, events: list[str]) -> _BehavioralToolId:
+    def __new__(cls, value: str, events: list[str]) -> Self:
         instance = super().__new__(cls, value)
         instance.events = events
         return instance
@@ -212,7 +213,7 @@ def _list_tools_client(
         def __init__(self, _target: object) -> None:
             pass
 
-        async def __aenter__(self) -> FakeClient:
+        async def __aenter__(self) -> Self:
             return self
 
         async def __aexit__(
