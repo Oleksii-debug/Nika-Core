@@ -209,6 +209,35 @@ def test_legacy_unbound_recovery_remains_deterministic_and_ready(tmp_path: Path)
     assert result.status is RuntimeResumeProbeStatus.READY
 
 
+def test_recovery_health_uses_frozen_task_route_after_default_changes(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _task_with_selection(store, _ollama())
+    settings = V01ModelSettings(store)
+    assert settings.configure({"revision": 1, **_deterministic()}).status == "completed"
+    health = _StaticHealthProbe(
+        _snapshot(
+            reachable=ModelHealthFact.YES,
+            present=ModelHealthFact.YES,
+            ready=ModelHealthFact.YES,
+        )
+    )
+    seen: list[ModelSelection] = []
+
+    def factory(selection: ModelSelection):
+        seen.append(selection)
+        return health
+
+    result = _probe(_runtime(store, health_probe_factory=factory), task_id)
+
+    assert result.status is RuntimeResumeProbeStatus.READY
+    assert [selection.route_kind for selection in seen] == ["ollama"]
+    assert seen[0].model == "local-model:1"
+    assert seen[0].base_url == "http://localhost:11434"
+    assert settings.snapshot()["route_kind"] == "deterministic"
+
+
 def test_ready_ollama_route_allows_exact_crash_recovery_checkpoint(tmp_path: Path) -> None:
     store = _store(tmp_path)
     task_id = _task_with_selection(store, _ollama())
