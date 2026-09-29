@@ -361,3 +361,25 @@ def test_unicode_payload_uses_canonical_utf8_size(tmp_path: Path) -> None:
     restored = store.get("job-1")
     assert restored is not None
     assert restored.payload == {"value": value}
+
+
+def test_legacy_ascii_escaped_unicode_within_canonical_bound_recovers(
+    tmp_path: Path,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    value = "ї" * 100_000
+    legacy_json = '{"value":"' + ("\\u0457" * 100_000) + '"}'
+    assert len(legacy_json.encode("utf-8")) > 262_144
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            (legacy_json, "job-1"),
+        )
+
+    restored = store.get("job-1")
+    assert restored is not None
+    assert restored.payload == {"value": value}
