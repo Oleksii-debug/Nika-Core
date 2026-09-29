@@ -437,7 +437,9 @@ def _decode_job(
     *,
     expected_recurrence_id: str,
 ) -> tuple[RecurrenceState, dict[str, Any]]:
-    if job.action_id != DurableRecurrenceService.ACTION_ID:
+    if type(job.job_id) is not str or job.job_id != _job_id(expected_recurrence_id):
+        raise ValueError("durable recurrence job identity is corrupt")
+    if type(job.action_id) is not str or job.action_id != DurableRecurrenceService.ACTION_ID:
         raise ValueError("durable recurrence job has an unexpected action_id")
     if job.trigger_kind is not TriggerKind.DATE:
         raise ValueError("durable recurrence job must use a DATE trigger")
@@ -462,7 +464,8 @@ def _decode_job(
     if type(metadata) is not dict or type(target_payload) is not dict:
         raise TypeError("durable recurrence payload is corrupt")
     target_payload = _canonical_payload(target_payload)
-    if metadata.get("version") != _RECURRENCE_VERSION:
+    version = metadata.get("version")
+    if type(version) is not int or version != _RECURRENCE_VERSION:
         raise ValueError("unsupported durable recurrence payload version")
     recurrence_id = _required_text(metadata.get("recurrence_id"), "persisted recurrence_id")
     if recurrence_id != expected_recurrence_id:
@@ -549,7 +552,7 @@ def _decode_job(
         deadline_at=state.deadline_at,
         target_payload=target_payload,
     )
-    if persisted_binding != expected_binding:
+    if type(persisted_binding) is not str or persisted_binding != expected_binding:
         raise ValueError("durable recurrence immutable binding is missing or corrupt")
     return state, dict(target_payload)
 
