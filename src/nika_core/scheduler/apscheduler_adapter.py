@@ -52,7 +52,7 @@ class APSchedulerAdapter(SchedulerPort):
     def upsert(self, job: ScheduledJob) -> None:
         if type(job) is not ScheduledJob:
             raise TypeError("job must be an exact ScheduledJob")
-        job_id = job.job_id
+        job_id = _require_job_id(job.job_id)
         self._jobs.upsert(job)
         effective_job = self._required_job(job_id)
         if self._started:
@@ -64,6 +64,7 @@ class APSchedulerAdapter(SchedulerPort):
         self._audit_change("scheduler.job_upserted", effective_job)
 
     def remove(self, job_id: str) -> bool:
+        job_id = _require_job_id(job_id)
         removed = self._jobs.delete(job_id)
         if self._started and self._scheduler.get_job(job_id) is not None:
             self._scheduler.remove_job(job_id)
@@ -76,7 +77,7 @@ class APSchedulerAdapter(SchedulerPort):
         return removed
 
     def pause(self, job_id: str) -> None:
-        job = self._required_job(job_id)
+        job = self._required_job(_require_job_id(job_id))
         self._jobs.set_enabled(job.job_id, False)
         paused_job = self._required_job(job.job_id)
         if self._started and self._scheduler.get_job(paused_job.job_id) is not None:
@@ -84,7 +85,7 @@ class APSchedulerAdapter(SchedulerPort):
         self._audit_change("scheduler.job_paused", paused_job)
 
     def resume(self, job_id: str) -> None:
-        job = self._required_job(job_id)
+        job = self._required_job(_require_job_id(job_id))
         self._jobs.set_enabled(job.job_id, True)
         enabled_job = self._required_job(job.job_id)
         if not enabled_job.enabled or not self._task_authority_allows(enabled_job):
@@ -94,6 +95,7 @@ class APSchedulerAdapter(SchedulerPort):
         self._audit_change("scheduler.job_resumed", enabled_job)
 
     def has_runtime_job(self, job_id: str) -> bool:
+        job_id = _require_job_id(job_id)
         return self._scheduler.get_job(job_id) is not None
 
     def _install(self, job: ScheduledJob) -> None:
@@ -109,11 +111,16 @@ class APSchedulerAdapter(SchedulerPort):
         )
 
     def _dispatch(self, job_id: str) -> None:
-        job = self._required_job(job_id)
-        if not job.enabled or not self._task_authority_allows(job):
+        job_id = _require_job_id(job_id)
+        job = self._jobs.get(job_id)
+        if job is None or not job.enabled or not self._task_authority_allows(job):
             return
         action_id = job.action_id
-        handler = self._handler_resolver(action_id)
+        try:
+            handler = self._handler_resolver(action_id)
+        except Exception as exc:
+            self._audit_failure(job_id, action_id, exc)
+            raise
         # Resolver work can race with pause/remove/upsert. Re-read the durable
         # job at the last scheduler-owned boundary before any external effect.
         job = self._jobs.get(job_id)
@@ -134,13 +141,7 @@ class APSchedulerAdapter(SchedulerPort):
         try:
             handler(dict(job.payload))
         except Exception as exc:
-            if self._audit is not None:
-                self._audit.append(
-                    event_type="scheduler.job_failed",
-                    entity_type="scheduled_job",
-                    entity_id=job_id,
-                    payload={"action_id": job.action_id, "error_type": type(exc).__name__},
-                )
+            self._audit_failure(job_id, job.action_id, exc)
             raise
         if self._audit is not None:
             self._audit.append(
@@ -194,7 +195,17 @@ class APSchedulerAdapter(SchedulerPort):
                 payload=payload,
             )
 
+    def _audit_failure(self, job_id: str, action_id: str, exc: Exception) -> None:
+        if self._audit is not None:
+            self._audit.append(
+                event_type="scheduler.job_failed",
+                entity_type="scheduled_job",
+                entity_id=job_id,
+                payload={"action_id": action_id, "error_type": type(exc).__name__},
+            )
+
     def _required_job(self, job_id: str) -> ScheduledJob:
+        job_id = _require_job_id(job_id)
         job = self._jobs.get(job_id)
         if job is None:
             raise KeyError(f"unknown scheduled job: {job_id}")
@@ -212,6 +223,14 @@ class APSchedulerAdapter(SchedulerPort):
                     "enabled": job.enabled,
                 },
             )
+
+
+def _require_job_id(value: object) -> str:
+    if type(value) is not str:
+        raise TypeError("job_id must be an exact string")
+    if not value or value != value.strip():
+        raise ValueError("job_id must be non-empty and whitespace-stable")
+    return value
 
 
 def _make_trigger(job: ScheduledJob) -> object:

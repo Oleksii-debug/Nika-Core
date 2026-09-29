@@ -308,6 +308,120 @@ def test_resume_uses_durable_replacement_after_enable_interleaving(tmp_path) -> 
     adapter.shutdown(wait=False)
 
 
+
+def test_adapter_rejects_foreign_job_id_before_behavior(tmp_path) -> None:
+    class BehavioralId(str):
+        def strip(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("foreign job_id behavior must not run")
+
+    store = SQLiteStore(tmp_path / "Ніка Scheduler ID Fence" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    hostile = _date_job(
+        job_id=BehavioralId("job-hostile"),
+        action_id="hostile",
+        run_at=datetime.now(UTC) + timedelta(days=1),
+        payload={},
+    )
+
+    with pytest.raises(TypeError, match="job_id must be an exact string"):
+        adapter.upsert(hostile)
+
+    assert jobs.get("job-hostile") is None
+
+
+@pytest.mark.parametrize("operation", ("remove", "pause", "resume", "has_runtime_job"))
+def test_adapter_job_id_operations_reject_foreign_text_before_behavior(
+    tmp_path,
+    operation: str,
+) -> None:
+    class BehavioralId(str):
+        def strip(self, *args, **kwargs):
+            del args, kwargs
+            raise AssertionError("foreign job_id behavior must not run")
+
+    store = SQLiteStore(tmp_path / f"Ніка Scheduler ID {operation}" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    jobs.upsert(
+        _date_job(
+            job_id="job-live",
+            action_id="live",
+            run_at=datetime.now(UTC) + timedelta(days=1),
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+
+    with pytest.raises(TypeError, match="job_id must be an exact string"):
+        getattr(adapter, operation)(BehavioralId("job-live"))
+
+    durable = jobs.get("job-live")
+    assert durable is not None
+    assert durable.enabled is True
+
+
+def test_dispatch_removed_durable_job_is_noop(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Removed Dispatch" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    resolved: list[str] = []
+
+    def resolve(action_id: str):
+        resolved.append(action_id)
+        return lambda _payload: None
+
+    jobs.upsert(
+        _date_job(
+            job_id="job-removed",
+            action_id="removed",
+            run_at=datetime.now(UTC) + timedelta(days=1),
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, resolve)
+    assert jobs.delete("job-removed") is True
+
+    adapter._dispatch("job-removed")
+
+    assert resolved == []
+
+
+def test_resolver_failure_is_audited_before_handler_start(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Resolver Audit" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    jobs.upsert(
+        _date_job(
+            job_id="job-resolver-failure",
+            action_id="missing-handler",
+            run_at=datetime.now(UTC) + timedelta(days=1),
+            payload={},
+        )
+    )
+
+    def resolve(_action_id: str):
+        raise RuntimeError("resolver unavailable")
+
+    adapter = APSchedulerAdapter(jobs, resolve, audit=audit)
+
+    with pytest.raises(RuntimeError, match="resolver unavailable"):
+        adapter._dispatch("job-resolver-failure")
+
+    events = audit.list_for(
+        entity_type="scheduled_job",
+        entity_id="job-resolver-failure",
+    )
+    assert [event.event_type for event in events] == ["scheduler.job_failed"]
+    assert events[0].payload == {
+        "action_id": "missing-handler",
+        "error_type": "RuntimeError",
+    }
+
+
 def test_repeated_stop_of_one_cancelled_task_is_idempotent(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Repeated Stop" / "nika core.db")
     store.initialize()
