@@ -8,6 +8,8 @@ from datetime import datetime
 
 from nika_core.background_life import BackgroundAction, BackgroundWorkKind
 from nika_core.background_runtime import BackgroundDispatchGuard, BackgroundDispatchResult
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.recurrence import (
     DurableRecurrenceService,
     RecurrenceDecision,
@@ -62,7 +64,7 @@ class BackgroundRecurrenceBinding:
         }
 
     @classmethod
-    def from_payload(cls, raw: object) -> "BackgroundRecurrenceBinding":
+    def from_payload(cls, raw: object) -> BackgroundRecurrenceBinding:
         if type(raw) is not dict:
             raise TypeError("background recurrence payload must be exact built-in dict")
         if any(type(key) is not str for key in raw):
@@ -102,6 +104,10 @@ class BackgroundRecurrenceBridge:
     A recurrence is an admission/retry loop for one existing task. It stops after the
     first successful guarded effect (or when #855 reports that effect already completed).
     It never turns one task into a repeating side effect.
+
+    Occurrence execution is intentionally not a public bridge API. DurableRecurrenceService
+    owns persisted binding/cursor/deadline/due-time authority and is the only supported caller
+    of the private handler returned by resolve().
     """
 
     ACTION_ID = "living.background.dispatch"
@@ -116,7 +122,11 @@ class BackgroundRecurrenceBridge:
             raise TypeError("guard must be exact BackgroundDispatchGuard")
         if not callable(effect_resolver):
             raise TypeError("effect_resolver must be callable")
+        queue = getattr(guard, "_queue", None)
+        if type(queue) is not TaskQueue:
+            raise TypeError("guard must retain the canonical TaskQueue authority")
         self._guard = guard
+        self._queue = queue
         self._effect_resolver = effect_resolver
 
     def create(
@@ -141,6 +151,9 @@ class BackgroundRecurrenceBridge:
             effect_action_id=effect_action_id,
             owner_id=owner_id,
         )
+        task = self._queue.get(binding.task_id)
+        if self._is_irreversibly_terminal(task.state):
+            raise ValueError("background recurrence cannot bind an irreversibly terminal task")
         return recurrence.create(
             recurrence_id=binding.recurrence_id,
             task_id=binding.task_id,
@@ -158,28 +171,31 @@ class BackgroundRecurrenceBridge:
         action_key = _required_identity(action_id, "action_id")
         if action_key != self.ACTION_ID:
             raise KeyError(f"unknown background recurrence action: {action_key}")
-        return self.occurrence_handler
+        return self._occurrence_handler
 
-    def occurrence_handler(self, invocation: RecurrenceInvocation) -> RecurrenceDecision:
+    def _occurrence_handler(self, invocation: RecurrenceInvocation) -> RecurrenceDecision:
+        """Trusted callback for DurableRecurrenceService only."""
+
         try:
             asyncio.get_running_loop()
         except RuntimeError:
             pass
         else:
             raise RuntimeError(
-                "synchronous recurrence handler cannot run inside an active event loop; "
-                "await dispatch_invocation() instead"
+                "canonical background recurrence handler requires a non-async scheduler thread"
             )
-        return asyncio.run(self.dispatch_invocation(invocation))
+        snapshot = self._snapshot_invocation(invocation)
+        return asyncio.run(self._dispatch_trusted_invocation(snapshot))
 
-    async def dispatch_invocation(
+    async def _dispatch_trusted_invocation(
         self,
         invocation: RecurrenceInvocation,
     ) -> RecurrenceDecision:
-        snapshot = self._snapshot_invocation(invocation)
-        binding = BackgroundRecurrenceBinding.from_payload(snapshot.payload)
-        if binding.recurrence_id != snapshot.recurrence_id:
+        binding = BackgroundRecurrenceBinding.from_payload(invocation.payload)
+        if binding.recurrence_id != invocation.recurrence_id:
             raise ValueError("background recurrence identity mismatch")
+        if self._is_irreversibly_terminal(self._queue.get(binding.task_id).state):
+            return RecurrenceDecision.STOP
 
         async def guarded_effect() -> object:
             effect = self._effect_resolver(binding.effect_action_id)
@@ -197,6 +213,14 @@ class BackgroundRecurrenceBridge:
             owner_id=binding.owner_id,
         )
         return self._decision_from_dispatch(result)
+
+    @staticmethod
+    def _is_irreversibly_terminal(state: object) -> bool:
+        return state in {
+            TaskState.COMPLETED,
+            TaskState.CANCELLED,
+            TaskState.ARCHIVED,
+        }
 
     @staticmethod
     def _snapshot_invocation(raw: object) -> RecurrenceInvocation:
