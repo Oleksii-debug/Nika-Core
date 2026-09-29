@@ -135,6 +135,65 @@ def test_create_rejects_behavioral_identity_carriers_before_persistence(
     assert count == 0
 
 
+
+@pytest.mark.parametrize("field", ("task_id", "cursor_id"))
+def test_create_rejects_non_utf8_identity_before_persistence(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    identities: dict[str, str] = {"task_id": "task", "cursor_id": "cursor"}
+    identities[field] = "\ud800"
+
+    with pytest.raises(ValueError, match=rf"{field} must be valid UTF-8 text"):
+        BatchCursor.create(
+            memory,
+            ledger,
+            targets=_targets(1),
+            batch_size=1,
+            **identities,
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memory_records WHERE namespace = ?",
+            ("v01.batch_cursor",),
+        ).fetchone()[0]
+    assert count == 0
+
+
+@pytest.mark.parametrize(
+    "spec",
+    (
+        BatchTargetSpec(target_id="target-\ud800", payload={}),
+        BatchTargetSpec(target_id="target-0", payload={"value": "\ud800"}),
+        BatchTargetSpec(target_id="target-0", payload={"key-\ud800": "value"}),
+    ),
+)
+def test_create_rejects_non_utf8_target_text_before_persistence(
+    tmp_path: Path,
+    spec: BatchTargetSpec,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+
+    with pytest.raises((ValueError, BatchCursorStateError), match="UTF-8"):
+        BatchCursor.create(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=[spec],
+            batch_size=1,
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memory_records WHERE namespace = ?",
+            ("v01.batch_cursor",),
+        ).fetchone()[0]
+    assert count == 0
+
+
 def test_effect_lookup_rejects_behavioral_target_identity_without_reservation(
     tmp_path: Path,
 ) -> None:
@@ -209,6 +268,40 @@ def test_confirm_rejects_noncanonical_result_object_before_completing_effect(
 
     with pytest.raises(TypeError, match="result must be an exact JSON object"):
         cursor.confirm("target-0", BehavioralDict(ok=True))  # type: ignore[arg-type]
+
+    durable = ledger.require(grant.operation_key)
+    assert durable.status is IdempotencyStatus.PENDING
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+
+
+@pytest.mark.parametrize(
+    ("operation", "payload"),
+    (
+        ("confirm", {"value": "\ud800"}),
+        ("confirm", {"key-\ud800": "value"}),
+        ("mark_uncertain", {"value": "\ud800"}),
+        ("mark_uncertain", {"key-\ud800": "value"}),
+    ),
+)
+def test_effect_evidence_rejects_non_utf8_json_before_ledger_mutation(
+    tmp_path: Path,
+    operation: str,
+    payload: dict[str, object],
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(1),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+
+    with pytest.raises(BatchCursorStateError, match="valid UTF-8 JSON text"):
+        getattr(cursor, operation)("target-0", payload)
 
     durable = ledger.require(grant.operation_key)
     assert durable.status is IdempotencyStatus.PENDING

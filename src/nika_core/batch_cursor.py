@@ -1053,8 +1053,10 @@ def _json_copy(value: Any) -> Any:
 
 def _public_json_value(value: Any) -> Any:
     value_type = type(value)
-    if value is None or value_type in {bool, str, int}:
+    if value is None or value_type in {bool, int}:
         return value
+    if value_type is str:
+        return _public_utf8_text(value)
     if value_type is float:
         if not math.isfinite(value):
             raise BatchCursorStateError("batch cursor values must be JSON-serializable")
@@ -1068,7 +1070,7 @@ def _public_json_value(value: Any) -> Any:
                 raise BatchCursorStateError(
                     "batch cursor values must be JSON-serializable"
                 )
-            copied[key] = _public_json_value(item)
+            copied[_public_utf8_text(key)] = _public_json_value(item)
         return copied
     raise BatchCursorStateError("batch cursor values must be JSON-serializable")
 
@@ -1109,7 +1111,21 @@ def _required(name: str, value: str) -> str:
     result = value.strip()
     if not result:
         raise ValueError(f"{name} must not be empty")
+    try:
+        result.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
     return result
+
+
+def _public_utf8_text(value: str) -> str:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise BatchCursorStateError(
+            "batch cursor values must be valid UTF-8 JSON text"
+        ) from exc
+    return value
 
 
 def _positive_batch_size(value: int) -> int:
