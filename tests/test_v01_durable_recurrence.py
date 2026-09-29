@@ -264,6 +264,13 @@ def test_terminal_task_suppresses_recurrence_on_restart_before_handler(
         suppressed = jobs.get(persisted.job_id)
         assert suppressed is not None
         assert suppressed.enabled is False
+
+        reconciled = restarted.get(f"terminal-{terminal_state.value.lower()}")
+        assert reconciled is not None
+        assert reconciled.status is RecurrenceStatus.CANCELLED
+        assert reconciled.next_due_at is None
+        assert reconciled.next_occurrence_id is None
+        assert restarted.get(reconciled.recurrence_id) == reconciled
         assert calls == []
     finally:
         adapter.shutdown()
@@ -313,9 +320,40 @@ def test_missing_task_suppresses_recurrence_on_restart_before_handler(tmp_path: 
         suppressed = jobs.get(persisted.job_id)
         assert suppressed is not None
         assert suppressed.enabled is False
+
+        reconciled = restarted.get("missing-task")
+        assert reconciled is not None
+        assert reconciled.status is RecurrenceStatus.CANCELLED
+        assert reconciled.next_due_at is None
+        assert reconciled.next_occurrence_id is None
+        assert restarted.get("missing-task") == reconciled
         assert calls == []
     finally:
         adapter.shutdown()
+
+
+def test_disabled_active_recurrence_with_nonterminal_task_remains_corrupt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _set_task_state(store, TASK_ID, TaskState.RUNNING)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="nonterminal-disabled",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    job_id = scheduler.upserts[-1].job_id
+    assert service._jobs.set_enabled(job_id, False)
+
+    with pytest.raises(ValueError, match="enabled state does not match lifecycle state"):
+        service.get("nonterminal-disabled")
+
+    assert calls == []
 
 
 def test_completed_occurrence_is_not_repeated_and_missed_runs_coalesce_once(
