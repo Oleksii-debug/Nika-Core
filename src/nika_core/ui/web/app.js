@@ -463,6 +463,19 @@
         || comparison.source_states.some((state) => (
           !["valid", "missing", "worker_error", "evidence_invalid"].includes(state)
         ))) return false;
+    let expectedNoncomparisonStatus = null;
+    if (comparison.source_states.includes("evidence_invalid")) {
+      expectedNoncomparisonStatus = "evidence_invalid";
+    } else if (comparison.source_states.includes("worker_error")) {
+      expectedNoncomparisonStatus = "worker_error";
+    } else if (comparison.source_states.includes("missing")) {
+      expectedNoncomparisonStatus = "missing";
+    }
+    if (expectedNoncomparisonStatus === null) {
+      if (!validComparisonStatuses.includes(comparison.status)) return false;
+    } else if (comparison.status !== expectedNoncomparisonStatus) {
+      return false;
+    }
     if (!Number.isInteger(comparison.agreement_count) || comparison.agreement_count < 0
         || !Number.isInteger(comparison.difference_count) || comparison.difference_count < 0) {
       return false;
