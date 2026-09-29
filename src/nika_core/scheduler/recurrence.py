@@ -99,7 +99,7 @@ class DurableRecurrenceService:
         self._jobs = jobs
         self._scheduler = scheduler
         self._handler_resolver = handler_resolver
-        self._clock = clock or _utc_now
+        self._clock = _utc_now if clock is None else clock
 
     def create(
         self,
