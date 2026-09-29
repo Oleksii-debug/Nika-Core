@@ -1041,10 +1041,7 @@ def _durable_json_value(value: Any) -> Any:
 
 
 def _json_copy(value: Any) -> Any:
-    try:
-        return json.loads(_canonical_json(value))
-    except (TypeError, ValueError) as exc:
-        raise BatchCursorStateError("batch cursor values must be JSON-serializable") from exc
+    return _public_json_value(value)
 
 
 def _public_json_value(value: Any) -> Any:

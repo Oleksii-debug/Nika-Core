@@ -1821,3 +1821,36 @@ def test_durable_completion_decoder_rejects_behavioral_nested_scalar_carriers() 
 
     with pytest.raises(BatchCursorStateError, match="completed effect result is malformed"):
         _decode_completion_result(payload)
+
+
+@pytest.mark.parametrize(
+    "nested_value",
+    (
+        HostileDurableList(["payload"]),
+        BehavioralText("payload"),
+    ),
+)
+def test_create_rejects_forged_nested_behavioral_payload_before_persistence(
+    tmp_path: Path,
+    nested_value: object,
+) -> None:
+    memory, ledger, store = _services(tmp_path)
+    spec = BatchTargetSpec(target_id="target-0", payload={})
+    object.__setattr__(spec, "payload", {"nested": nested_value})
+
+    with pytest.raises(BatchCursorStateError, match="JSON-serializable"):
+        BatchCursor.create(
+            memory,
+            ledger,
+            task_id="task",
+            cursor_id="cursor",
+            targets=[spec],
+            batch_size=1,
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memory_records WHERE namespace = ?",
+            ("v01.batch_cursor",),
+        ).fetchone()[0]
+    assert count == 0
