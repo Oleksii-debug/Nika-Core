@@ -383,6 +383,8 @@ class DesktopVoiceTurnController:
                 or transcription.request_id != request_id
                 or wake.request_id != request_id
                 or not _is_public_transcript(result.transcript)
+                or type(transcription.transcript_chars) is not int
+                or transcription.transcript_chars != len(result.transcript)
             ):
                 return DesktopVoiceSnapshot(
                     status=DesktopVoiceStatus.FAILED,
