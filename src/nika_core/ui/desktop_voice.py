@@ -121,10 +121,10 @@ class DesktopVoiceTurnController:
                 )
                 raise TypeError("submit must return concurrent.futures.Future")
             self._active = future
-            future.add_done_callback(
-                lambda done, identity=request_id: self._finish(identity, done)
-            )
 
+        future.add_done_callback(
+            lambda done, identity=request_id: self._finish(identity, done)
+        )
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -141,8 +141,8 @@ class DesktopVoiceTurnController:
                     status="completed",
                     message="Активного голосового вводу немає.",
                 )
-            accepted = active.cancel()
 
+        accepted = active.cancel()
         if not accepted:
             return UIResult(
                 request_id="desktop-handler",
