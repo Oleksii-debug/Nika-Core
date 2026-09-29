@@ -243,6 +243,26 @@ def test_precompleted_future_callback_does_not_deadlock_start() -> None:
     assert controller.snapshot()["status"] == DesktopVoiceStatus.FAILED.value
 
 
+def test_precompleted_base_exception_future_cannot_strand_controller() -> None:
+    def immediate_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        coroutine.close()
+        future: Future[Any] = Future()
+        future.set_exception(KeyboardInterrupt("synthetic async base exception"))
+        return future
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=immediate_submit,
+    )
+
+    assert controller.start({}).status == "accepted"
+    snapshot = controller.snapshot()
+    assert snapshot["status"] == DesktopVoiceStatus.FAILED.value
+    assert snapshot["active"] is False
+    assert snapshot["transcript"] is None
+
+
 def test_cancel_callback_does_not_deadlock_controller_lock() -> None:
     submitter = _LoopSubmitter()
     entered = threading.Event()
