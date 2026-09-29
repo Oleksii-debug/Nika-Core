@@ -1,6 +1,7 @@
 from nika_core.model_engineering.contracts import (
     AcceleratorObserverPort,
     AcceleratorSnapshot,
+    BenchmarkExecutionConfig,
     BenchmarkSuiteReport,
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
@@ -35,6 +36,7 @@ from nika_core.model_engineering.runner import (
 __all__ = [
     "AcceleratorObserverPort",
     "AcceleratorSnapshot",
+    "BenchmarkExecutionConfig",
     "BenchmarkSuiteReport",
     "CandidateBenchmarkReport",
     "COMPLETION_METRIC",
