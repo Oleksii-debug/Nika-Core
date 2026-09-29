@@ -639,11 +639,26 @@ def test_renderer_rejects_active_team_with_terminal_final_result() -> None:
     assert rejected["summary_hidden"] is True
 
 
-def test_renderer_rejects_unknown_packaged_task_state() -> None:
+def test_renderer_presents_unknown_packaged_task_state_without_raw_leak() -> None:
     projection = _model_result_projection()
     task = projection["task"]
     assert isinstance(task, dict)
-    task["state"] = "CORRUPT_UNKNOWN_STATE"
+    task["state"] = "FUTURE_TASK_STATE"
+
+    rendered = _rendered_team_snapshot(live_projection=projection)
+    text = str(rendered["rendered"])
+
+    assert rendered["ready"] == "true"
+    assert rendered["summary_hidden"] is False
+    assert "Стан недоступний" in text
+    assert "FUTURE_TASK_STATE" not in text
+
+
+def test_renderer_rejects_blank_packaged_task_state() -> None:
+    projection = _model_result_projection()
+    task = projection["task"]
+    assert isinstance(task, dict)
+    task["state"] = "   "
 
     rejected = _rendered_team_snapshot(live_projection=projection)
 
@@ -684,6 +699,29 @@ def test_renderer_rejects_incoherent_valid_comparison_counts(
     assert rejected["summary_hidden"] is True
 
 
+@pytest.mark.parametrize("agreement_count", [101, (1 << 53)])
+def test_renderer_rejects_out_of_bound_partial_agreement_count(
+    agreement_count: int,
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.update(
+        status="partial",
+        validated=True,
+        source_states=["valid", "valid"],
+        agreement_count=agreement_count,
+        difference_count=1,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
 def test_renderer_rejects_noncomparison_with_comparison_counts() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
@@ -696,6 +734,117 @@ def test_renderer_rejects_noncomparison_with_comparison_counts() -> None:
         validated=False,
         source_states=["worker_error", "valid"],
         agreement_count=1,
+        difference_count=0,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+@pytest.mark.parametrize(
+    ("status", "source_states", "agreement_count", "difference_count"),
+    [
+        ("agree", ["valid", "missing"], 1, 0),
+        ("missing", ["valid", "valid"], 0, 0),
+        ("worker_error", ["evidence_invalid", "worker_error"], 0, 0),
+        ("missing", ["worker_error", "missing"], 0, 0),
+        ("evidence_invalid", ["missing", "valid"], 0, 0),
+    ],
+)
+def test_renderer_rejects_status_that_conflicts_with_source_states(
+    status: str,
+    source_states: list[str],
+    agreement_count: int,
+    difference_count: int,
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status=status,
+        validated=False,
+        source_states=source_states,
+        agreement_count=agreement_count,
+        difference_count=difference_count,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+@pytest.mark.parametrize(
+    ("status", "source_states"),
+    [
+        ("evidence_invalid", ["evidence_invalid", "worker_error"]),
+        ("worker_error", ["worker_error", "missing"]),
+        ("missing", ["missing", "valid"]),
+    ],
+)
+def test_renderer_accepts_canonical_noncomparison_source_state_precedence(
+    status: str,
+    source_states: list[str],
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status=status,
+        validated=False,
+        source_states=source_states,
+        agreement_count=0,
+        difference_count=0,
+    )
+
+    rendered = _rendered_team_snapshot(live_projection=projection)
+
+    assert rendered["ready"] == "true"
+    assert rendered["summary_hidden"] is False
+
+
+def test_renderer_accepts_canonical_evidence_invalid_without_source_details() -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status="evidence_invalid",
+        validated=False,
+        source_states=[],
+        agreement_count=0,
+        difference_count=0,
+    )
+
+    rendered = _rendered_team_snapshot(live_projection=projection)
+
+    assert rendered["ready"] == "true"
+    assert rendered["summary_hidden"] is False
+
+
+@pytest.mark.parametrize("status", ["agree", "missing", "worker_error"])
+def test_renderer_rejects_empty_source_details_for_other_statuses(status: str) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status=status,
+        validated=False,
+        source_states=[],
+        agreement_count=0,
         difference_count=0,
     )
 
