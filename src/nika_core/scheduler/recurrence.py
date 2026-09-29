@@ -258,13 +258,34 @@ class DurableRecurrenceService:
         if now < state.next_due_at:
             return
 
+        handler = self._handler_resolver(state.action_id)
+        current, current_payload = self._required(recurrence_id)
+        if current.status is not RecurrenceStatus.ACTIVE:
+            return
+        if (
+            current.next_due_at != state.next_due_at
+            or current.next_occurrence_id != state.next_occurrence_id
+        ):
+            return
+        now = self._now()
+        if current.deadline_at is not None and now >= current.deadline_at:
+            self._complete_terminal(
+                current,
+                current_payload,
+                reason=RecurrenceTerminalReason.DEADLINE,
+            )
+            return
+        if current.next_due_at is None or current.next_occurrence_id is None:
+            raise ValueError("active recurrence is missing its next durable intent")
+        if now < current.next_due_at:
+            return
         invocation = RecurrenceInvocation(
-            recurrence_id=state.recurrence_id,
-            occurrence_id=state.next_occurrence_id,
-            scheduled_for=state.next_due_at,
-            payload=dict(target_payload),
+            recurrence_id=current.recurrence_id,
+            occurrence_id=current.next_occurrence_id,
+            scheduled_for=current.next_due_at,
+            payload=dict(current_payload),
         )
-        decision = self._handler_resolver(state.action_id)(invocation)
+        decision = handler(invocation)
         if decision is None or decision is RecurrenceDecision.CONTINUE:
             stop = False
         elif decision is RecurrenceDecision.STOP:
