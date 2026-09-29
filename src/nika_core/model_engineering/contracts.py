@@ -54,6 +54,40 @@ class EvaluationPurpose(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class BenchmarkExecutionConfig:
+    timeout_seconds: float = 60.0
+    temperature: float | None = 0.0
+
+    def __post_init__(self) -> None:
+        if type(self.timeout_seconds) not in (int, float):
+            raise TypeError("timeout_seconds must be numeric")
+        timeout = float(self.timeout_seconds)
+        if not isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout_seconds must be finite and greater than zero")
+        object.__setattr__(self, "timeout_seconds", timeout)
+        if self.temperature is None:
+            return
+        if type(self.temperature) not in (int, float):
+            raise TypeError("temperature must be numeric")
+        temperature = float(self.temperature)
+        if not isfinite(temperature) or not 0 <= temperature <= 2:
+            raise ValueError("temperature must be finite and in [0, 2]")
+        object.__setattr__(self, "temperature", temperature)
+
+    @property
+    def evidence_sha256(self) -> str:
+        payload = {
+            "schema": "nika-model-benchmark-execution-config-v1",
+            "temperature": self.temperature,
+            "timeout_seconds": self.timeout_seconds,
+        }
+        encoded = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
 class ModelCandidate:
     candidate_id: str
     provider_id: str
@@ -284,6 +318,7 @@ class CandidateBenchmarkReport:
     evaluation_set_id: str
     evaluation_set_version: str
     evaluation_set_sha256: str
+    execution_config_sha256: str
     evaluation_purpose: EvaluationPurpose
     case_results: tuple[CaseBenchmarkResult, ...]
     weighted_quality_score: float
@@ -303,6 +338,7 @@ class CandidateBenchmarkReport:
         _identity(self.evaluation_set_id, "evaluation_set_id")
         _identity(self.evaluation_set_version, "evaluation_set_version")
         _optional_sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
+        _optional_sha256(self.execution_config_sha256, "execution_config_sha256")
         if not any(self.evaluation_purpose is member for member in EvaluationPurpose):
             raise TypeError("evaluation_purpose must be an EvaluationPurpose")
         if type(self.case_results) is not tuple:
@@ -353,12 +389,14 @@ class BenchmarkSuiteReport:
     evaluation_set_id: str
     evaluation_set_version: str
     evaluation_set_sha256: str
+    execution_config_sha256: str
     reports: tuple[CandidateBenchmarkReport, ...]
 
     def __post_init__(self) -> None:
         _identity(self.evaluation_set_id, "evaluation_set_id")
         _identity(self.evaluation_set_version, "evaluation_set_version")
         _optional_sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
+        _optional_sha256(self.execution_config_sha256, "execution_config_sha256")
         if type(self.reports) is not tuple:
             raise TypeError("benchmark suite reports must be a canonical tuple")
         if not self.reports:
@@ -373,5 +411,6 @@ class BenchmarkSuiteReport:
                 report.evaluation_set_id != self.evaluation_set_id
                 or report.evaluation_set_version != self.evaluation_set_version
                 or report.evaluation_set_sha256 != self.evaluation_set_sha256
+                or report.execution_config_sha256 != self.execution_config_sha256
             ):
-                raise ValueError("benchmark suite mixes evaluation set identities")
+                raise ValueError("benchmark suite mixes evaluation/config identities")
