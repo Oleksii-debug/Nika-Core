@@ -222,6 +222,140 @@ def test_upsert_uses_durable_job_after_caller_payload_mutation(tmp_path) -> None
     adapter.shutdown(wait=False)
 
 
+
+def test_start_reloads_durable_job_before_live_install(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Start Install Fence" / "nika core.db")
+    store.initialize()
+    original_at = datetime.now(UTC) + timedelta(days=1)
+    replacement_at = original_at + timedelta(days=1)
+
+    class ReplacingListJobs(ScheduledJobStore):
+        def list_enabled(self) -> tuple[ScheduledJob, ...]:
+            listed = super().list_enabled()
+            self.upsert(
+                _date_job(
+                    job_id="job-start-race",
+                    action_id="replacement",
+                    run_at=replacement_at,
+                    payload={},
+                )
+            )
+            return listed
+
+    jobs = ReplacingListJobs(store)
+    jobs.upsert(
+        _date_job(
+            job_id="job-start-race",
+            action_id="original",
+            run_at=original_at,
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+
+    adapter.start()
+
+    runtime = adapter._scheduler.get_job("job-start-race")
+    durable = jobs.get("job-start-race")
+    assert runtime is not None
+    assert durable is not None
+    assert durable.action_id == "replacement"
+    assert runtime.trigger.run_date == replacement_at
+    adapter.shutdown(wait=False)
+
+
+def test_upsert_reloads_after_post_read_durable_replacement(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Upsert Install Fence" / "nika core.db")
+    store.initialize()
+    original_at = datetime.now(UTC) + timedelta(days=1)
+    replacement_at = original_at + timedelta(days=1)
+
+    class ReplacingGetJobs(ScheduledJobStore):
+        replace_after_get = False
+
+        def get(self, job_id: str) -> ScheduledJob | None:
+            job = super().get(job_id)
+            if self.replace_after_get:
+                self.replace_after_get = False
+                super().upsert(
+                    _date_job(
+                        job_id=job_id,
+                        action_id="replacement",
+                        run_at=replacement_at,
+                        payload={},
+                    )
+                )
+            return job
+
+    jobs = ReplacingGetJobs(store)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.start()
+    jobs.replace_after_get = True
+
+    adapter.upsert(
+        _date_job(
+            job_id="job-upsert-race",
+            action_id="original",
+            run_at=original_at,
+            payload={},
+        )
+    )
+
+    runtime = adapter._scheduler.get_job("job-upsert-race")
+    durable = jobs.get("job-upsert-race")
+    assert runtime is not None
+    assert durable is not None
+    assert durable.action_id == "replacement"
+    assert runtime.trigger.run_date == replacement_at
+    adapter.shutdown(wait=False)
+
+
+def test_resume_reloads_after_post_read_durable_replacement(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Resume Install Fence" / "nika core.db")
+    store.initialize()
+    original_at = datetime.now(UTC) + timedelta(days=1)
+    replacement_at = original_at + timedelta(days=1)
+
+    class ReplacingGetJobs(ScheduledJobStore):
+        reads = 0
+
+        def get(self, job_id: str) -> ScheduledJob | None:
+            job = super().get(job_id)
+            self.reads += 1
+            if self.reads == 2:
+                super().upsert(
+                    _date_job(
+                        job_id=job_id,
+                        action_id="replacement",
+                        run_at=replacement_at,
+                        payload={},
+                    )
+                )
+            return job
+
+    jobs = ReplacingGetJobs(store)
+    jobs.upsert(
+        _date_job(
+            job_id="job-resume-install-race",
+            action_id="original",
+            run_at=original_at,
+            payload={},
+        )
+    )
+    jobs.set_enabled("job-resume-install-race", False)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.start()
+
+    adapter.resume("job-resume-install-race")
+
+    runtime = adapter._scheduler.get_job("job-resume-install-race")
+    durable = jobs.get("job-resume-install-race")
+    assert runtime is not None
+    assert durable is not None
+    assert durable.action_id == "replacement"
+    assert runtime.trigger.run_date == replacement_at
+    adapter.shutdown(wait=False)
+
 def test_dispatch_rechecks_durable_job_after_resolver_pause(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Dispatch Fence" / "nika core.db")
     store.initialize()
