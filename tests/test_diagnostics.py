@@ -139,6 +139,20 @@ def test_bounded_database_inspection_fails_closed_on_deadline(
     assert "bounded integrity inspection" in check.message
 
 
+def test_broken_database_symlink_fails_closed(tmp_path: Path) -> None:
+    link = tmp_path / "nika_core.db"
+    try:
+        link.symlink_to(tmp_path / "missing-target.db")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+
+    report = collect_diagnostics(_config(link))
+
+    check = next(item for item in report.checks if item.check_id == "database")
+    assert check.status is CheckStatus.FAIL
+    assert report.status is CheckStatus.FAIL
+
+
 def test_invalid_environment_configuration_fails_without_echoing_value(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
