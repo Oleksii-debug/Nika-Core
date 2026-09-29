@@ -521,6 +521,7 @@
       || typeof task.task_id !== "string"
       || !task.task_id.trim()
       || typeof task.state !== "string"
+      || !task.state.trim()
       || (task.command != null && (typeof task.command !== "string" || !task.command.trim()))
     ) {
       return false;
