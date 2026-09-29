@@ -400,7 +400,9 @@ class DesktopVoiceTurnController:
                     request_id=request_id,
                     message="Голосовий сервіс повернув некоректні доказові поля.",
                 )
-            transcript_sha256 = hashlib.sha256(result.transcript.encode("utf-8")).hexdigest()
+            transcript_sha256 = hashlib.sha256(
+                result.transcript.encode("utf-8")
+            ).hexdigest()
             if (
                 transcription.audio_sha256 != evidence.capture.audio_sha256
                 or transcription.transcript_sha256 != transcript_sha256
@@ -478,7 +480,11 @@ class DesktopVoiceTurnController:
 
 
 def _is_public_transcript(value: object) -> bool:
-    if type(value) is not str or not value or len(value) > MAX_TRANSCRIPT_CHARS:
+    if (
+        type(value) is not str
+        or not value.strip()
+        or len(value) > MAX_TRANSCRIPT_CHARS
+    ):
         return False
     if any(unicodedata.category(char).startswith("C") for char in value):
         return False
