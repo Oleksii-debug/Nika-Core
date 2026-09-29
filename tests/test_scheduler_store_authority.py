@@ -273,3 +273,19 @@ def test_duplicate_persisted_json_keys_fail_closed(
 
     with pytest.raises(ValueError, match="is corrupt"):
         store.get("job-1")
+
+
+def test_excessively_deep_persisted_json_fails_closed(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    nested = "[" * 1500 + "0" + "]" * 1500
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            ('{"deep":' + nested + "}", "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="persisted payload is corrupt"):
+        store.get("job-1")
