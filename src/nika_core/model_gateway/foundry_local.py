@@ -21,7 +21,7 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
-from nika_core.resources.contracts import ResourceObserverPort
+from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
 
 @dataclass(frozen=True, slots=True)
@@ -781,6 +781,29 @@ class FoundryLocalProvider:
             )
         return value
 
+    @staticmethod
+    def _resource_snapshot_values(raw: object) -> tuple[float, float, int]:
+        if type(raw) is not ResourceSnapshot:
+            raise TypeError("resource observer must return exact ResourceSnapshot")
+
+        def percent(name: str, value: object) -> float:
+            if type(value) not in (int, float):
+                raise TypeError(f"{name} must be numeric")
+            try:
+                normalized = float(value)
+            except OverflowError as exc:
+                raise ValueError(f"{name} must be finite") from exc
+            if not isfinite(normalized) or not 0 <= normalized <= 100:
+                raise ValueError(f"{name} must be finite and in the range [0, 100]")
+            return normalized
+
+        cpu_percent = percent("cpu_percent", raw.cpu_percent)
+        memory_percent = percent("memory_percent", raw.memory_percent)
+        available_memory_bytes = raw.available_memory_bytes
+        if type(available_memory_bytes) is not int or available_memory_bytes < 0:
+            raise ValueError("available_memory_bytes must be a nonnegative integer")
+        return cpu_percent, memory_percent, available_memory_bytes
+
     def _enforce_resource_policy(self) -> None:
         policy = self._resource_policy
         if policy is None:
@@ -795,15 +818,18 @@ class FoundryLocalProvider:
             )
         try:
             snapshot = observer.snapshot()
+            cpu_percent, memory_percent, available_memory_bytes = (
+                self._resource_snapshot_values(snapshot)
+            )
         except Exception as exc:
             raise ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
-                "model resource preflight could not read the system resource snapshot",
+                "model resource preflight returned an invalid system resource snapshot",
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             ) from exc
 
-        if policy.max_cpu_percent is not None and snapshot.cpu_percent > policy.max_cpu_percent:
+        if policy.max_cpu_percent is not None and cpu_percent > policy.max_cpu_percent:
             raise ModelGatewayError(
                 ModelErrorCode.RESOURCE_LIMIT,
                 "Foundry Local inference blocked by CPU resource policy",
@@ -812,7 +838,7 @@ class FoundryLocalProvider:
             )
         if (
             policy.max_memory_percent is not None
-            and snapshot.memory_percent > policy.max_memory_percent
+            and memory_percent > policy.max_memory_percent
         ):
             raise ModelGatewayError(
                 ModelErrorCode.RESOURCE_LIMIT,
@@ -822,7 +848,7 @@ class FoundryLocalProvider:
             )
         if (
             policy.min_available_memory_bytes is not None
-            and snapshot.available_memory_bytes < policy.min_available_memory_bytes
+            and available_memory_bytes < policy.min_available_memory_bytes
         ):
             raise ModelGatewayError(
                 ModelErrorCode.RESOURCE_LIMIT,
