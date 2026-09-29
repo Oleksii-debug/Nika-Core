@@ -56,6 +56,7 @@ class APSchedulerAdapter(SchedulerPort):
         effective_job = self._required_job(job_id)
         if self._started:
             self._sync_runtime_job(job_id)
+            effective_job = self._required_job(job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
 
     def remove(self, job_id: str) -> bool:
