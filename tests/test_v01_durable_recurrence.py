@@ -1028,3 +1028,50 @@ def test_persisted_scalar_carriers_fail_before_behavior(tmp_path: Path) -> None:
                 expected_recurrence_id="scalar-authority",
             )
     assert calls == []
+
+
+def test_persisted_timeline_and_terminal_semantics_fail_closed(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    start = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
+    clock = FakeClock(start)
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="timeline-authority",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=start,
+    )
+    job = scheduler.upserts[-1]
+
+    off_grid_payload = dict(job.payload)
+    off_grid_metadata = dict(off_grid_payload["_nika_recurrence_v1"])
+    off_grid_due = start + timedelta(seconds=30)
+    off_grid_metadata["next_due_at"] = off_grid_due.isoformat()
+    off_grid_metadata["next_occurrence_id"] = recurrence_module._occurrence_id(
+        "timeline-authority",
+        off_grid_due,
+    )
+    off_grid_payload["_nika_recurrence_v1"] = off_grid_metadata
+    off_grid_job = replace(
+        job,
+        payload=off_grid_payload,
+        trigger={"run_date": off_grid_due.isoformat()},
+    )
+    with pytest.raises(ValueError, match="outside the recurrence grid"):
+        recurrence_module._decode_job(
+            off_grid_job,
+            expected_recurrence_id="timeline-authority",
+        )
+
+    active_terminal_payload = dict(job.payload)
+    active_terminal_metadata = dict(active_terminal_payload["_nika_recurrence_v1"])
+    active_terminal_metadata["terminal_reason"] = "deadline"
+    active_terminal_payload["_nika_recurrence_v1"] = active_terminal_metadata
+    with pytest.raises(ValueError, match="non-completed recurrence"):
+        recurrence_module._decode_job(
+            replace(job, payload=active_terminal_payload),
+            expected_recurrence_id="timeline-authority",
+        )
+    assert calls == []
