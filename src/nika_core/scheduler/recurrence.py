@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any, cast
 
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
 from nika_core.scheduler.store import IMMUTABLE_JOB_BINDING_KEY, ScheduledJobStore
 
@@ -18,6 +19,9 @@ _TASK_ID_KEY = "task_id"
 _RECURRENCE_VERSION = 2
 _MAX_PAYLOAD_DEPTH = 32
 _MAX_PAYLOAD_JSON_BYTES = 262_144
+_IRREVERSIBLY_TERMINAL_TASK_STATES = frozenset(
+    {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.ARCHIVED}
+)
 
 
 class MissedRunPolicy(StrEnum):
@@ -134,7 +138,10 @@ class DurableRecurrenceService:
         job_id = _job_id(recurrence_key)
         existing = self._jobs.get(job_id)
         if existing is not None:
-            state, existing_payload = _decode_job(existing, expected_recurrence_id=recurrence_key)
+            state, existing_payload = self._decode_with_task_authority(
+                existing,
+                expected_recurrence_id=recurrence_key,
+            )
             requested_binding = _definition_fingerprint(
                 recurrence_id=recurrence_key,
                 task_id=task_key,
@@ -182,7 +189,10 @@ class DurableRecurrenceService:
         job = self._jobs.get(_job_id(recurrence_key))
         if job is None:
             return None
-        state, _ = _decode_job(job, expected_recurrence_id=recurrence_key)
+        state, _ = self._decode_with_task_authority(
+            job,
+            expected_recurrence_id=recurrence_key,
+        )
         return state
 
     def pause(self, recurrence_id: str) -> RecurrenceState:
@@ -393,7 +403,46 @@ class DurableRecurrenceService:
         job = self._jobs.get(_job_id(recurrence_key))
         if job is None:
             raise KeyError(f"unknown recurrence: {recurrence_key}")
-        return _decode_job(job, expected_recurrence_id=recurrence_key)
+        return self._decode_with_task_authority(
+            job,
+            expected_recurrence_id=recurrence_key,
+        )
+
+    def _decode_with_task_authority(
+        self,
+        job: ScheduledJob,
+        *,
+        expected_recurrence_id: str,
+    ) -> tuple[RecurrenceState, dict[str, Any]]:
+        state, payload = _decode_job(
+            job,
+            expected_recurrence_id=expected_recurrence_id,
+            allow_disabled_active=True,
+        )
+        expected_enabled = (
+            state.status is RecurrenceStatus.ACTIVE and state.next_due_at is not None
+        )
+        if job.enabled == expected_enabled:
+            return state, payload
+
+        task_state = self._jobs.task_state(state.task_id)
+        if (
+            task_state is not None
+            and task_state not in _IRREVERSIBLY_TERMINAL_TASK_STATES
+        ):
+            raise ValueError(
+                "durable recurrence enabled state does not match lifecycle state"
+            )
+
+        cancelled = replace(
+            state,
+            status=RecurrenceStatus.CANCELLED,
+            next_due_at=None,
+            next_occurrence_id=None,
+            terminal_reason=None,
+        )
+        self._persist(cancelled, payload)
+        return cancelled, payload
 
     def _persist(self, state: RecurrenceState, target_payload: dict[str, Any]) -> None:
         enabled = state.status is RecurrenceStatus.ACTIVE and state.next_due_at is not None
@@ -463,6 +512,7 @@ def _decode_job(
     job: ScheduledJob,
     *,
     expected_recurrence_id: str,
+    allow_disabled_active: bool = False,
 ) -> tuple[RecurrenceState, dict[str, Any]]:
     if type(job.job_id) is not str or job.job_id != _job_id(expected_recurrence_id):
         raise ValueError("durable recurrence job identity is corrupt")
@@ -590,8 +640,15 @@ def _decode_job(
         raise ValueError("non-completed recurrence cannot retain a terminal reason")
     if type(job.enabled) is not bool:
         raise ValueError("durable recurrence enabled state is corrupt")
-    if job.enabled != (status is RecurrenceStatus.ACTIVE and next_due is not None):
-        raise ValueError("durable recurrence enabled state does not match lifecycle state")
+    expected_enabled = status is RecurrenceStatus.ACTIVE and next_due is not None
+    if job.enabled != expected_enabled:
+        recoverable_disabled_active = (
+            allow_disabled_active and expected_enabled and job.enabled is False
+        )
+        if not recoverable_disabled_active:
+            raise ValueError(
+                "durable recurrence enabled state does not match lifecycle state"
+            )
     expected_run_date = next_due or last_due or anchor
     run_date_raw = trigger.get("run_date")
     if type(run_date_raw) is not str or run_date_raw != _iso(expected_run_date):
