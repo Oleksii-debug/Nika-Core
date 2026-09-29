@@ -969,19 +969,19 @@ def _decode_completion_result(
 ) -> tuple[dict[str, Any], datetime | None]:
     if raw is None:
         raise BatchCursorStateError("completed effect is missing durable result")
-    if not isinstance(raw, dict):
+    if type(raw) is not dict:
         raise BatchCursorStateError("completed effect result is malformed")
 
     if set(raw) == {_COMPLETION_ENVELOPE_KEY}:
         envelope = raw[_COMPLETION_ENVELOPE_KEY]
-        if not isinstance(envelope, dict) or set(envelope) != {
+        if type(envelope) is not dict or set(envelope) != {
             "result",
             "next_batch_not_before",
         }:
             raise BatchCursorStateError("completed effect envelope is malformed")
         result = envelope["result"]
         due = envelope["next_batch_not_before"]
-        if not isinstance(result, dict):
+        if type(result) is not dict:
             raise BatchCursorStateError("completed effect result is malformed")
         if due is None:
             parsed_due = None

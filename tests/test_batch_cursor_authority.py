@@ -14,6 +14,7 @@ from nika_core.batch_cursor import (
     BatchCursorStateError,
     BatchTargetSpec,
     IntentKind,
+    _decode_completion_result,
 )
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.memory import MemoryScope, MemoryService
@@ -31,6 +32,14 @@ class BehavioralDateTime(datetime):
 
 class BehavioralDict(dict[str, object]):
     pass
+
+
+class HostileDurableDict(dict[str, object]):
+    def __iter__(self):
+        raise AssertionError("durable mapping iteration must not execute")
+
+    def __getitem__(self, key: str) -> object:
+        raise AssertionError("durable mapping lookup must not execute")
 
 
 def _services(tmp_path: Path) -> tuple[MemoryService, IdempotencyLedger, SQLiteStore]:
@@ -1740,3 +1749,37 @@ def test_mark_uncertain_rejects_rebound_durable_identity_before_mutation(
     assert durable.status is IdempotencyStatus.PENDING
     assert durable.operation_type == "tampered.effect"
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+
+@pytest.mark.parametrize(
+    ("payload", "message"),
+    (
+        (
+            HostileDurableDict({"legacy": "value"}),
+            "completed effect result is malformed",
+        ),
+        (
+            {
+                "__nika_batch_cursor_completion_v1__": HostileDurableDict(
+                    {"result": {"ok": True}, "next_batch_not_before": None}
+                )
+            },
+            "completed effect envelope is malformed",
+        ),
+        (
+            {
+                "__nika_batch_cursor_completion_v1__": {
+                    "result": HostileDurableDict({"ok": True}),
+                    "next_batch_not_before": None,
+                }
+            },
+            "completed effect result is malformed",
+        ),
+    ),
+)
+def test_durable_completion_decoder_rejects_behavioral_mapping_carriers_before_access(
+    payload: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(BatchCursorStateError, match=message):
+        _decode_completion_result(payload)
