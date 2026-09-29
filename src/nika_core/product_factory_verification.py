@@ -147,12 +147,20 @@ def classify_candidate_verification(
 def _snapshot_evidence(item: object) -> ExactShaCheckEvidence:
     if type(item) is not ExactShaCheckEvidence:
         raise VerificationError("verification evidence must be ExactShaCheckEvidence")
+    try:
+        check_id = item.check_id
+        candidate_sha = item.candidate_sha
+        state = item.state
+        evidence_ref = item.evidence_ref
+        required = item.required
+    except AttributeError as exc:
+        raise VerificationError("verification evidence is incomplete") from exc
     return ExactShaCheckEvidence(
-        check_id=item.check_id,
-        candidate_sha=item.candidate_sha,
-        state=item.state,
-        evidence_ref=item.evidence_ref,
-        required=item.required,
+        check_id=check_id,
+        candidate_sha=candidate_sha,
+        state=state,
+        evidence_ref=evidence_ref,
+        required=required,
     )
 
 
