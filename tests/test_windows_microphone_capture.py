@@ -274,6 +274,23 @@ def test_noncanonical_host_api_container_fails_closed_without_effect() -> None:
     assert sd.streams == []
 
 
+def test_malformed_endpoint_unicode_is_sanitized_before_identity_escape() -> None:
+    sd = _FakeSoundDevice()
+    sd.raw_device_name = "PRIVATE-\ud800-ENDPOINT"
+    adapter = _adapter(sd)
+
+    with pytest.raises(MicrophoneCaptureAdapterError) as caught:
+        _ = adapter.capabilities
+
+    assert caught.value.code is MicrophoneCaptureFailureCode.UNAVAILABLE
+    assert caught.value.retryable is False
+    assert str(caught.value) == "Default WASAPI endpoint identity is invalid."
+    assert caught.value.__suppress_context__ is True
+    assert caught.value.__cause__ is None
+    assert sd.check_calls == []
+    assert sd.streams == []
+
+
 def test_no_wasapi_host_never_falls_back_to_mme() -> None:
     sd = _FakeSoundDevice()
 
