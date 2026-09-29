@@ -22,6 +22,7 @@ from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VER
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
+from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.reliability.backup import BackupRecoveryError, SQLiteRecoveryManager
 
@@ -29,6 +30,7 @@ _RECEIPT_TABLE = "legacy_database_adoption_v1"
 _EMPTY_TABLES = {
     "schema_migrations",
     "multi_agent_state_schema_migrations",
+    "model_artifact_schema_migrations",
     "product_project_schema_migrations",
     "sqlite_sequence",
     "audit_events",
@@ -109,6 +111,7 @@ def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
         ]
         for name, supported in (
             ("multi_agent_state_schema_migrations", MULTI_AGENT_STATE_SCHEMA_VERSION),
+            ("model_artifact_schema_migrations", MODEL_ARTIFACT_SCHEMA_VERSION),
             ("product_project_schema_migrations", PRODUCT_PROJECT_SCHEMA_VERSION),
         ):
             if name in tables:

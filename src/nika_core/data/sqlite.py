@@ -11,6 +11,10 @@ from nika_core.data.multi_agent_state_schema import (
     MULTI_AGENT_STATE_SCHEMA_VERSION,
 )
 from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
+from nika_core.model_artifact_schema import (
+    MODEL_ARTIFACT_MIGRATIONS,
+    MODEL_ARTIFACT_SCHEMA_VERSION,
+)
 from nika_core.product_project_schema import (
     PRODUCT_PROJECT_MIGRATIONS,
     PRODUCT_PROJECT_SCHEMA_VERSION,
@@ -60,6 +64,7 @@ class SQLiteStore:
                 )
             self._initialize_multi_agent_state_schema(conn)
             self._initialize_product_project_schema(conn)
+            self._initialize_model_artifact_schema(conn)
 
     @staticmethod
     def _initialize_multi_agent_state_schema(conn: sqlite3.Connection) -> None:
@@ -121,6 +126,34 @@ class SQLiteStore:
                 conn.execute(statement)
             conn.execute(
                 "INSERT INTO product_project_schema_migrations(version, applied_at) VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
+
+    @staticmethod
+    def _initialize_model_artifact_schema(conn: sqlite3.Connection) -> None:
+        """Apply provider-neutral model provenance migrations through the canonical store."""
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_artifact_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM model_artifact_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > MODEL_ARTIFACT_SCHEMA_VERSION:
+            raise RuntimeError(
+                "model artifact database schema "
+                f"{current} is newer than supported schema {MODEL_ARTIFACT_SCHEMA_VERSION}"
+            )
+        for version in range(current + 1, MODEL_ARTIFACT_SCHEMA_VERSION + 1):
+            statements = MODEL_ARTIFACT_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing model artifact migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO model_artifact_schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
                 (version, datetime.now(UTC).isoformat()),
             )
 
