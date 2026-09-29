@@ -904,7 +904,7 @@ def test_non_hex_audio_digest_cannot_satisfy_success_evidence_binding() -> None:
     assert snapshot.transcript is None
 
 
-@pytest.mark.parametrize("transcript", ["valid\\x00hidden", "valid\\ud800hidden"])
+@pytest.mark.parametrize("transcript", ["valid\x00hidden", "valid\ud800hidden"])
 def test_forged_completed_result_rejects_non_public_transcript(
     transcript: str,
 ) -> None:
