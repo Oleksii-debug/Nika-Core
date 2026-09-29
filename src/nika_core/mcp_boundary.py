@@ -16,7 +16,6 @@ from nika_core.tools import (
     ToolSpec,
 )
 
-
 _MAX_MCP_SEGMENT_CHARS = 128
 _MAX_MCP_CURSOR_BYTES = 4096
 _MAX_MCP_LIST_PAGES = 1000
