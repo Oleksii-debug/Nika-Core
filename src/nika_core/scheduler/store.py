@@ -11,6 +11,7 @@ from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
 
 IMMUTABLE_JOB_BINDING_KEY = "_nika_immutable_job_binding_v1"
+_MAX_JSON_DEPTH = 32
 
 
 class ScheduledJobStore:
@@ -33,7 +34,10 @@ class ScheduledJobStore:
         if existing is not None:
             incoming_binding = payload.get(IMMUTABLE_JOB_BINDING_KEY)
             if incoming_binding is not None:
-                existing_payload = json.loads(existing["payload_json"])
+                existing_payload = _decode_json_object(
+                    existing["payload_json"],
+                    "persisted payload",
+                )
                 existing_binding = existing_payload.get(IMMUTABLE_JOB_BINDING_KEY)
                 if existing_binding is not None and existing_binding != incoming_binding:
                     raise ValueError("scheduled job immutable binding conflict")
@@ -58,8 +62,8 @@ class ScheduledJobStore:
                 job.job_id,
                 job.action_id,
                 job.trigger_kind.value,
-                json.dumps(trigger, sort_keys=True, separators=(",", ":"), allow_nan=False),
-                json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False),
+                _encode_json(trigger),
+                _encode_json(payload),
                 int(job.enabled),
                 int(job.coalesce),
                 job.max_instances,
@@ -133,7 +137,10 @@ class ScheduledJobStore:
             ).fetchone()
         if row is None:
             return None
-        return TaskState(str(row["state"]))
+        raw_state = row["state"]
+        if type(raw_state) is not str:
+            raise ValueError("persisted task state is corrupt")
+        return TaskState(raw_state)
 
 
 def _validated_job_data(job: ScheduledJob) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -154,10 +161,10 @@ def _validated_job_data(job: ScheduledJob) -> tuple[dict[str, Any], dict[str, An
         raise ValueError(
             "misfire_grace_seconds must be a positive exact integer or None"
         )
-    trigger = _canonical_json_object(job.trigger, "trigger")
+    trigger = _canonical_json_object(job.trigger, "trigger", depth=0)
     if not trigger:
         raise ValueError("trigger configuration must not be empty")
-    payload = _canonical_json_object(job.payload, "payload")
+    payload = _canonical_json_object(job.payload, "payload", depth=0)
     immutable_binding = payload.get(IMMUTABLE_JOB_BINDING_KEY)
     if immutable_binding is not None and (
         type(immutable_binding) is not str or not immutable_binding.strip()
@@ -166,23 +173,31 @@ def _validated_job_data(job: ScheduledJob) -> tuple[dict[str, Any], dict[str, An
     return trigger, payload
 
 
-def _canonical_json_object(value: object, label: str) -> dict[str, Any]:
+def _canonical_json_object(
+    value: object,
+    label: str,
+    *,
+    depth: int,
+) -> dict[str, Any]:
     if type(value) is not dict:
         raise TypeError(f"{label} must be an exact dict")
-    return {
-        key: _canonical_json_value(item, label)
-        for key, item in value.items()
-        if _exact_json_key(key, label)
-    }
+    if depth > _MAX_JSON_DEPTH:
+        raise ValueError(f"{label} exceeds durable JSON nesting limit")
+    detached: dict[str, Any] = {}
+    for key, item in value.items():
+        if type(key) is not str:
+            raise TypeError(f"{label} keys must be exact strings")
+        detached[key] = _canonical_json_value(
+            item,
+            label,
+            depth=depth + 1,
+        )
+    return detached
 
 
-def _exact_json_key(key: object, label: str) -> bool:
-    if type(key) is not str:
-        raise TypeError(f"{label} keys must be exact strings")
-    return True
-
-
-def _canonical_json_value(value: object, label: str) -> Any:
+def _canonical_json_value(value: object, label: str, *, depth: int) -> Any:
+    if depth > _MAX_JSON_DEPTH:
+        raise ValueError(f"{label} exceeds durable JSON nesting limit")
     if value is None or type(value) is bool or type(value) is int or type(value) is str:
         return value
     if type(value) is float:
@@ -190,10 +205,42 @@ def _canonical_json_value(value: object, label: str) -> Any:
             raise ValueError(f"{label} contains a non-finite number")
         return value
     if type(value) is list:
-        return [_canonical_json_value(item, label) for item in value]
+        return [
+            _canonical_json_value(item, label, depth=depth + 1)
+            for item in value
+        ]
     if type(value) is dict:
-        return _canonical_json_object(value, label)
+        return _canonical_json_object(value, label, depth=depth)
     raise TypeError(f"{label} must contain only exact JSON-compatible values")
+
+
+def _encode_json(value: dict[str, Any]) -> str:
+    return json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _decode_json_object(raw: object, label: str) -> dict[str, Any]:
+    if type(raw) is not str:
+        raise ValueError(f"{label} is corrupt")
+    try:
+        decoded = json.loads(
+            raw,
+            parse_constant=lambda _: _reject_json_constant(label),
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} is corrupt") from exc
+    try:
+        return _canonical_json_object(decoded, label, depth=0)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{label} is corrupt") from exc
+
+
+def _reject_json_constant(label: str) -> None:
+    raise ValueError(f"{label} contains a non-finite number")
 
 
 def _exact_text(value: object, label: str) -> str:
@@ -210,14 +257,45 @@ def _nonempty_text(value: object, label: str) -> str:
 
 
 def _from_row(row: object) -> ScheduledJob:
-    return ScheduledJob(
-        job_id=row["job_id"],
-        action_id=row["action_id"],
-        trigger_kind=TriggerKind(row["trigger_kind"]),
-        trigger=json.loads(row["trigger_json"]),
-        payload=json.loads(row["payload_json"]),
-        enabled=bool(row["enabled"]),
-        coalesce=bool(row["coalesce"]),
-        max_instances=int(row["max_instances"]),
-        misfire_grace_seconds=row["misfire_grace_seconds"],
+    job_id = _nonempty_text(row["job_id"], "persisted job_id")
+    action_id = _nonempty_text(row["action_id"], "persisted action_id")
+    trigger_kind_raw = _exact_text(row["trigger_kind"], "persisted trigger_kind")
+    try:
+        trigger_kind = TriggerKind(trigger_kind_raw)
+    except ValueError as exc:
+        raise ValueError("persisted trigger_kind is corrupt") from exc
+    enabled = _stored_bool(row["enabled"], "persisted enabled")
+    coalesce = _stored_bool(row["coalesce"], "persisted coalesce")
+    max_instances = _stored_positive_int(
+        row["max_instances"],
+        "persisted max_instances",
     )
+    grace_raw = row["misfire_grace_seconds"]
+    grace = (
+        None
+        if grace_raw is None
+        else _stored_positive_int(grace_raw, "persisted misfire_grace_seconds")
+    )
+    return ScheduledJob(
+        job_id=job_id,
+        action_id=action_id,
+        trigger_kind=trigger_kind,
+        trigger=_decode_json_object(row["trigger_json"], "persisted trigger"),
+        payload=_decode_json_object(row["payload_json"], "persisted payload"),
+        enabled=enabled,
+        coalesce=coalesce,
+        max_instances=max_instances,
+        misfire_grace_seconds=grace,
+    )
+
+
+def _stored_bool(value: object, label: str) -> bool:
+    if type(value) is not int or value not in (0, 1):
+        raise ValueError(f"{label} is corrupt")
+    return value == 1
+
+
+def _stored_positive_int(value: object, label: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise ValueError(f"{label} is corrupt")
+    return value
