@@ -70,9 +70,7 @@ class OwnerPresenceObservation:
             raise TypeError("presence must be OwnerPresence")
         if type(self.observed_at) is not datetime:
             raise TypeError("observed_at must be exact datetime")
-        if self.observed_at.tzinfo is None or self.observed_at.utcoffset() is None:
-            raise ValueError("observed_at must be timezone-aware")
-        if self.observed_at.utcoffset().total_seconds() != 0:
+        if self.observed_at.tzinfo is not UTC:
             raise ValueError("observed_at must use UTC")
 
 
@@ -910,9 +908,9 @@ class BackgroundDispatchGuard:
             raise OwnerPresenceEvidenceError("presence observation came from the wrong source")
 
         now = self._clock()
-        if type(now) is not datetime or now.tzinfo is None or now.utcoffset() is None:
-            raise OwnerPresenceEvidenceError("presence clock must return timezone-aware datetime")
-        if now.utcoffset().total_seconds() != 0:
+        if type(now) is not datetime:
+            raise OwnerPresenceEvidenceError("presence clock must return exact datetime")
+        if now.tzinfo is not UTC:
             raise OwnerPresenceEvidenceError("presence clock must use UTC")
 
         age_seconds = (now - observation.observed_at).total_seconds()
