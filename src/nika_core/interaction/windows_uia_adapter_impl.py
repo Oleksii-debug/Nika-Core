@@ -676,10 +676,100 @@ class WindowsUIAInteractionAdapter:
         ] = {}
         self._semantic_by_node: dict[str, ControlNode] = {}
 
+    @staticmethod
+    def _validated_runtime_id(value: object) -> tuple[int, ...]:
+        if type(value) is not tuple or not value:
+            raise ValueError("UIA backend RuntimeId must be an exact non-empty tuple")
+        if any(type(part) is not int for part in value):
+            raise ValueError("UIA backend RuntimeId parts must be exact integers")
+        return value
+
+    @classmethod
+    def _validated_window_record(cls, value: object) -> UIAWindowRecord:
+        if type(value) is not UIAWindowRecord:
+            raise ValueError("UIA backend window must be an exact UIAWindowRecord")
+        if type(value.hwnd) is not int or value.hwnd <= 0:
+            raise ValueError("UIA backend hwnd must be an exact positive integer")
+        if type(value.pid) is not int or value.pid <= 0:
+            raise ValueError("UIA backend pid must be an exact positive integer")
+        if type(value.title) is not str:
+            raise ValueError("UIA backend window title must be an exact string")
+        if type(value.enabled) is not bool:
+            raise ValueError("UIA backend window enabled must be an exact boolean")
+        return value
+
+    @classmethod
+    def _validated_control_record(cls, value: object) -> UIAControlRecord:
+        if type(value) is not UIAControlRecord:
+            raise ValueError("UIA backend control must be an exact UIAControlRecord")
+        if value.runtime_id is not None:
+            cls._validated_runtime_id(value.runtime_id)
+        for label, item in (
+            ("automation_id", value.automation_id),
+            ("role", value.role),
+            ("name", value.name),
+            ("class_name", value.class_name),
+            ("framework_id", value.framework_id),
+        ):
+            if type(item) is not str:
+                raise ValueError(f"UIA backend {label} must be an exact string")
+        for label, item in (
+            ("enabled", value.enabled),
+            ("visible", value.visible),
+            ("focused", value.focused),
+        ):
+            if type(item) is not bool:
+                raise ValueError(f"UIA backend {label} must be an exact boolean")
+        if value.value is not None and type(value.value) is not str:
+            raise ValueError("UIA backend value must be exact string or None")
+        if value.bounds is not None:
+            if type(value.bounds) is not tuple or len(value.bounds) != 4:
+                raise ValueError("UIA backend bounds must be an exact four-item tuple")
+            if any(type(part) is not int for part in value.bounds):
+                raise ValueError("UIA backend bounds parts must be exact integers")
+        if type(value.patterns) is not tuple:
+            raise ValueError("UIA backend patterns must be an exact tuple")
+        if any(type(pattern) is not str for pattern in value.patterns):
+            raise ValueError("UIA backend patterns must contain exact strings")
+        if type(value.element_generation) is not int or value.element_generation <= 0:
+            raise ValueError(
+                "UIA backend element_generation must be an exact positive integer"
+            )
+        return value
+
+    def _backend_windows(self) -> tuple[UIAWindowRecord, ...]:
+        raw = self.backend.enumerate_windows(self.process_id)
+        if type(raw) is not tuple:
+            raise ValueError("UIA backend windows result must be an exact tuple")
+        return tuple(self._validated_window_record(window) for window in raw)
+
+    def _backend_controls(self, hwnd: int) -> tuple[UIAControlRecord, ...]:
+        raw = self.backend.enumerate_controls(hwnd, self.view)
+        if type(raw) is not tuple:
+            raise ValueError("UIA backend controls result must be an exact tuple")
+        return tuple(self._validated_control_record(record) for record in raw)
+
+    def _backend_focused_identity(
+        self,
+        hwnd: int,
+    ) -> tuple[tuple[int, ...], int] | None:
+        value = self.backend.focused_identity(hwnd)
+        if value is None:
+            return None
+        if type(value) is not tuple or len(value) != 2:
+            raise ValueError("UIA backend focused identity must be an exact pair")
+        runtime_id = self._validated_runtime_id(value[0])
+        generation = value[1]
+        if type(generation) is not int or generation <= 0:
+            raise ValueError(
+                "UIA backend focus generation must be an exact positive integer"
+            )
+        return runtime_id, generation
+
     def _exact_window(self) -> UIAWindowRecord:
         windows = tuple(
             window
-            for window in self.backend.enumerate_windows(self.process_id)
+            for window in self._backend_windows()
             if window.pid == self.process_id
         )
         if self.native_handle is not None:
@@ -708,10 +798,18 @@ class WindowsUIAInteractionAdapter:
         self,
         window: UIAWindowRecord,
     ) -> tuple[ApplicationIdentity, WindowIdentity]:
+        executable = self.backend.executable(self.process_id)
+        if type(executable) is not str or not executable:
+            raise ValueError("UIA backend executable must be exact non-empty text")
+        process_started_ns = self.backend.process_started_ns(self.process_id)
+        if type(process_started_ns) is not int or process_started_ns <= 0:
+            raise ValueError(
+                "UIA backend process start must be an exact positive integer"
+            )
         app = ApplicationIdentity(
-            executable=self.backend.executable(self.process_id),
+            executable=executable,
             pid=self.process_id,
-            process_started_ns=self.backend.process_started_ns(self.process_id),
+            process_started_ns=process_started_ns,
         )
         if self._application is None:
             self._application = app
@@ -769,7 +867,7 @@ class WindowsUIAInteractionAdapter:
     def observe(self) -> SemanticSnapshot:
         window = self._exact_window()
         application, window_identity = self._identity(window)
-        records = self.backend.enumerate_controls(window.hwnd, self.view)
+        records = self._backend_controls(window.hwnd)
         identity_by_node: dict[
             str,
             tuple[tuple[int, ...], int],
@@ -857,7 +955,7 @@ class WindowsUIAInteractionAdapter:
         return identity
 
     def capture_focus(self) -> str | None:
-        identity = self.backend.focused_identity(self._live_hwnd())
+        identity = self._backend_focused_identity(self._live_hwnd())
         if identity is None:
             return None
         matches = [
@@ -875,7 +973,7 @@ class WindowsUIAInteractionAdapter:
         hwnd = self._live_hwnd()
         runtime_id, generation = self._control_identity(node)
         self.backend.focus(hwnd, runtime_id, generation)
-        if self.backend.focused_identity(hwnd) != (runtime_id, generation):
+        if self._backend_focused_identity(hwnd) != (runtime_id, generation):
             raise StaleSnapshotError("UIA focus verification failed")
 
     def restore_focus(self, node_id: str | None) -> bool:
@@ -889,7 +987,7 @@ class WindowsUIAInteractionAdapter:
             self.backend.focus(hwnd, *identity)
         except (TargetNotFoundError, StaleSnapshotError):
             return False
-        return self.backend.focused_identity(hwnd) == identity
+        return self._backend_focused_identity(hwnd) == identity
 
     @staticmethod
     def pattern_capabilities(node: ControlNode) -> tuple[str, ...]:

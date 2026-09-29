@@ -211,7 +211,7 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
         runtime_id, generation = self._control_identity(expected)
         matches = [
             record
-            for record in self.backend.enumerate_controls(hwnd, self.view)
+            for record in self._backend_controls(hwnd)
             if record.runtime_id == runtime_id
             and record.element_generation == generation
         ]
@@ -262,7 +262,7 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
     ) -> UIAControlRecord:
         matches = [
             record
-            for record in self.backend.enumerate_controls(hwnd, self.view)
+            for record in self._backend_controls(hwnd)
             if record.runtime_id == runtime_id
             and record.element_generation == generation
         ]
@@ -311,7 +311,7 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
                     "disabled/hidden controls cannot receive UIA focus authority"
                 )
 
-            last_focused = self.backend.focused_identity(hwnd)
+            last_focused = self._backend_focused_identity(hwnd)
             if last_focused == expected_identity:
                 return
             if attempt + 1 < _FOCUS_ACK_ATTEMPTS:
@@ -397,7 +397,7 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
                 return False
             if not live.enabled or not live.visible:
                 return False
-            if self.backend.focused_identity(hwnd) == identity:
+            if self._backend_focused_identity(hwnd) == identity:
                 return True
             if attempt + 1 < _FOCUS_ACK_ATTEMPTS:
                 time.sleep(_FOCUS_ACK_DELAY_SECONDS)
