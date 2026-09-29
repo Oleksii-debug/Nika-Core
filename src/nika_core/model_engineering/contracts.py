@@ -27,14 +27,18 @@ def _identity(value: str, name: str) -> str:
     return value
 
 
-def _optional_sha256(value: str | None, name: str) -> str | None:
-    if value is None:
-        return None
+def _sha256(value: str, name: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{name} must be canonical text")
     if not _SHA256_RE.fullmatch(value):
         raise ValueError(f"{name} must be a lowercase SHA-256 digest")
     return value
+
+
+def _optional_sha256(value: str | None, name: str) -> str | None:
+    if value is None:
+        return None
+    return _sha256(value, name)
 
 
 def _bounded_percent(value: float | None, name: str) -> float | None:
@@ -337,8 +341,8 @@ class CandidateBenchmarkReport:
             raise TypeError("candidate must be an exact ModelCandidate")
         _identity(self.evaluation_set_id, "evaluation_set_id")
         _identity(self.evaluation_set_version, "evaluation_set_version")
-        _optional_sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
-        _optional_sha256(self.execution_config_sha256, "execution_config_sha256")
+        _sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
+        _sha256(self.execution_config_sha256, "execution_config_sha256")
         if not any(self.evaluation_purpose is member for member in EvaluationPurpose):
             raise TypeError("evaluation_purpose must be an EvaluationPurpose")
         if type(self.case_results) is not tuple:
@@ -395,8 +399,8 @@ class BenchmarkSuiteReport:
     def __post_init__(self) -> None:
         _identity(self.evaluation_set_id, "evaluation_set_id")
         _identity(self.evaluation_set_version, "evaluation_set_version")
-        _optional_sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
-        _optional_sha256(self.execution_config_sha256, "execution_config_sha256")
+        _sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
+        _sha256(self.execution_config_sha256, "execution_config_sha256")
         if type(self.reports) is not tuple:
             raise TypeError("benchmark suite reports must be a canonical tuple")
         if not self.reports:
