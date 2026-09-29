@@ -328,7 +328,7 @@ def test_runtime_sync_serializes_concurrent_replacement_install(
     )
     stale_install_entered = Event()
     release_stale_install = Event()
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
     original_install = adapter._install
 
     def blocking_install(job: ScheduledJob) -> None:
@@ -341,7 +341,7 @@ def test_runtime_sync_serializes_concurrent_replacement_install(
     def upsert_in_thread(job: ScheduledJob) -> None:
         try:
             adapter.upsert(job)
-        except BaseException as exc:  # pragma: no cover - asserted below
+        except Exception as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 
     monkeypatch.setattr(adapter, "_install", blocking_install)
