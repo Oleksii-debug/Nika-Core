@@ -102,6 +102,21 @@ class FakeFoundryModel:
         return Client()
 
 
+class BlockingDownloadModel(FakeFoundryModel):
+    def __init__(self) -> None:
+        super().__init__(cached=False)
+        self.download_started = threading.Event()
+        self.release_download = threading.Event()
+
+    def download(self, *, cancel_event: threading.Event | None = None) -> None:
+        self.download_cancel_event = cancel_event
+        self.download_started.set()
+        if not self.release_download.wait(timeout=2.0):
+            raise RuntimeError("download barrier was not released")
+        self.downloaded = True
+        self.is_cached = True
+
+
 class FakeCatalog:
     def __init__(self, model: FakeFoundryModel | None) -> None:
         self.model = model
@@ -682,6 +697,38 @@ def test_foundry_download_rejects_non_event_cancel_carrier_before_manager() -> N
         )
 
     assert calls == []
+
+
+def test_foundry_download_does_not_promote_success_after_external_cancel() -> None:
+    async def scenario() -> None:
+        model = BlockingDownloadModel()
+        provider = FoundryLocalProvider(
+            default_model="test-model",
+            manager_factory=lambda: FakeManager(model),
+        )
+        cancel_event = threading.Event()
+        task = asyncio.create_task(
+            provider.download_model(
+                authorization(),
+                cancel_event=cancel_event,
+                timeout_seconds=1.0,
+            )
+        )
+
+        started = await asyncio.to_thread(model.download_started.wait, 2.0)
+        assert started is True
+        cancel_event.set()
+        model.release_download.set()
+
+        with pytest.raises(ModelGatewayError) as exc_info:
+            await task
+
+        assert exc_info.value.code is ModelErrorCode.CANCELLED
+        assert exc_info.value.retryable is False
+        assert model.downloaded is True
+        assert model.is_cached is True
+
+    asyncio.run(scenario())
 
 
 def test_foundry_download_honors_pre_set_cancel_before_manager() -> None:
