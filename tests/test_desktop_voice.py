@@ -366,6 +366,36 @@ def test_cancel_waits_for_blocking_request_factory_before_reentry() -> None:
         submitter.close()
 
 
+def test_cancelled_late_factory_base_exception_cannot_strand_controller() -> None:
+    submitter = _LoopSubmitter()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def failing_factory(_request_id: str) -> VoiceTurnRequest:
+        entered.set()
+        assert release.wait(timeout=2)
+        raise KeyboardInterrupt("synthetic worker base exception")
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=failing_factory,
+        submit=submitter.submit,
+    )
+    try:
+        assert controller.start({}).status == "accepted"
+        assert entered.wait(timeout=2)
+        assert controller.cancel({}).status == "accepted"
+        assert controller.snapshot()["status"] == DesktopVoiceStatus.CANCELLING.value
+
+        release.set()
+        final = _wait_status(controller, DesktopVoiceStatus.CANCELLED)
+        assert final["active"] is False
+        assert final["transcript"] is None
+    finally:
+        release.set()
+        submitter.close()
+
+
 def test_cancel_propagates_to_active_async_capture() -> None:
     submitter = _LoopSubmitter()
     entered = threading.Event()
