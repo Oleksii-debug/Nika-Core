@@ -356,6 +356,101 @@ def test_resume_reloads_after_post_read_durable_replacement(tmp_path) -> None:
     assert runtime.trigger.run_date == replacement_at
     adapter.shutdown(wait=False)
 
+def test_remove_resyncs_durable_recreation_before_return(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Remove Recreate Fence" / "nika core.db")
+    store.initialize()
+    original_at = datetime.now(UTC) + timedelta(days=1)
+    replacement_at = original_at + timedelta(days=1)
+
+    class RecreatingDeleteJobs(ScheduledJobStore):
+        def delete(self, job_id: str) -> bool:
+            removed = super().delete(job_id)
+            super().upsert(
+                _date_job(
+                    job_id=job_id,
+                    action_id="live",
+                    run_at=replacement_at,
+                    payload={},
+                )
+            )
+            return removed
+
+    jobs = RecreatingDeleteJobs(store)
+    jobs.upsert(
+        _date_job(
+            job_id="job-remove-race",
+            action_id="live",
+            run_at=original_at,
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.start()
+
+    assert adapter.remove("job-remove-race") is True
+
+    durable = jobs.get("job-remove-race")
+    runtime = adapter._scheduler.get_job("job-remove-race")
+    assert durable is not None
+    assert durable.enabled is True
+    assert runtime is not None
+    assert runtime.trigger.run_date == replacement_at
+    adapter.shutdown(wait=False)
+
+
+def test_pause_resyncs_enabled_replacement_before_return(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Pause Replace Fence" / "nika core.db")
+    store.initialize()
+    audit = AuditLog(store)
+    original_at = datetime.now(UTC) + timedelta(days=1)
+    replacement_at = original_at + timedelta(days=1)
+
+    class ReplacingPauseJobs(ScheduledJobStore):
+        def set_enabled(self, job_id: str, enabled: bool) -> bool:
+            changed = super().set_enabled(job_id, enabled)
+            if not enabled:
+                super().upsert(
+                    _date_job(
+                        job_id=job_id,
+                        action_id="live",
+                        run_at=replacement_at,
+                        payload={},
+                    )
+                )
+            return changed
+
+    jobs = ReplacingPauseJobs(store)
+    jobs.upsert(
+        _date_job(
+            job_id="job-pause-race",
+            action_id="live",
+            run_at=original_at,
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda _action_id: lambda _payload: None,
+        audit=audit,
+    )
+    adapter.start()
+
+    adapter.pause("job-pause-race")
+
+    durable = jobs.get("job-pause-race")
+    runtime = adapter._scheduler.get_job("job-pause-race")
+    events = audit.list_for(
+        entity_type="scheduled_job",
+        entity_id="job-pause-race",
+    )
+    assert durable is not None
+    assert durable.enabled is True
+    assert runtime is not None
+    assert runtime.trigger.run_date == replacement_at
+    assert all(event.event_type != "scheduler.job_paused" for event in events)
+    adapter.shutdown(wait=False)
+
+
 def test_dispatch_rechecks_durable_job_after_resolver_pause(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Dispatch Fence" / "nika core.db")
     store.initialize()
