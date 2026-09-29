@@ -201,7 +201,6 @@ def test_safe_repair_uses_exact_failed_result_sha_and_preserves_component_scope(
     assert repair.work_id != first.work_id
 
 
-
 def test_cancel_without_recovery_state_retains_running_authority_fail_closed() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
@@ -215,6 +214,8 @@ def test_cancel_without_recovery_state_retains_running_authority_fail_closed() -
     assert outcome.record.state is WorkState.RUNNING
     assert outcome.record.blocker is None
     assert worker.recovered == []
+
+
 def test_cancel_reconciles_typed_cancel_result_before_product_state_changes() -> None:
     def cancelled(job):
         return CodingResult(
