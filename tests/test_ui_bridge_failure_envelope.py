@@ -10,6 +10,11 @@ from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.ui.bridge import UIActionBridge
 
 
+class _BehavioralText(str):
+    def __str__(self) -> str:
+        raise AssertionError("must-not-run")
+
+
 def _bridge(tmp_path: Path, *, handler=None, state_provider=None) -> UIActionBridge:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -189,7 +194,10 @@ def test_dispatch_preserves_canonical_request_id_on_other_validation_failure(
         ("set_binding", lambda bridge: bridge.set_binding("nav.agents", "Alt+9")),
         ("restore_default", lambda bridge: bridge.restore_default("nav.agents")),
         ("export_json", lambda bridge: bridge.export_keymap()),
-        ("import_json", lambda bridge: bridge.import_keymap('{"format_version": 1, "bindings": {}}')),
+        (
+            "import_json",
+            lambda bridge: bridge.import_keymap('{"format_version": 1, "bindings": {}}'),
+        ),
     ],
 )
 def test_keymap_transport_does_not_swallow_base_exception(
@@ -209,11 +217,7 @@ def test_keymap_transport_does_not_swallow_base_exception(
     "outcome",
     [
         object(),
-        type(
-            "BehavioralText",
-            (str,),
-            {"__str__": lambda self: (_ for _ in ()).throw(AssertionError("must-not-run"))},
-        )("text"),
+        _BehavioralText("text"),
     ],
 )
 def test_dispatch_rejects_noncanonical_handler_result_without_coercion(
