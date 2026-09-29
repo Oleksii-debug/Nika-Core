@@ -441,8 +441,9 @@ def _decode_job(
         raise ValueError("durable recurrence job has an unexpected action_id")
     metadata = job.payload.get(_RECURRENCE_PAYLOAD_KEY)
     target_payload = job.payload.get(_TARGET_PAYLOAD_KEY)
-    if not isinstance(metadata, dict) or not isinstance(target_payload, dict):
+    if type(metadata) is not dict or type(target_payload) is not dict:
         raise TypeError("durable recurrence payload is corrupt")
+    target_payload = _canonical_payload(target_payload)
     if metadata.get("version") != _RECURRENCE_VERSION:
         raise ValueError("unsupported durable recurrence payload version")
     recurrence_id = _required_text(metadata.get("recurrence_id"), "persisted recurrence_id")
@@ -475,9 +476,9 @@ def _decode_job(
         raise ValueError("durable recurrence terminal reason is corrupt") from exc
     next_id = metadata.get("next_occurrence_id")
     last_id = metadata.get("last_completed_occurrence_id")
-    if next_id is not None and (not isinstance(next_id, str) or not next_id.strip()):
+    if next_id is not None and (type(next_id) is not str or not next_id.strip()):
         raise ValueError("durable recurrence next occurrence identity is corrupt")
-    if last_id is not None and (not isinstance(last_id, str) or not last_id.strip()):
+    if last_id is not None and (type(last_id) is not str or not last_id.strip()):
         raise ValueError("durable recurrence completion identity is corrupt")
     if (next_due is None) != (next_id is None):
         raise ValueError("durable recurrence next intent is incomplete")
