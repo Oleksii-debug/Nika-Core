@@ -102,8 +102,9 @@ class ModelBenchmarkRunner:
         temperature: float | None = 0.0,
     ) -> CandidateBenchmarkReport:
         execution_config = BenchmarkExecutionConfig(
-            timeout_seconds=execution_config.timeout_seconds,
-            temperature=execution_config.temperature,
+            timeout_seconds=timeout_seconds,
+            temperature=temperature,
+            scorer_id=self._scorer_id,
         )
 
         results: list[CaseBenchmarkResult] = []
