@@ -204,8 +204,10 @@ def test_wrong_server_rejection_never_opens_transport() -> None:
     assert result.error == "wrong MCP server"
 
 
-
-def _list_tools_client(tools: list[SimpleNamespace]) -> type:
+def _list_tools_client(
+    pages: dict[str | None, tuple[list[SimpleNamespace], str | None]],
+    seen_cursors: list[str | None] | None = None,
+) -> type:
     class FakeClient:
         def __init__(self, _target: object) -> None:
             pass
@@ -219,10 +221,17 @@ def _list_tools_client(tools: list[SimpleNamespace]) -> type:
             _exc: object,
             _tb: object,
         ) -> None:
-            return None
+            pass
 
-        async def list_tools(self) -> SimpleNamespace:
-            return SimpleNamespace(tools=tools)
+        async def list_tools(
+            self,
+            *,
+            cursor: str | None = None,
+        ) -> SimpleNamespace:
+            if seen_cursors is not None:
+                seen_cursors.append(cursor)
+            tools, next_cursor = pages[cursor]
+            return SimpleNamespace(tools=tools, next_cursor=next_cursor)
 
     return FakeClient
 
@@ -263,7 +272,10 @@ def test_list_tools_rejects_duplicate_canonical_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_client = _list_tools_client(
-        [_listed_tool("publish"), _listed_tool("publish")]
+        {
+            None: ([_listed_tool("publish")], "page-2"),
+            "page-2": ([_listed_tool("publish")], None),
+        }
     )
     monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
     adapter = MCPClientAdapter(
@@ -282,7 +294,9 @@ def test_list_tools_accepts_128_character_tool_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tool_name = "x" * 128
-    fake_client = _list_tools_client([_listed_tool(tool_name)])
+    fake_client = _list_tools_client(
+        {None: ([_listed_tool(tool_name)], None)}
+    )
     monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
     adapter = MCPClientAdapter(
         MCPServerConfig(
@@ -295,3 +309,102 @@ def test_list_tools_accepts_128_character_tool_name(
     specs = asyncio.run(adapter.list_tools())
 
     assert [spec.tool_id for spec in specs] == [f"mcp:safety:{tool_name}"]
+
+
+
+def test_list_tools_discovers_every_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_cursors: list[str | None] = []
+    fake_client = _list_tools_client(
+        {
+            None: ([_listed_tool("first")], "page-2"),
+            "page-2": ([_listed_tool("second")], None),
+        },
+        seen_cursors,
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    specs = asyncio.run(adapter.list_tools())
+
+    assert [spec.tool_id for spec in specs] == [
+        "mcp:safety:first",
+        "mcp:safety:second",
+    ]
+    assert seen_cursors == [None, "page-2"]
+
+
+def test_list_tools_rejects_repeated_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _list_tools_client(
+        {
+            None: ([], "loop"),
+            "loop": ([], "loop"),
+        }
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    with pytest.raises(ValueError, match="MCP tools pagination cursor repeated"):
+        asyncio.run(adapter.list_tools())
+
+
+def test_list_tools_rejects_oversized_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _list_tools_client(
+        {None: ([], "x" * 4097)}
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    with pytest.raises(ValueError, match="MCP next cursor must contain at most 4096 UTF-8 bytes"):
+        asyncio.run(adapter.list_tools())
+
+
+def test_list_tools_bounds_unique_cursor_pagination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_cursors: list[str | None] = []
+    fake_client = _list_tools_client(
+        {
+            None: ([], "page-2"),
+            "page-2": ([], "page-3"),
+            "page-3": ([], None),
+        },
+        seen_cursors,
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    monkeypatch.setattr("nika_core.mcp_boundary._MAX_MCP_LIST_PAGES", 2)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    with pytest.raises(ValueError, match="MCP tools pagination exceeded safe page limit"):
+        asyncio.run(adapter.list_tools())
+
+    assert seen_cursors == [None, "page-2"]
