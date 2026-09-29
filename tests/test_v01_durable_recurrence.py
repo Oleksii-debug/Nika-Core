@@ -1128,3 +1128,24 @@ def test_persisted_mapping_keys_fail_before_lookup_behavior(tmp_path: Path) -> N
         )
 
     assert calls == []
+
+
+def test_action_payload_keys_fail_before_lookup_behavior(tmp_path: Path) -> None:
+    class BehavioralKey(str):
+        __hash__ = str.__hash__
+
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral action key comparison must not run")
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, _ = _service(store, clock, calls)
+    action_payload: dict[str, object] = {}
+    action_payload[BehavioralKey("recurrence_id")] = "unknown"
+
+    with pytest.raises(TypeError, match="recurrence action payload keys"):
+        service.action_handler(action_payload)  # type: ignore[arg-type]
+
+    assert calls == []
