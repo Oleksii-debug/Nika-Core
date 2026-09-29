@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import threading
 import time
 from types import SimpleNamespace
@@ -184,6 +185,100 @@ def test_foundry_provider_revalidates_resource_policy_at_construction() -> None:
             resource_policy=forged,
             resource_observer=Observer(),
         )
+
+
+def test_foundry_provider_rejects_nonfinite_resource_snapshot_before_manager() -> None:
+    calls: list[str] = []
+
+    class Observer:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                cpu_percent=math.nan,
+                memory_percent=20.0,
+                available_memory_bytes=1_000_000,
+            )
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached for invalid resource evidence")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        resource_policy=ModelResourcePolicy(max_cpu_percent=90.0),
+        resource_observer=Observer(),
+        manager_factory=manager_factory,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(request()))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert calls == []
+
+
+def test_foundry_provider_rejects_behavioral_resource_values_without_execution() -> None:
+    calls: list[str] = []
+
+    class BehavioralFloat(float):
+        def __float__(self) -> float:
+            raise AssertionError("behavioral resource conversion must not execute")
+
+        def __gt__(self, other: object) -> bool:
+            raise AssertionError("behavioral resource comparison must not execute")
+
+    class Observer:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                cpu_percent=BehavioralFloat(10.0),
+                memory_percent=20.0,
+                available_memory_bytes=1_000_000,
+            )
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached for invalid resource evidence")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        resource_policy=ModelResourcePolicy(max_cpu_percent=90.0),
+        resource_observer=Observer(),
+        manager_factory=manager_factory,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(request()))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert calls == []
+
+
+def test_foundry_provider_rejects_invalid_available_memory_before_manager() -> None:
+    calls: list[str] = []
+
+    class Observer:
+        def snapshot(self) -> ResourceSnapshot:
+            return ResourceSnapshot(
+                cpu_percent=10.0,
+                memory_percent=20.0,
+                available_memory_bytes=-1,
+            )
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached for invalid resource evidence")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        resource_policy=ModelResourcePolicy(min_available_memory_bytes=1),
+        resource_observer=Observer(),
+        manager_factory=manager_factory,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(request()))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert calls == []
 
 
 def test_foundry_provider_snapshots_resource_policy_before_inference() -> None:
