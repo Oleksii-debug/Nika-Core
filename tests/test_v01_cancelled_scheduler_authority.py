@@ -169,7 +169,7 @@ def test_upsert_rejects_foreign_job_before_attribute_behavior(tmp_path) -> None:
     jobs = ScheduledJobStore(store)
     adapter = APSchedulerAdapter(
         jobs,
-        lambda action_id: lambda payload: None,
+        lambda _action_id: lambda _payload: None,
     )
 
     with pytest.raises(TypeError, match="job must be an exact ScheduledJob"):
