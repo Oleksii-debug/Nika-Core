@@ -225,6 +225,95 @@ def test_remove_during_start_transition_removes_pending_runtime(tmp_path) -> Non
     adapter.shutdown(wait=False)
 
 
+
+
+def test_pause_and_resume_during_start_transition_reconcile_pending_jobs(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Start Toggle Race" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    pause_at = datetime.now(UTC) + timedelta(days=1)
+    resume_at = pause_at + timedelta(hours=1)
+    jobs.upsert(
+        _date_job(
+            job_id="job-start-pause",
+            action_id="pause",
+            run_at=pause_at,
+            payload={},
+        )
+    )
+    jobs.upsert(
+        _date_job(
+            job_id="job-start-resume",
+            action_id="resume",
+            run_at=resume_at,
+            payload={},
+        )
+    )
+    jobs.set_enabled("job-start-resume", False)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    scheduler_start = adapter._scheduler.start
+
+    def start_with_toggles(*args, **kwargs):
+        adapter.pause("job-start-pause")
+        adapter.resume("job-start-resume")
+        return scheduler_start(*args, **kwargs)
+
+    adapter._scheduler.start = start_with_toggles
+
+    adapter.start()
+
+    paused = jobs.get("job-start-pause")
+    resumed = jobs.get("job-start-resume")
+    assert paused is not None
+    assert paused.enabled is False
+    assert not adapter.has_runtime_job("job-start-pause")
+    assert resumed is not None
+    assert resumed.enabled is True
+    resumed_runtime = adapter._scheduler.get_job("job-start-resume")
+    assert resumed_runtime is not None
+    assert resumed_runtime.trigger.run_date == resume_at
+    adapter.shutdown(wait=False)
+
+
+def test_failed_start_rehydration_clears_starting_for_retry(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Start Retry" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    jobs.upsert(
+        ScheduledJob(
+            job_id="job-start-retry",
+            action_id="retry",
+            trigger_kind=TriggerKind.CRON,
+            trigger={"bogus_field": "*"},
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+
+    with pytest.raises(TypeError):
+        adapter.start()
+
+    assert adapter._starting is False
+    assert adapter._started is False
+    assert not adapter.has_runtime_job("job-start-retry")
+
+    run_at = datetime.now(UTC) + timedelta(days=1)
+    jobs.upsert(
+        _date_job(
+            job_id="job-start-retry",
+            action_id="retry",
+            run_at=run_at,
+            payload={},
+        )
+    )
+    adapter.start()
+
+    runtime = adapter._scheduler.get_job("job-start-retry")
+    assert runtime is not None
+    assert runtime.trigger.run_date == run_at
+    adapter.shutdown(wait=False)
+
+
 def test_adapter_restart_rebuilds_apscheduler_executor(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Restart Lifecycle" / "nika core.db")
     store.initialize()
