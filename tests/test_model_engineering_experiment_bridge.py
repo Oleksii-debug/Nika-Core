@@ -11,6 +11,7 @@ from nika_core.model_engineering import (
     LATENCY_METRIC,
     QUALITY_METRIC,
     TASK_PASS_METRIC,
+    BenchmarkExecutionConfig,
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
     EvaluationCase,
@@ -39,6 +40,16 @@ def _candidate(candidate_id: str, model: str) -> ModelCandidate:
         engine_license_ref="license:engine",
         model_provenance_ref=f"model:{model}",
         model_license_ref="license:model",
+    )
+
+
+def _execution_config(
+    timeout_seconds: float = 60.0,
+    temperature: float | None = 0.0,
+) -> BenchmarkExecutionConfig:
+    return BenchmarkExecutionConfig(
+        timeout_seconds=timeout_seconds,
+        temperature=temperature,
     )
 
 
@@ -71,6 +82,7 @@ def _report(
     *,
     quality: tuple[float, float],
     latency: tuple[float, float],
+    execution_config: BenchmarkExecutionConfig | None = None,
 ) -> CandidateBenchmarkReport:
     results = tuple(
         CaseBenchmarkResult(
@@ -97,11 +109,13 @@ def _report(
             strict=True,
         )
     )
+    config = _execution_config() if execution_config is None else execution_config
     return CandidateBenchmarkReport(
         candidate=candidate,
         evaluation_set_id=evaluation.evaluation_set_id,
         evaluation_set_version=evaluation.version,
         evaluation_set_sha256=evaluation.content_sha256,
+        execution_config_sha256=config.evidence_sha256,
         evaluation_purpose=evaluation.purpose,
         case_results=results,
         weighted_quality_score=sum(quality) / len(quality),
@@ -146,6 +160,7 @@ def test_bridge_requires_held_out_evidence_for_promotion_definition() -> None:
             champion=_candidate("champion", "m1"),
             challengers=(_candidate("challenger", "m2"),),
             evaluation_set=_evaluation(EvaluationPurpose.DEVELOPMENT),
+            execution_config=_execution_config(),
             policy=policy,
             permission_fingerprint="permissions-v1",
         )
@@ -164,6 +179,7 @@ def test_bridge_rejects_policy_metrics_it_cannot_supply() -> None:
             champion=_candidate("champion", "m1"),
             challengers=(_candidate("challenger", "m2"),),
             evaluation_set=_evaluation(),
+            execution_config=_execution_config(),
             policy=policy,
             permission_fingerprint="permissions-v1",
         )
@@ -191,12 +207,14 @@ def test_bridge_uses_exact_evaluation_and_candidate_evidence() -> None:
         champion=champion,
         challengers=(challenger,),
         evaluation_set=evaluation,
+        execution_config=_execution_config(),
         policy=policy,
         permission_fingerprint="permissions-v1",
     )
 
     assert definition.champion.version == f"sha256:{champion.evidence_sha256}"
-    assert definition.challengers[0].artifact_ref.endswith(challenger.evidence_sha256)
+    assert challenger.evidence_sha256 in definition.challengers[0].artifact_ref
+    assert _execution_config().evidence_sha256 in definition.challengers[0].artifact_ref
     assert {item.replay_id for item in definition.replays} == {"r1", "r2"}
     for replay in definition.replays:
         assert evaluation.content_sha256 in replay.dataset_ref
@@ -223,6 +241,7 @@ def test_benchmark_observations_drive_existing_experiment_engine() -> None:
         champion=champion,
         challengers=(challenger,),
         evaluation_set=evaluation,
+        execution_config=_execution_config(),
         policy=policy,
         permission_fingerprint="permissions-v1",
     )
@@ -270,6 +289,7 @@ def test_bridge_projects_only_metrics_declared_by_the_exact_policy() -> None:
         champion=candidate,
         challengers=(_candidate("other", "m2"),),
         evaluation_set=evaluation,
+        execution_config=_execution_config(),
         policy=PromotionPolicy(
             primary_metric=QUALITY_METRIC,
             minimum_replays=2,
@@ -311,6 +331,7 @@ def test_bridge_rejects_cross_evaluation_evidence_rebinding() -> None:
         champion=candidate,
         challengers=(_candidate("other", "m2"),),
         evaluation_set=target_evaluation,
+        execution_config=_execution_config(),
         policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
         permission_fingerprint="permissions-v1",
     )
@@ -331,6 +352,7 @@ def test_bridge_rejects_same_candidate_id_with_different_model_evidence() -> Non
         champion=trusted_candidate,
         challengers=(_candidate("other", "m3"),),
         evaluation_set=evaluation,
+        execution_config=_execution_config(),
         policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
         permission_fingerprint="permissions-v1",
     )
@@ -375,6 +397,7 @@ def test_observation_boundary_rejects_development_evidence_even_with_direct_defi
         champion=candidate,
         challengers=(_candidate("other", "m2"),),
         evaluation_set=held_out,
+        execution_config=_execution_config(),
         policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
         permission_fingerprint="permissions-v1",
     )
@@ -415,6 +438,7 @@ def test_failure_attempt_latency_is_not_projected_as_promotion_latency() -> None
         champion=candidate,
         challengers=(_candidate("other", "m2"),),
         evaluation_set=evaluation,
+        execution_config=_execution_config(),
         policy=PromotionPolicy(
             primary_metric=COMPLETION_METRIC,
             minimum_replays=2,
@@ -451,3 +475,34 @@ def test_failure_attempt_latency_is_not_projected_as_promotion_latency() -> None
         item.replay_id == failed.case_id and item.metric == LATENCY_METRIC
         for item in observations
     )
+
+
+
+def test_bridge_rejects_cross_execution_config_rebinding() -> None:
+    candidate = _candidate("candidate", "m1")
+    evaluation = _evaluation()
+    trusted_config = _execution_config(timeout_seconds=60.0, temperature=0.0)
+    other_config = _execution_config(timeout_seconds=30.0, temperature=0.5)
+    definition = build_experiment_definition(
+        experiment_id="config-substitution",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=trusted_config,
+        policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+        permission_fingerprint="permissions-v1",
+    )
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 10.0),
+        execution_config=other_config,
+    )
+
+    with pytest.raises(ValueError, match="candidate evidence"):
+        benchmark_observations(
+            report,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
