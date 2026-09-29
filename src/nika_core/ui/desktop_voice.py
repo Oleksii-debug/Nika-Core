@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import math
 import threading
+import unicodedata
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
@@ -21,7 +22,11 @@ from nika_core.voice_turn import (
     VoiceTurnResult,
     VoiceTurnStatus,
 )
-from nika_core.wake_activation import WakeActivationEvidence, WakeActivationOutcome
+from nika_core.wake_activation import (
+    MAX_TRANSCRIPT_CHARS,
+    WakeActivationEvidence,
+    WakeActivationOutcome,
+)
 
 VoiceRequestFactory = Callable[[str], VoiceTurnRequest]
 VoiceSubmitter = Callable[
@@ -377,8 +382,7 @@ class DesktopVoiceTurnController:
                 or type(wake.request_id) is not str
                 or transcription.request_id != request_id
                 or wake.request_id != request_id
-                or type(result.transcript) is not str
-                or not result.transcript
+                or not _is_public_transcript(result.transcript)
             ):
                 return DesktopVoiceSnapshot(
                     status=DesktopVoiceStatus.FAILED,
@@ -396,9 +400,7 @@ class DesktopVoiceTurnController:
                     request_id=request_id,
                     message="Голосовий сервіс повернув некоректні доказові поля.",
                 )
-            transcript_sha256 = hashlib.sha256(
-                result.transcript.encode("utf-8", errors="surrogatepass")
-            ).hexdigest()
+            transcript_sha256 = hashlib.sha256(result.transcript.encode("utf-8")).hexdigest()
             if (
                 transcription.audio_sha256 != evidence.capture.audio_sha256
                 or transcription.transcript_sha256 != transcript_sha256
@@ -473,6 +475,18 @@ class DesktopVoiceTurnController:
             raise TypeError("voice desktop action payload must be an exact dict")
         if payload:
             raise ValueError("voice desktop action does not accept payload authority")
+
+
+def _is_public_transcript(value: object) -> bool:
+    if type(value) is not str or not value or len(value) > MAX_TRANSCRIPT_CHARS:
+        return False
+    if any(unicodedata.category(char).startswith("C") for char in value):
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 def _is_sha256(value: object) -> bool:
