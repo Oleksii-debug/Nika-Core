@@ -144,6 +144,21 @@ def test_complete_rejects_behavioral_json_containers_without_executing_them(
     assert persisted.result is None
 
 
+def test_complete_rejects_circular_result_without_status_mutation(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+    circular: list[object] = []
+    circular.append(circular)
+
+    with pytest.raises(ValueError, match="JSON serializable"):
+        ledger.complete("effect:1", {"circular": circular})
+
+    persisted = ledger.require("effect:1")
+    assert persisted.status is IdempotencyStatus.PENDING
+    assert persisted.result is None
+
+
 def test_concurrent_conflicting_completions_have_one_durable_winner(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
