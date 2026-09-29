@@ -88,9 +88,11 @@ def _stored_timestamp(row: sqlite3.Row, field_name: str) -> str:
     return value
 
 
-def _require_json_object_keys(value: object) -> None:
-    if isinstance(value, dict):
-        for key, item in dict.items(value):
+def _snapshot_json_value(value: Any) -> Any:
+    value_type = type(value)
+    if value_type is dict:
+        copied: dict[str, Any] = {}
+        for key, item in value.items():
             if type(key) is not str:
                 raise ValueError("idempotency result object keys must be exact text")
             try:
@@ -99,11 +101,17 @@ def _require_json_object_keys(value: object) -> None:
                 raise ValueError(
                     "idempotency result object keys must be valid UTF-8 text"
                 ) from exc
-            _require_json_object_keys(item)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _require_json_object_keys(item)
+            copied[key] = _snapshot_json_value(item)
+        return copied
+    if value_type is list:
+        return [_snapshot_json_value(item) for item in value]
+    if value_type is tuple:
+        return tuple(_snapshot_json_value(item) for item in value)
+    if isinstance(value, (dict, list, tuple)):
+        raise ValueError(
+            "idempotency result containers must use exact built-in types"
+        )
+    return value
 
 
 def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
@@ -112,8 +120,7 @@ def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
     if not isinstance(result, Mapping):
         raise TypeError("idempotency result must be a mapping when provided")
     try:
-        payload = dict(result)
-        _require_json_object_keys(payload)
+        payload = _snapshot_json_value(dict(result))
         serialized = json.dumps(
             payload,
             ensure_ascii=False,
