@@ -712,9 +712,18 @@ class FoundryLocalProvider:
         path: str | None = None
         if cached:
             try:
-                path = str(model.get_path())
-            except Exception:  # noqa: BLE001 - metadata collection must not break inference use.
+                raw_path = model.get_path()
+            except Exception:  # noqa: BLE001 - path evidence is optional metadata.
                 path = None
+            else:
+                if type(raw_path) is not str:
+                    raise ModelGatewayError(
+                        ModelErrorCode.PROVIDER_ERROR,
+                        "Foundry Local SDK returned invalid path metadata",
+                        provider_id=self.capabilities.provider_id,
+                        retryable=False,
+                    )
+                path = raw_path
         evidence = FoundryModelEvidence(
             model_id=model_id,
             model_version=self._version_from_model_id(model_id),

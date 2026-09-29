@@ -67,6 +67,20 @@ class _Model:
         return Client()
 
 
+class _BehavioralPath(str):
+    def __str__(self) -> str:
+        raise AssertionError("path __str__ must not execute")
+
+
+class _PathCarrierModel(_Model):
+    def __init__(self, path_carrier: object) -> None:
+        super().__init__()
+        self._path_carrier = path_carrier
+
+    def get_path(self) -> object:
+        return self._path_carrier
+
+
 class _Catalog:
     def __init__(self, model: _Model) -> None:
         self._model = model
@@ -183,6 +197,24 @@ def test_model_metadata_is_not_coerced_into_plausible_evidence(
 ) -> None:
     model = _Model()
     setattr(model, field, value)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        _provider(model).inspect_model()
+
+    _assert_provider_error(exc_info)
+
+
+@pytest.mark.parametrize(
+    "path_carrier",
+    [
+        object(),
+        _BehavioralPath("C:/Nika Test Models/strict-model"),
+    ],
+)
+def test_cached_path_metadata_rejects_noncanonical_carriers_without_coercion(
+    path_carrier: object,
+) -> None:
+    model = _PathCarrierModel(path_carrier)
 
     with pytest.raises(ModelGatewayError) as exc_info:
         _provider(model).inspect_model()
