@@ -113,6 +113,7 @@ class FoundryLocalProvider:
         self._resource_observer = resource_observer
         self._manager_factory = manager_factory
         self._manager_instance: Any | None = None
+        self._manager_lock = Lock()
         self._inference_lock = asyncio.Lock()
         self._model_management_lock = asyncio.Lock()
         self._owned_model_lock = Lock()
@@ -860,19 +861,23 @@ class FoundryLocalProvider:
     def _manager(self) -> Any:
         if self._manager_instance is not None:
             return self._manager_instance
-        if self._manager_factory is not None:
-            self._manager_instance = self._manager_factory()
+
+        with self._manager_lock:
+            if self._manager_instance is not None:
+                return self._manager_instance
+            if self._manager_factory is not None:
+                self._manager_instance = self._manager_factory()
+                return self._manager_instance
+
+            from foundry_local_sdk import Configuration, FoundryLocalManager
+
+            config_kwargs: dict[str, object] = {"app_name": self._app_name}
+            if self._model_cache_dir is not None:
+                config_kwargs["model_cache_dir"] = str(self._model_cache_dir)
+            configuration = Configuration(**config_kwargs)
+            FoundryLocalManager.initialize(configuration)
+            self._manager_instance = FoundryLocalManager.instance
             return self._manager_instance
-
-        from foundry_local_sdk import Configuration, FoundryLocalManager
-
-        config_kwargs: dict[str, object] = {"app_name": self._app_name}
-        if self._model_cache_dir is not None:
-            config_kwargs["model_cache_dir"] = str(self._model_cache_dir)
-        configuration = Configuration(**config_kwargs)
-        FoundryLocalManager.initialize(configuration)
-        self._manager_instance = FoundryLocalManager.instance
-        return self._manager_instance
 
     @staticmethod
     def _usage(response: Any) -> ModelUsage:
