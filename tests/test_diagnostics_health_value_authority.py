@@ -244,7 +244,6 @@ def test_health_report_snapshots_canonical_checks() -> None:
     ]
 
 
-
 def test_health_service_does_not_evaluate_injected_clock_truthiness(
     tmp_path: Path,
 ) -> None:
