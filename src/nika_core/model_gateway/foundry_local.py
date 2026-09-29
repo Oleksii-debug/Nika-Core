@@ -116,7 +116,7 @@ class FoundryLocalProvider:
         self._inference_lock = asyncio.Lock()
         self._model_management_lock = asyncio.Lock()
         self._owned_model_lock = Lock()
-        self._owned_loaded_models: dict[str, Any] = {}
+        self._owned_loaded_models: dict[int, tuple[str, Any]] = {}
         self._tainted_loaded_models: dict[int, Any] = {}
 
     @property
@@ -252,6 +252,13 @@ class FoundryLocalProvider:
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             )
+        if effective_cancel_event.is_set():
+            raise ModelGatewayError(
+                ModelErrorCode.CANCELLED,
+                f"Foundry Local model '{authorization.model}' download was cancelled",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
 
         loop = asyncio.get_running_loop()
         deadline = loop.time() + bounded_timeout
@@ -265,7 +272,22 @@ class FoundryLocalProvider:
             await asyncio.wait_for(self._model_management_lock.acquire(), timeout=remaining)
             management_acquired = True
 
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    f"Foundry Local model '{authorization.model}' download was cancelled",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
+
             model = self._get_model(authorization.model)
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    f"Foundry Local model '{authorization.model}' download was cancelled",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
             expected_model_id = authorization.expected_model_id or self._expected_model_id
             self._validate_model_identity(model, expected_model_id)
             if self._sdk_bool(model, "is_cached"):
@@ -276,6 +298,14 @@ class FoundryLocalProvider:
                 raise TimeoutError
             await asyncio.wait_for(self._inference_lock.acquire(), timeout=remaining)
             inference_acquired = True
+
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    f"Foundry Local model '{authorization.model}' download was cancelled",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
 
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -465,7 +495,7 @@ class FoundryLocalProvider:
 
         with self._owned_model_lock:
             owned = tuple(self._owned_loaded_models.items())
-        for model_id, model in owned:
+        for marker, (model_id, model) in owned:
             try:
                 if self._sdk_bool(model, "is_loaded"):
                     model.unload()
@@ -484,7 +514,7 @@ class FoundryLocalProvider:
                     retryable=False,
                 ) from exc
             with self._owned_model_lock:
-                self._owned_loaded_models.pop(model_id, None)
+                self._owned_loaded_models.pop(marker, None)
 
         for marker, model in tuple(self._tainted_loaded_models.items()):
             try:
@@ -569,7 +599,7 @@ class FoundryLocalProvider:
                 raise
             self._tainted_loaded_models.pop(id(model), None)
             with self._owned_model_lock:
-                self._owned_loaded_models[model_id] = model
+                self._owned_loaded_models[id(model)] = (model_id, model)
 
         if abandon_event.is_set():
             raise ModelGatewayError(
