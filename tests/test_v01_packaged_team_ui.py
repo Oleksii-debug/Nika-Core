@@ -720,6 +720,74 @@ def test_renderer_rejects_noncomparison_with_comparison_counts() -> None:
     assert rejected["summary_hidden"] is True
 
 
+@pytest.mark.parametrize(
+    ("status", "source_states", "agreement_count", "difference_count"),
+    [
+        ("agree", ["valid", "missing"], 1, 0),
+        ("missing", ["valid", "valid"], 0, 0),
+        ("worker_error", ["evidence_invalid", "worker_error"], 0, 0),
+        ("missing", ["worker_error", "missing"], 0, 0),
+        ("evidence_invalid", ["missing", "valid"], 0, 0),
+    ],
+)
+def test_renderer_rejects_status_that_conflicts_with_source_states(
+    status: str,
+    source_states: list[str],
+    agreement_count: int,
+    difference_count: int,
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status=status,
+        validated=False,
+        source_states=source_states,
+        agreement_count=agreement_count,
+        difference_count=difference_count,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
+@pytest.mark.parametrize(
+    ("status", "source_states"),
+    [
+        ("evidence_invalid", ["evidence_invalid", "worker_error"]),
+        ("worker_error", ["worker_error", "missing"]),
+        ("missing", ["missing", "valid"]),
+    ],
+)
+def test_renderer_accepts_canonical_noncomparison_source_state_precedence(
+    status: str,
+    source_states: list[str],
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.pop("model_result")
+    comparison.update(
+        status=status,
+        validated=False,
+        source_states=source_states,
+        agreement_count=0,
+        difference_count=0,
+    )
+
+    rendered = _rendered_team_snapshot(live_projection=projection)
+
+    assert rendered["ready"] == "true"
+    assert rendered["summary_hidden"] is False
+
+
 def test_renderer_rejects_terminal_member_count_not_matching_roster_state() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
