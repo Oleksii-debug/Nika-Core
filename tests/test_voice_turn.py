@@ -347,6 +347,71 @@ def test_turn_requires_one_exact_request_identity_across_capture_and_composition
         )
 
 
+def test_turn_rejects_behavioral_nested_request_id_without_dispatch() -> None:
+    class BehavioralStr(str):
+        def __ne__(self, other: object) -> bool:
+            del other
+            raise AssertionError("nested request identity comparison must not execute")
+
+    base = _request()
+    object.__setattr__(base.capture, "request_id", BehavioralStr(base.request_id))
+
+    with pytest.raises(TypeError, match="capture.request_id"):
+        VoiceTurnRequest(
+            request_id=base.request_id,
+            capture=base.capture,
+            stt_provider_id=base.stt_provider_id,
+            stt_model=base.stt_model,
+            stt_policy=base.stt_policy,
+        )
+
+
+def test_turn_rejects_behavioral_nested_audio_bounds_without_dispatch() -> None:
+    class BehavioralInt(int):
+        def __gt__(self, other: object) -> bool:
+            del other
+            raise AssertionError("nested numeric comparison must not execute")
+
+        def __mul__(self, other: object) -> int:
+            del other
+            raise AssertionError("nested numeric multiplication must not execute")
+
+    base = _request()
+    object.__setattr__(base.capture, "sample_count", BehavioralInt(8))
+
+    with pytest.raises(TypeError, match="audio bounds"):
+        VoiceTurnRequest(
+            request_id=base.request_id,
+            capture=base.capture,
+            stt_provider_id=base.stt_provider_id,
+            stt_model=base.stt_model,
+            stt_policy=base.stt_policy,
+        )
+
+
+def test_turn_rejects_behavioral_transcript_bound_without_dispatch() -> None:
+    class BehavioralInt(int):
+        def __gt__(self, other: object) -> bool:
+            del other
+            raise AssertionError("transcript bound comparison must not execute")
+
+    base = _request()
+    object.__setattr__(
+        base.stt_policy,
+        "max_transcript_chars",
+        BehavioralInt(MAX_TRANSCRIPT_CHARS),
+    )
+
+    with pytest.raises(TypeError, match="max_transcript_chars"):
+        VoiceTurnRequest(
+            request_id=base.request_id,
+            capture=base.capture,
+            stt_provider_id=base.stt_provider_id,
+            stt_model=base.stt_model,
+            stt_policy=base.stt_policy,
+        )
+
+
 def test_caller_cancellation_propagates_without_fabricated_turn_evidence() -> None:
     class _BlockedStt(_SttAdapter):
         def __init__(self) -> None:
