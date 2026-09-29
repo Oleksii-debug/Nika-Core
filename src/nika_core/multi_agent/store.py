@@ -11,6 +11,7 @@ from nika_core.multi_agent.contracts import (
     AgentHandoff,
     HandoffKind,
     MemberState,
+    StoredMemberResult,
     TeamMember,
     TeamQuota,
     TeamState,
@@ -22,6 +23,7 @@ _NONTERMINAL_MEMBER_STATES = frozenset(
         MemberState.SPAWNED,
         MemberState.RUNNING,
         MemberState.WAITING_APPROVAL,
+        MemberState.PAUSED,
     }
 )
 _TERMINAL_MEMBER_STATES = frozenset(
@@ -50,6 +52,7 @@ class MultiAgentStore:
         root_thread_id: str,
         root_grants: tuple[ToolGrant, ...],
         quota: TeamQuota,
+        root_task_handoff: AgentHandoff | None = None,
     ) -> TeamMember:
         now = datetime.now(UTC).isoformat()
         root = TeamMember(
@@ -76,6 +79,13 @@ class MultiAgentStore:
                 ),
             )
             self._insert_member(conn, root, now)
+            if root_task_handoff is not None:
+                self._validate_root_task_handoff(
+                    root_task_handoff,
+                    team_id=team_id,
+                    root_member_id=root_member_id,
+                )
+                self._insert_handoff_with_connection(conn, root_task_handoff, now)
             self._audit.append_with_connection(
                 conn,
                 event_type="multi_agent.team_created",
@@ -213,6 +223,68 @@ class MultiAgentStore:
         if not isinstance(payload, dict):
             raise TypeError("persisted task handoff payload must be an object")
         return payload
+
+    def inbound_result_handoffs(
+        self,
+        team_id: str,
+        recipient_id: str,
+    ) -> tuple[AgentHandoff, ...]:
+        """Return durable RESULT/ERROR inputs addressed to one team member."""
+        self.member(team_id, recipient_id)
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND recipient_id = ? AND kind IN (?, ?) "
+                "ORDER BY created_at, handoff_id",
+                (
+                    team_id,
+                    recipient_id,
+                    HandoffKind.RESULT.value,
+                    HandoffKind.ERROR.value,
+                ),
+            ).fetchall()
+        handoffs: list[AgentHandoff] = []
+        for row in rows:
+            payload = json.loads(row["payload_json"])
+            if not isinstance(payload, dict):
+                raise TypeError("persisted result handoff payload must be an object")
+            handoffs.append(
+                AgentHandoff(
+                    handoff_id=row["handoff_id"],
+                    team_id=row["team_id"],
+                    sender_id=row["sender_id"],
+                    recipient_id=row["recipient_id"],
+                    kind=HandoffKind(row["kind"]),
+                    correlation_id=row["correlation_id"],
+                    payload=payload,
+                )
+            )
+        return tuple(handoffs)
+
+    def member_result(self, team_id: str, member_id: str) -> StoredMemberResult:
+        """Return the one terminal result record used for deterministic reconstruction."""
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT outcome, payload_json, error FROM multi_agent_results "
+                "WHERE team_id = ? AND member_id = ? ORDER BY result_id LIMIT 2",
+                (team_id, member_id),
+            ).fetchall()
+        if not rows:
+            raise KeyError(f"no persisted result for {team_id}/{member_id}")
+        if len(rows) > 1:
+            raise RuntimeError(f"ambiguous persisted result for {team_id}/{member_id}")
+        payload = json.loads(rows[0]["payload_json"])
+        if not isinstance(payload, dict):
+            raise TypeError("persisted member result payload must be an object")
+        error = rows[0]["error"]
+        if error is not None and not isinstance(error, str):
+            raise TypeError("persisted member result error must be text")
+        return StoredMemberResult(
+            outcome=str(rows[0]["outcome"]),
+            payload=payload,
+            error=error,
+        )
 
     def prepare_member_execution(
         self,
@@ -422,7 +494,7 @@ class MultiAgentStore:
         )
 
     def finalize_team(self, team_id: str) -> TeamState:
-        """Explicitly close a team only after all child executions are terminal."""
+        """Close a team after children and any operational root are terminal."""
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -442,14 +514,37 @@ class MultiAgentStore:
             ).fetchall()
             states = tuple(MemberState(item["state"]) for item in child_rows)
             active = [state for state in states if state in _NONTERMINAL_MEMBER_STATES]
+            root_row = conn.execute(
+                "SELECT state FROM multi_agent_members "
+                "WHERE team_id = ? AND parent_id IS NULL",
+                (team_id,),
+            ).fetchone()
+            root_result_exists = conn.execute(
+                "SELECT 1 FROM multi_agent_results results "
+                "JOIN multi_agent_members members "
+                "ON members.team_id = results.team_id AND members.member_id = results.member_id "
+                "WHERE members.team_id = ? AND members.parent_id IS NULL LIMIT 1",
+                (team_id,),
+            ).fetchone()
+            root_state = (
+                MemberState(root_row["state"])
+                if root_row is not None and root_result_exists is not None
+                else None
+            )
+            if root_state in _NONTERMINAL_MEMBER_STATES:
+                active.append(root_state)
             if active:
                 values = ", ".join(sorted({state.value for state in active}))
-                raise RuntimeError(f"team has nonterminal child executions: {values}")
+                raise RuntimeError(f"team has nonterminal member executions: {values}")
 
             completed = sum(state is MemberState.COMPLETED for state in states)
             failed = sum(state is MemberState.FAILED for state in states)
             cancelled = sum(state is MemberState.CANCELLED for state in states)
-            if completed:
+            if root_state is MemberState.FAILED:
+                final = TeamState.FAILED
+            elif root_state is MemberState.CANCELLED:
+                final = TeamState.CANCELLED
+            elif completed:
                 final = TeamState.COMPLETED
             elif failed:
                 final = TeamState.FAILED
@@ -471,6 +566,9 @@ class MultiAgentStore:
                     "completed_children": completed,
                     "failed_children": failed,
                     "cancelled_children": cancelled,
+                    "operational_root_state": (
+                        root_state.value if root_state is not None else None
+                    ),
                 },
             )
         return final
@@ -495,7 +593,7 @@ class MultiAgentStore:
             )
             conn.execute(
                 "UPDATE multi_agent_members SET state = ?, updated_at = ? WHERE team_id = ? "
-                "AND state IN (?, ?, ?)",
+                "AND state IN (?, ?, ?, ?)",
                 (
                     MemberState.CANCELLED.value,
                     now,
@@ -503,6 +601,7 @@ class MultiAgentStore:
                     MemberState.SPAWNED.value,
                     MemberState.RUNNING.value,
                     MemberState.WAITING_APPROVAL.value,
+                    MemberState.PAUSED.value,
                 ),
             )
             self._audit.append_with_connection(
@@ -586,6 +685,20 @@ class MultiAgentStore:
                 now,
             ),
         )
+
+    @staticmethod
+    def _validate_root_task_handoff(
+        handoff: AgentHandoff,
+        *,
+        team_id: str,
+        root_member_id: str,
+    ) -> None:
+        if handoff.team_id != team_id:
+            raise ValueError("root task handoff team does not match created team")
+        if handoff.sender_id != root_member_id or handoff.recipient_id != root_member_id:
+            raise ValueError("root task handoff must be bound to the root member")
+        if handoff.kind is not HandoffKind.TASK:
+            raise ValueError("root journey handoff must be TASK")
 
     @staticmethod
     def _validate_task_handoff(

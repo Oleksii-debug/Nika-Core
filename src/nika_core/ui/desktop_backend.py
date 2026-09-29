@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
-from collections.abc import Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from typing import Any
 
@@ -19,7 +19,9 @@ from nika_core.runtime.contracts import (
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.reference import ReferenceRuntime
+from nika_core.ui.autostart_settings import AutostartSettings
 from nika_core.ui.bridge_models import UIResult
+from nika_core.windows_autostart import WindowsAutostartService
 
 _LOGGER = logging.getLogger(__name__)
 _DEFAULT_AGENT_ID = "nika.default"
@@ -89,6 +91,8 @@ class DesktopBackend:
         workspaces: WorkspaceRegistry,
         audit: AuditLog,
         runtime: AgentRuntimePort | None = None,
+        prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        autostart_service: WindowsAutostartService | None = None,
     ) -> None:
         self._queue = queue
         self._agents = agents
@@ -96,6 +100,8 @@ class DesktopBackend:
         self._audit = audit
         self._coordinator = TaskRuntimeCoordinator(queue, audit)
         self._runtime = runtime or ReferenceRuntime()
+        self._prepare_task_payload = prepare_task_payload
+        self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.Lock()
         self._active_threads: dict[str, str] = {}
@@ -107,10 +113,15 @@ class DesktopBackend:
         command = str(payload.get("command", "")).strip()
         if not command:
             raise ValueError("Введіть команду перед створенням завдання.")
+        task_payload: dict[str, Any] = {"command": command}
+        if self._prepare_task_payload is not None:
+            task_payload = dict(self._prepare_task_payload(task_payload))
+            if task_payload.get("command") != command:
+                raise ValueError("Підготовка завдання не може змінювати його команду.")
         record = self._queue.create(
             workspace_id=_DEFAULT_WORKSPACE_ID,
             agent_id=_DEFAULT_AGENT_ID,
-            payload={"command": command},
+            payload=task_payload,
         )
         self._queue.transition(record.task_id, TaskState.READY)
         self._schedule_start(record.task_id, command)
@@ -193,6 +204,17 @@ class DesktopBackend:
     def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
         record = self._only_controllable(action="зупинки")
         if record is None:
+            cancelled = self._only_with_state(
+                TaskState.CANCELLED,
+                action="повторної зупинки",
+            )
+            if cancelled is not None:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Завдання вже скасовано; додаткових дій не виконано.",
+                    focus_id="tasks-heading",
+                )
             raise ValueError("Немає активного завдання агента для зупинки.")
 
         cancel_future: Future[bool] | None = None
@@ -240,6 +262,7 @@ class DesktopBackend:
 
     def snapshot(self) -> dict[str, Any]:
         return {
+            "autostart": self.autostart_settings.snapshot(),
             "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
             "agents": [
                 {

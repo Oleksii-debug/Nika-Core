@@ -11,6 +11,7 @@ from nika_core.interaction import (
     DownloadBroker,
     FrameScope,
     PlaywrightInteractionAdapter,
+    UnsupportedInteractionError,
 )
 
 
@@ -37,6 +38,25 @@ class _FakeDownload:
     def save_as(self, destination: str) -> None:
         self.destination = Path(destination)
         self.destination.write_text(self.payload, encoding="utf-8")
+
+
+class _FakeTextEntryLocator:
+    def __init__(self, kind: str, value: str | None) -> None:
+        self.kind = kind
+        self.value = value
+        self.input_value_calls = 0
+        self.text_content_calls = 0
+
+    def evaluate(self, _expression: str) -> str:
+        return self.kind
+
+    def input_value(self) -> str:
+        self.input_value_calls += 1
+        return "" if self.value is None else self.value
+
+    def text_content(self) -> str | None:
+        self.text_content_calls += 1
+        return self.value
 
 
 def test_frame_scope_requires_exactly_one_identity() -> None:
@@ -113,6 +133,33 @@ def test_semantic_revision_tracks_accessibility_state_but_ignores_focus_marker()
     assert PlaywrightInteractionAdapter._semantic_revision(baseline, 1) != (
         PlaywrightInteractionAdapter._semantic_revision(baseline, 2)
     )
+
+
+def test_text_entry_value_distinguishes_input_textarea_and_contenteditable() -> None:
+    input_locator = _FakeTextEntryLocator("input", "Український текст")
+    textarea_locator = _FakeTextEntryLocator("textarea", "Рядок 1\nРядок 2")
+    editor_locator = _FakeTextEntryLocator("contenteditable", "Редактор")
+
+    assert PlaywrightInteractionAdapter._text_entry_value(input_locator) == "Український текст"
+    assert PlaywrightInteractionAdapter._text_entry_value(textarea_locator) == "Рядок 1\nРядок 2"
+    assert PlaywrightInteractionAdapter._text_entry_value(editor_locator) == "Редактор"
+    assert input_locator.input_value_calls == 1
+    assert textarea_locator.input_value_calls == 1
+    assert editor_locator.input_value_calls == 0
+    assert editor_locator.text_content_calls == 1
+
+
+def test_text_entry_contenteditable_none_normalizes_to_empty_string() -> None:
+    locator = _FakeTextEntryLocator("contenteditable", None)
+    assert PlaywrightInteractionAdapter._text_entry_value(locator) == ""
+
+
+def test_text_entry_value_rejects_unsupported_element_without_echoing_secret() -> None:
+    locator = _FakeTextEntryLocator("unsupported", "NIKA_SECRET_CANARY")
+    with pytest.raises(UnsupportedInteractionError) as exc_info:
+        PlaywrightInteractionAdapter._text_entry_value(locator)
+    assert "input, textarea, or contenteditable" in str(exc_info.value)
+    assert "NIKA_SECRET_CANARY" not in str(exc_info.value)
 
 
 def test_adapter_exposes_no_direct_navigation_bypass(tmp_path: Path) -> None:
