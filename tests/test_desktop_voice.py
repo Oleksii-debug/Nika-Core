@@ -327,6 +327,38 @@ def test_close_during_blocking_submit_marks_cancellation_and_fails_closed() -> N
     assert final["active"] is False
 
 
+def test_submit_base_exception_cleans_reservation_and_allows_reentry() -> None:
+    attempts = 0
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise KeyboardInterrupt("synthetic submit base exception")
+        coroutine.close()
+        future: Future[Any] = Future()
+        future.set_exception(RuntimeError("synthetic retry completion"))
+        return future
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=submit,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="synthetic submit base exception"):
+        controller.start({})
+
+    failed = controller.snapshot()
+    assert failed["status"] == DesktopVoiceStatus.FAILED.value
+    assert failed["active"] is False
+
+    assert controller.start({}).status == "accepted"
+    final = controller.snapshot()
+    assert final["status"] == DesktopVoiceStatus.FAILED.value
+    assert final["active"] is False
+
+
 def test_precompleted_future_callback_does_not_deadlock_start() -> None:
     def immediate_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
         coroutine.close()
