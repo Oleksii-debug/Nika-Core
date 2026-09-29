@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from nika_core.config import AppConfig
+from nika_core.config import APP_CONFIG_SCHEMA_VERSION, AppConfig
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import ActionDefinition, ActionRegistry, Keymap
@@ -42,6 +42,34 @@ def test_legacy_db_path_has_priority_when_both_env_names_exist(
 def test_invalid_config_fails_closed() -> None:
     with pytest.raises(ValueError):
         AppConfig(log_level="verbose")
+
+
+def test_config_schema_version_accepts_canonical_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NIKA_SCHEMA_VERSION", "1")
+
+    config = AppConfig.from_environment()
+
+    assert config.schema_version == APP_CONFIG_SCHEMA_VERSION
+
+
+def test_config_rejects_future_schema_version_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NIKA_SCHEMA_VERSION", "2")
+
+    with pytest.raises(ValueError, match="unsupported schema_version"):
+        AppConfig.from_environment()
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, 1.0, 2, "2", "01", " 1"],
+)
+def test_config_schema_version_rejects_noncanonical_carriers(value: object) -> None:
+    with pytest.raises(ValueError, match="schema_version"):
+        AppConfig(schema_version=value)  # type: ignore[arg-type]
 
 
 def test_schema_migrates_existing_v1_database(tmp_path: Path) -> None:
