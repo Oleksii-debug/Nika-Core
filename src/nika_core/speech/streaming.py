@@ -281,7 +281,12 @@ class IncrementalSpeechStream:
                     cancel_event=self._cancel_event,
                 )
             except SpeechError as exc:
-                if self._cancel_event.is_set():
+                if (
+                    self._cancel_event.is_set()
+                    and type(exc) is SpeechError
+                    and type(exc.code) is SpeechErrorCode
+                    and exc.code is SpeechErrorCode.PROCESS_CANCELLED
+                ):
                     self._cancel()
                     return
                 self._fail(_sanitize_speech_error(exc))
@@ -376,17 +381,18 @@ def _pop_ready_chunk(
 
 def _first_sentence_boundary(text: str, *, limit: int) -> int | None:
     closing = "\"'”’»)]}"
-    for index, char in enumerate(text[:limit]):
+    scan_limit = min(len(text), limit)
+    for index, char in enumerate(text[:scan_limit]):
         if char == "\n":
             return index + 1
         if char not in ".!?…":
             continue
         cursor = index + 1
-        while cursor < len(text) and text[cursor] in closing:
+        while cursor < scan_limit and text[cursor] in closing:
             cursor += 1
-        if cursor >= len(text) or not text[cursor].isspace():
+        if cursor >= scan_limit or not text[cursor].isspace():
             continue
-        while cursor < len(text) and text[cursor].isspace():
+        while cursor < scan_limit and text[cursor].isspace():
             cursor += 1
         return cursor
     return None
