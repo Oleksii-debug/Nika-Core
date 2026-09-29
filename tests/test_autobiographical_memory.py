@@ -414,7 +414,10 @@ def test_missing_or_tampered_audit_evidence_fails_closed(tmp_path) -> None:
         conn.execute(
             "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
             (
-                '{"autobiographical_category":"outcome","result":"changed"}',
+                (
+                    '{"autobiographical_agent_id":"agent-1",'
+                    '"autobiographical_category":"outcome","result":"changed"}'
+                ),
                 event_id,
             ),
         )
