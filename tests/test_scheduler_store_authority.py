@@ -168,7 +168,7 @@ def test_upsert_uses_one_canonical_snapshot_after_validation(
         max_instances=2,
         payload={IMMUTABLE_JOB_BINDING_KEY: "binding-1"},
     )
-    canonicalize = getattr(scheduler_store, "_canonical_job")
+    canonicalize = scheduler_store._canonical_job
 
     def snapshot_then_mutate(job: ScheduledJob) -> ScheduledJob:
         canonical = canonicalize(job)
