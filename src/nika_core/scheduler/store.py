@@ -107,6 +107,7 @@ class ScheduledJobStore:
 
     def set_enabled(self, job_id: str, enabled: bool) -> bool:
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             return self.set_enabled_with_connection(conn, job_id, enabled)
 
     def set_enabled_with_connection(
@@ -119,6 +120,14 @@ class ScheduledJobStore:
         job_key = _stable_identity(job_id, "job_id")
         if type(enabled) is not bool:
             raise TypeError("enabled must be an exact bool")
+        if enabled:
+            row = conn.execute(
+                "SELECT * FROM scheduled_jobs WHERE job_id = ?",
+                (job_key,),
+            ).fetchone()
+            if row is None:
+                return False
+            _from_row(row)
         cursor = conn.execute(
             "UPDATE scheduled_jobs SET enabled = ?, updated_at = ? WHERE job_id = ?",
             (int(enabled), datetime.now(UTC).isoformat(), job_key),

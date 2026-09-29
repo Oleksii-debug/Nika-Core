@@ -287,6 +287,56 @@ def test_list_enabled_rejects_corrupt_enabled_state(
         store.list_enabled()
 
 
+def test_enable_validates_durable_job_before_reactivation(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+    assert store.set_enabled("job-1", False) is True
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET trigger_json = ? WHERE job_id = ?",
+            ('{"broken":', "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="persisted trigger is corrupt"):
+        store.set_enabled("job-1", True)
+
+    with sqlite.connection() as conn:
+        enabled = conn.execute(
+            "SELECT enabled FROM scheduled_jobs WHERE job_id = ?",
+            ("job-1",),
+        ).fetchone()[0]
+    assert enabled == 0
+
+
+def test_disable_contains_corrupt_job_without_decoding_payload(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            ('{"broken":', "job-1"),
+        )
+
+    assert store.set_enabled("job-1", False) is True
+    assert store.list_enabled() == ()
+
+
+def test_set_enabled_preserves_valid_and_missing_semantics(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.upsert(_job(enabled=False))
+
+    assert store.set_enabled("job-1", True) is True
+    restored = store.get("job-1")
+    assert restored is not None
+    assert restored.enabled is True
+    assert store.set_enabled("missing-job", True) is False
+    assert store.set_enabled("missing-job", False) is False
+
+
 def test_list_enabled_still_skips_valid_disabled_job_payload(tmp_path: Path) -> None:
     sqlite = _sqlite(tmp_path)
     store = ScheduledJobStore(sqlite)
