@@ -211,6 +211,8 @@ class APSchedulerAdapter(SchedulerPort):
         if installed_job is not None and job != installed_job:
             return
         if not self._task_authority_allows(job):
+            if self._started or self._starting:
+                self._sync_runtime_job(job_id)
             return
         action_id = job.action_id
         try:
@@ -281,11 +283,6 @@ class APSchedulerAdapter(SchedulerPort):
     ) -> None:
         if not self._jobs.disable_if_current(job):
             return
-        if (
-            (self._started or self._starting)
-            and self._scheduler.get_job(job.job_id) is not None
-        ):
-            self._scheduler.remove_job(job.job_id)
         if self._audit is not None:
             payload: dict[str, Any] = {
                 "action_id": job.action_id,
