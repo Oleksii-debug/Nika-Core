@@ -204,6 +204,10 @@ class APSchedulerAdapter(SchedulerPort):
         if job is None:
             if self._started or self._starting:
                 self._sync_runtime_job(job_id)
+            else:
+                current = self._jobs.get(job_id)
+                if current is not None:
+                    self._task_authority_allows(current)
             return
         if job.action_id != action_id:
             return
