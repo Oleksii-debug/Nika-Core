@@ -507,7 +507,6 @@ def test_bridge_rejects_cross_execution_config_rebinding() -> None:
         )
 
 
-
 class _ExecutionConfigAlias(BenchmarkExecutionConfig):
     @property
     def evidence_sha256(self):
