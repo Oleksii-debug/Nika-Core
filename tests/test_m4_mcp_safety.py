@@ -164,3 +164,40 @@ def test_mcp_routing_segments_reject_delimiter_collisions() -> None:
 def test_mcp_server_identity_rejects_edge_whitespace() -> None:
     with pytest.raises(ValueError, match="server_id must not contain edge whitespace"):
         MCPServerConfig(server_id=" safety", target=object())
+
+
+def test_incomplete_exact_tool_call_fails_before_routing() -> None:
+    adapter = MCPClientAdapter(MCPServerConfig(server_id="safety", target=object()))
+    incomplete = object.__new__(ToolCall)
+
+    with pytest.raises(ValueError, match="call is incomplete"):
+        asyncio.run(adapter.call(incomplete))
+
+
+def test_incomplete_exact_config_fails_before_target_use() -> None:
+    incomplete = object.__new__(MCPServerConfig)
+
+    with pytest.raises(ValueError, match="config is incomplete"):
+        MCPClientAdapter(incomplete)
+
+
+def test_wrong_server_rejection_never_opens_transport() -> None:
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    result = asyncio.run(
+        adapter.call(
+            ToolCall(
+                call_id="mcp-wrong-server-1",
+                tool_id="mcp:other:publish",
+                arguments={"value": "blocked"},
+            )
+        )
+    )
+
+    assert result.error == "wrong MCP server"
