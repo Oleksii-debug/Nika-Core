@@ -198,6 +198,38 @@ def test_stream_pins_selected_voice_after_first_chunk() -> None:
     assert stream.result().voice_id == "Nika Test Voice"
 
 
+def test_first_explicit_voice_receipt_accepts_canonical_engine_casing() -> None:
+    class CanonicalizingPort(FakeSpeechPort):
+        def speak(
+            self,
+            request: SpeechRequest,
+            *,
+            timeout_seconds: float = 120.0,
+            cancel_event: threading.Event | None = None,
+        ) -> SpeechReceipt:
+            assert timeout_seconds > 0
+            assert cancel_event is None or not cancel_event.is_set()
+            self.requests.append(request)
+            return SpeechReceipt(
+                engine_id="test-engine",
+                voice_id="Nika Test Voice",
+                character_count=len(request.text),
+                rate=request.rate,
+                volume=request.volume,
+            )
+
+    port = CanonicalizingPort()
+    stream = IncrementalSpeechStream(port, voice_id="nika test voice")
+    stream.feed("Перше. Друге. ")
+    _wait_for_request_count(port, 2)
+    stream.finish()
+    assert stream.wait(1)
+
+    assert port.requests[0].voice_id == "nika test voice"
+    assert port.requests[1].voice_id == "Nika Test Voice"
+    assert stream.result().voice_id == "Nika Test Voice"
+
+
 def test_sentence_boundary_waits_for_disambiguating_following_fragment() -> None:
     assert speech_streaming._first_sentence_boundary("Версія 3.", limit=200) is None
     text = "Версія 3.14 працює. "
