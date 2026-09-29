@@ -19,6 +19,7 @@ HandlerResolver = Callable[[str], ActionHandler]
 _TERMINAL_TASK_STATES = frozenset(
     {TaskState.CANCELLED, TaskState.COMPLETED, TaskState.ARCHIVED}
 )
+_SYNC_RETRY_LIMIT = 3
 
 
 class APSchedulerAdapter(SchedulerPort):
@@ -143,30 +144,43 @@ class APSchedulerAdapter(SchedulerPort):
 
     def _sync_runtime_job(self, job_id: str) -> ScheduledJob | None:
         job_id = _require_job_id(job_id)
-        job = self._jobs.get(job_id)
-        if job is None or not job.enabled:
-            if self._scheduler.get_job(job_id) is not None:
-                self._scheduler.remove_job(job_id)
-            return None
-        if not self._task_authority_allows(job):
+        for _ in range(_SYNC_RETRY_LIMIT):
+            job = self._jobs.get(job_id)
+            if job is None or not job.enabled:
+                self._remove_runtime_job(job_id)
+                return None
+            if not self._task_authority_allows(job):
+                current = self._jobs.get(job_id)
+                if current is not None and current != job:
+                    continue
+                self._remove_runtime_job(job_id)
+                return None
             current = self._jobs.get(job_id)
-            if current is not None and current != job:
-                return self._sync_runtime_job(job_id)
-            if self._scheduler.get_job(job_id) is not None:
-                self._scheduler.remove_job(job_id)
-            return None
-        current = self._jobs.get(job_id)
-        if current is None or not current.enabled or not self._task_authority_allows(current):
-            if self._scheduler.get_job(job_id) is not None:
-                self._scheduler.remove_job(job_id)
-            return None
-        try:
-            self._install(current)
-        except Exception:
-            if self._scheduler.get_job(job_id) is not None:
-                self._scheduler.remove_job(job_id)
-            raise
-        return current
+            if current is None or not current.enabled:
+                self._remove_runtime_job(job_id)
+                return None
+            if current != job:
+                continue
+            if not self._task_authority_allows(current):
+                after_authority = self._jobs.get(job_id)
+                if after_authority is not None and after_authority != current:
+                    continue
+                self._remove_runtime_job(job_id)
+                return None
+            if self._jobs.get(job_id) != current:
+                continue
+            try:
+                self._install(current)
+            except Exception:
+                self._remove_runtime_job(job_id)
+                raise
+            return current
+        self._remove_runtime_job(job_id)
+        return None
+
+    def _remove_runtime_job(self, job_id: str) -> None:
+        if self._scheduler.get_job(job_id) is not None:
+            self._scheduler.remove_job(job_id)
 
     def _install(self, job: ScheduledJob) -> None:
         self._scheduler.add_job(
