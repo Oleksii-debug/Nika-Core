@@ -178,7 +178,14 @@ def test_sentence_boundary_waits_for_disambiguating_following_fragment() -> None
     assert speech_streaming._first_sentence_boundary("Версія 3.", limit=200) is None
     text = "Версія 3.14 працює. "
     boundary = speech_streaming._first_sentence_boundary(text, limit=200)
-    assert boundary == len("Версія 3.14 працює.")
+    assert boundary == len(text)
+
+
+def test_sentence_boundary_accepts_closing_quote_before_whitespace() -> None:
+    text = 'Вона сказала: "Готово!" Далі'
+    boundary = speech_streaming._first_sentence_boundary(text, limit=200)
+
+    assert boundary == len('Вона сказала: "Готово!" ')
 
 
 def test_split_decimal_is_spoken_as_one_sentence() -> None:
@@ -228,6 +235,41 @@ def test_cancel_reaches_active_speak_and_prevents_later_output() -> None:
 
     assert error.value.code is SpeechErrorCode.PROCESS_CANCELLED
     assert "CANARY_RAW_TEXT" not in str(error.value)
+
+
+def test_successful_chunk_is_accounted_before_late_cancellation_stops_stream() -> None:
+    class LateCancelPort(FakeSpeechPort):
+        def speak(
+            self,
+            request: SpeechRequest,
+            *,
+            timeout_seconds: float = 120.0,
+            cancel_event: threading.Event | None = None,
+        ) -> SpeechReceipt:
+            receipt = super().speak(
+                request,
+                timeout_seconds=timeout_seconds,
+                cancel_event=cancel_event,
+            )
+            assert cancel_event is not None
+            cancel_event.set()
+            return receipt
+
+    text = "Вже озвучено."
+    stream = IncrementalSpeechStream(LateCancelPort())
+    stream.feed(text)
+    stream.finish()
+    assert stream.wait(1)
+
+    snapshot = stream.snapshot()
+    assert snapshot.state is SpeechStreamState.CANCELLED
+    assert snapshot.chunk_count == 1
+    assert snapshot.spoken_characters == len(text)
+
+    with pytest.raises(SpeechError) as error:
+        stream.result()
+
+    assert error.value.code is SpeechErrorCode.PROCESS_CANCELLED
 
 
 def test_feed_rejects_behavioral_string_without_invoking_it() -> None:
