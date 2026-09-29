@@ -6,9 +6,12 @@ import pytest
 
 from nika_core.interaction import InteractionAction
 from nika_core.interaction.windows_uia_adapter import (
+    UIABackendMeasurement,
     UIAControlRecord,
     UIAWindowRecord,
     WindowsUIAInteractionAdapter,
+    choose_measured_backend,
+    measure_observation,
 )
 
 
@@ -178,3 +181,99 @@ def test_behavioral_process_identity_is_rejected_before_snapshot_binding() -> No
         _adapter(backend).observe()
 
     assert backend.effects == []
+
+class BehavioralMeasurementText(str):
+    def __ne__(self, other: object) -> bool:
+        raise AssertionError("behavioral backend comparison executed")
+
+
+class BehavioralMeasurementInt(int):
+    def __lt__(self, other: object) -> bool:
+        raise AssertionError("behavioral sample comparison executed")
+
+    def __le__(self, other: object) -> bool:
+        raise AssertionError("behavioral sample comparison executed")
+
+    def __ge__(self, other: object) -> bool:
+        raise AssertionError("behavioral sample comparison executed")
+
+
+class BehavioralMeasurementFloat(float):
+    def __le__(self, other: object) -> bool:
+        raise AssertionError("behavioral latency comparison executed")
+
+
+def _measurement(
+    *,
+    backend: object = "pywinauto",
+    sample_count: object = 5,
+    latency: object = 10.0,
+    patterns: object = ("Invoke", "Value"),
+) -> UIABackendMeasurement:
+    return UIABackendMeasurement(
+        backend=backend,  # type: ignore[arg-type]
+        sample_count=sample_count,  # type: ignore[arg-type]
+        median_observe_ms=latency,  # type: ignore[arg-type]
+        exact_identity=True,
+        strict_ambiguity=True,
+        focus_verified=True,
+        pattern_coverage=patterns,  # type: ignore[arg-type]
+    )
+
+
+def test_backend_selection_rejects_behavioral_backend_name_before_comparison() -> None:
+    py = _measurement(backend=BehavioralMeasurementText("pywinauto"))
+
+    with pytest.raises(ValueError, match="backend name"):
+        choose_measured_backend(py, None)
+
+
+def test_backend_selection_rejects_behavioral_sample_count_before_comparison() -> None:
+    py = _measurement(sample_count=BehavioralMeasurementInt(5))
+
+    with pytest.raises(ValueError, match="sample_count"):
+        choose_measured_backend(py, None)
+
+
+def test_backend_selection_rejects_behavioral_pattern_tuple_before_iteration() -> None:
+    py = _measurement()
+    raw = _measurement(
+        backend="raw-uia",
+        latency=7.0,
+        patterns=BehavioralTuple(("Invoke", "Value", "Text")),
+    )
+
+    with pytest.raises(ValueError, match="pattern coverage"):
+        choose_measured_backend(py, raw)
+
+
+def test_backend_selection_rejects_behavioral_latency_before_arithmetic() -> None:
+    py = _measurement()
+    raw = _measurement(
+        backend="raw-uia",
+        latency=BehavioralMeasurementFloat(7.0),
+    )
+
+    with pytest.raises(ValueError, match="median latency"):
+        choose_measured_backend(py, raw)
+
+
+@pytest.mark.parametrize("latency", [float("nan"), float("inf"), -1.0])
+def test_backend_selection_rejects_nonfinite_or_negative_latency(
+    latency: float,
+) -> None:
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        choose_measured_backend(_measurement(latency=latency), None)
+
+
+def test_measure_observation_rejects_behavioral_sample_count_before_observe() -> None:
+    class NeverObserve:
+        def observe(self) -> None:
+            raise AssertionError("observe executed")
+
+    with pytest.raises(ValueError, match="exact integer"):
+        measure_observation(
+            NeverObserve(),  # type: ignore[arg-type]
+            BehavioralMeasurementInt(5),
+        )
+

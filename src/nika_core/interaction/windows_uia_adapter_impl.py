@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import time
 from dataclasses import dataclass, replace
@@ -1073,12 +1074,65 @@ class UIABackendMeasurement:
     pattern_coverage: tuple[str, ...]
 
 
+def _validated_backend_measurement(
+    value: object,
+    *,
+    name: str,
+) -> UIABackendMeasurement:
+    if type(value) is not UIABackendMeasurement:
+        raise ValueError(
+            f"{name} measurement must be an exact UIABackendMeasurement"
+        )
+    if type(value.backend) is not str:
+        raise ValueError(f"{name} backend name must be an exact string")
+    if type(value.sample_count) is not int or value.sample_count <= 0:
+        raise ValueError(
+            f"{name} sample_count must be an exact positive integer"
+        )
+    if type(value.median_observe_ms) not in {int, float}:
+        raise ValueError(f"{name} median latency must be an exact number")
+    latency = float(value.median_observe_ms)
+    if not math.isfinite(latency) or latency < 0:
+        raise ValueError(f"{name} median latency must be finite and nonnegative")
+    for label, flag in (
+        ("exact_identity", value.exact_identity),
+        ("strict_ambiguity", value.strict_ambiguity),
+        ("focus_verified", value.focus_verified),
+    ):
+        if type(flag) is not bool:
+            raise ValueError(f"{name} {label} must be an exact boolean")
+    if type(value.pattern_coverage) is not tuple:
+        raise ValueError(f"{name} pattern coverage must be an exact tuple")
+    if any(type(pattern) is not str for pattern in value.pattern_coverage):
+        raise ValueError(
+            f"{name} pattern coverage must contain exact strings"
+        )
+    return UIABackendMeasurement(
+        backend=value.backend,
+        sample_count=value.sample_count,
+        median_observe_ms=latency,
+        exact_identity=value.exact_identity,
+        strict_ambiguity=value.strict_ambiguity,
+        focus_verified=value.focus_verified,
+        pattern_coverage=value.pattern_coverage,
+    )
+
+
 def choose_measured_backend(
     pywinauto: UIABackendMeasurement,
     raw_uia: UIABackendMeasurement | None,
 ) -> str:
     """Retain pywinauto unless a raw UIA adapter is safely and materially better."""
 
+    pywinauto = _validated_backend_measurement(
+        pywinauto,
+        name="pywinauto",
+    )
+    if raw_uia is not None:
+        raw_uia = _validated_backend_measurement(
+            raw_uia,
+            name="raw UIA",
+        )
     if pywinauto.backend != "pywinauto" or pywinauto.sample_count < 3:
         raise ValueError(
             "pywinauto baseline requires at least three measured samples"
@@ -1117,8 +1171,8 @@ def measure_observation(
     adapter: WindowsUIAInteractionAdapter,
     samples: int = 5,
 ) -> tuple[float, ...]:
-    if not 3 <= samples <= 20:
-        raise ValueError("samples must be between 3 and 20")
+    if type(samples) is not int or not 3 <= samples <= 20:
+        raise ValueError("samples must be an exact integer between 3 and 20")
     results: list[float] = []
     for _ in range(samples):
         started = time.perf_counter()
