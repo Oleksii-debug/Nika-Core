@@ -371,8 +371,12 @@ def _pop_ready_chunk(
 
 def _first_sentence_boundary(text: str, *, limit: int) -> int | None:
     for index, char in enumerate(text[:limit]):
-        if char in ".!?…\n":
+        if char == "\n":
             return index + 1
+        if char in ".!?…":
+            next_index = index + 1
+            if next_index < len(text) and text[next_index].isspace():
+                return next_index
     return None
 
 
