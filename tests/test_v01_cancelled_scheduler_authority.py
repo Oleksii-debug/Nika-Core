@@ -158,6 +158,43 @@ def test_terminal_task_authority_suppresses_rehydrated_wakes(tmp_path) -> None:
     third.shutdown(wait=False)
 
 
+
+
+def test_adapter_restart_rebuilds_apscheduler_executor(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Restart Lifecycle" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    jobs.upsert(
+        _date_job(
+            job_id="job-restart",
+            action_id="restart",
+            run_at=datetime.now(UTC) + timedelta(days=1),
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+
+    adapter.start()
+    first_scheduler = adapter._scheduler
+    first_executor = first_scheduler._executors["default"]
+    assert adapter.has_runtime_job("job-restart")
+
+    adapter.shutdown(wait=False)
+
+    assert adapter._scheduler is not first_scheduler
+    assert not adapter.has_runtime_job("job-restart")
+
+    adapter.start()
+    second_scheduler = adapter._scheduler
+    second_executor = second_scheduler._executors["default"]
+    assert second_scheduler is not first_scheduler
+    assert second_executor is not first_executor
+    assert adapter.has_runtime_job("job-restart")
+    probe = second_executor._pool.submit(lambda: "live")
+    assert probe.result(timeout=1) == "live"
+    adapter.shutdown(wait=False)
+
+
 def test_upsert_rejects_foreign_job_before_attribute_behavior(tmp_path) -> None:
     class BehavioralJob:
         @property

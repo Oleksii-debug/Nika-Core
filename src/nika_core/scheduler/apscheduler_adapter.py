@@ -45,7 +45,9 @@ class APSchedulerAdapter(SchedulerPort):
     def shutdown(self, *, wait: bool = True) -> None:
         if not self._started:
             return
+        replacement = BackgroundScheduler(timezone="UTC")
         self._scheduler.shutdown(wait=wait)
+        self._scheduler = replacement
         self._started = False
 
     def upsert(self, job: ScheduledJob) -> None:
