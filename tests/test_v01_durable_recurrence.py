@@ -959,3 +959,72 @@ def test_durable_transport_authority_rejects_scheduler_drift(tmp_path: Path) -> 
                 expected_recurrence_id="transport-authority",
             )
     assert calls == []
+
+
+def test_persisted_scalar_carriers_fail_before_behavior(tmp_path: Path) -> None:
+    class BehavioralText(str):
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral text comparison must not run")
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral text comparison must not run")
+
+    class BehavioralInt(int):
+        def __eq__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral integer comparison must not run")
+
+        def __ne__(self, other: object) -> bool:
+            del other
+            raise AssertionError("behavioral integer comparison must not run")
+
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="scalar-authority",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    job = scheduler.upserts[-1]
+
+    version_payload = dict(job.payload)
+    version_metadata = dict(version_payload["_nika_recurrence_v1"])
+    version_metadata["version"] = BehavioralInt(2)
+    version_payload["_nika_recurrence_v1"] = version_metadata
+
+    binding_payload = dict(job.payload)
+    binding_payload["_nika_immutable_job_binding_v1"] = BehavioralText(
+        binding_payload["_nika_immutable_job_binding_v1"]
+    )
+
+    bad_jobs = (
+        (
+            replace(job, job_id=BehavioralText(job.job_id)),
+            "job identity",
+        ),
+        (
+            replace(job, action_id=BehavioralText(job.action_id)),
+            "unexpected action_id",
+        ),
+        (
+            replace(job, payload=version_payload),
+            "payload version",
+        ),
+        (
+            replace(job, payload=binding_payload),
+            "immutable binding",
+        ),
+    )
+    for bad_job, message in bad_jobs:
+        with pytest.raises(ValueError, match=message):
+            recurrence_module._decode_job(
+                bad_job,
+                expected_recurrence_id="scalar-authority",
+            )
+    assert calls == []
