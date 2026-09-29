@@ -45,6 +45,7 @@ def test_durable_completion_decoder_rejects_behavioral_envelope_key_before_hash(
     with pytest.raises(BatchCursorStateError, match="completed effect envelope is malformed"):
         _decode_completion_result(payload)
 
+
 class HostilePublicDict(dict[str, object]):
     def items(self):
         raise AssertionError("nested public mapping behavior must not execute")
