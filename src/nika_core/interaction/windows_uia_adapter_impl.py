@@ -674,6 +674,7 @@ class WindowsUIAInteractionAdapter:
             str,
             tuple[tuple[int, ...], int],
         ] = {}
+        self._semantic_by_node: dict[str, ControlNode] = {}
 
     def _exact_window(self) -> UIAWindowRecord:
         windows = tuple(
@@ -773,6 +774,7 @@ class WindowsUIAInteractionAdapter:
             str,
             tuple[tuple[int, ...], int],
         ] = {}
+        semantic_by_node: dict[str, ControlNode] = {}
         controls: list[ControlNode] = []
         for record in records:
             if record.runtime_id is None:
@@ -812,20 +814,21 @@ class WindowsUIAInteractionAdapter:
                 )
                 if value
             )
-            controls.append(
-                ControlNode(
-                    node_id=node_id,
-                    role=record.role,
-                    name=record.name,
-                    enabled=record.enabled,
-                    visible=record.visible,
-                    focused=record.focused,
-                    value=record.value,
-                    bounds=record.bounds,
-                    attributes=attributes,
-                )
+            node = ControlNode(
+                node_id=node_id,
+                role=record.role,
+                name=record.name,
+                enabled=record.enabled,
+                visible=record.visible,
+                focused=record.focused,
+                value=record.value,
+                bounds=record.bounds,
+                attributes=attributes,
             )
+            controls.append(node)
+            semantic_by_node[node_id] = node
         self._identity_by_node = identity_by_node
+        self._semantic_by_node = semantic_by_node
         return SemanticSnapshot(
             target=InteractionTarget(
                 application=application,

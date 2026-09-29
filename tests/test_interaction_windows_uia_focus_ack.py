@@ -194,6 +194,30 @@ def test_restore_focus_waits_for_same_identity_without_reissuing_effect(
     assert backend.focused_reads == 3
 
 
+
+@pytest.mark.parametrize(
+    "changed",
+    (
+        {"role": "link"},
+        {"name": "Delete"},
+        {"enabled": False},
+        {"visible": False},
+    ),
+)
+def test_restore_focus_rejects_semantic_drift_before_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    changed: dict[str, object],
+) -> None:
+    _remove_focus_sleep(monkeypatch)
+    backend = FocusAckBackend("lag_then_success")
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+    backend.controls = [replace(backend.controls[0], **changed)]
+
+    assert not adapter.restore_focus(node.node_id)
+    assert backend.focus_calls == 0
+    assert backend.focused_reads == 0
+
 def test_restore_focus_fails_closed_on_identity_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

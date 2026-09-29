@@ -327,15 +327,28 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             generation=generation,
         )
 
+    @staticmethod
+    def _restore_focus_semantics_match(
+        live: UIAControlRecord,
+        expected: ControlNode,
+    ) -> bool:
+        return (
+            live.role == expected.role
+            and live.name == expected.name
+            and live.enabled == expected.enabled
+            and live.visible == expected.visible
+        )
+
     def restore_focus(self, node_id: str | None) -> bool:
-        """Restore one exact prior identity with bounded read-only acknowledgement."""
+        """Restore focus only while the captured semantic authority remains exact."""
 
         if node_id is None:
             return True
         if type(node_id) is not str:
             raise ValueError("UIA focus identity must be an exact string")
         identity = self._identity_by_node.get(node_id)
-        if identity is None:
+        expected = self._semantic_by_node.get(node_id)
+        if identity is None or expected is None:
             return False
         runtime_id, generation = identity
         try:
@@ -347,12 +360,14 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             )
         except (TargetNotFoundError, StaleSnapshotError, AmbiguousTargetError):
             return False
+        if not self._restore_focus_semantics_match(live, expected):
+            return False
         if not live.enabled or not live.visible:
             return False
 
         try:
             self.backend.focus(hwnd, runtime_id, generation)
-        except (TargetNotFoundError, StaleSnapshotError):
+        except (TargetNotFoundError, StaleSnapshotError, AmbiguousTargetError):
             return False
 
         for attempt in range(_FOCUS_ACK_ATTEMPTS):
@@ -365,6 +380,8 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
                     generation=generation,
                 )
             except (TargetNotFoundError, StaleSnapshotError, AmbiguousTargetError):
+                return False
+            if not self._restore_focus_semantics_match(live, expected):
                 return False
             if not live.enabled or not live.visible:
                 return False
