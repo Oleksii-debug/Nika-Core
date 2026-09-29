@@ -214,14 +214,9 @@ class APSchedulerAdapter(SchedulerPort):
             if self._started or self._starting:
                 self._sync_runtime_job(job_id)
             return
-        action_id = job.action_id
-        try:
-            handler = self._handler_resolver(action_id)
-        except Exception as exc:
-            self._audit_failure(job_id, action_id, exc)
-            raise
-        # Resolver work can race with scheduler or task mutations. Serialize the
-        # final authority decision with durable writers before the external effect.
+        # Linearize durable scheduler + task authority before touching the
+        # resolver or any external handler surface. A stale occurrence that lost
+        # authority must have zero resolver/effect observations.
         dispatch_snapshot = installed_job if installed_job is not None else job
         job = self._jobs.authorize_dispatch(dispatch_snapshot)
         if job is None:
@@ -232,8 +227,12 @@ class APSchedulerAdapter(SchedulerPort):
                 if current is not None:
                     self._task_authority_allows(current)
             return
-        if job.action_id != action_id:
-            return
+        action_id = job.action_id
+        try:
+            handler = self._handler_resolver(action_id)
+        except Exception as exc:
+            self._audit_failure(job_id, action_id, exc)
+            raise
         if self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_started",
