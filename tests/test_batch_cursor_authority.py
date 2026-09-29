@@ -42,6 +42,11 @@ class HostileDurableDict(dict[str, object]):
         raise AssertionError("durable mapping lookup must not execute")
 
 
+class HostileDurableList(list[object]):
+    def __iter__(self):
+        raise AssertionError("durable sequence iteration must not execute")
+
+
 def _services(tmp_path: Path) -> tuple[MemoryService, IdempotencyLedger, SQLiteStore]:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -1782,4 +1787,37 @@ def test_durable_completion_decoder_rejects_behavioral_mapping_carriers_before_a
     message: str,
 ) -> None:
     with pytest.raises(BatchCursorStateError, match=message):
+        _decode_completion_result(payload)
+
+
+@pytest.mark.parametrize(
+    "nested_value",
+    (
+        HostileDurableDict({"nested": "value"}),
+        HostileDurableList(["nested"]),
+    ),
+)
+def test_durable_completion_decoder_rejects_nested_behavioral_json_before_access(
+    nested_value: object,
+) -> None:
+    payload = {
+        "__nika_batch_cursor_completion_v1__": {
+            "result": {"nested": nested_value},
+            "next_batch_not_before": None,
+        }
+    }
+
+    with pytest.raises(BatchCursorStateError, match="completed effect result is malformed"):
+        _decode_completion_result(payload)
+
+
+def test_durable_completion_decoder_rejects_behavioral_nested_scalar_carriers() -> None:
+    payload = {
+        "__nika_batch_cursor_completion_v1__": {
+            "result": {"nested": BehavioralText("value")},
+            "next_batch_not_before": None,
+        }
+    }
+
+    with pytest.raises(BatchCursorStateError, match="completed effect result is malformed"):
         _decode_completion_result(payload)
