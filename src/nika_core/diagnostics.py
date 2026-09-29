@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import sys
+from contextlib import closing
 from dataclasses import asdict, dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -109,7 +110,7 @@ def _database_checks(path: Path) -> Iterable[DiagnosticCheck]:
         return
     try:
         uri = f"{path.absolute().as_uri()}?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=2.0) as connection:
+        with closing(sqlite3.connect(uri, uri=True, timeout=2.0)) as connection:
             result = connection.execute("PRAGMA quick_check").fetchone()
             tables = connection.execute(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'"
