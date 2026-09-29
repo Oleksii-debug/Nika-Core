@@ -8,6 +8,7 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_coordinator import ComponentWorkRequest
 from nika_core.product_factory_program_host import (
+    ProductFactoryProgramError,
     ProductFactoryProgramHost,
     _operation_key,
 )
@@ -213,3 +214,95 @@ def test_new_work_fence_takes_over_crash_stale_recovery_claim(tmp_path) -> None:
     assert row is not None
     assert row["owner_id"] == second.owner_id
     assert row["fence"] == second_lease.fence
+
+
+def test_current_recovery_claim_cannot_be_cleared_for_reconciliation(tmp_path) -> None:
+    clock = _Clock()
+    host, ownership = _host(tmp_path, clock, "program-host:first")
+    request = _request()
+    lease = ownership.acquire(
+        project_id=request.project_id,
+        work_id=request.work_id,
+        owner_id=host.owner_id,
+        lease_seconds=10,
+    )
+    operation, _ = host._reserve_effect(
+        host_task_id="host-task",
+        request=request,
+        lease=lease,
+    )
+    host._ledger.mark_uncertain(operation.operation_key)
+    host._claim_recovery_effect(
+        host_task_id="host-task",
+        request=request,
+        lease=lease,
+    )
+
+    with host.store.connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        host._assert_lease(connection, lease)
+        with pytest.raises(
+            ProductFactoryProgramError,
+            match="active recovery claim blocks terminal reconciliation",
+        ):
+            host._clear_stale_recovery_claim_for_reconciliation(
+                connection,
+                operation.operation_key,
+                lease,
+            )
+
+
+def test_newer_work_fence_can_clear_crash_stale_claim_for_reconciliation(
+    tmp_path,
+) -> None:
+    clock = _Clock()
+    first, first_ownership = _host(tmp_path, clock, "program-host:first")
+    request = _request()
+    first_lease = first_ownership.acquire(
+        project_id=request.project_id,
+        work_id=request.work_id,
+        owner_id=first.owner_id,
+        lease_seconds=10,
+    )
+    operation, _ = first._reserve_effect(
+        host_task_id="host-task",
+        request=request,
+        lease=first_lease,
+    )
+    first._ledger.mark_uncertain(operation.operation_key)
+    first._claim_recovery_effect(
+        host_task_id="host-task",
+        request=request,
+        lease=first_lease,
+    )
+
+    clock.now += timedelta(seconds=11)
+    second_ownership = ProductFactoryWorkOwnership(first.store, clock=clock)
+    second = ProductFactoryProgramHost(
+        first.store,
+        _UnusedWorker(),
+        ownership=second_ownership,
+        owner_id="program-host:second",
+        lease_seconds=10,
+    )
+    second_lease = second_ownership.acquire(
+        project_id=request.project_id,
+        work_id=request.work_id,
+        owner_id=second.owner_id,
+        lease_seconds=10,
+    )
+
+    with second.store.connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        second._assert_lease(connection, second_lease)
+        second._clear_stale_recovery_claim_for_reconciliation(
+            connection,
+            operation.operation_key,
+            second_lease,
+        )
+
+    reconciled = second._ledger.reconcile_completed(
+        operation.operation_key,
+        {"winner": "manual-after-crash"},
+    )
+    assert reconciled.status is IdempotencyStatus.COMPLETED
