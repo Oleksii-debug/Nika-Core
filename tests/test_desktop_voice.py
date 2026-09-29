@@ -690,6 +690,55 @@ def test_action_payload_cannot_supply_hidden_voice_authority() -> None:
         submitter.close()
 
 
+
+@pytest.mark.parametrize(
+    ("status", "capture_succeeded", "transcription_succeeded"),
+    [
+        ("capture_failed", True, None),
+        ("transcription_failed", True, True),
+    ],
+)
+def test_failure_snapshot_rejects_impossible_component_success(
+    status: str,
+    capture_succeeded: bool,
+    transcription_succeeded: bool | None,
+) -> None:
+    del capture_succeeded
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    if status == "capture_failed":
+        object.__setattr__(
+            result.evidence,
+            "status",
+            type(result.evidence.status).CAPTURE_FAILED,
+        )
+        object.__setattr__(result, "transcript", None)
+        object.__setattr__(result.evidence, "transcription", None)
+        object.__setattr__(result.evidence, "wake", None)
+        object.__setattr__(result.evidence, "activated", False)
+    else:
+        assert transcription_succeeded is True
+        object.__setattr__(
+            result.evidence,
+            "status",
+            type(result.evidence.status).TRANSCRIPTION_FAILED,
+        )
+        object.__setattr__(result, "transcript", None)
+        object.__setattr__(result.evidence, "wake", None)
+        object.__setattr__(result.evidence, "activated", False)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "failure evidence" in snapshot.message
+
+
+
 def test_forged_nested_voice_evidence_fails_closed_without_callback_error() -> None:
     forged = VoiceTurnResult(
         transcript="secret transcript",
