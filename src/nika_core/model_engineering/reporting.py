@@ -55,8 +55,8 @@ def render_text_report(report: CandidateBenchmarkReport) -> str:
         f"Weighted quality score: {report.weighted_quality_score:.6f}",
         f"Task pass rate: {report.task_pass_rate:.6f}",
         f"Completion rate: {report.completion_rate:.6f}",
-        f"Mean latency ms: {report.mean_latency_ms:.3f}",
-        f"P95 latency ms: {report.p95_latency_ms:.3f}",
+        f"Mean latency ms: {_optional_number(report.mean_latency_ms)}",
+        f"P95 latency ms: {_optional_number(report.p95_latency_ms)}",
         f"Peak CPU percent: {_optional_number(report.peak_cpu_percent)}",
         f"Peak memory percent: {_optional_number(report.peak_memory_percent)}",
         (
