@@ -350,6 +350,13 @@ class FoundryLocalProvider:
                     ) from exc
                 raise
 
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    f"Foundry Local model '{authorization.model}' download was cancelled",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
             self._validate_model_alias(model, authorization.model)
             evidence = self._model_evidence(model)
             self._validate_model_identity(model, expected_model_id)
