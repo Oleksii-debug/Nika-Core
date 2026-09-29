@@ -22,7 +22,7 @@ from nika_core.speech_to_text import (
     SpeechToTextService,
 )
 from nika_core.ui.desktop_voice import DesktopVoiceStatus, DesktopVoiceTurnController
-from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest
+from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest, VoiceTurnResult
 from nika_core.wake_activation import WakeActivationDetector
 
 
@@ -296,6 +296,37 @@ def test_action_payload_cannot_supply_hidden_voice_authority() -> None:
             controller.start({"model": "forged-model"})
         with pytest.raises(ValueError, match="does not accept payload authority"):
             controller.cancel({"request_id": "other"})
+    finally:
+        submitter.close()
+
+
+def test_forged_nested_voice_evidence_fails_closed_without_callback_error() -> None:
+    forged = VoiceTurnResult(
+        transcript="secret transcript",
+        evidence=object(),  # type: ignore[arg-type]
+    )
+
+    snapshot = DesktopVoiceTurnController._result_snapshot("desktop-voice-test", forged)
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+    assert "evidence" in snapshot.message
+
+
+def test_behavioral_mapping_payload_is_rejected_without_mapping_methods() -> None:
+    class BehavioralDict(dict[str, object]):
+        def __bool__(self) -> bool:
+            raise AssertionError("payload truthiness must not execute")
+
+    submitter = _LoopSubmitter()
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=submitter.submit,
+    )
+    try:
+        with pytest.raises(TypeError, match="exact dict"):
+            controller.start(BehavioralDict())
     finally:
         submitter.close()
 
