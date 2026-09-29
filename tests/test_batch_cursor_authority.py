@@ -1891,3 +1891,94 @@ def test_inter_batch_release_uses_internal_clock_and_rejects_caller_time_authori
     assert cursor.next_target() is not None
     assert cursor.next_target().target_id == "target-1"
 
+
+
+def test_scheduler_deadline_cannot_shorten_completion_deadline(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    completion_due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    earlier = completion_due - timedelta(minutes=5)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm(
+        "target-0",
+        {"ok": True},
+        next_batch_not_before=completion_due,
+    )
+    before = _state_value(memory, "task")
+
+    with pytest.raises(BatchCursorBlockedError, match="cannot move earlier"):
+        cursor.schedule_inter_batch_wait(earlier)
+
+    assert _state_value(memory, "task") == before
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.deadline_source == "completion"
+    assert intent.not_before == completion_due.isoformat()
+
+
+def test_scheduler_deadline_cannot_shorten_existing_scheduler_deadline(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    scheduler_due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    earlier = scheduler_due - timedelta(minutes=5)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm("target-0", {"ok": True})
+    cursor.schedule_inter_batch_wait(scheduler_due)
+    before = _state_value(memory, "task")
+
+    with pytest.raises(BatchCursorBlockedError, match="cannot move earlier"):
+        cursor.schedule_inter_batch_wait(earlier)
+
+    assert _state_value(memory, "task") == before
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.deadline_source == "scheduler"
+    assert intent.not_before == scheduler_due.isoformat()
+
+
+def test_equal_scheduler_deadline_preserves_completion_authority(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    completion_due = datetime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    cursor.begin_effect("target-0")
+    cursor.confirm(
+        "target-0",
+        {"ok": True},
+        next_batch_not_before=completion_due,
+    )
+    before = _state_value(memory, "task")
+
+    cursor.schedule_inter_batch_wait(completion_due)
+
+    assert _state_value(memory, "task") == before
+    intent = cursor.state.next_scheduled_intent
+    assert intent is not None
+    assert intent.deadline_source == "completion"
+    assert intent.not_before == completion_due.isoformat()
