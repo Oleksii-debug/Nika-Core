@@ -105,7 +105,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             settings=self._model_settings,
         )
         self._ollama_health_probe_factory = (
-            ollama_health_probe_factory or self._default_ollama_health_probe
+            self._default_ollama_health_probe
+            if ollama_health_probe_factory is None
+            else ollama_health_probe_factory
         )
         self._model_runtimes: dict[str, ModelGatewayAgentRuntime] = {}
         self._coordinator = MultiAgentSupervisor(
@@ -185,6 +187,8 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         try:
             probe = self._ollama_health_probe_factory(selection)
             observed = await asyncio.to_thread(probe.snapshot)
+            if type(observed) is not ModelHealthSnapshot:
+                raise TypeError("model health probe returned a noncanonical snapshot")
             snapshot = ModelHealthSnapshot(
                 configured=observed.configured,
                 reachable=observed.reachable,
