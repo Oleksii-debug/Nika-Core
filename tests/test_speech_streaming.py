@@ -396,6 +396,41 @@ def test_result_before_completion_is_retryable_busy() -> None:
     assert stream.wait(1)
 
 
+def test_result_does_not_expose_mutable_stored_failure() -> None:
+    class FailingPort(FakeSpeechPort):
+        def speak(
+            self,
+            request: SpeechRequest,
+            *,
+            timeout_seconds: float = 120.0,
+            cancel_event: threading.Event | None = None,
+        ) -> SpeechReceipt:
+            del request, timeout_seconds, cancel_event
+            raise SpeechError(
+                SpeechErrorCode.ENGINE_UNAVAILABLE,
+                "CANARY_ENGINE_DETAIL",
+                retryable=True,
+            )
+
+    stream = IncrementalSpeechStream(FailingPort())
+    stream.feed("Тест.")
+    stream.finish()
+    assert stream.wait(1)
+
+    with pytest.raises(SpeechError) as first:
+        stream.result()
+    first.value.code = SpeechErrorCode.PROCESS_FAILED
+    first.value.retryable = False
+
+    with pytest.raises(SpeechError) as second:
+        stream.result()
+
+    assert second.value is not first.value
+    assert second.value.code is SpeechErrorCode.ENGINE_UNAVAILABLE
+    assert second.value.retryable is True
+    assert "CANARY" not in str(second.value)
+
+
 def test_unexpected_port_failure_is_privacy_minimized() -> None:
     class ExplodingPort(FakeSpeechPort):
         def speak(

@@ -202,7 +202,11 @@ class IncrementalSpeechStream:
             )
         with self._condition:
             if self._failure is not None:
-                raise self._failure
+                raise SpeechError(
+                    self._failure.code,
+                    str(self._failure),
+                    retryable=self._failure.retryable,
+                )
             if self._state is SpeechStreamState.CANCELLED:
                 raise SpeechError(
                     SpeechErrorCode.PROCESS_CANCELLED,
