@@ -8,6 +8,7 @@ from typing import Protocol
 
 from nika_core.speech.contracts import (
     MAX_SPEECH_TEXT_CHARS,
+    MAX_VOICE_ID_CHARS,
     SpeechError,
     SpeechErrorCode,
     SpeechOutputPort,
@@ -18,6 +19,7 @@ from nika_core.speech.contracts import (
 DEFAULT_STREAM_CHUNK_CHARS = 600
 MAX_STREAM_PENDING_CHARS = 40_000
 MAX_STREAM_TOTAL_CHARS = 200_000
+MAX_STREAM_ENGINE_ID_CHARS = 200
 
 
 class SpeechStreamState(StrEnum):
@@ -404,12 +406,20 @@ def _validate_receipt(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid receipt",
         )
-    if type(receipt.engine_id) is not str or not receipt.engine_id.strip():
+    if (
+        type(receipt.engine_id) is not str
+        or not receipt.engine_id.strip()
+        or len(receipt.engine_id) > MAX_STREAM_ENGINE_ID_CHARS
+    ):
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid engine identity",
         )
-    if type(receipt.voice_id) is not str or not receipt.voice_id.strip():
+    if (
+        type(receipt.voice_id) is not str
+        or not receipt.voice_id.strip()
+        or len(receipt.voice_id) > MAX_VOICE_ID_CHARS
+    ):
         raise SpeechError(
             SpeechErrorCode.INVALID_ENGINE_RESPONSE,
             "speech output returned an invalid voice identity",
