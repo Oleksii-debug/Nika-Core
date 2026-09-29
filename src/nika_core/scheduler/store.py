@@ -32,15 +32,17 @@ class ScheduledJobStore:
             (job.job_id,),
         ).fetchone()
         if existing is not None:
+            existing_payload = _decode_json_object(
+                existing["payload_json"],
+                "persisted payload",
+            )
             incoming_binding = payload.get(IMMUTABLE_JOB_BINDING_KEY)
-            if incoming_binding is not None:
-                existing_payload = _decode_json_object(
-                    existing["payload_json"],
-                    "persisted payload",
-                )
-                existing_binding = existing_payload.get(IMMUTABLE_JOB_BINDING_KEY)
-                if existing_binding is not None and existing_binding != incoming_binding:
-                    raise ValueError("scheduled job immutable binding conflict")
+            existing_binding = _validated_binding(
+                existing_payload.get(IMMUTABLE_JOB_BINDING_KEY),
+                "persisted scheduled job immutable binding",
+            )
+            if existing_binding is not None and incoming_binding != existing_binding:
+                raise ValueError("scheduled job immutable binding conflict")
         created_at = existing["created_at"] if existing else now
         conn.execute(
             """INSERT INTO scheduled_jobs(
@@ -165,12 +167,19 @@ def _validated_job_data(job: ScheduledJob) -> tuple[dict[str, Any], dict[str, An
     if not trigger:
         raise ValueError("trigger configuration must not be empty")
     payload = _canonical_json_object(job.payload, "payload", depth=0)
-    immutable_binding = payload.get(IMMUTABLE_JOB_BINDING_KEY)
-    if immutable_binding is not None and (
-        type(immutable_binding) is not str or not immutable_binding.strip()
-    ):
-        raise ValueError("scheduled job immutable binding must be a non-empty string")
+    _validated_binding(
+        payload.get(IMMUTABLE_JOB_BINDING_KEY),
+        "scheduled job immutable binding",
+    )
     return trigger, payload
+
+
+def _validated_binding(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{label} must be a non-empty string")
+    return value
 
 
 def _canonical_json_object(
