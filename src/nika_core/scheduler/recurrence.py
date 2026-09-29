@@ -135,23 +135,25 @@ class DurableRecurrenceService:
         existing = self._jobs.get(job_id)
         if existing is not None:
             state, existing_payload = _decode_job(existing, expected_recurrence_id=recurrence_key)
-            expected = (
-                task_key,
-                target_action,
-                interval,
-                anchor,
-                deadline,
-                user_payload,
+            requested_binding = _definition_fingerprint(
+                recurrence_id=recurrence_key,
+                task_id=task_key,
+                action_id=target_action,
+                interval_seconds=interval,
+                anchor_at=anchor,
+                deadline_at=deadline,
+                target_payload=user_payload,
             )
-            actual = (
-                state.task_id,
-                state.action_id,
-                state.interval_seconds,
-                state.anchor_at,
-                state.deadline_at,
-                existing_payload,
+            existing_binding = _definition_fingerprint(
+                recurrence_id=state.recurrence_id,
+                task_id=state.task_id,
+                action_id=state.action_id,
+                interval_seconds=state.interval_seconds,
+                anchor_at=state.anchor_at,
+                deadline_at=state.deadline_at,
+                target_payload=existing_payload,
             )
-            if actual != expected:
+            if existing_binding != requested_binding:
                 raise ValueError("recurrence_id is already bound to a different recurrence")
             return state
 
