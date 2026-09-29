@@ -254,7 +254,15 @@ class WindowsWasapiMicrophoneCaptureAdapter:
                 "Default WASAPI endpoint is not a valid microphone input.",
                 retryable=True,
             )
-        return sd, device_index, _logical_device_id(host_api_index, device_index, raw_name)
+        try:
+            logical_device_id = _logical_device_id(host_api_index, device_index, raw_name)
+        except ValueError:
+            raise MicrophoneCaptureAdapterError(
+                MicrophoneCaptureFailureCode.UNAVAILABLE,
+                "Default WASAPI endpoint identity is invalid.",
+                retryable=False,
+            ) from None
+        return sd, device_index, logical_device_id
 
     def _load_sounddevice(self) -> Any:
         if self._sounddevice_module is not None:
@@ -319,7 +327,10 @@ def _logical_device_id(host_api_index: int, device_index: int, raw_name: str) ->
         or not raw_name
     ):
         raise ValueError("WASAPI endpoint identity is invalid")
-    material = f"{host_api_index}\x00{device_index}\x00{raw_name}".encode("utf-8")
+    try:
+        material = f"{host_api_index}\x00{device_index}\x00{raw_name}".encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("WASAPI endpoint identity is invalid") from None
     digest = hashlib.sha256(material).hexdigest()
     return f"wasapi-device-sha256:{digest}"
 
