@@ -1838,6 +1838,72 @@ def test_heartbeat_authority_loss_cancels_inflight_effect_and_marks_uncertain(
     ).status is IdempotencyStatus.UNCERTAIN
 
 
+def test_heartbeat_loss_does_not_wait_forever_for_cancellation_resistant_worker(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    first_cancel_seen = asyncio.Event()
+    release_worker = asyncio.Event()
+
+    class LoseHeartbeatOwnership(ProductFactoryWorkOwnership):
+        def __init__(self, target_store):
+            super().__init__(target_store)
+            self.renew_calls = 0
+
+        def renew(self, **kwargs):
+            self.renew_calls += 1
+            if self.renew_calls >= 2:
+                raise WorkOwnershipError("forced heartbeat authority loss")
+            return super().renew(**kwargs)
+
+    class CancellationResistantWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            try:
+                await release_worker.wait()
+            except asyncio.CancelledError:
+                first_cancel_seen.set()
+                await release_worker.wait()
+            return _envelope(request)
+
+    authority = LoseHeartbeatOwnership(store)
+    worker = CancellationResistantWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:bounded-cancel",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.001)
+    monkeypatch.setattr(program_host_module, "_EFFECT_CANCEL_GRACE_SECONDS", 0.01)
+
+    async def scenario():
+        outcomes = await asyncio.wait_for(
+            host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_count=1,
+            ),
+            timeout=0.5,
+        )
+        assert first_cancel_seen.is_set()
+        release_worker.set()
+        await asyncio.sleep(0)
+        return outcomes
+
+    outcomes = _run(scenario())
+
+    request = _record(coordinator, "component-0").request
+    durable = IdempotencyLedger(store).require(f"pf-worker:{request.work_id}")
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is IdempotencyStatus.UNCERTAIN
+    assert durable.status is IdempotencyStatus.UNCERTAIN
+    assert _record(coordinator, "component-0").state is WorkState.RUNNING
+
+
 def test_unexpected_heartbeat_failure_cancels_inflight_effect_and_marks_uncertain(
     monkeypatch,
     tmp_path,
