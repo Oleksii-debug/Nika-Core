@@ -49,7 +49,7 @@ class WindowsWasapiMicrophoneCaptureAdapter:
         )
 
     async def capture(self, request: MicrophoneCaptureRequest) -> MicrophoneCaptureResponse:
-        _validate_request_carriers(request)
+        request = _snapshot_request(request)
         sd, device_index, logical_device_id = self._resolve_wasapi_default_input()
         if request.provider_id != _PROVIDER_ID or request.device_id != logical_device_id:
             raise MicrophoneCaptureAdapterError(
@@ -324,26 +324,20 @@ def _logical_device_id(host_api_index: int, device_index: int, raw_name: str) ->
     return f"wasapi-device-sha256:{digest}"
 
 
-def _validate_request_carriers(request: MicrophoneCaptureRequest) -> None:
+def _snapshot_request(request: MicrophoneCaptureRequest) -> MicrophoneCaptureRequest:
     if type(request) is not MicrophoneCaptureRequest:
         raise TypeError("request must be exact MicrophoneCaptureRequest")
-    if type(request.request_id) is not str or not request.request_id:
-        raise TypeError("request_id must be plain non-empty text")
-    if type(request.provider_id) is not str or not request.provider_id:
-        raise TypeError("provider_id must be plain non-empty text")
-    if type(request.device_id) is not str or not request.device_id:
-        raise TypeError("device_id must be plain non-empty text")
-    if (
-        type(request.sample_rate_hz) is not int
-        or not _MIN_SAMPLE_RATE_HZ <= request.sample_rate_hz <= _MAX_SAMPLE_RATE_HZ
-    ):
-        raise TypeError("sample_rate_hz must be an exact supported integer")
-    if (
-        type(request.sample_count) is not int
-        or request.sample_count <= 0
-        or request.sample_count > request.sample_rate_hz * _MAX_CAPTURE_SECONDS
-    ):
-        raise TypeError("sample_count must be an exact supported positive integer")
+    try:
+        return MicrophoneCaptureRequest(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            device_id=request.device_id,
+            sample_rate_hz=request.sample_rate_hz,
+            sample_count=request.sample_count,
+            policy=request.policy,
+        )
+    except AttributeError:
+        raise TypeError("microphone capture request is incomplete") from None
 
 
 def _abort_and_close(stream: Any | None) -> None:
