@@ -313,7 +313,6 @@ def test_restore_rejects_ready_dependency_before_parent_acceptance() -> None:
         _restore(coordinator, forged)
 
 
-
 def test_single_declared_pytest_rejects_unscoped_full_suite_evidence() -> None:
     graph = ProductRepositoryGraph(
         project_id="single-product",
@@ -352,6 +351,8 @@ def test_single_declared_pytest_rejects_unscoped_full_suite_evidence() -> None:
         coordinator.record_result(envelope)
 
     assert coordinator.snapshot() == before
+
+
 def test_one_full_suite_evidence_cannot_cover_two_declared_commands() -> None:
     coordinator = _planned()
     request = coordinator.start("core")
