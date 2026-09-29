@@ -635,7 +635,9 @@ def test_forged_exact_success_result_cannot_project_unbound_transcript() -> None
 
 
 def test_forged_exact_success_result_rejects_noncanonical_wake_outcome() -> None:
-    result = _completed_voice_result("desktop-voice-test")
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
     assert result.evidence.wake is not None
     object.__setattr__(result.evidence.wake, "outcome", "detected")
     object.__setattr__(result.evidence, "activated", False)
