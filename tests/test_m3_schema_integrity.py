@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.reliability import legacy_database as adoption
 
 
 def _store(tmp_path: Path) -> SQLiteStore:
@@ -65,3 +66,19 @@ def test_m3_future_version_still_precedes_shape_recovery(tmp_path: Path) -> None
 
     with pytest.raises(RuntimeError, match="newer than supported"):
         store.initialize()
+
+def test_legacy_adoption_rejects_future_m3_extension_history(tmp_path: Path) -> None:
+    source = tmp_path / "legacy.db"
+    store = SQLiteStore(source)
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO m3_extension_schema_migrations(version, applied_at) VALUES (?, ?)",
+            (3, datetime.now(UTC).isoformat()),
+        )
+
+    target = tmp_path / "canonical.db"
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [source])
+
+    assert not target.exists()
