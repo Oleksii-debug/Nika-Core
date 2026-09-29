@@ -481,6 +481,31 @@ def test_feed_rejects_behavioral_string_without_invoking_it() -> None:
     assert port.requests == []
 
 
+def test_feed_rejects_invalid_utf8_without_poisoning_live_stream() -> None:
+    port = FakeSpeechPort()
+    stream = IncrementalSpeechStream(port)
+
+    stream.feed("Перше. ")
+    _wait_for_request_count(port, 1)
+    accepted_before = stream.snapshot().accepted_characters
+
+    with pytest.raises(SpeechError) as error:
+        stream.feed("bad\ud800text")
+
+    snapshot = stream.snapshot()
+    assert error.value.code is SpeechErrorCode.INVALID_REQUEST
+    assert snapshot.state is SpeechStreamState.RUNNING
+    assert snapshot.accepted_characters == accepted_before
+
+    stream.feed("Друге. ")
+    _wait_for_request_count(port, 2)
+    stream.finish()
+    assert stream.wait(1)
+
+    assert stream.snapshot().state is SpeechStreamState.COMPLETED
+    assert [request.text for request in port.requests] == ["Перше.", "Друге."]
+
+
 def test_pending_buffer_is_bounded_while_speech_is_blocked() -> None:
     port = BlockingSpeechPort()
     stream = IncrementalSpeechStream(port)

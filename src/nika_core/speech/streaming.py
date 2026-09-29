@@ -138,6 +138,13 @@ class IncrementalSpeechStream:
                 SpeechErrorCode.INVALID_REQUEST,
                 "speech stream fragment must not contain NUL",
             )
+        try:
+            fragment.encode("utf-8")
+        except UnicodeEncodeError:
+            raise SpeechError(
+                SpeechErrorCode.INVALID_REQUEST,
+                "speech stream fragment must be valid UTF-8 text",
+            ) from None
         with self._condition:
             if (
                 self._state is not SpeechStreamState.RUNNING
