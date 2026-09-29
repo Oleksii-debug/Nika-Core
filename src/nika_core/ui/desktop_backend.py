@@ -658,7 +658,8 @@ class DesktopBackend:
 
     def _pause_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:
-            self._pause_futures.pop(task_id, None)
+            if self._pause_futures.get(task_id) is future:
+                self._pause_futures.pop(task_id, None)
         if future.cancelled():
             self._record_background_failure(task_id, "desktop.runtime_pause_interrupted")
             return

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from concurrent.futures import Future
 import threading
 import time
 from pathlib import Path
@@ -271,4 +272,29 @@ def test_running_pause_fails_before_effect_without_durable_resume_capability(
     _wait_for_state(queue, task_id, TaskState.CANCELLED)
     runtime.allow_run_exit.set()
     assert runtime.run_exited.wait(timeout=1)
+    backend.close()
+
+
+def test_stale_pause_callback_does_not_remove_newer_pause_generation(
+    tmp_path: Path,
+) -> None:
+    runtime = DurableBlockingRuntime()
+    backend, _queue, _audit = _build_backend(tmp_path, runtime)
+    task_id = "same-durable-task"
+    stale_pause: Future[bool] = Future()
+    newer_pause: Future[bool] = Future()
+    stale_pause.set_result(True)
+
+    with backend._active_lock:
+        backend._pause_futures[task_id] = newer_pause
+
+    backend._pause_done(task_id, stale_pause)
+
+    with backend._active_lock:
+        assert backend._pause_futures.get(task_id) is newer_pause
+
+    newer_pause.set_result(True)
+    backend._pause_done(task_id, newer_pause)
+    with backend._active_lock:
+        assert task_id not in backend._pause_futures
     backend.close()
