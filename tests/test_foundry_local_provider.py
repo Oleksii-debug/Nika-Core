@@ -117,6 +117,21 @@ class BlockingDownloadModel(FakeFoundryModel):
         self.is_cached = True
 
 
+class CancelDuringEvidenceModel(FakeFoundryModel):
+    def __init__(
+        self,
+        cancel_event: threading.Event,
+        *,
+        cached: bool,
+    ) -> None:
+        super().__init__(cached=cached)
+        self._cancel_during_evidence = cancel_event
+
+    def get_path(self) -> str:
+        self._cancel_during_evidence.set()
+        return super().get_path()
+
+
 class FakeCatalog:
     def __init__(self, model: FakeFoundryModel | None) -> None:
         self.model = model
@@ -769,6 +784,51 @@ def test_foundry_download_does_not_promote_success_after_external_cancel() -> No
         assert model.is_cached is True
 
     asyncio.run(scenario())
+
+
+def test_foundry_cached_download_rechecks_cancel_after_evidence_collection() -> None:
+    cancel_event = threading.Event()
+    model = CancelDuringEvidenceModel(cancel_event, cached=True)
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: FakeManager(model),
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(
+            provider.download_model(
+                authorization(),
+                cancel_event=cancel_event,
+                timeout_seconds=1.0,
+            )
+        )
+
+    assert exc_info.value.code is ModelErrorCode.CANCELLED
+    assert exc_info.value.retryable is False
+    assert model.downloaded is False
+
+
+def test_foundry_download_rechecks_cancel_after_post_download_evidence() -> None:
+    cancel_event = threading.Event()
+    model = CancelDuringEvidenceModel(cancel_event, cached=False)
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=lambda: FakeManager(model),
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(
+            provider.download_model(
+                authorization(),
+                cancel_event=cancel_event,
+                timeout_seconds=1.0,
+            )
+        )
+
+    assert exc_info.value.code is ModelErrorCode.CANCELLED
+    assert exc_info.value.retryable is False
+    assert model.downloaded is True
+    assert model.is_cached is True
 
 
 def test_foundry_download_honors_pre_set_cancel_before_manager() -> None:
