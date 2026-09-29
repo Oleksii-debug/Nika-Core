@@ -55,6 +55,8 @@ class VoiceTurnRequest:
             raise TypeError("request_id must be exact non-empty text")
         if type(self.capture) is not MicrophoneCaptureRequest:
             raise TypeError("capture must be an exact MicrophoneCaptureRequest")
+        if type(self.capture.request_id) is not str:
+            raise TypeError("capture.request_id must be exact text")
         if self.capture.request_id != self.request_id:
             raise ValueError("capture request_id must match voice turn request_id")
         if type(self.stt_provider_id) is not str or not self.stt_provider_id:
@@ -65,11 +67,18 @@ class VoiceTurnRequest:
             raise TypeError("language must be exact text or None")
         if type(self.stt_policy) is not SpeechToTextPolicy:
             raise TypeError("stt_policy must be an exact SpeechToTextPolicy")
-        if self.stt_policy.max_transcript_chars > MAX_TRANSCRIPT_CHARS:
+        max_transcript_chars = self.stt_policy.max_transcript_chars
+        if type(max_transcript_chars) is not int:
+            raise TypeError("stt_policy.max_transcript_chars must be an exact integer")
+        if max_transcript_chars > MAX_TRANSCRIPT_CHARS:
             raise ValueError(
                 "stt_policy.max_transcript_chars exceeds wake activation bound"
             )
-        if self.capture.expected_audio_bytes > self.stt_policy.max_audio_bytes:
+        sample_count = self.capture.sample_count
+        max_audio_bytes = self.stt_policy.max_audio_bytes
+        if type(sample_count) is not int or type(max_audio_bytes) is not int:
+            raise TypeError("voice turn audio bounds must be exact integers")
+        if sample_count * 2 > max_audio_bytes:
             raise ValueError("capture audio exceeds stt_policy.max_audio_bytes")
 
 
