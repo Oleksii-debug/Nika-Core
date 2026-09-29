@@ -317,6 +317,7 @@ class DesktopVoiceTurnController:
                 or type(transcription) is not SpeechToTextEvidence
                 or transcription.status is not SpeechToTextStatus.SUCCEEDED
                 or type(wake) is not WakeActivationEvidence
+                or type(wake.outcome) is not WakeActivationOutcome
                 or transcription.request_id != request_id
                 or wake.request_id != request_id
                 or type(result.transcript) is not str
