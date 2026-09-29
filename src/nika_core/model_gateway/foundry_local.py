@@ -80,6 +80,16 @@ class FoundryLocalProvider:
             raise ValueError("default_model must not contain surrounding whitespace")
         if any(not char.isprintable() for char in default_model):
             raise ValueError("default_model must not contain control characters")
+        if type(app_name) is not str:
+            raise TypeError("app_name must be text")
+        if not app_name.strip():
+            raise ValueError("app_name must not be empty")
+        if app_name != app_name.strip():
+            raise ValueError("app_name must not contain surrounding whitespace")
+        if any(not char.isprintable() for char in app_name):
+            raise ValueError("app_name must not contain control characters")
+        if type(allow_download) is not bool:
+            raise TypeError("allow_download must be boolean")
         if allow_download:
             raise ValueError(
                 "allow_download on FoundryLocalProvider is no longer supported; "
