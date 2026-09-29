@@ -8,8 +8,13 @@ import pytest
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import ModelHealthFact, ModelHealthSnapshot
+from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.runtime.contracts import RuntimeResumeProbeStatus
+from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
+from nika_core.runtime.registry import RuntimeRegistry
+from nika_core.runtime.session_store import RuntimeSessionStore
 from nika_core.v01_model_settings import ModelSelection, V01ModelSettings
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
 
@@ -326,3 +331,62 @@ def test_health_probe_failure_or_malformed_snapshot_blocks_auto_resume(
     assert result.status is RuntimeResumeProbeStatus.UNVERIFIABLE
     assert result.checkpoint_id is None
     assert health.calls == 1
+
+
+def test_recovery_service_stops_unready_model_before_auto_resume(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    task_id = _task_with_selection(store, _ollama())
+    queue = TaskQueue(store)
+    queue.transition(task_id, TaskState.READY)
+    queue.transition(task_id, TaskState.RUNNING)
+    health = _StaticHealthProbe(
+        _snapshot(
+            reachable=ModelHealthFact.YES,
+            present=ModelHealthFact.YES,
+            ready=ModelHealthFact.UNKNOWN,
+        )
+    )
+    model_factory = _ExplodingModelFactory()
+    runtime = _runtime(
+        store,
+        health_probe_factory=lambda _selection: health,
+        model_runtime_factory=model_factory,
+    )
+    thread_id = f"desktop-{task_id}"
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id=runtime.runtime_id,
+        thread_id=thread_id,
+        resume_token=runtime.initial_resume_token(
+            task_id=task_id,
+            thread_id=thread_id,
+        ),
+    )
+    registry = RuntimeRegistry()
+    registry.register(runtime)
+    audit = AuditLog(store)
+    recovery = RuntimeRecoveryService(
+        queue=queue,
+        audit=audit,
+        runtimes=registry,
+        sessions=sessions,
+    )
+
+    executions = asyncio.run(recovery.resume_safe_crash_sessions(max_count=1))
+
+    assert len(executions) == 1
+    execution = executions[0]
+    assert execution.candidate.disposition is RecoveryDisposition.CHECKPOINT_UNAVAILABLE
+    assert execution.result is None
+    assert execution.error is not None
+    assert queue.get(task_id).state is TaskState.RUNNING
+    assert sessions.get(task_id) is not None
+    assert health.calls == 1
+    assert model_factory.calls == 0
+    event_types = [
+        event.event_type
+        for event in audit.list_for(entity_type="task", entity_id=task_id)
+    ]
+    assert "runtime.recovery_checkpoint_blocked" in event_types
+    assert "runtime.recovery_auto_resume_requested" not in event_types
