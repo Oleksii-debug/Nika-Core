@@ -554,6 +554,79 @@ def test_cancelled_late_factory_base_exception_cannot_strand_controller() -> Non
         submitter.close()
 
 
+def test_cancel_running_future_masks_late_success_when_runtime_refuses_cancel() -> None:
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=lambda coroutine: Future(),  # pragma: no cover - not used
+    )
+    active: Future[VoiceTurnResult] = Future()
+    assert active.set_running_or_notify_cancel() is True
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-running-cancel"))
+    )
+
+    with controller._lock:
+        controller._active = active
+        controller._active_started = threading.Event()
+        controller._active_settled = threading.Event()
+        controller._snapshot = DesktopVoiceSnapshot(
+            status=DesktopVoiceStatus.RUNNING,
+            request_id="desktop-voice-running-cancel",
+            message="running",
+        )
+    active.add_done_callback(
+        lambda done: controller._finish("desktop-voice-running-cancel", done)
+    )
+
+    cancel_result = controller.cancel({})
+    assert cancel_result.status == "accepted"
+    pending = controller.snapshot()
+    assert pending["status"] == DesktopVoiceStatus.CANCELLING.value
+    assert pending["active"] is True
+
+    active.set_result(result)
+    final = controller.snapshot()
+    assert final["status"] == DesktopVoiceStatus.CANCELLED.value
+    assert final["active"] is False
+    assert final["transcript"] is None
+
+
+def test_close_running_future_masks_late_success_after_shutdown_timeout() -> None:
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=lambda coroutine: Future(),  # pragma: no cover - not used
+    )
+    active: Future[VoiceTurnResult] = Future()
+    assert active.set_running_or_notify_cancel() is True
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-running-close"))
+    )
+
+    with controller._lock:
+        controller._active = active
+        controller._active_started = threading.Event()
+        controller._active_settled = threading.Event()
+        controller._snapshot = DesktopVoiceSnapshot(
+            status=DesktopVoiceStatus.RUNNING,
+            request_id="desktop-voice-running-close",
+            message="running",
+        )
+    active.add_done_callback(
+        lambda done: controller._finish("desktop-voice-running-close", done)
+    )
+
+    with pytest.raises(RuntimeError, match="remained active"):
+        controller.close(timeout_seconds=0.01)
+
+    active.set_result(result)
+    final = controller.snapshot()
+    assert final["status"] == DesktopVoiceStatus.CANCELLED.value
+    assert final["active"] is False
+    assert final["transcript"] is None
+
+
 def test_cancel_propagates_to_active_async_capture() -> None:
     submitter = _LoopSubmitter()
     entered = threading.Event()
