@@ -514,7 +514,7 @@ class TaskRuntimeCoordinator:
         if RuntimeCapability.DURABLE_RESUME not in runtime.capabilities:
             raise ValueError("Safe active pause requires durable runtime resume support")
         if not isinstance(runtime, RuntimeResumeProbePort):
-            raise ValueError(
+            raise TypeError(
                 "Safe active pause requires runtime checkpoint proof for durable resume"
             )
         if RuntimeCapability.CANCELLATION not in runtime.capabilities:
