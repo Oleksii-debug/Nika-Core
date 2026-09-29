@@ -477,7 +477,6 @@ def test_failure_attempt_latency_is_not_projected_as_promotion_latency() -> None
     )
 
 
-
 def test_bridge_rejects_cross_execution_config_rebinding() -> None:
     candidate = _candidate("candidate", "m1")
     evaluation = _evaluation()
