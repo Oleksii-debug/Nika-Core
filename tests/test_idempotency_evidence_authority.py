@@ -86,6 +86,31 @@ def test_complete_rejects_non_utf8_result_without_status_mutation(
     assert persisted.result is None
 
 
+@pytest.mark.parametrize(
+    "result",
+    (
+        {1: "value"},
+        {None: "value"},
+        {_BehavioralText("key"): "value"},
+        {"nested": [{False: "value"}]},
+    ),
+)
+def test_complete_rejects_non_text_object_keys_without_status_mutation(
+    tmp_path,
+    result: dict[object, object],
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+
+    with pytest.raises(ValueError, match="object keys must be exact text"):
+        ledger.complete("effect:1", result)
+
+    persisted = ledger.require("effect:1")
+    assert persisted.status is IdempotencyStatus.PENDING
+    assert persisted.result is None
+
+
 def test_concurrent_conflicting_completions_have_one_durable_winner(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     ledger = IdempotencyLedger(store)
