@@ -24,7 +24,11 @@ from nika_core.speech_to_text import (
     SpeechToTextService,
 )
 from nika_core.ui.bridge import UIActionBridge
-from nika_core.ui.desktop_voice import DesktopVoiceStatus, DesktopVoiceTurnController
+from nika_core.ui.desktop_voice import (
+    DesktopVoiceSnapshot,
+    DesktopVoiceStatus,
+    DesktopVoiceTurnController,
+)
 from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest, VoiceTurnResult
 from nika_core.wake_activation import WakeActivationDetector
 
@@ -282,12 +286,51 @@ def test_second_turn_is_rejected_while_first_turn_is_active() -> None:
     try:
         assert controller.start({}).status == "accepted"
         assert entered.wait(timeout=2)
-        with pytest.raises(ValueError, match="уже виконується"):
+        with pytest.raises(ValueError, match="виконується або завершує скасування"):
             controller.start({})
         assert controller.cancel({}).status == "accepted"
         _wait_status(controller, DesktopVoiceStatus.CANCELLED)
     finally:
         submitter.close()
+
+
+def test_cancelled_outer_future_does_not_clear_active_before_coroutine_settles() -> None:
+    submitter = _LoopSubmitter()
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=submitter.submit,
+    )
+    active: Future[VoiceTurnResult] = Future()
+    started = threading.Event()
+    settled = threading.Event()
+    started.set()
+
+    with controller._lock:
+        controller._active = active
+        controller._active_started = started
+        controller._active_settled = settled
+        controller._snapshot = DesktopVoiceSnapshot(
+            status=DesktopVoiceStatus.RUNNING,
+            request_id="desktop-voice-settlement",
+            message="running",
+        )
+
+    assert active.cancel() is True
+    controller._finish("desktop-voice-settlement", active)
+
+    pending = controller.snapshot()
+    assert pending["status"] == DesktopVoiceStatus.CANCELLING.value
+    assert pending["active"] is True
+    with pytest.raises(ValueError, match="завершує скасування"):
+        controller.start({})
+
+    settled.set()
+    final = controller.snapshot()
+    assert final["status"] == DesktopVoiceStatus.CANCELLED.value
+    assert final["active"] is False
+
+    submitter.close()
 
 
 def test_cancel_propagates_to_active_async_capture() -> None:
