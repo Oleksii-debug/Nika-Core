@@ -1857,6 +1857,7 @@ def test_create_rejects_forged_nested_behavioral_payload_before_persistence(
         ).fetchone()[0]
     assert count == 0
 
+
 def test_inter_batch_release_uses_internal_clock_and_rejects_caller_time_authority(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
