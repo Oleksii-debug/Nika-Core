@@ -294,7 +294,7 @@ class DesktopVoiceTurnController:
         else:
             try:
                 result = future.result()
-            except Exception:  # noqa: BLE001 - isolate desktop async boundary
+            except BaseException:
                 snapshot = DesktopVoiceSnapshot(
                     status=DesktopVoiceStatus.FAILED,
                     request_id=request_id,
