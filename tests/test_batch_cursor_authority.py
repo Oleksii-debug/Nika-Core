@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import math
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from pathlib import Path
 
 import pytest
@@ -29,6 +29,17 @@ class BehavioralText(str):
 
 class BehavioralDateTime(datetime):
     pass
+
+
+class BehavioralTimezone(tzinfo):
+    def utcoffset(self, dt: datetime | None) -> timedelta | None:
+        raise AssertionError("behavioral timezone must not execute")
+
+    def dst(self, dt: datetime | None) -> timedelta | None:
+        raise AssertionError("behavioral timezone must not execute")
+
+    def tzname(self, dt: datetime | None) -> str | None:
+        raise AssertionError("behavioral timezone must not execute")
 
 
 class BehavioralDict(dict[str, object]):
@@ -225,6 +236,32 @@ def test_schedule_wait_rejects_datetime_subclass_without_mutating_deadline(
 
     hostile = BehavioralDateTime(2030, 1, 2, 3, 4, 5, tzinfo=UTC)
     with pytest.raises(TypeError, match="datetime must be an exact datetime"):
+        cursor.schedule_inter_batch_wait(hostile)
+
+    assert cursor.state.next_scheduled_intent is not None
+    assert cursor.state.next_scheduled_intent.not_before is None
+
+
+def test_schedule_wait_rejects_behavioral_timezone_without_mutating_deadline(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, _ = _services(tmp_path)
+    cursor = BatchCursor.create(
+        memory,
+        ledger,
+        task_id="task",
+        cursor_id="cursor",
+        targets=_targets(2),
+        batch_size=1,
+    )
+    grant = cursor.begin_effect("target-0")
+    assert grant.execute is True
+    cursor.confirm("target-0", {"ok": True})
+    assert cursor.state.next_scheduled_intent is not None
+    assert cursor.state.next_scheduled_intent.not_before is None
+
+    hostile = datetime(2030, 1, 2, 3, 4, 5, tzinfo=BehavioralTimezone())
+    with pytest.raises(TypeError, match="datetime timezone must be canonical"):
         cursor.schedule_inter_batch_wait(hostile)
 
     assert cursor.state.next_scheduled_intent is not None
