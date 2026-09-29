@@ -151,7 +151,7 @@ def test_complete_rejects_circular_result_without_status_mutation(tmp_path) -> N
     circular: list[object] = []
     circular.append(circular)
 
-    with pytest.raises(ValueError, match="JSON serializable"):
+    with pytest.raises(ValueError, match="must not contain circular containers"):
         ledger.complete("effect:1", {"circular": circular})
 
     persisted = ledger.require("effect:1")
