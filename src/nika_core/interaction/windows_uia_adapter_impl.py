@@ -826,7 +826,7 @@ class WindowsUIAInteractionAdapter:
                 attributes=attributes,
             )
             controls.append(node)
-            semantic_by_node[node_id] = node
+            semantic_by_node[node_id] = replace(node)
         self._identity_by_node = identity_by_node
         self._semantic_by_node = semantic_by_node
         return SemanticSnapshot(

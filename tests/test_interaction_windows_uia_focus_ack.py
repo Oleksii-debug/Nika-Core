@@ -218,6 +218,22 @@ def test_restore_focus_rejects_semantic_drift_before_effect(
     assert backend.focused_reads == 0
 
 
+def test_restore_focus_private_semantics_ignore_public_snapshot_mutation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _remove_focus_sleep(monkeypatch)
+    backend = FocusAckBackend("lag_then_success")
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    object.__setattr__(node, "name", "Delete")
+    backend.controls = [replace(backend.controls[0], name="Delete")]
+
+    assert not adapter.restore_focus(node.node_id)
+    assert backend.focus_calls == 0
+    assert backend.focused_reads == 0
+
+
 def test_restore_focus_fails_closed_on_identity_replacement(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
