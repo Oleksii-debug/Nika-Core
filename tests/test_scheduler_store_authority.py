@@ -47,6 +47,62 @@ def _job(**overrides: object) -> ScheduledJob:
     return ScheduledJob(**values)  # type: ignore[arg-type]
 
 
+def test_scheduler_identities_require_whitespace_stability(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+
+    with pytest.raises(ValueError, match="job_id.*whitespace-stable"):
+        store.upsert(_job(job_id=" job-1"))
+    with pytest.raises(ValueError, match="action_id.*whitespace-stable"):
+        store.upsert(_job(action_id="test.action "))
+
+    assert store.get("job-1") is None
+
+
+def test_scheduler_identity_operations_reject_unstable_keys(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.upsert(_job())
+
+    with pytest.raises(ValueError, match="job_id.*whitespace-stable"):
+        store.get(" job-1")
+    with pytest.raises(ValueError, match="job_id.*whitespace-stable"):
+        store.delete("job-1 ")
+    with pytest.raises(ValueError, match="job_id.*whitespace-stable"):
+        store.set_enabled(" job-1", False)
+    with pytest.raises(ValueError, match="task_id.*whitespace-stable"):
+        store.task_state(" task-1")
+
+    restored = store.get("job-1")
+    assert restored is not None
+    assert restored.enabled is True
+
+
+@pytest.mark.parametrize(
+    ("column", "value", "message"),
+    (
+        ("job_id", "job-1 ", "persisted job_id.*whitespace-stable"),
+        ("action_id", " test.action", "persisted action_id.*whitespace-stable"),
+    ),
+)
+def test_persisted_scheduler_identity_whitespace_fails_closed(
+    tmp_path: Path,
+    column: str,
+    value: str,
+    message: str,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            f"UPDATE scheduled_jobs SET {column} = ? WHERE job_id = ?",
+            (value, "job-1"),
+        )
+
+    with pytest.raises(ValueError, match=message):
+        store.list_enabled()
+
+
 def test_behavioral_job_carriers_fail_before_behavior(tmp_path: Path) -> None:
     class BehavioralText(str):
         def strip(self, *args: object, **kwargs: object) -> str:

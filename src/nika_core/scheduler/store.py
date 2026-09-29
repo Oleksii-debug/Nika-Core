@@ -79,7 +79,7 @@ class ScheduledJobStore:
         )
 
     def get(self, job_id: str) -> ScheduledJob | None:
-        job_key = _exact_text(job_id, "job_id")
+        job_key = _stable_identity(job_id, "job_id")
         with self._store.connection() as conn:
             return self.get_with_connection(conn, job_key)
 
@@ -89,7 +89,7 @@ class ScheduledJobStore:
         job_id: str,
     ) -> ScheduledJob | None:
         """Read one job inside a caller-owned SQLite transaction."""
-        job_key = _exact_text(job_id, "job_id")
+        job_key = _stable_identity(job_id, "job_id")
         row = conn.execute(
             "SELECT * FROM scheduled_jobs WHERE job_id = ?",
             (job_key,),
@@ -119,7 +119,7 @@ class ScheduledJobStore:
         enabled: bool,
     ) -> bool:
         """Set durable enabled state inside a caller-owned SQLite transaction."""
-        job_key = _exact_text(job_id, "job_id")
+        job_key = _stable_identity(job_id, "job_id")
         if type(enabled) is not bool:
             raise TypeError("enabled must be an exact bool")
         cursor = conn.execute(
@@ -129,7 +129,7 @@ class ScheduledJobStore:
         return cursor.rowcount > 0
 
     def delete(self, job_id: str) -> bool:
-        job_key = _exact_text(job_id, "job_id")
+        job_key = _stable_identity(job_id, "job_id")
         with self._store.connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM scheduled_jobs WHERE job_id = ?",
@@ -139,7 +139,7 @@ class ScheduledJobStore:
 
     def task_state(self, task_id: str) -> TaskState | None:
         """Read canonical task authority for scheduler dispatch without mutating it."""
-        task_key = _exact_text(task_id, "task_id")
+        task_key = _stable_identity(task_id, "task_id")
         with self._store.connection() as conn:
             row = conn.execute(
                 "SELECT state FROM tasks WHERE task_id = ?",
@@ -156,8 +156,8 @@ class ScheduledJobStore:
 def _validated_job_data(job: ScheduledJob) -> tuple[dict[str, Any], dict[str, Any]]:
     if type(job) is not ScheduledJob:
         raise TypeError("job must be an exact ScheduledJob")
-    _nonempty_text(job.job_id, "job_id")
-    _nonempty_text(job.action_id, "action_id")
+    _stable_identity(job.job_id, "job_id")
+    _stable_identity(job.action_id, "action_id")
     if type(job.trigger_kind) is not TriggerKind:
         raise TypeError("trigger_kind must be an exact TriggerKind")
     if type(job.enabled) is not bool or type(job.coalesce) is not bool:
@@ -303,16 +303,16 @@ def _exact_text(value: object, label: str) -> str:
     return value
 
 
-def _nonempty_text(value: object, label: str) -> str:
+def _stable_identity(value: object, label: str) -> str:
     text = _exact_text(value, label)
-    if not text.strip():
-        raise ValueError(f"{label} must not be empty")
+    if not text or text != text.strip():
+        raise ValueError(f"{label} must be non-empty and whitespace-stable")
     return text
 
 
 def _from_row(row: object) -> ScheduledJob:
-    job_id = _nonempty_text(row["job_id"], "persisted job_id")
-    action_id = _nonempty_text(row["action_id"], "persisted action_id")
+    job_id = _stable_identity(row["job_id"], "persisted job_id")
+    action_id = _stable_identity(row["action_id"], "persisted action_id")
     trigger_kind_raw = _exact_text(row["trigger_kind"], "persisted trigger_kind")
     try:
         trigger_kind = TriggerKind(trigger_kind_raw)
