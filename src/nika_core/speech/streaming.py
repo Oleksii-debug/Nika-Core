@@ -352,7 +352,7 @@ class IncrementalSpeechStream:
                     )
                 )
                 return
-            except BaseException:  # noqa: B036 - worker boundary must terminalize
+            except BaseException:  # noqa: BLE001 - worker boundary must terminalize
                 self._fail(
                     SpeechError(
                         SpeechErrorCode.PROCESS_FAILED,
