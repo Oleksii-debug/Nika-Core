@@ -188,3 +188,48 @@ def test_runtime_sync_preserves_replacement_when_stale_suppression_loses_cas(
     assert runtime is not None
     assert tuple(runtime.args)[1] == replacement
     adapter.shutdown(wait=False)
+
+
+def test_runtime_sync_bounds_continuous_stale_suppression_churn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    queue = TaskQueue(sqlite)
+    jobs = ScheduledJobStore(sqlite)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "bounded scheduler churn"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    initial = _job(payload={"task_id": task.task_id, "generation": 0})
+    jobs.upsert(initial)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    adapter.start()
+    queue.transition(task.task_id, TaskState.CANCELLED)
+    churn_count = 0
+
+    def replace_on_every_task_check(task_id: str) -> TaskState | None:
+        nonlocal churn_count
+        churn_count += 1
+        jobs.upsert(
+            replace(
+                initial,
+                payload={"task_id": task_id, "generation": churn_count},
+            )
+        )
+        return TaskState.CANCELLED
+
+    monkeypatch.setattr(jobs, "task_state", replace_on_every_task_check)
+
+    assert adapter._sync_runtime_job(initial.job_id) is None
+
+    current = jobs.get(initial.job_id)
+    assert churn_count == 3
+    assert current is not None
+    assert current.payload["generation"] == churn_count
+    assert current.enabled is True
+    assert not adapter.has_runtime_job(initial.job_id)
+    adapter.shutdown(wait=False)
