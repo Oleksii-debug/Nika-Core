@@ -439,6 +439,24 @@ def _decode_job(
 ) -> tuple[RecurrenceState, dict[str, Any]]:
     if job.action_id != DurableRecurrenceService.ACTION_ID:
         raise ValueError("durable recurrence job has an unexpected action_id")
+    if job.trigger_kind is not TriggerKind.DATE:
+        raise ValueError("durable recurrence job must use a DATE trigger")
+    if type(job.trigger) is not dict or set(job.trigger) != {"run_date"}:
+        raise ValueError("durable recurrence trigger shape is corrupt")
+    if type(job.coalesce) is not bool or job.coalesce is not True:
+        raise ValueError("durable recurrence coalesce policy is corrupt")
+    if type(job.max_instances) is not int or job.max_instances != 1:
+        raise ValueError("durable recurrence max_instances policy is corrupt")
+    if job.misfire_grace_seconds is not None:
+        raise ValueError("durable recurrence misfire policy is corrupt")
+    if type(job.payload) is not dict:
+        raise TypeError("durable recurrence payload is corrupt")
+    scheduled_recurrence_id = _required_text(
+        job.payload.get("recurrence_id"),
+        "scheduled recurrence_id",
+    )
+    if scheduled_recurrence_id != expected_recurrence_id:
+        raise ValueError("durable recurrence scheduled identity mismatch")
     metadata = job.payload.get(_RECURRENCE_PAYLOAD_KEY)
     target_payload = job.payload.get(_TARGET_PAYLOAD_KEY)
     if type(metadata) is not dict or type(target_payload) is not dict:
@@ -498,8 +516,14 @@ def _decode_job(
         raise ValueError("non-terminal recurrence is missing its next durable intent")
     if status in {RecurrenceStatus.CANCELLED, RecurrenceStatus.COMPLETED} and next_due is not None:
         raise ValueError("terminal recurrence cannot retain a next durable intent")
-    if bool(job.enabled) != (status is RecurrenceStatus.ACTIVE and next_due is not None):
+    if type(job.enabled) is not bool:
+        raise ValueError("durable recurrence enabled state is corrupt")
+    if job.enabled != (status is RecurrenceStatus.ACTIVE and next_due is not None):
         raise ValueError("durable recurrence enabled state does not match lifecycle state")
+    expected_run_date = next_due or last_due or anchor
+    run_date_raw = job.trigger.get("run_date")
+    if type(run_date_raw) is not str or run_date_raw != _iso(expected_run_date):
+        raise ValueError("durable recurrence trigger run_date is corrupt")
     state = RecurrenceState(
         recurrence_id=recurrence_id,
         task_id=task_id,
