@@ -239,6 +239,7 @@ def _decode_json_object(raw: object, label: str) -> dict[str, Any]:
         decoded = json.loads(
             raw,
             parse_constant=lambda _: _reject_json_constant(label),
+            object_pairs_hook=lambda pairs: _strict_json_object(pairs, label),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} is corrupt") from exc
@@ -250,6 +251,18 @@ def _decode_json_object(raw: object, label: str) -> dict[str, Any]:
 
 def _reject_json_constant(label: str) -> None:
     raise ValueError(f"{label} contains a non-finite number")
+
+
+def _strict_json_object(
+    pairs: list[tuple[str, object]],
+    label: str,
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"{label} contains duplicate object keys")
+        result[key] = value
+    return result
 
 
 def _exact_text(value: object, label: str) -> str:
