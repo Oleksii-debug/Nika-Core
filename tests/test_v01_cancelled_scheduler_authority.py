@@ -539,6 +539,105 @@ def test_pause_resyncs_enabled_replacement_before_return(tmp_path) -> None:
     adapter.shutdown(wait=False)
 
 
+
+
+def test_installed_callback_rejects_same_action_replacement_before_resolver(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Callback Entry Snapshot" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    original_at = datetime.now(UTC) + timedelta(days=1)
+    replacement_at = original_at + timedelta(days=1)
+    resolved: list[str] = []
+
+    def resolve(action_id: str):
+        resolved.append(action_id)
+        return lambda _payload: None
+
+    adapter = APSchedulerAdapter(jobs, resolve)
+    adapter.upsert(
+        _date_job(
+            job_id="job-entry-snapshot",
+            action_id="same-action",
+            run_at=original_at,
+            payload={"generation": "old"},
+        )
+    )
+    adapter.start()
+    old_runtime = adapter._scheduler.get_job("job-entry-snapshot")
+    assert old_runtime is not None
+    old_args = tuple(old_runtime.args)
+
+    adapter.upsert(
+        _date_job(
+            job_id="job-entry-snapshot",
+            action_id="same-action",
+            run_at=replacement_at,
+            payload={"generation": "new"},
+        )
+    )
+    adapter._dispatch(*old_args)
+
+    durable = jobs.get("job-entry-snapshot")
+    runtime = adapter._scheduler.get_job("job-entry-snapshot")
+    assert resolved == []
+    assert durable is not None
+    assert durable.payload == {"generation": "new"}
+    assert runtime is not None
+    assert runtime.trigger.run_date == replacement_at
+    adapter.shutdown(wait=False)
+
+
+def test_installed_callback_rejects_same_action_replacement_during_resolver(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Callback Resolver Snapshot" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    original_at = datetime.now(UTC) + timedelta(days=1)
+    replacement_at = original_at + timedelta(days=1)
+    handled: list[dict[str, object]] = []
+    adapter: APSchedulerAdapter
+
+    def resolve(action_id: str):
+        assert action_id == "same-action"
+        adapter.upsert(
+            _date_job(
+                job_id="job-resolver-snapshot",
+                action_id="same-action",
+                run_at=replacement_at,
+                payload={"generation": "new"},
+            )
+        )
+
+        def handler(payload: dict[str, object]) -> None:
+            handled.append(payload)
+
+        return handler
+
+    adapter = APSchedulerAdapter(jobs, resolve)
+    adapter.upsert(
+        _date_job(
+            job_id="job-resolver-snapshot",
+            action_id="same-action",
+            run_at=original_at,
+            payload={"generation": "old"},
+        )
+    )
+    adapter.start()
+    old_runtime = adapter._scheduler.get_job("job-resolver-snapshot")
+    assert old_runtime is not None
+    old_args = tuple(old_runtime.args)
+
+    adapter._dispatch(*old_args)
+
+    durable = jobs.get("job-resolver-snapshot")
+    runtime = adapter._scheduler.get_job("job-resolver-snapshot")
+    assert handled == []
+    assert durable is not None
+    assert durable.payload == {"generation": "new"}
+    assert runtime is not None
+    assert runtime.trigger.run_date == replacement_at
+    adapter.shutdown(wait=False)
+
+
 def test_dispatch_rechecks_durable_job_after_resolver_pause(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Dispatch Fence" / "nika core.db")
     store.initialize()

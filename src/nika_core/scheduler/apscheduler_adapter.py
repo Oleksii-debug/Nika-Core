@@ -124,17 +124,30 @@ class APSchedulerAdapter(SchedulerPort):
             self._dispatch,
             trigger=_make_trigger(job),
             id=job.job_id,
-            args=(job.job_id,),
+            args=(job.job_id, job),
             replace_existing=True,
             coalesce=job.coalesce,
             max_instances=job.max_instances,
             misfire_grace_time=job.misfire_grace_seconds,
         )
 
-    def _dispatch(self, job_id: str) -> None:
+    def _dispatch(
+        self,
+        job_id: str,
+        installed_job: ScheduledJob | None = None,
+    ) -> None:
         job_id = _require_job_id(job_id)
+        if installed_job is not None:
+            if type(installed_job) is not ScheduledJob:
+                raise TypeError("installed_job must be an exact ScheduledJob or None")
+            if _require_job_id(installed_job.job_id) != job_id:
+                return
         job = self._jobs.get(job_id)
-        if job is None or not job.enabled or not self._task_authority_allows(job):
+        if job is None or not job.enabled:
+            return
+        if installed_job is not None and job != installed_job:
+            return
+        if not self._task_authority_allows(job):
             return
         action_id = job.action_id
         try:
@@ -145,12 +158,11 @@ class APSchedulerAdapter(SchedulerPort):
         # Resolver work can race with pause/remove/upsert. Re-read the durable
         # job at the last scheduler-owned boundary before any external effect.
         job = self._jobs.get(job_id)
-        if (
-            job is None
-            or not job.enabled
-            or job.action_id != action_id
-            or not self._task_authority_allows(job)
-        ):
+        if job is None or not job.enabled:
+            return
+        if installed_job is not None and job != installed_job:
+            return
+        if job.action_id != action_id or not self._task_authority_allows(job):
             return
         if self._audit is not None:
             self._audit.append(
