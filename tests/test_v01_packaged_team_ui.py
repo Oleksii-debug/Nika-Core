@@ -699,6 +699,29 @@ def test_renderer_rejects_incoherent_valid_comparison_counts(
     assert rejected["summary_hidden"] is True
 
 
+@pytest.mark.parametrize("agreement_count", [101, (1 << 53)])
+def test_renderer_rejects_out_of_bound_partial_agreement_count(
+    agreement_count: int,
+) -> None:
+    projection = _model_result_projection()
+    final_result = projection["final_result"]
+    assert isinstance(final_result, dict)
+    comparison = final_result["comparison"]
+    assert isinstance(comparison, dict)
+    comparison.update(
+        status="partial",
+        validated=True,
+        source_states=["valid", "valid"],
+        agreement_count=agreement_count,
+        difference_count=1,
+    )
+
+    rejected = _rendered_team_snapshot(live_projection=projection)
+
+    assert rejected["ready"] == "false"
+    assert rejected["summary_hidden"] is True
+
+
 def test_renderer_rejects_noncomparison_with_comparison_counts() -> None:
     projection = _model_result_projection()
     final_result = projection["final_result"]
