@@ -546,6 +546,73 @@ def test_foundry_download_rejects_non_event_cancel_carrier_before_manager() -> N
     assert calls == []
 
 
+def test_foundry_download_honors_pre_set_cancel_before_manager() -> None:
+    calls: list[str] = []
+
+    def manager_factory() -> object:
+        calls.append("manager")
+        raise AssertionError("manager must not be reached after cancellation")
+
+    provider = FoundryLocalProvider(
+        default_model="test-model",
+        manager_factory=manager_factory,
+    )
+    cancel_event = threading.Event()
+    cancel_event.set()
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(
+            provider.download_model(
+                authorization(),
+                cancel_event=cancel_event,
+                timeout_seconds=1.0,
+            )
+        )
+
+    assert exc_info.value.code is ModelErrorCode.CANCELLED
+    assert exc_info.value.retryable is False
+    assert calls == []
+
+
+def test_foundry_download_rechecks_cancel_after_management_wait() -> None:
+    async def scenario() -> None:
+        calls: list[str] = []
+
+        def manager_factory() -> object:
+            calls.append("manager")
+            raise AssertionError("manager must not be reached after cancellation")
+
+        provider = FoundryLocalProvider(
+            default_model="test-model",
+            manager_factory=manager_factory,
+        )
+        cancel_event = threading.Event()
+
+        await provider._model_management_lock.acquire()
+        task = asyncio.create_task(
+            provider.download_model(
+                authorization(),
+                cancel_event=cancel_event,
+                timeout_seconds=1.0,
+            )
+        )
+        try:
+            await asyncio.sleep(0)
+            assert not task.done()
+            cancel_event.set()
+        finally:
+            provider._model_management_lock.release()
+
+        with pytest.raises(ModelGatewayError) as exc_info:
+            await task
+
+        assert exc_info.value.code is ModelErrorCode.CANCELLED
+        assert exc_info.value.retryable is False
+        assert calls == []
+
+    asyncio.run(scenario())
+
+
 def test_foundry_download_rejects_authorization_for_other_provider() -> None:
     model = FakeFoundryModel(cached=False)
     provider = FoundryLocalProvider(
