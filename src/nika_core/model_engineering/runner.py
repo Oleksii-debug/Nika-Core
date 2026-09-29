@@ -145,12 +145,12 @@ class ModelBenchmarkRunner:
     ) -> CaseBenchmarkResult:
         resource_before = self._resource_snapshot()
         accelerator_before = self._accelerator_snapshot()
-        started = self._clock()
         request = ModelRequest(
             request_id=self._request_id(candidate, evaluation_set, case),
             messages=case.messages,
             model=candidate.request_model,
             provider_id=candidate.provider_id,
+            provider_kind=candidate.provider_kind,
             privacy=evaluation_set.privacy,
             timeout_seconds=timeout_seconds,
             temperature=temperature,
@@ -162,6 +162,7 @@ class ModelBenchmarkRunner:
                 "model_candidate_id": candidate.candidate_id,
             },
         )
+        started = self._clock()
         try:
             response = await self._gateway.complete(request)
         except ModelGatewayError as error:
@@ -186,14 +187,14 @@ class ModelBenchmarkRunner:
                 accelerator_after=accelerator_after,
             )
 
+        self._validate_response_identity(candidate, request, response)
+        input_tokens, output_tokens, total_tokens = self._usage(response)
         latency_ms = self._elapsed_ms(started)
         resource_after = self._resource_snapshot()
         accelerator_after = self._accelerator_snapshot()
-        self._validate_response_identity(candidate, request, response)
         score = float(self._scorer.score(case, response))
         if not isfinite(score) or not 0 <= score <= 1:
             raise ModelBenchmarkError("scorer returned a non-finite or out-of-range score")
-        input_tokens, output_tokens, total_tokens = self._usage(response)
         return CaseBenchmarkResult(
             candidate_id=candidate.candidate_id,
             case_id=case.case_id,
@@ -316,7 +317,9 @@ class ModelBenchmarkRunner:
         completion_rate = (
             sum(result.completion_succeeded for result in results) / len(results)
         )
-        latencies = [result.latency_ms for result in results]
+        latencies = [
+            result.latency_ms for result in results if result.completion_succeeded
+        ]
         resource_snapshots = [
             snapshot
             for result in results
@@ -349,8 +352,12 @@ class ModelBenchmarkRunner:
             weighted_quality_score=quality,
             task_pass_rate=pass_rate,
             completion_rate=completion_rate,
-            mean_latency_ms=fmean(latencies),
-            p95_latency_ms=ModelBenchmarkRunner._nearest_rank(latencies, 0.95),
+            mean_latency_ms=fmean(latencies) if latencies else None,
+            p95_latency_ms=(
+                ModelBenchmarkRunner._nearest_rank(latencies, 0.95)
+                if latencies
+                else None
+            ),
             peak_cpu_percent=max(
                 (float(snapshot.cpu_percent) for snapshot in resource_snapshots),
                 default=None,
