@@ -462,12 +462,18 @@ def _decode_job(
     deadline = _parse_optional_iso(metadata.get("deadline_at"), "deadline_at")
     next_due = _parse_optional_iso(metadata.get("next_due_at"), "next_due_at")
     last_due = _parse_optional_iso(metadata.get("last_completed_due_at"), "last_completed_due_at")
+    status_raw = metadata.get("status")
+    policy_raw = metadata.get("missed_run_policy")
+    if type(status_raw) is not str or type(policy_raw) is not str:
+        raise ValueError("durable recurrence enum state is corrupt")
     try:
-        status = RecurrenceStatus(metadata.get("status"))
-        policy = MissedRunPolicy(metadata.get("missed_run_policy"))
-    except (TypeError, ValueError) as exc:
+        status = RecurrenceStatus(status_raw)
+        policy = MissedRunPolicy(policy_raw)
+    except ValueError as exc:
         raise ValueError("durable recurrence enum state is corrupt") from exc
     terminal_raw = metadata.get("terminal_reason")
+    if terminal_raw is not None and type(terminal_raw) is not str:
+        raise ValueError("durable recurrence terminal reason is corrupt")
     try:
         terminal_reason = (
             RecurrenceTerminalReason(terminal_raw) if terminal_raw is not None else None
