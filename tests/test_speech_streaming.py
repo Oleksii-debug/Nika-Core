@@ -640,7 +640,7 @@ def test_cancel_after_completion_is_idempotent_and_does_not_relabel_result() -> 
 
 
 def test_streaming_surface_is_exported_from_canonical_speech_package() -> None:
-    import nika_core.speech as speech
+    from nika_core import speech
 
     assert speech.IncrementalSpeechStream is IncrementalSpeechStream
     assert speech.SpeechStreamState is SpeechStreamState
