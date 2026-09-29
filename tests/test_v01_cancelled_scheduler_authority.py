@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+import pytest
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.agent_registry import AgentRegistry
 from nika_core.kernel.audit import AuditLog
@@ -154,6 +156,26 @@ def test_terminal_task_authority_suppresses_rehydrated_wakes(tmp_path) -> None:
     third._dispatch("job-cancelled")
     assert calls == ["live", "unrelated"]
     third.shutdown(wait=False)
+
+
+def test_upsert_rejects_foreign_job_before_attribute_behavior(tmp_path) -> None:
+    class BehavioralJob:
+        @property
+        def job_id(self) -> str:
+            raise AssertionError("foreign job attribute behavior must not run")
+
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Envelope Fence" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda action_id: lambda payload: None,
+    )
+
+    with pytest.raises(TypeError, match="job must be an exact ScheduledJob"):
+        adapter.upsert(BehavioralJob())  # type: ignore[arg-type]
+
+    assert jobs.list_enabled() == ()
 
 
 def test_upsert_uses_durable_job_after_caller_payload_mutation(tmp_path) -> None:
