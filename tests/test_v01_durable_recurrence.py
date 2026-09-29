@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -835,4 +836,38 @@ def test_action_payload_requires_exact_dict_before_lookup(tmp_path: Path) -> Non
         service.action_handler(
             BehavioralActionPayload({"recurrence_id": "does-not-matter"})
         )
+    assert calls == []
+
+
+def test_restart_rejects_nonfinite_persisted_target_payload(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="corrupt-payload",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+        payload={"score": 1.0},
+    )
+    job_id = scheduler.upserts[-1].job_id
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM scheduled_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()
+        assert row is not None
+        persisted = json.loads(row["payload_json"])
+        persisted["target_payload"]["score"] = float("nan")
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            (json.dumps(persisted, sort_keys=True), job_id),
+        )
+
+    restarted, _ = _service(store, clock, calls)
+    with pytest.raises(ValueError, match="non-finite"):
+        restarted.get("corrupt-payload")
     assert calls == []
