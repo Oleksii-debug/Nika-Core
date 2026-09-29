@@ -879,3 +879,39 @@ def test_study_material_keeps_nonsecret_oauth1_metadata_across_restart(tmp_path)
 
     assert restored.material.source_ref == safe_ref
 
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "https://example.test/book.pdf?x=1;client_secret=oauth-secret",
+        "https://example.test/book.pdf?next=https://nested.test/?client_assertion=jwt-secret",
+        "https://example.test/book.pdf?next=https%3A%2F%2Fnested.test%2F%3Fassertion%3Djwt-secret",
+        "https://example.test/book.pdf#next=urn:example:oauth_token_secret=temp-secret",
+        "label=public;oauth_signature=request-signature",
+        "x=1&next=client%2Bsecret%3Doauth-secret",
+    ],
+)
+def test_study_material_rejects_nested_or_semicolon_credentials(
+    source_ref: str,
+) -> None:
+    with pytest.raises(ValueError, match="credential"):
+        _material(source_ref=source_ref)
+
+
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "https://example.test/book.pdf?reassertion=public-label",
+        "https://example.test/book.pdf?client_secret_count=0",
+        "https://example.test/book.pdf?oauth_token_count=0",
+        "https://example.test/book.pdf?next=https://nested.test/?reassertion=public-label",
+        "label=public;oauth_signature_method=HMAC-SHA1",
+    ],
+)
+def test_study_material_preserves_assignment_key_lookalikes(source_ref: str) -> None:
+    material = _material(
+        material_id="assignment-lookalike",
+        source_ref=source_ref,
+    )
+
+    assert material.source_ref == source_ref
+
