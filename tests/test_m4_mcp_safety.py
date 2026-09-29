@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 from mcp.server import MCPServer
@@ -201,3 +202,96 @@ def test_wrong_server_rejection_never_opens_transport() -> None:
     )
 
     assert result.error == "wrong MCP server"
+
+
+
+def _list_tools_client(tools: list[SimpleNamespace]) -> type:
+    class FakeClient:
+        def __init__(self, _target: object) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeClient:
+            return self
+
+        async def __aexit__(
+            self,
+            _exc_type: object,
+            _exc: object,
+            _tb: object,
+        ) -> None:
+            return None
+
+        async def list_tools(self) -> SimpleNamespace:
+            return SimpleNamespace(tools=tools)
+
+    return FakeClient
+
+
+def _listed_tool(name: str) -> SimpleNamespace:
+    return SimpleNamespace(
+        name=name,
+        description=None,
+        title=None,
+        input_schema={},
+    )
+
+
+def test_mcp_routing_segments_are_bounded() -> None:
+    with pytest.raises(ValueError, match="server_id must contain at most 128 characters"):
+        MCPServerConfig(server_id="s" * 129, target=object())
+
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+    with pytest.raises(ValueError, match="MCP tool name must contain at most 128 characters"):
+        asyncio.run(
+            adapter.call(
+                ToolCall(
+                    call_id="mcp-overlong-tool-1",
+                    tool_id=f"mcp:safety:{'x' * 129}",
+                    arguments={},
+                )
+            )
+        )
+
+
+def test_list_tools_rejects_duplicate_canonical_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_client = _list_tools_client(
+        [_listed_tool("publish"), _listed_tool("publish")]
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    with pytest.raises(ValueError, match="duplicate MCP tool id: mcp:safety:publish"):
+        asyncio.run(adapter.list_tools())
+
+
+def test_list_tools_accepts_128_character_tool_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool_name = "x" * 128
+    fake_client = _list_tools_client([_listed_tool(tool_name)])
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+
+    specs = asyncio.run(adapter.list_tools())
+
+    assert [spec.tool_id for spec in specs] == [f"mcp:safety:{tool_name}"]
