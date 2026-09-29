@@ -552,6 +552,7 @@ def test_close_waits_for_submission_then_cancels_resulting_future() -> None:
     def blocking_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
         entered.set()
         assert release.wait(timeout=2)
+        coroutine.close()
         future_created.set()
         return future
 
@@ -610,6 +611,7 @@ def test_close_submission_wait_respects_deadline_without_losing_reservation() ->
     def blocking_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
         entered.set()
         assert release.wait(timeout=2)
+        coroutine.close()
         future: Future[Any] = Future()
         return future
 
