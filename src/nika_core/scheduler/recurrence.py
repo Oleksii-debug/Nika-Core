@@ -761,7 +761,8 @@ def _detached_exact_key_dict(
     for key, item in value.items():
         if type(key) is not str:
             raise TypeError(f"{label} keys must be exact strings")
-        detached[key] = item
+        utf8_key = _require_utf8_text(key, f"{label} key")
+        detached[utf8_key] = item
     return detached
 
 
@@ -770,13 +771,21 @@ def _canonical_task_id(value: object, *, label: str = "task_id") -> str:
         raise ValueError(f"{label} is required")
     if value != value.strip():
         raise ValueError(f"{label} must be canonical")
-    return value
+    return _require_utf8_text(value, label)
 
 
 def _required_text(value: object, label: str) -> str:
     if type(value) is not str or not value.strip():
         raise ValueError(f"{label} is required")
-    return value.strip()
+    return _require_utf8_text(value.strip(), label)
+
+
+def _require_utf8_text(value: str, label: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must be valid UTF-8 text") from exc
+    return value
 
 
 def _canonical_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
@@ -810,7 +819,7 @@ def _canonical_json_value(value: Any, *, label: str, depth: int) -> Any:
             raise ValueError(f"{label} contains a non-finite number")
         return value
     if type(value) is str:
-        return value
+        return _require_utf8_text(value, label)
     if type(value) is list:
         return [
             _canonical_json_value(item, label=label, depth=depth + 1)
@@ -821,7 +830,8 @@ def _canonical_json_value(value: Any, *, label: str, depth: int) -> Any:
         for key, item in value.items():
             if type(key) is not str:
                 raise TypeError(f"{label} keys must be exact strings")
-            detached[key] = _canonical_json_value(
+            utf8_key = _require_utf8_text(key, f"{label} key")
+            detached[utf8_key] = _canonical_json_value(
                 item,
                 label=label,
                 depth=depth + 1,
