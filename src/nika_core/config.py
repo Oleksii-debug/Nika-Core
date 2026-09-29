@@ -33,6 +33,11 @@ class AppConfig(BaseSettings):
         populate_by_name=True,
     )
 
+    def __init__(self, **values: object) -> None:
+        if "schema_version" in values and type(values["schema_version"]) is not int:
+            raise ValueError("explicit schema_version must be an exact integer")
+        super().__init__(**values)
+
     @field_validator("schema_version", mode="before")
     @classmethod
     def validate_schema_version(cls, value: object) -> int:

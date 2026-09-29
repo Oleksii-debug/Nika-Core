@@ -80,11 +80,19 @@ def test_config_rejects_future_schema_version_from_environment(
 
 @pytest.mark.parametrize(
     "value",
-    [True, 1.0, 2, "2", "01", " 1"],
+    [True, 1.0, 2, "1", "2", "01", " 1"],
 )
 def test_config_schema_version_rejects_noncanonical_carriers(value: object) -> None:
     with pytest.raises(ValueError, match="schema_version"):
         AppConfig(schema_version=value)  # type: ignore[arg-type]
+
+
+def test_config_schema_version_rejects_explicit_integer_subclass() -> None:
+    class SchemaInt(int):
+        pass
+
+    with pytest.raises(ValueError, match="explicit schema_version"):
+        AppConfig(schema_version=SchemaInt(1))
 
 
 def test_schema_migrates_existing_v1_database(tmp_path: Path) -> None:
