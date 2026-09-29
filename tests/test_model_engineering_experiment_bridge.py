@@ -359,3 +359,93 @@ def test_report_identity_guard_rejects_cross_candidate_rebinding() -> None:
             report,
             candidate=_candidate("other", "m2"),
         )
+
+
+def test_observation_boundary_rejects_development_evidence_even_with_direct_definition() -> None:
+    evaluation = _evaluation(EvaluationPurpose.DEVELOPMENT)
+    candidate = _candidate("candidate", "m1")
+    held_out = _evaluation(EvaluationPurpose.HELD_OUT)
+    definition = build_experiment_definition(
+        experiment_id="promotion",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=held_out,
+        policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+        permission_fingerprint="permissions-v1",
+    )
+    direct_definition = replace(
+        definition,
+        replays=tuple(
+            replace(
+                replay,
+                dataset_ref=(
+                    f"model-evaluation:{evaluation.evaluation_set_id}:"
+                    f"sha256:{evaluation.content_sha256}"
+                ),
+                dataset_version=evaluation.version,
+            )
+            for replay in definition.replays
+        ),
+    )
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 10.0),
+    )
+
+    with pytest.raises(ValueError, match="held-out"):
+        benchmark_observations(
+            report,
+            definition=direct_definition,
+            evaluation_set=evaluation,
+        )
+
+
+def test_failure_attempt_latency_is_not_projected_as_promotion_latency() -> None:
+    evaluation = _evaluation()
+    candidate = _candidate("candidate", "m1")
+    definition = build_experiment_definition(
+        experiment_id="promotion",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        policy=PromotionPolicy(
+            primary_metric=COMPLETION_METRIC,
+            minimum_replays=2,
+            guardrails=(MetricRule(metric=LATENCY_METRIC, higher_is_better=False),),
+        ),
+        permission_fingerprint="permissions-v1",
+    )
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 20.0),
+    )
+    failed = replace(
+        report.case_results[1],
+        completion_succeeded=False,
+        passed=False,
+        score=0.0,
+        response_sha256=None,
+        error_code=__import__(
+            "nika_core.model_gateway.contracts",
+            fromlist=["ModelErrorCode"],
+        ).ModelErrorCode.UNAVAILABLE,
+        input_tokens=None,
+        output_tokens=None,
+        total_tokens=None,
+    )
+    report = replace(report, case_results=(report.case_results[0], failed))
+
+    observations = benchmark_observations(
+        report,
+        definition=definition,
+        evaluation_set=evaluation,
+    )
+
+    assert not any(
+        item.replay_id == failed.case_id and item.metric == LATENCY_METRIC
+        for item in observations
+    )
