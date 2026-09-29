@@ -33,14 +33,19 @@ class APSchedulerAdapter(SchedulerPort):
         self._audit = audit
         self._scheduler = BackgroundScheduler(timezone="UTC")
         self._started = False
+        self._starting = False
 
     def start(self) -> None:
-        if self._started:
+        if self._started or self._starting:
             return
-        for job in self._jobs.list_enabled():
-            self._sync_runtime_job(job.job_id)
-        self._scheduler.start()
-        self._started = True
+        self._starting = True
+        try:
+            for job in self._jobs.list_enabled():
+                self._sync_runtime_job(job.job_id)
+            self._scheduler.start()
+            self._started = True
+        finally:
+            self._starting = False
 
     def shutdown(self, *, wait: bool = True) -> None:
         if not self._started:
@@ -56,7 +61,7 @@ class APSchedulerAdapter(SchedulerPort):
         job_id = _require_job_id(job.job_id)
         self._jobs.upsert(job)
         effective_job = self._required_job(job_id)
-        if self._started:
+        if self._started or self._starting:
             self._sync_runtime_job(job_id)
             effective_job = self._required_job(job_id)
         elif not self._task_authority_allows(effective_job):
@@ -66,7 +71,7 @@ class APSchedulerAdapter(SchedulerPort):
     def remove(self, job_id: str) -> bool:
         job_id = _require_job_id(job_id)
         removed = self._jobs.delete(job_id)
-        if self._started:
+        if self._started or self._starting:
             self._sync_runtime_job(job_id)
         remaining = self._jobs.get(job_id)
         if removed and remaining is None and self._audit is not None:
@@ -80,7 +85,7 @@ class APSchedulerAdapter(SchedulerPort):
     def pause(self, job_id: str) -> None:
         job = self._required_job(_require_job_id(job_id))
         self._jobs.set_enabled(job.job_id, False)
-        if self._started:
+        if self._started or self._starting:
             self._sync_runtime_job(job.job_id)
         paused_job = self._required_job(job.job_id)
         if paused_job.enabled:
@@ -93,7 +98,7 @@ class APSchedulerAdapter(SchedulerPort):
         enabled_job = self._required_job(job.job_id)
         if not enabled_job.enabled:
             return
-        if self._started:
+        if self._started or self._starting:
             installed_job = self._sync_runtime_job(enabled_job.job_id)
             if installed_job is None:
                 return

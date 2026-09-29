@@ -160,6 +160,71 @@ def test_terminal_task_authority_suppresses_rehydrated_wakes(tmp_path) -> None:
 
 
 
+
+
+def test_upsert_during_start_transition_is_installed(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Start Upsert Race" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    run_at = datetime.now(UTC) + timedelta(days=1)
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    scheduler_start = adapter._scheduler.start
+
+    def start_with_upsert(*args, **kwargs):
+        adapter.upsert(
+            _date_job(
+                job_id="job-start-upsert",
+                action_id="start-upsert",
+                run_at=run_at,
+                payload={},
+            )
+        )
+        return scheduler_start(*args, **kwargs)
+
+    adapter._scheduler.start = start_with_upsert
+
+    adapter.start()
+
+    durable = jobs.get("job-start-upsert")
+    runtime = adapter._scheduler.get_job("job-start-upsert")
+    assert durable is not None
+    assert durable.enabled is True
+    assert runtime is not None
+    assert runtime.trigger.run_date == run_at
+    adapter.shutdown(wait=False)
+
+
+def test_remove_during_start_transition_removes_pending_runtime(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Scheduler Start Remove Race" / "nika core.db")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    run_at = datetime.now(UTC) + timedelta(days=1)
+    jobs.upsert(
+        _date_job(
+            job_id="job-start-remove",
+            action_id="start-remove",
+            run_at=run_at,
+            payload={},
+        )
+    )
+    adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    scheduler_start = adapter._scheduler.start
+    removed: list[bool] = []
+
+    def start_with_remove(*args, **kwargs):
+        removed.append(adapter.remove("job-start-remove"))
+        return scheduler_start(*args, **kwargs)
+
+    adapter._scheduler.start = start_with_remove
+
+    adapter.start()
+
+    assert removed == [True]
+    assert jobs.get("job-start-remove") is None
+    assert not adapter.has_runtime_job("job-start-remove")
+    adapter.shutdown(wait=False)
+
+
 def test_adapter_restart_rebuilds_apscheduler_executor(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Restart Lifecycle" / "nika core.db")
     store.initialize()
