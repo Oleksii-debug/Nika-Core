@@ -506,7 +506,6 @@ def test_latency_clock_validation_happens_after_response_identity_and_usage() ->
         asyncio.run(runner.benchmark(_candidate(), evaluation))
 
 
-
 class _HostileText(str):
     def strip(self, chars=None):
         raise AssertionError("hostile text behavior executed")
@@ -626,6 +625,32 @@ def test_case_result_rejects_behavioral_metrics_before_conversion() -> None:
             output_tokens=1,
             total_tokens=2,
             resource_before=None,
+            resource_after=None,
+            accelerator_before=None,
+            accelerator_after=None,
+        )
+
+
+
+class _ResourceAlias(ResourceSnapshot):
+    pass
+
+
+def test_case_result_requires_exact_resource_snapshot_carriers() -> None:
+    with pytest.raises(TypeError, match="exact ResourceSnapshot"):
+        CaseBenchmarkResult(
+            candidate_id="candidate",
+            case_id="case",
+            score=1.0,
+            passed=True,
+            completion_succeeded=True,
+            latency_ms=1.0,
+            response_sha256="a" * 64,
+            error_code=None,
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+            resource_before=_ResourceAlias(1.0, 2.0, 3),
             resource_after=None,
             accelerator_before=None,
             accelerator_after=None,
