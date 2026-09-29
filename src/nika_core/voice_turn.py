@@ -24,6 +24,7 @@ from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureA
 from nika_core.wake_activation import (
     MAX_TRANSCRIPT_CHARS,
     WakeActivationDetector,
+    WakeActivationError,
     WakeActivationEvidence,
     WakeActivationOutcome,
 )
@@ -206,10 +207,23 @@ class OneShotVoiceTurnService:
                 ),
             )
 
-        wake = self._wake_detector.detect(
-            request_id=trusted.request_id,
-            transcript=transcription.text,
-        )
+        try:
+            wake = self._wake_detector.detect(
+                request_id=trusted.request_id,
+                transcript=transcription.text,
+            )
+        except WakeActivationError:
+            return VoiceTurnResult(
+                transcript=None,
+                evidence=VoiceTurnEvidence(
+                    request_id=trusted.request_id,
+                    status=VoiceTurnStatus.INVALID_COMPOSITION,
+                    capture=capture_result.evidence,
+                    transcription=transcription.evidence,
+                    wake=None,
+                    activated=False,
+                ),
+            )
         if (
             transcription.evidence.transcript_sha256 is None
             or wake.transcript_sha256 != transcription.evidence.transcript_sha256
