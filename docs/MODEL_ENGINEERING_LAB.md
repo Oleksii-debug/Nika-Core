@@ -55,6 +55,18 @@ evaluation-set identity.
 Raw prompts and expected answers are needed in memory to execute the benchmark, but they are not
 serialized into benchmark result evidence or accessible reports.
 
+## Execution configuration identity
+
+`BenchmarkExecutionConfig` binds the result-affecting runner settings currently owned by this
+foundation: request timeout and temperature. Its canonical JSON representation is hashed with
+SHA-256. That digest is carried in ModelRequest metadata, candidate and suite benchmark reports,
+machine/text evidence, and the Experiment Engine strategy reference.
+
+A report produced with one timeout/temperature pair therefore cannot be rebound to an experiment
+defined for another pair merely because candidate and evaluation identities match. Adding another
+result-affecting runner/scorer setting requires extending this identity before that setting can be
+used as comparable promotion evidence.
+
 ## Candidate identity and licensing
 
 `ModelCandidate` keeps inference-engine evidence separate from model evidence:
@@ -82,7 +94,7 @@ silently contaminate another candidate's latency/resource evidence.
 Each case:
 1. captures optional CPU/memory and accelerator snapshots;
 2. creates a deterministic benchmark request ID bound to candidate evidence, evaluation-set
-   evidence and case ID;
+   evidence and case ID, while request metadata binds the exact execution-config digest;
 3. calls the existing ModelGateway-compatible completion port with an exact provider ID and model;
 4. records typed `ModelGatewayError` failure without persisting exception text;
 5. validates response request/provider/provider-kind/model identity before scoring;
@@ -168,7 +180,8 @@ Fail closed on:
 - development-set use for a promotion Experiment definition;
 - unsupported promotion-policy metrics;
 - replay/evaluation-set evidence substitution;
-- same-candidate-ID model evidence substitution.
+- same-candidate-ID model evidence substitution;
+- cross-execution-config benchmark evidence substitution.
 
 Provider errors remain benchmark evidence as typed failures. Unexpected programming errors are not
 laundered into a normal provider failure.
