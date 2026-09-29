@@ -67,9 +67,6 @@ class _SubstitutedModel:
         return _Client()
 
 
-
-
-
 class _LoadAliasDriftModel(_SubstitutedModel):
     def __init__(self) -> None:
         super().__init__(cached=True)
@@ -181,7 +178,6 @@ def test_foundry_inspect_rejects_catalog_alias_substitution() -> None:
     assert model.chat_calls == 0
 
 
-
 def test_foundry_complete_rejects_alias_drift_after_native_load_before_chat() -> None:
     model = _LoadAliasDriftModel()
     manager = _Manager(model)
@@ -196,6 +192,7 @@ def test_foundry_complete_rejects_alias_drift_after_native_load_before_chat() ->
     _assert_alias_substitution_failure(exc_info.value)
     assert manager.catalog.requested_aliases == ["authorized-model"]
     assert model.load_calls == 1
+    assert model.is_loaded is False
     assert model.chat_calls == 0
 
 
