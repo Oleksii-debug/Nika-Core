@@ -748,3 +748,113 @@ def test_runner_rejects_behavioral_scorer_result_before_conversion() -> None:
 
     with pytest.raises(ModelBenchmarkError, match="non-canonical numeric score"):
         asyncio.run(runner.benchmark(_candidate(), evaluation))
+
+
+
+class _FalseyScorer:
+    def __bool__(self):
+        raise AssertionError("scorer truthiness executed")
+
+    def score(self, case, response):
+        return 1.0
+
+
+class _HostileResponseFieldGateway:
+    async def complete(self, request):
+        return ModelResponse(
+            request_id=_HostileText(request.request_id),
+            text="answer",
+            provider_id=request.provider_id,
+            provider_kind=request.provider_kind,
+            model=request.model,
+        )
+
+
+class _UsageAlias(ModelUsage):
+    pass
+
+
+class _UsageAliasGateway:
+    async def complete(self, request):
+        return ModelResponse(
+            request_id=request.request_id,
+            text="answer",
+            provider_id=request.provider_id,
+            provider_kind=request.provider_kind,
+            model=request.model,
+            usage=_UsageAlias(input_tokens=1, output_tokens=1, total_tokens=2),
+        )
+
+
+def test_runner_does_not_invoke_scorer_truthiness() -> None:
+    runner = ModelBenchmarkRunner(
+        _ProviderKindSpyGateway(),
+        scorer=_FalseyScorer(),
+        clock=_Clock((1.0, 1.1, 2.0, 2.1)),
+    )
+
+    report = asyncio.run(runner.benchmark(_candidate(), _evaluation_set()))
+
+    assert report.completion_rate == 1.0
+
+
+def test_runner_rejects_behavioral_response_text_carrier_before_comparison() -> None:
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+    runner = ModelBenchmarkRunner(
+        _HostileResponseFieldGateway(),
+        clock=_Clock((1.0,)),
+    )
+
+    with pytest.raises(ModelBenchmarkError, match="request_id must be canonical text"):
+        asyncio.run(runner.benchmark(_candidate(), evaluation))
+
+
+def test_runner_requires_exact_usage_carrier() -> None:
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+    runner = ModelBenchmarkRunner(
+        _UsageAliasGateway(),
+        clock=_Clock((1.0,)),
+    )
+
+    with pytest.raises(ModelBenchmarkError, match="exact ModelUsage"):
+        asyncio.run(runner.benchmark(_candidate(), evaluation))
+
+
+def test_benchmark_suite_requires_canonical_candidate_tuple() -> None:
+    candidate = _candidate()
+
+    with pytest.raises(TypeError, match="canonical tuple"):
+        asyncio.run(
+            ModelBenchmarkRunner(_FakeGateway()).benchmark_suite(
+                [candidate],
+                _evaluation_set(),
+            )
+        )
