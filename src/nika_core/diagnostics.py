@@ -11,6 +11,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Iterable
 
+from pydantic import ValidationError
+
 from nika_core.config import AppConfig
 from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
 from nika_core.data.schema import SCHEMA_VERSION
@@ -238,7 +240,7 @@ def collect_diagnostics(config: AppConfig | None = None) -> DiagnosticReport:
     if config is None:
         try:
             config = AppConfig()
-        except Exception:
+        except ValidationError:
             return DiagnosticReport(
                 app_version="unknown",
                 runtime_mode=runtime_mode,
