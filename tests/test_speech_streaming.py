@@ -11,6 +11,7 @@ from nika_core.speech.contracts import (
     SpeechReceipt,
     SpeechRequest,
 )
+import nika_core.speech.streaming as speech_streaming
 from nika_core.speech.streaming import (
     MAX_STREAM_PENDING_CHARS,
     MAX_STREAM_TOTAL_CHARS,
@@ -143,11 +144,11 @@ def test_stream_accepts_more_fragments_while_current_speech_is_active() -> None:
     port = BlockingSpeechPort()
     stream = IncrementalSpeechStream(port)
 
-    stream.feed("Перше.")
+    stream.feed("Перше. ")
     assert port.started.wait(timeout=1)
 
-    stream.feed(" Друге.")
-    assert stream.snapshot().accepted_characters == len("Перше. Друге.")
+    stream.feed("Друге. ")
+    assert stream.snapshot().accepted_characters == len("Перше. Друге. ")
 
     port.release.set()
     _wait_for_request_count(port, 2)
@@ -161,9 +162,9 @@ def test_stream_pins_selected_voice_after_first_chunk() -> None:
     port = FakeSpeechPort()
     stream = IncrementalSpeechStream(port)
 
-    stream.feed("Перше.")
+    stream.feed("Перше. ")
     _wait_for_request_count(port, 1)
-    stream.feed(" Друге.")
+    stream.feed("Друге. ")
     _wait_for_request_count(port, 2)
     stream.finish()
     assert stream.wait(1)
@@ -171,6 +172,30 @@ def test_stream_pins_selected_voice_after_first_chunk() -> None:
     assert port.requests[0].voice_id is None
     assert port.requests[1].voice_id == "Nika Test Voice"
     assert stream.result().voice_id == "Nika Test Voice"
+
+
+def test_sentence_boundary_waits_for_disambiguating_following_fragment() -> None:
+    assert speech_streaming._first_sentence_boundary("Версія 3.", limit=200) is None
+    text = "Версія 3.14 працює. "
+    boundary = speech_streaming._first_sentence_boundary(text, limit=200)
+    assert boundary == len("Версія 3.14 працює.")
+
+
+def test_split_decimal_is_spoken_as_one_sentence() -> None:
+    port = FakeSpeechPort()
+    stream = IncrementalSpeechStream(port, chunk_chars=200)
+
+    stream.feed("Версія 3.")
+    time.sleep(0.03)
+    assert port.requests == []
+
+    stream.feed("14 працює. ")
+    _wait_for_request_count(port, 1)
+
+    assert port.requests[0].text == "Версія 3.14 працює."
+    stream.finish()
+    assert stream.wait(1)
+    assert stream.result().chunk_count == 1
 
 
 def test_chunk_threshold_starts_output_without_sentence_boundary() -> None:
@@ -191,7 +216,7 @@ def test_cancel_reaches_active_speak_and_prevents_later_output() -> None:
     port = CancelAwareSpeechPort()
     stream = IncrementalSpeechStream(port)
 
-    stream.feed("Секретний текст.")
+    stream.feed("Секретний текст. ")
     assert port.started.wait(timeout=1)
 
     stream.cancel()
@@ -222,7 +247,7 @@ def test_pending_buffer_is_bounded_while_speech_is_blocked() -> None:
     port = BlockingSpeechPort()
     stream = IncrementalSpeechStream(port)
 
-    stream.feed("Початок.")
+    stream.feed("Початок. ")
     assert port.started.wait(timeout=1)
 
     with pytest.raises(SpeechError) as error:
@@ -346,7 +371,7 @@ def test_feed_after_cancel_is_rejected_without_accepting_more_text() -> None:
     port = BlockingSpeechPort()
     stream = IncrementalSpeechStream(port)
 
-    stream.feed("Початок.")
+    stream.feed("Початок. ")
     assert port.started.wait(timeout=1)
     accepted_before_cancel = stream.snapshot().accepted_characters
 
