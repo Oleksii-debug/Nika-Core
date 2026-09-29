@@ -467,3 +467,30 @@ def test_candidate_verification_rejects_behavioral_evidence_ref_without_executio
             verification.VerificationState.UNKNOWN,
             (HostileText("actions://core/example"),),  # type: ignore[arg-type]
         )
+
+
+def test_incomplete_exact_evidence_is_normalized_to_verification_error() -> None:
+    forged = object.__new__(verification.ExactShaCheckEvidence)
+    object.__setattr__(forged, "check_id", "core")
+
+    with pytest.raises(verification.VerificationError, match="evidence is incomplete"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (forged, evidence("factory", SHA_A, verification.CheckState.PASS)),
+            REQUIRED,
+        )
+
+
+def test_evidence_subclass_is_rejected_before_attribute_behavior() -> None:
+    class HostileEvidence(verification.ExactShaCheckEvidence):
+        def __getattribute__(self, name):
+            raise AssertionError(f"caller attribute behavior executed: {name}")
+
+    hostile = object.__new__(HostileEvidence)
+
+    with pytest.raises(verification.VerificationError, match="must be ExactShaCheckEvidence"):
+        verification.classify_candidate_verification(
+            SHA_A,
+            (hostile, evidence("factory", SHA_A, verification.CheckState.PASS)),
+            REQUIRED,
+        )
