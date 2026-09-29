@@ -477,7 +477,7 @@ def test_constructor_rejects_invalid_stream_bounds(kwargs: dict[str, object]) ->
 
 
 def test_feed_after_cancel_is_rejected_without_accepting_more_text() -> None:
-    port = BlockingSpeechPort()
+    port = CancelAwareSpeechPort()
     stream = IncrementalSpeechStream(port)
 
     stream.feed("Початок. ")
@@ -490,7 +490,6 @@ def test_feed_after_cancel_is_rejected_without_accepting_more_text() -> None:
 
     assert error.value.code is SpeechErrorCode.INVALID_REQUEST
     assert stream.snapshot().accepted_characters == accepted_before_cancel
-    port.release.set()
     assert stream.wait(1)
     assert stream.snapshot().state is SpeechStreamState.CANCELLED
 
