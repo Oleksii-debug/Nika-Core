@@ -67,6 +67,29 @@ class _SubstitutedModel:
         return _Client()
 
 
+
+
+
+class _LoadAliasDriftModel(_SubstitutedModel):
+    def __init__(self) -> None:
+        super().__init__(cached=True)
+        self.alias = "authorized-model"
+
+    def load(self) -> None:
+        super().load()
+        self.alias = "substituted-model"
+
+
+class _DownloadAliasDriftModel(_SubstitutedModel):
+    def __init__(self) -> None:
+        super().__init__(cached=False)
+        self.alias = "authorized-model"
+
+    def download(self, *, cancel_event: object | None = None) -> None:
+        super().download(cancel_event=cancel_event)
+        self.alias = "substituted-model"
+
+
 class _SubstitutingCatalog:
     def __init__(self, model: _SubstitutedModel) -> None:
         self.model = model
@@ -156,3 +179,37 @@ def test_foundry_inspect_rejects_catalog_alias_substitution() -> None:
     assert model.load_calls == 0
     assert model.download_calls == 0
     assert model.chat_calls == 0
+
+
+
+def test_foundry_complete_rejects_alias_drift_after_native_load_before_chat() -> None:
+    model = _LoadAliasDriftModel()
+    manager = _Manager(model)
+    provider = FoundryLocalProvider(
+        default_model="authorized-model",
+        manager_factory=lambda: manager,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(_request()))
+
+    _assert_alias_substitution_failure(exc_info.value)
+    assert manager.catalog.requested_aliases == ["authorized-model"]
+    assert model.load_calls == 1
+    assert model.chat_calls == 0
+
+
+def test_foundry_download_rejects_alias_drift_after_native_download() -> None:
+    model = _DownloadAliasDriftModel()
+    manager = _Manager(model)
+    provider = FoundryLocalProvider(
+        default_model="authorized-model",
+        manager_factory=lambda: manager,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.download_model(_authorization(), timeout_seconds=1.0))
+
+    _assert_alias_substitution_failure(exc_info.value)
+    assert manager.catalog.requested_aliases == ["authorized-model"]
+    assert model.download_calls == 1
