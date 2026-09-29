@@ -5,13 +5,13 @@ import time
 
 import pytest
 
+import nika_core.speech.streaming as speech_streaming
 from nika_core.speech.contracts import (
     SpeechError,
     SpeechErrorCode,
     SpeechReceipt,
     SpeechRequest,
 )
-import nika_core.speech.streaming as speech_streaming
 from nika_core.speech.streaming import (
     MAX_STREAM_PENDING_CHARS,
     MAX_STREAM_TOTAL_CHARS,
