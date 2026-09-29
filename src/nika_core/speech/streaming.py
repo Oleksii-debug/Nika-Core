@@ -118,7 +118,10 @@ class IncrementalSpeechStream:
                 "speech stream fragment must not contain NUL",
             )
         with self._condition:
-            if self._state is not SpeechStreamState.RUNNING:
+            if (
+                self._state is not SpeechStreamState.RUNNING
+                or self._cancel_event.is_set()
+            ):
                 raise SpeechError(
                     SpeechErrorCode.INVALID_REQUEST,
                     "speech stream no longer accepts input",
