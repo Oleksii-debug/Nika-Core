@@ -247,3 +247,29 @@ def test_binding_can_be_introduced_when_existing_job_has_none(tmp_path: Path) ->
     restored = store.get("job-1")
     assert restored is not None
     assert restored.payload[IMMUTABLE_JOB_BINDING_KEY] == "binding-1"
+
+
+@pytest.mark.parametrize(
+    ("column", "stored_json"),
+    (
+        ("payload_json", '{"task_id":"one","task_id":"two"}'),
+        ("trigger_json", '{"run_date":"2030","run_date":"2040"}'),
+    ),
+)
+def test_duplicate_persisted_json_keys_fail_closed(
+    tmp_path: Path,
+    column: str,
+    stored_json: str,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            f"UPDATE scheduled_jobs SET {column} = ? WHERE job_id = ?",
+            (stored_json, "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="is corrupt"):
+        store.get("job-1")
