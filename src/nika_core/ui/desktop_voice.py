@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import math
 import threading
+import time
 import unicodedata
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -101,6 +102,7 @@ class DesktopVoiceTurnController:
         self._active_settled: threading.Event | None = None
         self._submitting_request_id: str | None = None
         self._cancel_requested_while_submitting = False
+        self._submission_settled: threading.Event | None = None
         self._snapshot = DesktopVoiceSnapshot(
             status=DesktopVoiceStatus.IDLE,
             request_id=None,
@@ -118,8 +120,10 @@ class DesktopVoiceTurnController:
             request_id = f"desktop-voice-{uuid.uuid4().hex}"
             started = threading.Event()
             settled = threading.Event()
+            submission_settled = threading.Event()
             self._submitting_request_id = request_id
             self._cancel_requested_while_submitting = False
+            self._submission_settled = submission_settled
             self._snapshot = DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.RUNNING,
                 request_id=request_id,
@@ -139,6 +143,7 @@ class DesktopVoiceTurnController:
                         request_id=request_id,
                         message="Не вдалося запустити голосовий ввід.",
                     )
+            submission_settled.set()
             raise ValueError("Не вдалося запустити голосовий ввід.") from exc
         if type(future) is not Future:
             coroutine.close()
@@ -150,6 +155,7 @@ class DesktopVoiceTurnController:
                         request_id=request_id,
                         message="Desktop runtime повернув некоректний voice future.",
                     )
+            submission_settled.set()
             raise TypeError("submit must return concurrent.futures.Future")
 
         with self._lock:
@@ -163,6 +169,7 @@ class DesktopVoiceTurnController:
             self._active_started = started
             self._active_settled = settled
 
+        submission_settled.set()
         future.add_done_callback(
             lambda done, identity=request_id: self._finish(identity, done)
         )
@@ -239,32 +246,45 @@ class DesktopVoiceTurnController:
         if not math.isfinite(timeout) or timeout <= 0.0 or timeout > 30.0:
             raise ValueError("timeout_seconds must be finite and in the range (0, 30]")
 
-        with self._lock:
-            self._reap_cancelled_settlement_locked()
-            if self._submitting_request_id is not None:
-                self._cancel_requested_while_submitting = True
-                self._snapshot = DesktopVoiceSnapshot(
-                    status=DesktopVoiceStatus.CANCELLING,
-                    request_id=self._submitting_request_id,
-                    message="Скасування голосового вводу завершується.",
-                )
+        deadline = time.monotonic() + timeout
+        while True:
+            with self._lock:
+                self._reap_cancelled_settlement_locked()
+                if self._submitting_request_id is not None:
+                    self._cancel_requested_while_submitting = True
+                    submission_settled = self._submission_settled
+                    self._snapshot = DesktopVoiceSnapshot(
+                        status=DesktopVoiceStatus.CANCELLING,
+                        request_id=self._submitting_request_id,
+                        message="Скасування голосового вводу завершується.",
+                    )
+                    active = None
+                    started = None
+                    settled = None
+                else:
+                    submission_settled = None
+                    active = self._active
+                    started = self._active_started
+                    settled = self._active_settled
+            if submission_settled is None:
+                break
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.0 or not submission_settled.wait(timeout=remaining):
                 raise RuntimeError(
-                    "voice submission remained in progress during desktop shutdown"
+                    "voice submission did not settle before the desktop shutdown deadline"
                 )
-            active = self._active
-            started = self._active_started
-            settled = self._active_settled
+
         if active is None:
             return
-
         if not active.done():
             active.cancel()
 
+        remaining = max(0.0, deadline - time.monotonic())
         if (
             started is not None
             and started.is_set()
             and settled is not None
-            and not settled.wait(timeout=timeout)
+            and not settled.wait(timeout=remaining)
         ):
             raise RuntimeError(
                 "voice coroutine did not settle before the desktop shutdown deadline"
@@ -384,6 +404,7 @@ class DesktopVoiceTurnController:
     def _clear_submission_locked(self) -> None:
         self._submitting_request_id = None
         self._cancel_requested_while_submitting = False
+        self._submission_settled = None
 
     @staticmethod
     def _result_snapshot(
