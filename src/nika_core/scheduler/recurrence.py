@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -15,6 +16,8 @@ _RECURRENCE_PAYLOAD_KEY = "_nika_recurrence_v1"
 _TARGET_PAYLOAD_KEY = "target_payload"
 _TASK_ID_KEY = "task_id"
 _RECURRENCE_VERSION = 2
+_MAX_PAYLOAD_DEPTH = 32
+_MAX_PAYLOAD_JSON_BYTES = 262_144
 
 
 class MissedRunPolicy(StrEnum):
@@ -127,7 +130,7 @@ class DurableRecurrenceService:
             terminal_reason = None
             next_due = anchor
 
-        user_payload = dict(payload or {})
+        user_payload = _canonical_payload(payload)
         job_id = _job_id(recurrence_key)
         existing = self._jobs.get(job_id)
         if existing is not None:
@@ -224,6 +227,8 @@ class DurableRecurrenceService:
         return cancelled
 
     def action_handler(self, payload: dict[str, Any]) -> None:
+        if type(payload) is not dict:
+            raise TypeError("recurrence action payload must be an exact dict")
         recurrence_id = _required_text(payload.get("recurrence_id"), "recurrence_id")
         state, target_payload = self._required(recurrence_id)
         if state.status is not RecurrenceStatus.ACTIVE:
@@ -589,7 +594,7 @@ def _validate_interval_origin(
 
 
 def _parse_iso(value: object, label: str) -> datetime:
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise TypeError(f"{label} must be a timezone-aware ISO-8601 string")
     try:
         parsed = datetime.fromisoformat(value)
@@ -605,7 +610,7 @@ def _parse_optional_iso(value: object, label: str) -> datetime | None:
 
 
 def _require_aware_utc(value: datetime, label: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None:
+    if type(value) is not datetime or value.tzinfo is None:
         raise ValueError(f"{label} must be timezone-aware")
     return value.astimezone(UTC)
 
@@ -615,7 +620,7 @@ def _iso(value: datetime) -> str:
 
 
 def _canonical_task_id(value: object, *, label: str = "task_id") -> str:
-    if not isinstance(value, str) or not value:
+    if type(value) is not str or not value:
         raise ValueError(f"{label} is required")
     if value != value.strip():
         raise ValueError(f"{label} must be canonical")
@@ -623,9 +628,58 @@ def _canonical_task_id(value: object, *, label: str = "task_id") -> str:
 
 
 def _required_text(value: object, label: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{label} is required")
     return value.strip()
+
+
+def _canonical_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if payload is None:
+        return {}
+    if type(payload) is not dict:
+        raise TypeError("payload must be an exact dict")
+    detached = _canonical_json_value(payload, label="payload", depth=0)
+    assert type(detached) is dict
+    encoded = json.dumps(
+        detached,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if len(encoded) > _MAX_PAYLOAD_JSON_BYTES:
+        raise ValueError("payload exceeds durable JSON size limit")
+    return detached
+
+
+def _canonical_json_value(value: Any, *, label: str, depth: int) -> Any:
+    if depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError(f"{label} exceeds durable JSON nesting limit")
+    if value is None or type(value) is bool or type(value) is int:
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError(f"{label} contains a non-finite number")
+        return value
+    if type(value) is str:
+        return value
+    if type(value) is list:
+        return [
+            _canonical_json_value(item, label=label, depth=depth + 1)
+            for item in value
+        ]
+    if type(value) is dict:
+        detached: dict[str, Any] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError(f"{label} keys must be exact strings")
+            detached[key] = _canonical_json_value(
+                item,
+                label=label,
+                depth=depth + 1,
+            )
+        return detached
+    raise TypeError(f"{label} must contain only exact JSON-compatible values")
 
 
 def _utc_now() -> datetime:
