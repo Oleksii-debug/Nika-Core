@@ -636,6 +636,65 @@ def test_case_result_rejects_behavioral_metrics_before_conversion() -> None:
         )
 
 
+def test_case_result_rejects_impossible_completion_evidence() -> None:
+    with pytest.raises(ValueError, match="passing quality evidence"):
+        CaseBenchmarkResult(
+            candidate_id="candidate",
+            case_id="case",
+            score=1.0,
+            passed=True,
+            completion_succeeded=False,
+            latency_ms=1.0,
+            response_sha256=None,
+            error_code=ModelErrorCode.UNAVAILABLE,
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            resource_before=None,
+            resource_after=None,
+            accelerator_before=None,
+            accelerator_after=None,
+        )
+
+    with pytest.raises(ValueError, match="requires response_sha256"):
+        CaseBenchmarkResult(
+            candidate_id="candidate",
+            case_id="case",
+            score=1.0,
+            passed=True,
+            completion_succeeded=True,
+            latency_ms=1.0,
+            response_sha256=None,
+            error_code=None,
+            input_tokens=1,
+            output_tokens=1,
+            total_tokens=2,
+            resource_before=None,
+            resource_after=None,
+            accelerator_before=None,
+            accelerator_after=None,
+        )
+
+    with pytest.raises(ValueError, match="token evidence"):
+        CaseBenchmarkResult(
+            candidate_id="candidate",
+            case_id="case",
+            score=0.0,
+            passed=False,
+            completion_succeeded=False,
+            latency_ms=1.0,
+            response_sha256=None,
+            error_code=ModelErrorCode.UNAVAILABLE,
+            input_tokens=1,
+            output_tokens=None,
+            total_tokens=None,
+            resource_before=None,
+            resource_after=None,
+            accelerator_before=None,
+            accelerator_after=None,
+        )
+
+
 class _ResourceAlias(ResourceSnapshot):
     pass
 
