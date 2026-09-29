@@ -16,6 +16,59 @@ from nika_core.tools import (
 )
 
 
+def _exact_utf8_text(
+    value: object,
+    *,
+    field: str,
+    non_empty: bool = False,
+) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{field} must be an exact string")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8") from exc
+    if non_empty and not value.strip():
+        raise ValueError(f"{field} must not be empty")
+    return value
+
+
+def _exact_tool_risk(value: object) -> ToolRisk:
+    if type(value) is not ToolRisk:
+        raise TypeError("default_risk must be an exact ToolRisk")
+    return value
+
+
+def _snapshot_tool_call(call: ToolCall) -> ToolCall:
+    if type(call) is not ToolCall:
+        raise TypeError("call must be an exact ToolCall")
+    try:
+        call_id = _exact_utf8_text(call.call_id, field="call_id")
+        tool_id = _exact_utf8_text(call.tool_id, field="tool_id", non_empty=True)
+        arguments = call.arguments
+        approved = call.approved
+        task_id = call.task_id
+        authorization = call.authorization
+    except AttributeError as exc:
+        raise ValueError("call is incomplete") from exc
+
+    if type(arguments) is not dict:
+        raise TypeError("arguments must be an exact dict")
+    if type(approved) is not bool:
+        raise TypeError("approved must be an exact bool")
+    if task_id is not None:
+        task_id = _exact_utf8_text(task_id, field="task_id")
+
+    return ToolCall(
+        call_id=call_id,
+        tool_id=tool_id,
+        arguments=dict(arguments),
+        approved=approved,
+        task_id=task_id,
+        authorization=authorization,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class MCPServerConfig:
     server_id: str
@@ -23,8 +76,8 @@ class MCPServerConfig:
     default_risk: ToolRisk = ToolRisk.EXTERNAL_SIDE_EFFECT
 
     def __post_init__(self) -> None:
-        if not self.server_id.strip():
-            raise ValueError("server_id must not be empty")
+        _exact_utf8_text(self.server_id, field="server_id", non_empty=True)
+        _exact_tool_risk(self.default_risk)
 
 
 class MCPClientAdapter:
@@ -37,43 +90,70 @@ class MCPClientAdapter:
         approval_policy: ApprovalPolicy | None = None,
         effect_guard: ToolEffectGuard | None = None,
     ) -> None:
-        self._config = config
+        if type(config) is not MCPServerConfig:
+            raise TypeError("config must be an exact MCPServerConfig")
+        try:
+            server_id = _exact_utf8_text(
+                config.server_id,
+                field="server_id",
+                non_empty=True,
+            )
+            target = config.target
+            default_risk = _exact_tool_risk(config.default_risk)
+        except AttributeError as exc:
+            raise ValueError("config is incomplete") from exc
+
+        self._server_id = server_id
+        self._target = target
+        self._default_risk = default_risk
         self._approval_policy = approval_policy
         self._effect_guard = effect_guard
 
     async def list_tools(self) -> tuple[ToolSpec, ...]:
-        async with Client(self._config.target) as client:
+        async with Client(self._target) as client:
             result = await client.list_tools()
         specs: list[ToolSpec] = []
         for tool in result.tools:
+            tool_name = _exact_utf8_text(
+                tool.name,
+                field="MCP tool name",
+                non_empty=True,
+            )
             specs.append(
                 ToolSpec(
-                    tool_id=f"mcp:{self._config.server_id}:{tool.name}",
-                    description=tool.description or tool.title or tool.name,
-                    risk=self._config.default_risk,
+                    tool_id=f"mcp:{self._server_id}:{tool_name}",
+                    description=tool.description or tool.title or tool_name,
+                    risk=self._default_risk,
                     input_schema=dict(tool.input_schema or {}),
                 )
             )
         return tuple(specs)
 
     async def call(self, call: ToolCall) -> ToolResult:
-        prefix = f"mcp:{self._config.server_id}:"
-        if not call.tool_id.startswith(prefix):
-            return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="wrong MCP server")
-        tool_name = call.tool_id.removeprefix(prefix)
-        if not tool_name:
+        canonical_call = _snapshot_tool_call(call)
+        prefix = f"mcp:{self._server_id}:"
+        if not canonical_call.tool_id.startswith(prefix):
             return ToolResult(
-                call_id=call.call_id,
-                tool_id=call.tool_id,
+                call_id=canonical_call.call_id,
+                tool_id=canonical_call.tool_id,
+                error="wrong MCP server",
+            )
+        tool_name = canonical_call.tool_id.removeprefix(prefix)
+        if not tool_name.strip():
+            return ToolResult(
+                call_id=canonical_call.call_id,
+                tool_id=canonical_call.tool_id,
                 error="invalid MCP tool id",
             )
+        _exact_utf8_text(tool_name, field="MCP tool name", non_empty=True)
         spec = ToolSpec(
-            tool_id=call.tool_id,
+            tool_id=canonical_call.tool_id,
             description=f"MCP tool {tool_name}",
-            risk=self._config.default_risk,
+            risk=self._default_risk,
         )
+
         async def invoke(arguments: dict[str, object]) -> object:
-            async with Client(self._config.target) as client:
+            async with Client(self._target) as client:
                 result = await client.call_tool(tool_name, arguments)
             if result.is_error:
                 raise RuntimeError("MCP tool failed")
@@ -86,4 +166,4 @@ class MCPClientAdapter:
             effect_guard=self._effect_guard,
         )
         executor.register(spec, invoke)
-        return await executor.execute(call)
+        return await executor.execute(canonical_call)
