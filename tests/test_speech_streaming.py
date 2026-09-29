@@ -188,6 +188,20 @@ def test_sentence_boundary_accepts_closing_quote_before_whitespace() -> None:
     assert boundary == len('Вона сказала: "Готово!" ')
 
 
+def test_sentence_boundary_never_exceeds_chunk_limit() -> None:
+    text = 'abcd."' + ('"' * 50) + " tail"
+
+    assert speech_streaming._first_sentence_boundary(text, limit=5) is None
+
+    chunk, _remaining, consumed = speech_streaming._pop_ready_chunk(
+        text,
+        chunk_chars=5,
+        flush=False,
+    )
+    assert chunk == "abcd."
+    assert consumed == 5
+
+
 def test_split_decimal_is_spoken_as_one_sentence() -> None:
     port = FakeSpeechPort()
     stream = IncrementalSpeechStream(port, chunk_chars=200)
@@ -270,6 +284,35 @@ def test_successful_chunk_is_accounted_before_late_cancellation_stops_stream() -
         stream.result()
 
     assert error.value.code is SpeechErrorCode.PROCESS_CANCELLED
+
+
+def test_cancel_signal_does_not_mask_non_cancel_speech_failure() -> None:
+    class FailingOnCancelPort(FakeSpeechPort):
+        def speak(
+            self,
+            request: SpeechRequest,
+            *,
+            timeout_seconds: float = 120.0,
+            cancel_event: threading.Event | None = None,
+        ) -> SpeechReceipt:
+            del request, timeout_seconds
+            assert cancel_event is not None
+            cancel_event.set()
+            raise SpeechError(
+                SpeechErrorCode.PROCESS_FAILED,
+                "CANARY_ENGINE_FAILURE",
+            )
+
+    stream = IncrementalSpeechStream(FailingOnCancelPort())
+    stream.feed("Помилка. ")
+    assert stream.wait(1)
+
+    assert stream.snapshot().state is SpeechStreamState.FAILED
+    with pytest.raises(SpeechError) as error:
+        stream.result()
+
+    assert error.value.code is SpeechErrorCode.PROCESS_FAILED
+    assert "CANARY" not in str(error.value)
 
 
 def test_feed_rejects_behavioral_string_without_invoking_it() -> None:
