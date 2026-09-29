@@ -228,7 +228,26 @@ def test_invalid_persisted_binding_fails_closed(
         )
 
     with pytest.raises(ValueError, match="persisted scheduled job immutable binding"):
+        store.get("job-1")
+    with pytest.raises(ValueError, match="persisted scheduled job immutable binding"):
         store.upsert(_job())
+
+
+def test_empty_persisted_trigger_fails_direct_read_and_list(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET trigger_json = ? WHERE job_id = ?",
+            ("{}", "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="persisted trigger configuration is corrupt"):
+        store.get("job-1")
+    with pytest.raises(ValueError, match="persisted trigger configuration is corrupt"):
+        store.list_enabled()
 
 
 def test_binding_can_be_introduced_when_existing_job_has_none(tmp_path: Path) -> None:

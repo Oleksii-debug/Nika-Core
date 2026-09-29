@@ -317,12 +317,20 @@ def _from_row(row: object) -> ScheduledJob:
         if grace_raw is None
         else _stored_positive_int(grace_raw, "persisted misfire_grace_seconds")
     )
+    trigger = _decode_json_object(row["trigger_json"], "persisted trigger")
+    if not trigger:
+        raise ValueError("persisted trigger configuration is corrupt")
+    payload = _decode_json_object(row["payload_json"], "persisted payload")
+    _validated_binding(
+        payload.get(IMMUTABLE_JOB_BINDING_KEY),
+        "persisted scheduled job immutable binding",
+    )
     return ScheduledJob(
         job_id=job_id,
         action_id=action_id,
         trigger_kind=trigger_kind,
-        trigger=_decode_json_object(row["trigger_json"], "persisted trigger"),
-        payload=_decode_json_object(row["payload_json"], "persisted payload"),
+        trigger=trigger,
+        payload=payload,
         enabled=enabled,
         coalesce=coalesce,
         max_instances=max_instances,
