@@ -531,6 +531,35 @@ def test_study_material_rejects_signed_url_signature_credentials(source_ref: str
         _material(source_ref=source_ref)
 
 
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "sig=canary-signature",
+        "signature=canary-signature",
+        "s-i-g=canary-signature",
+    ],
+)
+def test_study_material_rejects_bare_signature_credential_assignments(
+    source_ref: str,
+) -> None:
+    with pytest.raises(ValueError, match="credential"):
+        _material(source_ref=source_ref)
+
+
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "designature=public-label",
+        "signature_count=3",
+        "notes/designature=public-label",
+    ],
+)
+def test_study_material_preserves_noncredential_signature_like_bare_text(
+    source_ref: str,
+) -> None:
+    assert _material(source_ref=source_ref).source_ref == source_ref
+
+
 def test_study_material_keeps_benign_signature_metadata(tmp_path) -> None:
     safe_ref = "https://example.test/book.pdf?signature_count=3&chapter=4"
     path, _, queue = _services(tmp_path)
