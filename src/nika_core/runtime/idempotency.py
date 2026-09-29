@@ -88,14 +88,34 @@ def _stored_timestamp(row: sqlite3.Row, field_name: str) -> str:
     return value
 
 
+def _require_json_object_keys(value: object) -> None:
+    if isinstance(value, dict):
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                raise ValueError("idempotency result object keys must be exact text")
+            try:
+                key.encode("utf-8", errors="strict")
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    "idempotency result object keys must be valid UTF-8 text"
+                ) from exc
+            _require_json_object_keys(item)
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _require_json_object_keys(item)
+
+
 def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
     if result is None:
         return None
     if not isinstance(result, Mapping):
         raise TypeError("idempotency result must be a mapping when provided")
     try:
+        payload = dict(result)
+        _require_json_object_keys(payload)
         serialized = json.dumps(
-            dict(result),
+            payload,
             ensure_ascii=False,
             sort_keys=True,
             allow_nan=False,
