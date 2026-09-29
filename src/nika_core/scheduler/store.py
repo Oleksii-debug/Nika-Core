@@ -194,8 +194,7 @@ def _canonical_json_object(
         raise ValueError(f"{label} exceeds durable JSON nesting limit")
     detached: dict[str, Any] = {}
     for key, item in value.items():
-        if type(key) is not str:
-            raise TypeError(f"{label} keys must be exact strings")
+        _exact_text(key, f"{label} key")
         detached[key] = _canonical_json_value(
             item,
             label,
@@ -207,8 +206,10 @@ def _canonical_json_object(
 def _canonical_json_value(value: object, label: str, *, depth: int) -> Any:
     if depth > _MAX_JSON_DEPTH:
         raise ValueError(f"{label} exceeds durable JSON nesting limit")
-    if value is None or type(value) is bool or type(value) is int or type(value) is str:
+    if value is None or type(value) is bool or type(value) is int:
         return value
+    if type(value) is str:
+        return _exact_text(value, label)
     if type(value) is float:
         if not math.isfinite(value):
             raise ValueError(f"{label} contains a non-finite number")
@@ -268,6 +269,10 @@ def _strict_json_object(
 def _exact_text(value: object, label: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{label} must be an exact string")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must be valid UTF-8 text") from exc
     return value
 
 
