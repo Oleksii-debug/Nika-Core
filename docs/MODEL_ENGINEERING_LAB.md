@@ -58,14 +58,16 @@ serialized into benchmark result evidence or accessible reports.
 ## Execution configuration identity
 
 `BenchmarkExecutionConfig` binds the result-affecting runner settings currently owned by this
-foundation: request timeout and temperature. Its canonical JSON representation is hashed with
+foundation: request timeout, temperature and scorer identity. Its canonical JSON representation is hashed with
 SHA-256. That digest is carried in ModelRequest metadata, candidate and suite benchmark reports,
 machine/text evidence, and the Experiment Engine strategy reference.
 
-A report produced with one timeout/temperature pair therefore cannot be rebound to an experiment
-defined for another pair merely because candidate and evaluation identities match. Adding another
-result-affecting runner/scorer setting requires extending this identity before that setting can be
-used as comparable promotion evidence.
+A report produced with one timeout/temperature/scorer combination therefore cannot be rebound to
+an experiment defined for another combination merely because candidate and evaluation identities
+match. The built-in Unicode NFC exact-match scorer has a stable canonical identity; a custom
+scorer must provide an explicit stable scorer ID before any benchmark execution. Adding another
+result-affecting runner setting requires extending this identity before that setting can be used
+as comparable promotion evidence.
 
 ## Candidate identity and licensing
 
@@ -181,7 +183,8 @@ Fail closed on:
 - unsupported promotion-policy metrics;
 - replay/evaluation-set evidence substitution;
 - same-candidate-ID model evidence substitution;
-- cross-execution-config benchmark evidence substitution.
+- cross-execution-config benchmark evidence substitution;
+- custom scorer execution without a stable scorer identity.
 
 Provider errors remain benchmark evidence as typed failures. Unexpected programming errors are not
 laundered into a normal provider failure.
