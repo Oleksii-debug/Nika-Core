@@ -66,6 +66,13 @@ class DiagnosticReport:
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), ensure_ascii=False, sort_keys=True)
 
+    def exit_code(self, *, strict: bool = False) -> int:
+        if self.status is CheckStatus.FAIL:
+            return 2
+        if strict and self.status is CheckStatus.WARN:
+            return 1
+        return 0
+
     def to_text(self) -> str:
         lines = [
             f"Nika Core diagnostics: {self.status.value.upper()}",
