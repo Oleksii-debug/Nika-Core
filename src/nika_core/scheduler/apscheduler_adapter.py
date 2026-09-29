@@ -144,7 +144,14 @@ class APSchedulerAdapter(SchedulerPort):
     def _sync_runtime_job(self, job_id: str) -> ScheduledJob | None:
         job_id = _require_job_id(job_id)
         job = self._jobs.get(job_id)
-        if job is None or not job.enabled or not self._task_authority_allows(job):
+        if job is None or not job.enabled:
+            if self._scheduler.get_job(job_id) is not None:
+                self._scheduler.remove_job(job_id)
+            return None
+        if not self._task_authority_allows(job):
+            current = self._jobs.get(job_id)
+            if current is not None and current != job:
+                return self._sync_runtime_job(job_id)
             if self._scheduler.get_job(job_id) is not None:
                 self._scheduler.remove_job(job_id)
             return None
@@ -258,8 +265,12 @@ class APSchedulerAdapter(SchedulerPort):
         reason: str,
         task_state: TaskState | None = None,
     ) -> None:
-        self._jobs.set_enabled(job.job_id, False)
-        if self._started and self._scheduler.get_job(job.job_id) is not None:
+        if not self._jobs.disable_if_current(job):
+            return
+        if (
+            (self._started or self._starting)
+            and self._scheduler.get_job(job.job_id) is not None
+        ):
             self._scheduler.remove_job(job.job_id)
         if self._audit is not None:
             payload: dict[str, Any] = {
