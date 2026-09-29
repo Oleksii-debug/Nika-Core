@@ -79,13 +79,13 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> CandidateBenchmarkReport:
-        if isinstance(timeout_seconds, bool):
-            raise ValueError("timeout_seconds must not be boolean")
+        if type(timeout_seconds) not in (int, float):
+            raise TypeError("timeout_seconds must be numeric")
         if not isfinite(float(timeout_seconds)) or timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
         if temperature is not None:
-            if isinstance(temperature, bool):
-                raise ValueError("temperature must not be boolean")
+            if type(temperature) not in (int, float):
+                raise TypeError("temperature must be numeric")
             temperature_number = float(temperature)
             if not isfinite(temperature_number) or not 0 <= temperature_number <= 2:
                 raise ValueError("temperature must be finite and in [0, 2]")
@@ -163,6 +163,8 @@ class ModelBenchmarkRunner:
             },
         )
         started = self._clock()
+        if type(started) not in (int, float) or not isfinite(float(started)):
+            raise ModelBenchmarkError("benchmark clock returned a non-finite numeric carrier")
         try:
             response = await self._gateway.complete(request)
         except ModelGatewayError as error:
@@ -192,7 +194,10 @@ class ModelBenchmarkRunner:
         latency_ms = self._elapsed_ms(started)
         resource_after = self._resource_snapshot()
         accelerator_after = self._accelerator_snapshot()
-        score = float(self._scorer.score(case, response))
+        raw_score = self._scorer.score(case, response)
+        if type(raw_score) not in (int, float):
+            raise ModelBenchmarkError("scorer returned a non-canonical numeric score")
+        score = float(raw_score)
         if not isfinite(score) or not 0 <= score <= 1:
             raise ModelBenchmarkError("scorer returned a non-finite or out-of-range score")
         return CaseBenchmarkResult(
@@ -215,6 +220,8 @@ class ModelBenchmarkRunner:
 
     def _elapsed_ms(self, started: float) -> float:
         finished = self._clock()
+        if type(finished) not in (int, float) or not isfinite(float(finished)):
+            raise ModelBenchmarkError("benchmark clock returned a non-finite numeric carrier")
         elapsed = (finished - started) * 1000.0
         if not isfinite(elapsed) or elapsed < 0:
             raise ModelBenchmarkError("benchmark clock moved backwards or became non-finite")
@@ -238,6 +245,8 @@ class ModelBenchmarkRunner:
         request: ModelRequest,
         response: ModelResponse,
     ) -> None:
+        if type(response) is not ModelResponse:
+            raise ModelBenchmarkError("gateway returned an invalid response carrier")
         if response.request_id != request.request_id:
             raise ModelBenchmarkIdentityError("response request identity mismatch")
         if response.provider_id != candidate.provider_id:
@@ -275,10 +284,12 @@ class ModelBenchmarkRunner:
         if self._resource_observer is None:
             return None
         snapshot = self._resource_observer.snapshot()
-        if isinstance(snapshot.cpu_percent, bool) or isinstance(
-            snapshot.memory_percent, bool
-        ):
-            raise ModelBenchmarkError("resource observer returned boolean percentages")
+        if type(snapshot) is not ResourceSnapshot:
+            raise ModelBenchmarkError("resource observer returned an invalid snapshot type")
+        if type(snapshot.cpu_percent) not in (int, float):
+            raise ModelBenchmarkError("resource observer returned invalid CPU percent")
+        if type(snapshot.memory_percent) not in (int, float):
+            raise ModelBenchmarkError("resource observer returned invalid memory percent")
         cpu = float(snapshot.cpu_percent)
         memory = float(snapshot.memory_percent)
         available = snapshot.available_memory_bytes
@@ -286,7 +297,7 @@ class ModelBenchmarkRunner:
             raise ModelBenchmarkError("resource observer returned invalid CPU percent")
         if not isfinite(memory) or not 0 <= memory <= 100:
             raise ModelBenchmarkError("resource observer returned invalid memory percent")
-        if isinstance(available, bool) or not isinstance(available, int) or available < 0:
+        if type(available) is not int or available < 0:
             raise ModelBenchmarkError("resource observer returned invalid available memory")
         return snapshot
 
@@ -297,7 +308,7 @@ class ModelBenchmarkRunner:
             snapshot = self._accelerator_observer.snapshot()
         except ValueError as exc:
             raise ModelBenchmarkError("accelerator observer returned invalid telemetry") from exc
-        if not isinstance(snapshot, AcceleratorSnapshot):
+        if type(snapshot) is not AcceleratorSnapshot:
             raise ModelBenchmarkError("accelerator observer returned an invalid snapshot type")
         return snapshot
 
