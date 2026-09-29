@@ -13,6 +13,7 @@ from nika_core.product_factory_work_ownership import (
     WorkOwnershipError,
     WorkOwnershipLease,
 )
+from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 
 
 class BehavioralText(str):
@@ -80,7 +81,7 @@ def test_table_is_created_by_canonical_ordered_migration(tmp_path) -> None:
         ).fetchone()[0]
 
     assert table is not None
-    assert version == 3
+    assert version == PRODUCT_PROJECT_SCHEMA_VERSION
 
 
 def test_public_authority_rejects_behavioral_primitive_subclasses_before_use(tmp_path) -> None:

@@ -1684,6 +1684,9 @@ def test_recovery_queue_renews_exact_fence_while_waiting_for_semaphore(
         )
         await first_started.wait()
         first_component = worker.dispatch_calls[0].component_id
+        first_request = next(
+            request for request in requests if request.component_id == first_component
+        )
         queued = next(
             request for request in requests if request.component_id != first_component
         )
@@ -1692,11 +1695,15 @@ def test_recovery_queue_renews_exact_fence_while_waiting_for_semaphore(
                 project_id=queued.project_id,
                 work_id=queued.work_id,
             )
-            if original is not None:
+            first_original = authority.current(
+                project_id=first_request.project_id,
+                work_id=first_request.work_id,
+            )
+            if original is not None and first_original is not None:
                 break
             await asyncio.sleep(0)
         else:
-            raise AssertionError("queued recovery lease was not acquired")
+            raise AssertionError("recovery leases were not acquired")
 
         clock.advance(seconds=2)
         for _ in range(200):
@@ -1704,13 +1711,23 @@ def test_recovery_queue_renews_exact_fence_while_waiting_for_semaphore(
                 project_id=queued.project_id,
                 work_id=queued.work_id,
             )
-            if refreshed is not None and refreshed.expires_at > original.expires_at:
+            first_refreshed = authority.current(
+                project_id=first_request.project_id,
+                work_id=first_request.work_id,
+            )
+            if (
+                refreshed is not None
+                and first_refreshed is not None
+                and refreshed.expires_at > original.expires_at
+                and first_refreshed.expires_at > first_original.expires_at
+            ):
                 break
             await asyncio.sleep(0.002)
         else:
-            raise AssertionError("queued recovery lease heartbeat did not extend exact fence")
+            raise AssertionError("recovery lease heartbeats did not extend both exact fences")
 
         assert refreshed.fence == original.fence
+        assert first_refreshed.fence == first_original.fence
         clock.advance(seconds=2)
         with pytest.raises(WorkOwnershipError, match="active owner"):
             ProductFactoryWorkOwnership(store, clock=clock).acquire(
@@ -2032,6 +2049,12 @@ def test_reconcile_durable_results_rejects_concurrent_operation_rebinding(tmp_pa
         task_id,
         coordinator,
     )
+    foreign_task = TaskQueue(store).create(
+        workspace_id="ws-foreign",
+        agent_id="foreign-worker",
+        payload={"kind": "foreign"},
+    )
+    foreign_task_id = foreign_task.task_id
     foreign_fingerprint = "f" * 64
 
     class RebindOnFirstReadLedger(IdempotencyLedger):
@@ -2047,7 +2070,7 @@ def test_reconcile_durable_results_rejects_concurrent_operation_rebinding(tmp_pa
                 replacement.release_pending(key)
                 replacement.reserve_once(
                     operation_key=key,
-                    task_id="foreign-task",
+                    task_id=foreign_task_id,
                     operation_type="foreign.effect",
                     input_fingerprint=foreign_fingerprint,
                 )
@@ -2062,7 +2085,7 @@ def test_reconcile_durable_results_rejects_concurrent_operation_rebinding(tmp_pa
         )
 
     durable = IdempotencyLedger(store).require(operation_key)
-    assert durable.task_id == "foreign-task"
+    assert durable.task_id == foreign_task_id
     assert durable.operation_type == "foreign.effect"
     assert durable.input_fingerprint == foreign_fingerprint
     assert durable.status is IdempotencyStatus.PENDING

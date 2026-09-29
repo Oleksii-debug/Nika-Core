@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from nika_core.data.schema import SCHEMA_VERSION
+from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.research import (
     IngestDisposition,
@@ -36,11 +36,17 @@ def test_schema_migrates_to_research_version(tmp_path: Path) -> None:
 def test_research_migration_applies_after_existing_v8_database(tmp_path: Path) -> None:
     path = tmp_path / "nika-v8.db"
     conn = sqlite3.connect(path)
-    conn.execute("CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)")
-    conn.executemany(
-        "INSERT INTO schema_migrations(version, applied_at) VALUES (?, 'existing')",
-        ((version,) for version in range(1, 9)),
+    conn.execute(
+        "CREATE TABLE schema_migrations("
+        "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
     )
+    for version in range(1, 9):
+        for statement in MIGRATIONS[version]:
+            conn.execute(statement)
+        conn.execute(
+            "INSERT INTO schema_migrations(version, applied_at) VALUES (?, 'existing')",
+            (version,),
+        )
     conn.commit()
     conn.close()
 
