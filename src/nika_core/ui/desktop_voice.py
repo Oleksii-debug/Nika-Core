@@ -112,7 +112,7 @@ class DesktopVoiceTurnController:
                     message="Не вдалося запустити голосовий ввід.",
                 )
                 raise ValueError("Не вдалося запустити голосовий ввід.") from exc
-            if not isinstance(future, Future):
+            if type(future) is not Future:
                 coroutine.close()
                 self._snapshot = DesktopVoiceSnapshot(
                     status=DesktopVoiceStatus.FAILED,
@@ -209,6 +209,7 @@ class DesktopVoiceTurnController:
         evidence = result.evidence
         if (
             type(evidence) is not VoiceTurnEvidence
+            or type(evidence.request_id) is not str
             or type(evidence.status) is not VoiceTurnStatus
             or type(evidence.activated) is not bool
         ):
