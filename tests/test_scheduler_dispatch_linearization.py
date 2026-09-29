@@ -131,6 +131,41 @@ def test_disabled_before_authorization_never_resolves_handler(
     assert persisted.enabled is False
 
 
+def test_terminal_task_before_authorization_never_resolves_handler(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sqlite = _sqlite(tmp_path)
+    queue = TaskQueue(sqlite)
+    jobs = ScheduledJobStore(sqlite)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "terminal-before-authorize"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    installed = _job(payload={"task_id": task.task_id})
+    jobs.upsert(installed)
+    original_authorize = jobs.authorize_dispatch
+    resolver_calls: list[str] = []
+
+    def terminalize_before_authorize(expected: ScheduledJob) -> ScheduledJob | None:
+        queue.transition(task.task_id, TaskState.CANCELLED)
+        return original_authorize(expected)
+
+    monkeypatch.setattr(jobs, "authorize_dispatch", terminalize_before_authorize)
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda action_id: resolver_calls.append(action_id) or (lambda _payload: None),
+    )
+
+    adapter._dispatch(installed.job_id, installed)
+
+    assert resolver_calls == []
+    assert queue.get(task.task_id).state is TaskState.CANCELLED
+
+
 def test_authorization_before_pause_preserves_only_claimed_occurrence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
