@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+import nika_core.product_factory_program_host as program_host_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
@@ -30,6 +32,10 @@ from nika_core.product_factory_program_host import (
     ProgramWorkDisposition,
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
+from nika_core.product_factory_work_ownership import (
+    ProductFactoryWorkOwnership,
+    WorkOwnershipError,
+)
 from nika_core.product_project import (
     ProductProjectRepository,
     ProductProjectSpec,
@@ -309,6 +315,306 @@ def test_external_worker_failure_is_uncertain_and_does_not_cancel_independent_wo
     assert _record(restored, "component-2").state is WorkState.REVIEW_REQUIRED
 
 
+def test_uncontained_batch_failure_cancels_and_settles_admitted_sibling_before_return(
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    class BlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+
+    class OneChildFailsHost(ProductFactoryProgramHost):
+        async def _dispatch_one(self, **kwargs):
+            request = kwargs["request"]
+            if request.component_id == "component-0":
+                await sibling_started.wait()
+                self._release_best_effort(kwargs["lease"])
+                raise ProductFactoryProgramError("forced uncontained batch child failure")
+            return await super()._dispatch_one(**kwargs)
+
+    worker = BlockingWorker()
+    host = OneChildFailsHost(
+        store,
+        worker,
+        owner_id="program-host:batch-settlement",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(ProductFactoryProgramError, match="uncontained batch child failure"):
+            await host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=2,
+                max_count=2,
+            )
+        assert sibling_cancelled.is_set()
+
+    _run(scenario())
+
+    sibling = _record(coordinator, "component-1").request
+    failed = _record(coordinator, "component-0").request
+    ledger = IdempotencyLedger(store)
+    assert [item.component_id for item in worker.dispatch_calls] == ["component-1"]
+    assert ledger.get(f"pf-worker:{failed.work_id}") is None
+    assert (
+        ledger.require(f"pf-worker:{sibling.work_id}").status
+        is IdempotencyStatus.UNCERTAIN
+    )
+    assert host._ownership.current(
+        project_id=failed.project_id,
+        work_id=failed.work_id,
+    ) is None
+    assert host._ownership.current(
+        project_id=sibling.project_id,
+        work_id=sibling.work_id,
+    ) is None
+
+
+def test_uncontained_recovery_batch_failure_settles_sibling_before_return(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    coordinator.start("component-0")
+    coordinator.start("component-1")
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    class BlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+
+    class OneRecoveryChildFailsHost(ProductFactoryProgramHost):
+        async def _recover_one(self, **kwargs):
+            record = kwargs["record"]
+            if record.request.component_id == "component-0":
+                await sibling_started.wait()
+                raise ProductFactoryProgramError("forced uncontained recovery child failure")
+            return await super()._recover_one(**kwargs)
+
+    worker = BlockingWorker()
+    host = OneRecoveryChildFailsHost(
+        store,
+        worker,
+        owner_id="program-host:recovery-batch-settlement",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(ProductFactoryProgramError, match="uncontained recovery child failure"):
+            await host.recover_running(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=2,
+            )
+        assert sibling_cancelled.is_set()
+
+    _run(scenario())
+
+    sibling = _record(coordinator, "component-1").request
+    ledger = IdempotencyLedger(store)
+    assert [item.component_id for item in worker.dispatch_calls] == ["component-1"]
+    assert (
+        ledger.require(f"pf-worker:{sibling.work_id}").status
+        is IdempotencyStatus.UNCERTAIN
+    )
+    assert host._ownership.current(
+        project_id=sibling.project_id,
+        work_id=sibling.work_id,
+    ) is None
+
+
+def test_cancelled_dispatch_child_settles_blocking_sibling_before_propagation(
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    class BlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+
+    class OneChildCancelsHost(ProductFactoryProgramHost):
+        async def _dispatch_one(self, **kwargs):
+            request = kwargs["request"]
+            if request.component_id == "component-0":
+                await sibling_started.wait()
+                self._release_best_effort(kwargs["lease"])
+                raise asyncio.CancelledError()
+            return await super()._dispatch_one(**kwargs)
+
+    worker = BlockingWorker()
+    host = OneChildCancelsHost(
+        store,
+        worker,
+        owner_id="program-host:cancelled-batch-child",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(
+                host.dispatch_ready(
+                    host_task_id=task_id,
+                    binding=binding,
+                    coordinator=coordinator,
+                    max_parallel=2,
+                    max_count=2,
+                ),
+                timeout=0.5,
+            )
+        assert sibling_cancelled.is_set()
+
+    _run(scenario())
+
+    sibling = _record(coordinator, "component-1").request
+    failed = _record(coordinator, "component-0").request
+    ledger = IdempotencyLedger(store)
+    assert [item.component_id for item in worker.dispatch_calls] == ["component-1"]
+    assert ledger.get(f"pf-worker:{failed.work_id}") is None
+    assert (
+        ledger.require(f"pf-worker:{sibling.work_id}").status
+        is IdempotencyStatus.UNCERTAIN
+    )
+    assert host._ownership.current(
+        project_id=failed.project_id,
+        work_id=failed.work_id,
+    ) is None
+    assert host._ownership.current(
+        project_id=sibling.project_id,
+        work_id=sibling.work_id,
+    ) is None
+
+
+def test_cancelled_recovery_child_settles_blocking_sibling_before_propagation(
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    coordinator.start("component-0")
+    coordinator.start("component-1")
+    sibling_started = asyncio.Event()
+    sibling_cancelled = asyncio.Event()
+
+    class BlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            sibling_started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                sibling_cancelled.set()
+                raise
+
+    class OneRecoveryChildCancelsHost(ProductFactoryProgramHost):
+        async def _recover_one(self, **kwargs):
+            record = kwargs["record"]
+            if record.request.component_id == "component-0":
+                await sibling_started.wait()
+                raise asyncio.CancelledError()
+            return await super()._recover_one(**kwargs)
+
+    worker = BlockingWorker()
+    host = OneRecoveryChildCancelsHost(
+        store,
+        worker,
+        owner_id="program-host:cancelled-recovery-child",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(
+                host.recover_running(
+                    host_task_id=task_id,
+                    binding=binding,
+                    coordinator=coordinator,
+                    max_parallel=2,
+                ),
+                timeout=0.5,
+            )
+        assert sibling_cancelled.is_set()
+
+    _run(scenario())
+
+    sibling = _record(coordinator, "component-1").request
+    ledger = IdempotencyLedger(store)
+    assert [item.component_id for item in worker.dispatch_calls] == ["component-1"]
+    assert (
+        ledger.require(f"pf-worker:{sibling.work_id}").status
+        is IdempotencyStatus.UNCERTAIN
+    )
+    assert host._ownership.current(
+        project_id=sibling.project_id,
+        work_id=sibling.work_id,
+    ) is None
+
+
+def test_external_effect_cleanup_is_bounded_when_worker_ignores_first_cancel(
+    monkeypatch,
+) -> None:
+    first_cancel_seen = asyncio.Event()
+    release = asyncio.Event()
+
+    async def cancellation_resistant_effect() -> None:
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            first_cancel_seen.set()
+            await release.wait()
+
+    async def scenario() -> None:
+        monkeypatch.setattr(program_host_module, "_EFFECT_CANCEL_GRACE_SECONDS", 0.01)
+        task = asyncio.create_task(cancellation_resistant_effect())
+        await asyncio.sleep(0)
+
+        await asyncio.wait_for(
+            program_host_module._cancel_effect_task(task),
+            timeout=0.2,
+        )
+
+        assert first_cancel_seen.is_set()
+        assert not task.done()
+
+        release.set()
+        await asyncio.wait_for(task, timeout=0.2)
+
+    _run(scenario())
+
+
 def test_running_checkpoint_without_ledger_is_proven_pre_dispatch_and_can_start_once(
     tmp_path,
 ) -> None:
@@ -457,28 +763,31 @@ def test_durable_result_with_pending_ledger_reconciles_after_restart_without_wor
     tmp_path,
 ) -> None:
     store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
-    worker = FakeProgramWorker()
-
-    class FailingCompleteLedger(IdempotencyLedger):
-        def complete(self, operation_key, result=None):
-            raise OSError("simulated ledger write outage")
-
-    host = ProductFactoryProgramHost(
-        store,
-        worker,
-        idempotency=FailingCompleteLedger(store),
-    )
-    outcomes = _run(
-        host.dispatch_ready(
+    seed_host = ProductFactoryProgramHost(store, FakeProgramWorker())
+    request = coordinator.start("component-0")
+    lease = seed_host._acquire(request)
+    try:
+        seed_host._checkpoint_running(
             host_task_id=task_id,
             binding=binding,
             coordinator=coordinator,
-            max_count=1,
+            requests=(request,),
+            leases=(lease,),
         )
-    )
+        operation, created = seed_host._reserve_effect(
+            host_task_id=task_id,
+            request=request,
+            lease=lease,
+        )
+        assert created is True
+        assert operation.status is IdempotencyStatus.PENDING
 
-    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
-    request = _record(coordinator, "component-0").request
+        updated = coordinator.record_result(_envelope(request))
+        assert updated.state is WorkState.REVIEW_REQUIRED
+        seed_host._save_fenced(task_id, binding, coordinator, lease)
+    finally:
+        seed_host._release_best_effort(lease)
+
     assert IdempotencyLedger(store).require(
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.PENDING
@@ -803,6 +1112,51 @@ def test_twenty_five_components_progress_through_five_restart_waves_without_dupl
     assert all(record.state is WorkState.ACCEPTED for record in coordinator.snapshot().records)
 
 
+class _BehavioralProgramBound(int):
+    def __le__(self, other):  # pragma: no cover - must never execute
+        raise AssertionError("program bound comparison executed before exact-type validation")
+
+
+@pytest.mark.parametrize(
+    ("operation", "kwargs"),
+    (
+        ("dispatch", {"max_parallel": True}),
+        ("dispatch", {"max_count": True}),
+        ("dispatch", {"max_parallel": _BehavioralProgramBound(1)}),
+        ("dispatch", {"max_count": _BehavioralProgramBound(1)}),
+        ("recover", {"max_parallel": True}),
+        ("recover", {"max_parallel": _BehavioralProgramBound(1)}),
+    ),
+)
+def test_program_bounds_require_exact_integers_before_behavior(
+    tmp_path,
+    operation: str,
+    kwargs: dict[str, object],
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host = ProductFactoryProgramHost(store, FakeProgramWorker())
+    before = coordinator.snapshot()
+
+    if operation == "dispatch":
+        awaitable = host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            **kwargs,
+        )
+    else:
+        awaitable = host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            **kwargs,
+        )
+
+    with pytest.raises(ValueError, match="exact positive integer"):
+        _run(awaitable)
+    assert coordinator.snapshot() == before
+
+
 def test_invalid_program_bounds_fail_before_any_coordinator_mutation(tmp_path) -> None:
     store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
     host = ProductFactoryProgramHost(store, FakeProgramWorker())
@@ -940,3 +1294,800 @@ def test_program_host_dispatches_through_existing_public_coding_worker_adapter(t
         "pytest",
         "tests/component-0",
     )
+
+
+class _MutableOwnershipClock:
+    def __init__(self, instant: datetime) -> None:
+        self.instant = instant
+
+    def __call__(self) -> datetime:
+        return self.instant
+
+    def advance(self, **delta: int) -> None:
+        self.instant += timedelta(**delta)
+
+
+def _seed_running_pending(host, coordinator, binding, task_id):
+    request = coordinator.start("component-0")
+    lease = host._acquire(request)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(lease,),
+        )
+        operation, created = host._reserve_effect(
+            host_task_id=task_id,
+            request=request,
+            lease=lease,
+        )
+        assert created is True
+        assert operation.status is IdempotencyStatus.PENDING
+    finally:
+        host._release_best_effort(lease)
+    return request, lease
+
+
+def test_recovery_wait_cancellation_releases_exact_lease_without_changing_pending(
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(store, worker, owner_id="program-host:first")
+    request, seed_lease = _seed_running_pending(host, coordinator, binding, task_id)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            host._recover_one(
+                semaphore=asyncio.Semaphore(0),
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                record=_record(coordinator, "component-0"),
+            )
+        )
+        for _ in range(100):
+            if host._ownership.current(
+                project_id=request.project_id,
+                work_id=request.work_id,
+            ) is not None:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("recovery lease was not acquired")
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    _run(scenario())
+
+    assert host._ownership.current(
+        project_id=request.project_id,
+        work_id=request.work_id,
+    ) is None
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.PENDING
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+    replacement = ProductFactoryWorkOwnership(store).acquire(
+        project_id=request.project_id,
+        work_id=request.work_id,
+        owner_id="program-host:replacement",
+        lease_seconds=300,
+    )
+    assert replacement.fence > seed_lease.fence
+
+
+def test_recovery_ledger_read_failure_releases_lease_before_any_worker_effect(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.start("component-0")
+
+    class FailingReadLedger(IdempotencyLedger):
+        def get(self, operation_key):
+            raise RuntimeError(f"cannot read {operation_key}")
+
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        idempotency=FailingReadLedger(store),
+        owner_id="program-host:read-failure",
+    )
+
+    with pytest.raises(RuntimeError, match="cannot read"):
+        _run(
+            host._recover_one(
+                semaphore=asyncio.Semaphore(1),
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                record=_record(coordinator, "component-0"),
+            )
+        )
+
+    assert host._ownership.current(
+        project_id=request.project_id,
+        work_id=request.work_id,
+    ) is None
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+
+def test_recovery_pre_effect_renew_failure_releases_lease_without_worker_call(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.start("component-0")
+
+    class FailingRenewOwnership(ProductFactoryWorkOwnership):
+        def renew(self, **kwargs):
+            raise WorkOwnershipError("forced stale authority")
+
+    authority = FailingRenewOwnership(store)
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:renew-failure",
+    )
+
+    with pytest.raises(ProductFactoryProgramError, match="stale Product Factory authority"):
+        _run(
+            host._recover_one(
+                semaphore=asyncio.Semaphore(1),
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                record=_record(coordinator, "component-0"),
+            )
+        )
+
+    assert authority.current(
+        project_id=request.project_id,
+        work_id=request.work_id,
+    ) is None
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+
+def test_long_dispatch_renews_same_fence_before_original_expiry_allows_takeover(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    clock = _MutableOwnershipClock(datetime(2026, 9, 27, 12, 0, tzinfo=UTC))
+    authority = ProductFactoryWorkOwnership(store, clock=clock)
+    started = asyncio.Event()
+    finish = asyncio.Event()
+
+    class BlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            started.set()
+            await finish.wait()
+            return _envelope(request)
+
+    worker = BlockingWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:heartbeat",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.001)
+
+    async def scenario():
+        task = asyncio.create_task(
+            host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_count=1,
+            )
+        )
+        await started.wait()
+        request = _record(coordinator, "component-0").request
+        original = authority.current(
+            project_id=request.project_id,
+            work_id=request.work_id,
+        )
+        assert original is not None
+
+        clock.advance(seconds=2)
+        for _ in range(200):
+            refreshed = authority.current(
+                project_id=request.project_id,
+                work_id=request.work_id,
+            )
+            if refreshed is not None and refreshed.expires_at > original.expires_at:
+                break
+            await asyncio.sleep(0.001)
+        else:
+            raise AssertionError("lease heartbeat did not extend exact fence")
+
+        assert refreshed.fence == original.fence
+        clock.advance(seconds=2)
+        with pytest.raises(WorkOwnershipError, match="active owner"):
+            ProductFactoryWorkOwnership(store, clock=clock).acquire(
+                project_id=request.project_id,
+                work_id=request.work_id,
+                owner_id="program-host:competitor",
+                lease_seconds=3,
+            )
+
+        finish.set()
+        return await task
+
+    outcomes = _run(scenario())
+    assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    assert len(worker.dispatch_calls) == 1
+
+
+def test_dispatch_queue_renews_exact_fence_while_waiting_for_semaphore(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    clock = _MutableOwnershipClock(datetime(2026, 9, 28, 10, 0, tzinfo=UTC))
+    authority = ProductFactoryWorkOwnership(store, clock=clock)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    class QueueBlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            if len(self.dispatch_calls) == 1:
+                first_started.set()
+                await release_first.wait()
+            return _envelope(request, len(self.dispatch_calls))
+
+    worker = QueueBlockingWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:queued-dispatch",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.01)
+
+    async def scenario():
+        task = asyncio.create_task(
+            host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=1,
+                max_count=2,
+            )
+        )
+        await first_started.wait()
+        first_component = worker.dispatch_calls[0].component_id
+        queued = next(
+            _record(coordinator, component_id).request
+            for component_id in ("component-0", "component-1")
+            if component_id != first_component
+        )
+        original = authority.current(
+            project_id=queued.project_id,
+            work_id=queued.work_id,
+        )
+        assert original is not None
+
+        clock.advance(seconds=2)
+        for _ in range(200):
+            refreshed = authority.current(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+            )
+            if refreshed is not None and refreshed.expires_at > original.expires_at:
+                break
+            await asyncio.sleep(0.002)
+        else:
+            raise AssertionError("queued dispatch lease heartbeat did not extend exact fence")
+
+        assert refreshed.fence == original.fence
+        clock.advance(seconds=2)
+        with pytest.raises(WorkOwnershipError, match="active owner"):
+            ProductFactoryWorkOwnership(store, clock=clock).acquire(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+                owner_id="program-host:queued-dispatch-competitor",
+                lease_seconds=3,
+            )
+
+        release_first.set()
+        outcomes = await asyncio.wait_for(task, timeout=1.0)
+        return queued, outcomes
+
+    queued, outcomes = _run(scenario())
+    assert len(outcomes) == 2
+    assert sorted(item.component_id for item in worker.dispatch_calls) == [
+        "component-0",
+        "component-1",
+    ]
+    assert authority.current(
+        project_id=queued.project_id,
+        work_id=queued.work_id,
+    ) is None
+
+
+def test_recovery_queue_renews_exact_fence_while_waiting_for_semaphore(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+        repository_count=2,
+    )
+    clock = _MutableOwnershipClock(datetime(2026, 9, 28, 11, 0, tzinfo=UTC))
+    authority = ProductFactoryWorkOwnership(store, clock=clock)
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+
+    class QueueBlockingWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            if len(self.dispatch_calls) == 1:
+                first_started.set()
+                await release_first.wait()
+            return _envelope(request, len(self.dispatch_calls))
+
+    worker = QueueBlockingWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:queued-recovery",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.01)
+
+    requests = tuple(
+        coordinator.start(component_id)
+        for component_id in ("component-0", "component-1")
+    )
+    seed_leases = tuple(host._acquire(request) for request in requests)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=requests,
+            leases=seed_leases,
+        )
+    finally:
+        for lease in seed_leases:
+            host._release_best_effort(lease)
+
+    async def scenario():
+        task = asyncio.create_task(
+            host.recover_running(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=1,
+            )
+        )
+        await first_started.wait()
+        first_component = worker.dispatch_calls[0].component_id
+        first_request = next(
+            request for request in requests if request.component_id == first_component
+        )
+        queued = next(
+            request for request in requests if request.component_id != first_component
+        )
+        for _ in range(100):
+            original = authority.current(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+            )
+            first_original = authority.current(
+                project_id=first_request.project_id,
+                work_id=first_request.work_id,
+            )
+            if original is not None and first_original is not None:
+                break
+            await asyncio.sleep(0)
+        else:
+            raise AssertionError("recovery leases were not acquired")
+
+        clock.advance(seconds=2)
+        for _ in range(200):
+            refreshed = authority.current(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+            )
+            first_refreshed = authority.current(
+                project_id=first_request.project_id,
+                work_id=first_request.work_id,
+            )
+            if (
+                refreshed is not None
+                and first_refreshed is not None
+                and refreshed.expires_at > original.expires_at
+                and first_refreshed.expires_at > first_original.expires_at
+            ):
+                break
+            await asyncio.sleep(0.002)
+        else:
+            raise AssertionError("recovery lease heartbeats did not extend both exact fences")
+
+        assert refreshed.fence == original.fence
+        assert first_refreshed.fence == first_original.fence
+        clock.advance(seconds=2)
+        with pytest.raises(WorkOwnershipError, match="active owner"):
+            ProductFactoryWorkOwnership(store, clock=clock).acquire(
+                project_id=queued.project_id,
+                work_id=queued.work_id,
+                owner_id="program-host:queued-recovery-competitor",
+                lease_seconds=3,
+            )
+
+        release_first.set()
+        outcomes = await asyncio.wait_for(task, timeout=1.0)
+        return queued, outcomes
+
+    queued, outcomes = _run(scenario())
+    assert len(outcomes) == 2
+    assert sorted(item.component_id for item in worker.dispatch_calls) == [
+        "component-0",
+        "component-1",
+    ]
+    assert all(
+        IdempotencyLedger(store).require(f"pf-worker:{request.work_id}").status
+        is IdempotencyStatus.COMPLETED
+        for request in requests
+    )
+    assert authority.current(
+        project_id=queued.project_id,
+        work_id=queued.work_id,
+    ) is None
+
+
+def test_result_reconcile_marker_failure_reports_actual_pending_ledger_status(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+
+    class FailAfterReservationOwnership(ProductFactoryWorkOwnership):
+        def __init__(self, target_store):
+            super().__init__(target_store)
+            self.assert_calls = 0
+
+        def assert_owner_in_transaction(self, connection, **kwargs):
+            self.assert_calls += 1
+            if self.assert_calls >= 3:
+                raise WorkOwnershipError("forced post-effect fence loss")
+            return super().assert_owner_in_transaction(connection, **kwargs)
+
+    authority = FailAfterReservationOwnership(store)
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:status-truth",
+    )
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    request = _record(coordinator, "component-0").request
+    durable = IdempotencyLedger(store).require(f"pf-worker:{request.work_id}")
+    assert durable.status is IdempotencyStatus.PENDING
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is IdempotencyStatus.PENDING
+    assert "uncertainty marker failed" in outcomes[0].detail
+
+
+def test_heartbeat_authority_loss_cancels_inflight_effect_and_marks_uncertain(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    cancelled = asyncio.Event()
+
+    class LoseHeartbeatOwnership(ProductFactoryWorkOwnership):
+        def __init__(self, target_store):
+            super().__init__(target_store)
+            self.renew_calls = 0
+
+        def renew(self, **kwargs):
+            self.renew_calls += 1
+            if self.renew_calls >= 2:
+                raise WorkOwnershipError("forced heartbeat authority loss")
+            return super().renew(**kwargs)
+
+    class CancellableWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    authority = LoseHeartbeatOwnership(store)
+    worker = CancellableWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:heartbeat-loss",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.001)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    request = _record(coordinator, "component-0").request
+    assert cancelled.is_set()
+    assert authority.renew_calls >= 2
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is IdempotencyStatus.UNCERTAIN
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.UNCERTAIN
+
+
+def test_heartbeat_loss_does_not_wait_forever_for_cancellation_resistant_worker(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    first_cancel_seen = asyncio.Event()
+    release_worker = asyncio.Event()
+
+    class LoseHeartbeatOwnership(ProductFactoryWorkOwnership):
+        def __init__(self, target_store):
+            super().__init__(target_store)
+            self.renew_calls = 0
+
+        def renew(self, **kwargs):
+            self.renew_calls += 1
+            if self.renew_calls >= 2:
+                raise WorkOwnershipError("forced heartbeat authority loss")
+            return super().renew(**kwargs)
+
+    class CancellationResistantWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            try:
+                await release_worker.wait()
+            except asyncio.CancelledError:
+                first_cancel_seen.set()
+                await release_worker.wait()
+            return _envelope(request)
+
+    authority = LoseHeartbeatOwnership(store)
+    worker = CancellationResistantWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:bounded-cancel",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.001)
+    monkeypatch.setattr(program_host_module, "_EFFECT_CANCEL_GRACE_SECONDS", 0.01)
+
+    async def scenario():
+        outcomes = await asyncio.wait_for(
+            host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_count=1,
+            ),
+            timeout=0.5,
+        )
+        assert first_cancel_seen.is_set()
+        release_worker.set()
+        await asyncio.sleep(0)
+        return outcomes
+
+    outcomes = _run(scenario())
+
+    request = _record(coordinator, "component-0").request
+    durable = IdempotencyLedger(store).require(f"pf-worker:{request.work_id}")
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is IdempotencyStatus.UNCERTAIN
+    assert durable.status is IdempotencyStatus.UNCERTAIN
+    assert _record(coordinator, "component-0").state is WorkState.RUNNING
+
+
+def test_unexpected_heartbeat_failure_cancels_inflight_effect_and_marks_uncertain(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    cancelled = asyncio.Event()
+
+    class CrashHeartbeatOwnership(ProductFactoryWorkOwnership):
+        def __init__(self, target_store):
+            super().__init__(target_store)
+            self.renew_calls = 0
+
+        def renew(self, **kwargs):
+            self.renew_calls += 1
+            if self.renew_calls >= 2:
+                raise RuntimeError("forced unexpected heartbeat backend failure")
+            return super().renew(**kwargs)
+
+    class CancellableWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    authority = CrashHeartbeatOwnership(store)
+    worker = CancellableWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=authority,
+        owner_id="program-host:heartbeat-backend-failure",
+        lease_seconds=3,
+    )
+    monkeypatch.setattr(program_host_module, "_lease_heartbeat_interval", lambda _: 0.001)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    request = _record(coordinator, "component-0").request
+    assert cancelled.is_set()
+    assert authority.renew_calls >= 2
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is IdempotencyStatus.UNCERTAIN
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.UNCERTAIN
+
+
+def _seed_durable_result_pending_for_reconcile(store, binding, task_id, coordinator):
+    host = ProductFactoryProgramHost(store, FakeProgramWorker())
+    request = coordinator.start("component-0")
+    lease = host._acquire(request)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(lease,),
+        )
+        operation, created = host._reserve_effect(
+            host_task_id=task_id,
+            request=request,
+            lease=lease,
+        )
+        assert created is True
+        assert operation.status is IdempotencyStatus.PENDING
+        updated = coordinator.record_result(_envelope(request))
+        assert updated.state is WorkState.REVIEW_REQUIRED
+        host._save_fenced(task_id, binding, coordinator, lease)
+    finally:
+        host._release_best_effort(lease)
+    operation_key = f"pf-worker:{request.work_id}"
+    assert IdempotencyLedger(store).require(operation_key).status is IdempotencyStatus.PENDING
+    return host, operation_key
+
+
+def test_reconcile_durable_results_preserves_concurrent_terminal_completion(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host, operation_key = _seed_durable_result_pending_for_reconcile(
+        store,
+        binding,
+        task_id,
+        coordinator,
+    )
+    external_result = {"manual_reconciliation": "external completion is authoritative"}
+
+    class CompleteOnFirstReadLedger(IdempotencyLedger):
+        def __init__(self, ledger_store) -> None:
+            super().__init__(ledger_store)
+            self.triggered = False
+
+        def get(self, key):
+            record = super().get(key)
+            if not self.triggered and key == operation_key:
+                self.triggered = True
+                IdempotencyLedger(store).complete(key, external_result)
+            return record
+
+    host._ledger = CompleteOnFirstReadLedger(store)
+
+    assert host.reconcile_durable_results(
+        host_task_id=task_id,
+        coordinator=coordinator,
+    ) == ()
+
+    durable = IdempotencyLedger(store).require(operation_key)
+    assert durable.status is IdempotencyStatus.COMPLETED
+    assert durable.result == external_result
+
+
+def test_reconcile_durable_results_rejects_concurrent_operation_rebinding(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host, operation_key = _seed_durable_result_pending_for_reconcile(
+        store,
+        binding,
+        task_id,
+        coordinator,
+    )
+    foreign_task = TaskQueue(store).create(
+        workspace_id="ws-foreign",
+        agent_id="foreign-worker",
+        payload={"kind": "foreign"},
+    )
+    foreign_task_id = foreign_task.task_id
+    foreign_fingerprint = "f" * 64
+
+    class RebindOnFirstReadLedger(IdempotencyLedger):
+        def __init__(self, ledger_store) -> None:
+            super().__init__(ledger_store)
+            self.triggered = False
+
+        def get(self, key):
+            record = super().get(key)
+            if not self.triggered and key == operation_key:
+                self.triggered = True
+                replacement = IdempotencyLedger(store)
+                replacement.release_pending(key)
+                replacement.reserve_once(
+                    operation_key=key,
+                    task_id=foreign_task_id,
+                    operation_type="foreign.effect",
+                    input_fingerprint=foreign_fingerprint,
+                )
+            return record
+
+    host._ledger = RebindOnFirstReadLedger(store)
+
+    with pytest.raises(ProductFactoryProgramError, match="identity changed"):
+        host.reconcile_durable_results(
+            host_task_id=task_id,
+            coordinator=coordinator,
+        )
+
+    durable = IdempotencyLedger(store).require(operation_key)
+    assert durable.task_id == foreign_task_id
+    assert durable.operation_type == "foreign.effect"
+    assert durable.input_fingerprint == foreign_fingerprint
+    assert durable.status is IdempotencyStatus.PENDING
+    assert durable.result is None
+
