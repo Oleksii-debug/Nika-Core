@@ -1444,6 +1444,7 @@ def test_persisted_timeline_and_terminal_semantics_fail_closed(tmp_path: Path) -
     active_terminal_payload = dict(job.payload)
     active_terminal_metadata = dict(active_terminal_payload["_nika_recurrence_v1"])
     active_terminal_metadata["terminal_reason"] = "deadline"
+    active_terminal_metadata["deadline_at"] = (start + timedelta(minutes=5)).isoformat()
     active_terminal_payload["_nika_recurrence_v1"] = active_terminal_metadata
     with pytest.raises(ValueError, match="non-completed recurrence"):
         recurrence_module._decode_job(
