@@ -515,6 +515,37 @@ def test_study_material_rejects_common_credential_query_aliases(source_ref: str)
         _material(source_ref=source_ref)
 
 
+@pytest.mark.parametrize(
+    "source_ref",
+    [
+        "https://example.test/book.pdf?sig=canary-signature",
+        "https://example.test/book.pdf?signature=canary-signature",
+        "https://example.test/book.pdf#sig=canary-signature",
+        "https://example.test/book.pdf?sv=2024-11-04&sig=canary-signature",
+        "https://example.test/book.pdf?%73ig=canary-signature",
+        "https://example.test/book.pdf?sign%61ture=canary-signature",
+    ],
+)
+def test_study_material_rejects_signed_url_signature_credentials(source_ref: str) -> None:
+    with pytest.raises(ValueError, match="credential"):
+        _material(source_ref=source_ref)
+
+
+def test_study_material_keeps_benign_signature_metadata(tmp_path) -> None:
+    safe_ref = "https://example.test/book.pdf?signature_count=3&chapter=4"
+    path, _, queue = _services(tmp_path)
+    created = queue.enqueue(
+        workspace_id="study",
+        agent_id="reader",
+        material=_material(material_id="signature-count", source_ref=safe_ref),
+    )
+    fresh_store = SQLiteStore(path)
+    fresh_store.initialize()
+    fresh = StudyQueue(TaskQueue(fresh_store)).get(created.task_id)
+
+    assert fresh.material.source_ref == safe_ref
+
+
 def test_study_material_keeps_benign_subscription_metadata(tmp_path) -> None:
     safe_ref = "https://example.test/book.pdf?subscription_count=3&chapter=4"
     path, _, queue = _services(tmp_path)
