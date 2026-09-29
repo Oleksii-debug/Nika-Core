@@ -177,3 +177,30 @@ def test_existing_corrupt_binding_cannot_be_overwritten(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="persisted payload is corrupt"):
         store.upsert(_job(payload={IMMUTABLE_JOB_BINDING_KEY: "binding-1"}))
+
+
+def test_existing_binding_cannot_be_removed_by_upsert(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.upsert(_job())
+
+    with pytest.raises(ValueError, match="immutable binding conflict"):
+        store.upsert(_job(payload={"task_id": "task-1"}))
+
+    restored = store.get("job-1")
+    assert restored is not None
+    assert restored.payload[IMMUTABLE_JOB_BINDING_KEY] == "binding-1"
+
+
+def test_corrupt_existing_payload_cannot_be_silently_replaced(tmp_path: Path) -> None:
+    sqlite = _sqlite(tmp_path)
+    store = ScheduledJobStore(sqlite)
+    store.upsert(_job())
+
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            ('{"nested":[1,2,3}', "job-1"),
+        )
+
+    with pytest.raises(ValueError, match="persisted payload is corrupt"):
+        store.upsert(_job(payload={"replacement": True}))
