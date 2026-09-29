@@ -663,7 +663,7 @@ def test_invalid_port_receipt_fails_closed(mutator: object) -> None:
     [
         " leading-space",
         "trailing-space ",
-        "bidi-\\u202evoice",
+        "bidi-" + chr(0x202E) + "voice",
         "surrogate-" + chr(0xD800),
     ],
 )
