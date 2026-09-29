@@ -150,6 +150,11 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 status=RuntimeResumeProbeStatus.INVALID,
                 reason="Persisted V0.1 runtime cursor does not match task identity.",
             )
+        if not self._task_exists(task_id):
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="Persisted V0.1 task is missing from durable Nika state.",
+            )
         model_health_block = await self._model_recovery_health(task_id)
         if model_health_block is not None:
             return model_health_block
@@ -543,6 +548,14 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         runtime = self._model_factory.for_task(task_id)
         self._model_runtimes[task_id] = runtime
         return runtime
+
+    def _task_exists(self, task_id: str) -> bool:
+        with self._sqlite.connection() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        return row is not None
 
     def _task_has_model_selection(self, task_id: str) -> bool:
         with self._sqlite.connection() as conn:
