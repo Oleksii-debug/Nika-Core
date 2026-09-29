@@ -7,7 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from typing import Any
+from typing import Any, cast
 
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
 from nika_core.scheduler.store import IMMUTABLE_JOB_BINDING_KEY, ScheduledJobStore
@@ -639,8 +639,10 @@ def _canonical_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
         return {}
     if type(payload) is not dict:
         raise TypeError("payload must be an exact dict")
-    detached = _canonical_json_value(payload, label="payload", depth=0)
-    assert type(detached) is dict
+    detached = cast(
+        dict[str, Any],
+        _canonical_json_value(payload, label="payload", depth=0),
+    )
     encoded = json.dumps(
         detached,
         ensure_ascii=False,
