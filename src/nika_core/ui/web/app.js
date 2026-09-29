@@ -478,8 +478,12 @@
     } else if (comparison.status !== expectedNoncomparisonStatus) {
       return false;
     }
-    if (!Number.isInteger(comparison.agreement_count) || comparison.agreement_count < 0
-        || !Number.isInteger(comparison.difference_count) || comparison.difference_count < 0) {
+    if (!Number.isSafeInteger(comparison.agreement_count)
+        || comparison.agreement_count < 0
+        || comparison.agreement_count > 100
+        || !Number.isSafeInteger(comparison.difference_count)
+        || comparison.difference_count < 0
+        || comparison.difference_count > 100) {
       return false;
     }
     const countsCoherent = (
