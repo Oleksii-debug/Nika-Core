@@ -1339,3 +1339,52 @@ def test_invalid_composition_rejects_noncanonical_success_digest_carrier() -> No
     assert snapshot.status is DesktopVoiceStatus.FAILED
     assert snapshot.transcript is None
     assert "failure evidence" in snapshot.message
+
+
+def test_cancel_accepted_during_submission_masks_precompleted_success() -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    controller_holder: list[DesktopVoiceTurnController] = []
+
+    def blocking_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        entered.set()
+        assert release.wait(timeout=2)
+        coroutine.close()
+        controller = controller_holder[0]
+        request_id = controller.snapshot()["request_id"]
+        assert type(request_id) is str
+        result = asyncio.run(
+            _service(_MicrophoneAdapter()).run(_request(request_id))
+        )
+        future: Future[Any] = Future()
+        future.set_result(result)
+        return future
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=blocking_submit,
+    )
+    controller_holder.append(controller)
+    outcome: list[str] = []
+
+    def run_start() -> None:
+        outcome.append(controller.start({}).status)
+
+    thread = threading.Thread(target=run_start, daemon=True)
+    thread.start()
+    assert entered.wait(timeout=2)
+    assert controller.cancel({}).status == "accepted"
+    pending = controller.snapshot()
+    assert pending["status"] == DesktopVoiceStatus.CANCELLING.value
+    assert pending["active"] is True
+
+    release.set()
+    thread.join(timeout=2)
+    assert thread.is_alive() is False
+    assert outcome == ["accepted"]
+
+    final = controller.snapshot()
+    assert final["status"] == DesktopVoiceStatus.CANCELLED.value
+    assert final["active"] is False
+    assert final["transcript"] is None
