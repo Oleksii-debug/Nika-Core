@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,7 +11,7 @@ import nika_core.scheduler.recurrence as recurrence_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.apscheduler_adapter import APSchedulerAdapter
-from nika_core.scheduler.contracts import ScheduledJob
+from nika_core.scheduler.contracts import ScheduledJob, TriggerKind
 from nika_core.scheduler.recurrence import (
     DurableRecurrenceService,
     MissedRunPolicy,
@@ -900,4 +900,63 @@ def test_persisted_enum_carriers_fail_before_enum_behavior(tmp_path: Path) -> No
             job,
             expected_recurrence_id="hostile-enum-state",
         )
+    assert calls == []
+
+
+
+def test_durable_transport_authority_rejects_scheduler_drift(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="transport-authority",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    job = scheduler.upserts[-1]
+    wrong_payload = dict(job.payload)
+    wrong_payload["recurrence_id"] = "different-recurrence"
+
+    bad_jobs = (
+        (replace(job, trigger_kind=TriggerKind.INTERVAL), "DATE trigger"),
+        (
+            replace(
+                job,
+                trigger={
+                    "run_date": job.trigger["run_date"],
+                    "seconds": 60,
+                },
+            ),
+            "trigger shape",
+        ),
+        (
+            replace(
+                job,
+                trigger={
+                    "run_date": (
+                        clock.value + timedelta(minutes=5)
+                    ).isoformat(),
+                },
+            ),
+            "trigger run_date",
+        ),
+        (replace(job, coalesce=False), "coalesce policy"),
+        (replace(job, max_instances=2), "max_instances policy"),
+        (replace(job, misfire_grace_seconds=60), "misfire policy"),
+        (replace(job, enabled=1), "enabled state"),
+        (
+            replace(job, payload=wrong_payload),
+            "scheduled identity mismatch",
+        ),
+    )
+
+    for bad_job, message in bad_jobs:
+        with pytest.raises(ValueError, match=message):
+            recurrence_module._decode_job(
+                bad_job,
+                expected_recurrence_id="transport-authority",
+            )
     assert calls == []
