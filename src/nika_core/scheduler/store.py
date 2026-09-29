@@ -258,10 +258,10 @@ def _decode_json_object(raw: object, label: str) -> dict[str, Any]:
         raise ValueError(f"{label} is corrupt") from exc
     try:
         canonical = _canonical_json_object(decoded, label, depth=0)
-        _encode_json(canonical, label)
-        return canonical
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{label} is corrupt") from exc
+    _encode_json(canonical, label)
+    return canonical
 
 
 def _reject_json_constant(label: str) -> None:
