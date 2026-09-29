@@ -332,7 +332,10 @@ def test_owner_return_pause_round_trips_through_guarded_saved_resume(
     assert isinstance(resumed.effect_result, RuntimeResult)
     assert resumed.effect_result.outcome is RuntimeOutcome.COMPLETED
     assert queue.get(task_id).state is TaskState.COMPLETED
-    assert runtime.probe_calls == [(task_id, thread_id, "resume-token")]
+    assert runtime.probe_calls == [
+        (task_id, thread_id, "resume-token"),
+        (task_id, thread_id, "resume-token"),
+    ]
     assert len(runtime.resume_calls) == 1
     assert runtime.resume_calls[0].task_id == task_id
     assert resources.active_count(scope="background_life", owner_id="living-agent") == 0
@@ -676,7 +679,7 @@ def test_runtime_start_before_background_permission_cannot_prove_background_orig
         clock=lambda: now,
     )
 
-    with pytest.raises(ValueError, match="matching runtime start"):
+    with pytest.raises(ValueError, match="matching runtime/thread start"):
         asyncio.run(
             controller.reconcile(
                 runtime=runtime,
@@ -732,7 +735,7 @@ def test_foreign_runtime_start_after_permission_cannot_prove_background_origin(
         clock=lambda: now,
     )
 
-    with pytest.raises(ValueError, match="matching runtime start"):
+    with pytest.raises(ValueError, match="matching runtime/thread start"):
         asyncio.run(
             controller.reconcile(
                 runtime=runtime,
