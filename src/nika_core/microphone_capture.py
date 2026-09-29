@@ -393,6 +393,12 @@ class MicrophoneCaptureService:
         )
         return MicrophoneCaptureResult(pcm_s16le=audio, evidence=evidence)
 
+    def _discard_or_track_cleanup(self, future: asyncio.Future[object]) -> None:
+        if future.done():
+            _consume_future_result(future)
+            return
+        self._track_cleanup(future)
+
     def _track_cleanup(self, future: asyncio.Future[object]) -> None:
         self._cleanup_futures.add(future)
         future.add_done_callback(self._on_cleanup_done)
@@ -423,12 +429,10 @@ class MicrophoneCaptureService:
                 return_when=asyncio.FIRST_COMPLETED,
             )
         except asyncio.CancelledError:
-            if not future.done():
-                self._track_cleanup(future)
+            self._discard_or_track_cleanup(future)
             raise
         if future not in done or loop.time() >= deadline:
-            if not future.done():
-                self._track_cleanup(future)
+            self._discard_or_track_cleanup(future)
             return None
         return future.result()
 
