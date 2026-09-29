@@ -562,6 +562,20 @@ class ProductFactoryProgramHost:
             )
             try:
                 lease = self._reestablish_effect_authority(request, lease)
+                claimed = self._claim_recovery_effect(
+                    host_task_id=host_task_id,
+                    request=request,
+                    lease=lease,
+                )
+                if claimed is None:
+                    return _outcome(
+                        request,
+                        coordinator,
+                        ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                        IdempotencyStatus.COMPLETED,
+                        "worker operation completed before recovery effect admission",
+                    )
+                operation = claimed
                 try:
                     state, lease = await self._run_effect_with_lease(
                         request,
@@ -569,12 +583,14 @@ class ProductFactoryProgramHost:
                         self.worker.inspect(request.work_id),
                     )
                 except asyncio.CancelledError:
-                    self._mark_uncertain_with_status(operation_key, lease)
+                    self._mark_uncertain_and_release_recovery_claim(operation_key, lease)
                     raise
                 except Exception as exc:  # noqa: BLE001 - isolate one external inspect failure
-                    durable_status, marker_detail = self._mark_uncertain_with_status(
-                        operation_key,
-                        lease,
+                    durable_status, marker_detail = (
+                        self._mark_uncertain_and_release_recovery_claim(
+                            operation_key,
+                            lease,
+                        )
                     )
                     return _outcome(
                         request,
@@ -599,6 +615,7 @@ class ProductFactoryProgramHost:
                             coordinator=coordinator,
                             operation_key=operation_key,
                             lease=lease,
+                            release_recovery_claim=True,
                         )
                     except Exception:
                         coordinator.restore(before)
@@ -619,12 +636,14 @@ class ProductFactoryProgramHost:
                         self.worker.recover(request, state),
                     )
                 except asyncio.CancelledError:
-                    self._mark_uncertain_with_status(operation_key, lease)
+                    self._mark_uncertain_and_release_recovery_claim(operation_key, lease)
                     raise
                 except Exception as exc:  # noqa: BLE001 - isolate one external recovery failure
-                    durable_status, marker_detail = self._mark_uncertain_with_status(
-                        operation_key,
-                        lease,
+                    durable_status, marker_detail = (
+                        self._mark_uncertain_and_release_recovery_claim(
+                            operation_key,
+                            lease,
+                        )
                     )
                     return _outcome(
                         request,
@@ -649,6 +668,7 @@ class ProductFactoryProgramHost:
                 was_uncertain=operation.status is IdempotencyStatus.UNCERTAIN,
                 lease=lease,
                 release_lease=False,
+                recovery_claim=True,
             )
         finally:
             self._release_best_effort(lease)
@@ -665,6 +685,7 @@ class ProductFactoryProgramHost:
         was_uncertain: bool,
         lease: WorkOwnershipLease,
         release_lease: bool = True,
+        recovery_claim: bool = False,
     ) -> ProgramWorkOutcome:
         before = coordinator.snapshot()
         try:
@@ -679,6 +700,8 @@ class ProductFactoryProgramHost:
                     binding=binding,
                     coordinator=coordinator,
                 )
+                if recovery_claim:
+                    self._drop_recovery_claim(connection, operation_key, lease)
                 if was_uncertain:
                     self._ledger._set_status_with_connection(
                         connection,
@@ -695,10 +718,18 @@ class ProductFactoryProgramHost:
                     )
         except Exception as exc:  # noqa: BLE001 - external effect must become uncertain
             coordinator.restore(before)
-            durable_status, marker_detail = self._mark_uncertain_with_status(
-                operation_key,
-                lease,
-            )
+            if recovery_claim:
+                durable_status, marker_detail = (
+                    self._mark_uncertain_and_release_recovery_claim(
+                        operation_key,
+                        lease,
+                    )
+                )
+            else:
+                durable_status, marker_detail = self._mark_uncertain_with_status(
+                    operation_key,
+                    lease,
+                )
             if release_lease:
                 self._release_best_effort(lease)
             return _outcome(
@@ -769,6 +800,124 @@ class ProductFactoryProgramHost:
                 input_fingerprint=_request_fingerprint(request),
             )
 
+    def _claim_recovery_effect(
+        self,
+        *,
+        host_task_id: str,
+        request: ComponentWorkRequest,
+        lease: WorkOwnershipLease,
+    ) -> IdempotencyRecord | None:
+        operation_key = _operation_key(request)
+        with self.store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_lease(connection, lease)
+            current = self._ledger._require_with_connection(connection, operation_key)
+            if (
+                current.task_id != host_task_id
+                or current.operation_type != _OPERATION_TYPE
+                or current.input_fingerprint != _request_fingerprint(request)
+            ):
+                raise ProductFactoryProgramError(
+                    "worker recovery operation identity changed before effect admission"
+                )
+            if current.status is IdempotencyStatus.COMPLETED:
+                return None
+            if current.status not in {
+                IdempotencyStatus.PENDING,
+                IdempotencyStatus.UNCERTAIN,
+            }:
+                raise ProductFactoryProgramError(
+                    "worker recovery operation has unsupported durable status"
+                )
+            row = connection.execute(
+                "SELECT project_id, work_id, owner_id, fence "
+                "FROM product_factory_recovery_claims WHERE operation_key = ?",
+                (operation_key,),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO product_factory_recovery_claims "
+                    "(operation_key, project_id, work_id, owner_id, fence) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (
+                        operation_key,
+                        lease.project_id,
+                        lease.work_id,
+                        lease.owner_id,
+                        lease.fence,
+                    ),
+                )
+            else:
+                same_work = row["project_id"] == lease.project_id and row["work_id"] == lease.work_id
+                same_claim = (
+                    same_work
+                    and row["owner_id"] == lease.owner_id
+                    and row["fence"] == lease.fence
+                )
+                stale_claim = (
+                    same_work
+                    and type(row["fence"]) is int
+                    and row["fence"] < lease.fence
+                )
+                if same_claim:
+                    pass
+                elif stale_claim:
+                    connection.execute(
+                        "UPDATE product_factory_recovery_claims "
+                        "SET owner_id = ?, fence = ? WHERE operation_key = ?",
+                        (lease.owner_id, lease.fence, operation_key),
+                    )
+                else:
+                    raise ProductFactoryProgramError(
+                        "active recovery claim belongs to another authority generation"
+                    )
+            return current
+
+    def _drop_recovery_claim(
+        self,
+        connection,
+        operation_key: str,
+        lease: WorkOwnershipLease,
+    ) -> None:
+        cursor = connection.execute(
+            "DELETE FROM product_factory_recovery_claims "
+            "WHERE operation_key = ? AND project_id = ? AND work_id = ? "
+            "AND owner_id = ? AND fence = ?",
+            (
+                operation_key,
+                lease.project_id,
+                lease.work_id,
+                lease.owner_id,
+                lease.fence,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise ProductFactoryProgramError(
+                "exact Product Factory recovery claim is no longer held"
+            )
+
+    def _mark_uncertain_and_release_recovery_claim(
+        self,
+        operation_key: str,
+        lease: WorkOwnershipLease,
+    ) -> tuple[IdempotencyStatus | None, str]:
+        try:
+            with self.store.connection() as connection:
+                connection.execute("BEGIN IMMEDIATE")
+                self._assert_lease(connection, lease)
+                self._drop_recovery_claim(connection, operation_key, lease)
+                current = self._ledger._require_with_connection(connection, operation_key)
+                if current.status is IdempotencyStatus.PENDING:
+                    current = self._ledger.mark_uncertain_with_connection(
+                        connection,
+                        operation_key,
+                    )
+                return current.status, ""
+        except Exception as exc:  # noqa: BLE001 - never fabricate durable uncertainty
+            return self._durable_operation_status(operation_key), (
+                f"; uncertainty marker failed: {type(exc).__name__}"
+            )
+
     def _save_fenced(
         self,
         host_task_id: str,
@@ -794,6 +943,7 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         operation_key: str,
         lease: WorkOwnershipLease,
+        release_recovery_claim: bool = False,
     ) -> None:
         with self.store.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -804,6 +954,8 @@ class ProductFactoryProgramHost:
                 binding=binding,
                 coordinator=coordinator,
             )
+            if release_recovery_claim:
+                self._drop_recovery_claim(connection, operation_key, lease)
             current = self._ledger._require_with_connection(connection, operation_key)
             if current.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain_with_connection(connection, operation_key)
