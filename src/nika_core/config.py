@@ -7,7 +7,6 @@ from platformdirs import user_data_path
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
 APP_CONFIG_SCHEMA_VERSION = 1
 
 
