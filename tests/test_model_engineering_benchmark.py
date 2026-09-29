@@ -880,9 +880,13 @@ def test_execution_config_identity_binds_timeout_and_temperature() -> None:
 class _ConfigMetadataGateway:
     def __init__(self) -> None:
         self.config_sha256 = None
+        self.timeout_seconds = None
+        self.temperature = None
 
     async def complete(self, request):
         self.config_sha256 = request.metadata["benchmark_execution_config_sha256"]
+        self.timeout_seconds = request.timeout_seconds
+        self.temperature = request.temperature
         return ModelResponse(
             request_id=request.request_id,
             text="answer",
@@ -920,6 +924,8 @@ def test_benchmark_binds_execution_config_to_request_and_report() -> None:
     )
 
     assert gateway.config_sha256 == config.evidence_sha256
+    assert gateway.timeout_seconds == config.timeout_seconds
+    assert gateway.temperature == config.temperature
     assert report.execution_config_sha256 == config.evidence_sha256
 
 

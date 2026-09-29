@@ -182,8 +182,8 @@ class ModelBenchmarkRunner:
             provider_id=candidate.provider_id,
             provider_kind=candidate.provider_kind,
             privacy=evaluation_set.privacy,
-            timeout_seconds=timeout_seconds,
-            temperature=temperature,
+            timeout_seconds=execution_config.timeout_seconds,
+            temperature=execution_config.temperature,
             metadata={
                 "evaluation_set_id": evaluation_set.evaluation_set_id,
                 "evaluation_set_version": evaluation_set.version,
