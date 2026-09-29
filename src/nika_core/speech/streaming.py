@@ -106,7 +106,13 @@ class IncrementalSpeechStream:
             name="nika-incremental-speech",
             daemon=True,
         )
-        self._worker.start()
+        try:
+            self._worker.start()
+        except RuntimeError:
+            raise SpeechError(
+                SpeechErrorCode.PROCESS_FAILED,
+                "speech stream worker could not be started",
+            ) from None
 
     def feed(self, fragment: str) -> None:
         if type(fragment) is not str:
