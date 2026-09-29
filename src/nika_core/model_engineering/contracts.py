@@ -257,8 +257,8 @@ class CandidateBenchmarkReport:
     weighted_quality_score: float
     task_pass_rate: float
     completion_rate: float
-    mean_latency_ms: float
-    p95_latency_ms: float
+    mean_latency_ms: float | None
+    p95_latency_ms: float | None
     peak_cpu_percent: float | None
     peak_memory_percent: float | None
     min_available_memory_bytes: int | None
@@ -288,6 +288,8 @@ class CandidateBenchmarkReport:
             (self.mean_latency_ms, "mean_latency_ms"),
             (self.p95_latency_ms, "p95_latency_ms"),
         ):
+            if value is None:
+                continue
             number = float(value)
             if not isfinite(number) or number < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
