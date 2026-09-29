@@ -373,11 +373,18 @@ class IncrementalSpeechStream:
                         SpeechErrorCode.INVALID_ENGINE_RESPONSE,
                         "speech stream engine identity changed",
                     )
-                if selected_voice_id is not None and clean.voice_id != selected_voice_id:
-                    raise SpeechError(
-                        SpeechErrorCode.INVALID_ENGINE_RESPONSE,
-                        "speech stream voice identity changed",
+                if selected_voice_id is not None:
+                    initial_voice = self._selected_voice_id is None
+                    voice_changed = (
+                        clean.voice_id.casefold() != selected_voice_id.casefold()
+                        if initial_voice
+                        else clean.voice_id != selected_voice_id
                     )
+                    if voice_changed:
+                        raise SpeechError(
+                            SpeechErrorCode.INVALID_ENGINE_RESPONSE,
+                            "speech stream voice identity changed",
+                        )
             except SpeechError as exc:
                 self._fail(exc)
                 return
