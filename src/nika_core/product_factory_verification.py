@@ -190,7 +190,7 @@ def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
 
 def _validate_authoritative_required_profile(required_check_ids: tuple[str, ...]) -> None:
     if required_check_ids != PRODUCT_FACTORY_REQUIRED_CHECK_IDS:
-        raise VerificationError("required check ids must match authoritative Product Factory profile")
+        raise VerificationError(\n            "required check ids must match authoritative Product Factory profile"\n        )
 
 
 def _validate_evidence_ref(value: str) -> None:
