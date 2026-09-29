@@ -61,6 +61,7 @@ class EvaluationPurpose(StrEnum):
 class BenchmarkExecutionConfig:
     timeout_seconds: float = 60.0
     temperature: float | None = 0.0
+    scorer_id: str = "exact-match-nfc-v1"
 
     def __post_init__(self) -> None:
         if type(self.timeout_seconds) not in (int, float):
@@ -69,6 +70,7 @@ class BenchmarkExecutionConfig:
         if not isfinite(timeout) or timeout <= 0:
             raise ValueError("timeout_seconds must be finite and greater than zero")
         object.__setattr__(self, "timeout_seconds", timeout)
+        _identity(self.scorer_id, "scorer_id")
         if self.temperature is None:
             return
         if type(self.temperature) not in (int, float):
@@ -82,6 +84,7 @@ class BenchmarkExecutionConfig:
     def evidence_sha256(self) -> str:
         payload = {
             "schema": "nika-model-benchmark-execution-config-v1",
+            "scorer_id": self.scorer_id,
             "temperature": self.temperature,
             "timeout_seconds": self.timeout_seconds,
         }
