@@ -447,6 +447,38 @@ def test_close_fails_closed_when_started_coroutine_does_not_settle() -> None:
     submitter.close()
 
 
+def test_close_fails_closed_if_future_is_running_before_coroutine_start() -> None:
+    submitter = _LoopSubmitter()
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=submitter.submit,
+    )
+    active: Future[VoiceTurnResult] = Future()
+    assert active.set_running_or_notify_cancel() is True
+
+    with controller._lock:
+        controller._active = active
+        controller._active_started = threading.Event()
+        controller._active_settled = threading.Event()
+        controller._snapshot = DesktopVoiceSnapshot(
+            status=DesktopVoiceStatus.RUNNING,
+            request_id="desktop-voice-close-running",
+            message="running",
+        )
+
+    try:
+        with pytest.raises(RuntimeError, match="remained active"):
+            controller.close(timeout_seconds=0.01)
+        snapshot = controller.snapshot()
+        assert snapshot["status"] == DesktopVoiceStatus.RUNNING.value
+        assert snapshot["active"] is True
+    finally:
+        active.set_exception(RuntimeError("synthetic shutdown release"))
+        controller._finish("desktop-voice-close-running", active)
+        submitter.close()
+
+
 def test_close_rejects_behavioral_or_unbounded_timeout_before_cancel() -> None:
     class BehavioralFloat(float):
         def __float__(self) -> float:
