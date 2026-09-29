@@ -567,6 +567,55 @@ def test_same_recurrence_id_with_conflicting_definition_fails_closed(tmp_path: P
         )
 
 
+def test_same_recurrence_id_payload_replay_uses_canonical_json_identity(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, _ = _service(store, clock, calls)
+    created = service.create(
+        recurrence_id="typed-payload",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+        payload={"enabled": True, "count": 1},
+    )
+
+    replayed = service.create(
+        recurrence_id="typed-payload",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+        payload={"enabled": True, "count": 1},
+    )
+    assert replayed == created
+
+    with pytest.raises(ValueError, match="different recurrence"):
+        service.create(
+            recurrence_id="typed-payload",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload={"enabled": 1, "count": 1},
+        )
+    with pytest.raises(ValueError, match="different recurrence"):
+        service.create(
+            recurrence_id="typed-payload",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+            payload={"enabled": True, "count": 1.0},
+        )
+
+    assert service.get("typed-payload") == created
+    assert calls == []
+
+
 @pytest.mark.parametrize("bad_task_id", ("", " task", "task "))
 def test_invalid_task_id_fails_before_persistence(
     tmp_path: Path,
