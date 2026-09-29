@@ -20,6 +20,8 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def _identity(value: str, name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be canonical text")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty without surrounding whitespace")
     return value
@@ -28,6 +30,8 @@ def _identity(value: str, name: str) -> str:
 def _optional_sha256(value: str | None, name: str) -> str | None:
     if value is None:
         return None
+    if type(value) is not str:
+        raise TypeError(f"{name} must be canonical text")
     if not _SHA256_RE.fullmatch(value):
         raise ValueError(f"{name} must be a lowercase SHA-256 digest")
     return value
@@ -36,6 +40,8 @@ def _optional_sha256(value: str | None, name: str) -> str | None:
 def _bounded_percent(value: float | None, name: str) -> float | None:
     if value is None:
         return None
+    if type(value) not in (int, float):
+        raise TypeError(f"{name} must be numeric")
     number = float(value)
     if not isfinite(number) or not 0 <= number <= 100:
         raise ValueError(f"{name} must be finite and in [0, 100]")
@@ -72,7 +78,7 @@ class ModelCandidate:
             (self.model_license_ref, "model_license_ref"),
         ):
             _identity(value, name)
-        if not isinstance(self.provider_kind, ProviderKind):
+        if not any(self.provider_kind is member for member in ProviderKind):
             raise TypeError("provider_kind must be a ProviderKind")
         _optional_sha256(self.model_sha256, "model_sha256")
 
@@ -107,19 +113,23 @@ class EvaluationCase:
 
     def __post_init__(self) -> None:
         _identity(self.case_id, "case_id")
+        if type(self.messages) is not tuple:
+            raise TypeError("evaluation messages must be a canonical tuple")
         if not self.messages:
             raise ValueError("evaluation case requires at least one message")
-        if any(not isinstance(message, ModelMessage) for message in self.messages):
-            raise TypeError("evaluation messages must use ModelMessage")
+        if any(type(message) is not ModelMessage for message in self.messages):
+            raise TypeError("evaluation messages must use exact ModelMessage values")
+        if type(self.expected_text) is not str:
+            raise TypeError("expected_text must be canonical text")
         if not self.expected_text:
             raise ValueError("expected_text must not be empty")
-        if isinstance(self.pass_score, bool):
-            raise ValueError("pass_score must not be boolean")
+        if type(self.pass_score) not in (int, float):
+            raise TypeError("pass_score must be numeric")
         score = float(self.pass_score)
         if not isfinite(score) or not 0 <= score <= 1:
             raise ValueError("pass_score must be finite and in [0, 1]")
-        if isinstance(self.weight, bool):
-            raise ValueError("weight must not be boolean")
+        if type(self.weight) not in (int, float):
+            raise TypeError("weight must be numeric")
         weight = float(self.weight)
         if not isfinite(weight) or weight <= 0:
             raise ValueError("weight must be finite and greater than zero")
@@ -143,12 +153,16 @@ class EvaluationSet:
             (self.license_ref, "license_ref"),
         ):
             _identity(value, name)
-        if not isinstance(self.purpose, EvaluationPurpose):
+        if not any(self.purpose is member for member in EvaluationPurpose):
             raise TypeError("purpose must be an EvaluationPurpose")
-        if not isinstance(self.privacy, PrivacyClass):
+        if not any(self.privacy is member for member in PrivacyClass):
             raise TypeError("privacy must be a PrivacyClass")
+        if type(self.cases) is not tuple:
+            raise TypeError("evaluation cases must be a canonical tuple")
         if not self.cases:
             raise ValueError("evaluation set requires at least one case")
+        if any(type(case) is not EvaluationCase for case in self.cases):
+            raise TypeError("evaluation cases must use exact EvaluationCase values")
         case_ids = [case.case_id for case in self.cases]
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("evaluation case IDs must be unique")
@@ -191,11 +205,7 @@ class AcceleratorSnapshot:
     def __post_init__(self) -> None:
         _bounded_percent(self.utilization_percent, "utilization_percent")
         if self.memory_used_bytes is not None:
-            if (
-                isinstance(self.memory_used_bytes, bool)
-                or not isinstance(self.memory_used_bytes, int)
-                or self.memory_used_bytes < 0
-            ):
+            if type(self.memory_used_bytes) is not int or self.memory_used_bytes < 0:
                 raise ValueError("memory_used_bytes must be a non-negative integer")
 
 
@@ -224,9 +234,17 @@ class CaseBenchmarkResult:
     def __post_init__(self) -> None:
         _identity(self.candidate_id, "candidate_id")
         _identity(self.case_id, "case_id")
+        if type(self.score) not in (int, float):
+            raise TypeError("score must be numeric")
+        if type(self.passed) is not bool:
+            raise TypeError("passed must be boolean")
+        if type(self.completion_succeeded) is not bool:
+            raise TypeError("completion_succeeded must be boolean")
         score = float(self.score)
         if not isfinite(score) or not 0 <= score <= 1:
             raise ValueError("score must be finite and in [0, 1]")
+        if type(self.latency_ms) not in (int, float):
+            raise TypeError("latency_ms must be numeric")
         latency = float(self.latency_ms)
         if not isfinite(latency) or latency < 0:
             raise ValueError("latency_ms must be finite and non-negative")
@@ -236,10 +254,12 @@ class CaseBenchmarkResult:
             (self.output_tokens, "output_tokens"),
             (self.total_tokens, "total_tokens"),
         ):
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
+            if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer")
+        if self.error_code is not None and not any(
+            self.error_code is member for member in ModelErrorCode
+        ):
+            raise TypeError("error_code must be a ModelErrorCode")
         if self.completion_succeeded and self.error_code is not None:
             raise ValueError("successful completion cannot carry error_code")
         if not self.completion_succeeded and self.error_code is None:
@@ -266,11 +286,19 @@ class CandidateBenchmarkReport:
     peak_accelerator_memory_bytes: int | None
 
     def __post_init__(self) -> None:
+        if type(self.candidate) is not ModelCandidate:
+            raise TypeError("candidate must be an exact ModelCandidate")
         _identity(self.evaluation_set_id, "evaluation_set_id")
         _identity(self.evaluation_set_version, "evaluation_set_version")
         _optional_sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
+        if not any(self.evaluation_purpose is member for member in EvaluationPurpose):
+            raise TypeError("evaluation_purpose must be an EvaluationPurpose")
+        if type(self.case_results) is not tuple:
+            raise TypeError("case_results must be a canonical tuple")
         if not self.case_results:
             raise ValueError("benchmark report requires case results")
+        if any(type(item) is not CaseBenchmarkResult for item in self.case_results):
+            raise TypeError("case_results must use exact CaseBenchmarkResult values")
         if any(item.candidate_id != self.candidate.candidate_id for item in self.case_results):
             raise ValueError("case result candidate identity mismatch")
         case_ids = [item.case_id for item in self.case_results]
@@ -281,6 +309,8 @@ class CandidateBenchmarkReport:
             (self.task_pass_rate, "task_pass_rate"),
             (self.completion_rate, "completion_rate"),
         ):
+            if type(value) not in (int, float):
+                raise TypeError(f"{name} must be numeric")
             number = float(value)
             if not isfinite(number) or not 0 <= number <= 1:
                 raise ValueError(f"{name} must be finite and in [0, 1]")
@@ -290,6 +320,8 @@ class CandidateBenchmarkReport:
         ):
             if value is None:
                 continue
+            if type(value) not in (int, float):
+                raise TypeError(f"{name} must be numeric")
             number = float(value)
             if not isfinite(number) or number < 0:
                 raise ValueError(f"{name} must be finite and non-negative")
@@ -300,9 +332,7 @@ class CandidateBenchmarkReport:
             (self.min_available_memory_bytes, "min_available_memory_bytes"),
             (self.peak_accelerator_memory_bytes, "peak_accelerator_memory_bytes"),
         ):
-            if value is not None and (
-                isinstance(value, bool) or not isinstance(value, int) or value < 0
-            ):
+            if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer")
 
 
@@ -317,8 +347,12 @@ class BenchmarkSuiteReport:
         _identity(self.evaluation_set_id, "evaluation_set_id")
         _identity(self.evaluation_set_version, "evaluation_set_version")
         _optional_sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
+        if type(self.reports) is not tuple:
+            raise TypeError("benchmark suite reports must be a canonical tuple")
         if not self.reports:
             raise ValueError("benchmark suite requires at least one candidate report")
+        if any(type(report) is not CandidateBenchmarkReport for report in self.reports):
+            raise TypeError("benchmark suite reports must use exact candidate reports")
         ids = [report.candidate.candidate_id for report in self.reports]
         if len(ids) != len(set(ids)):
             raise ValueError("benchmark suite candidate IDs must be unique")
