@@ -245,9 +245,10 @@ class AcceleratorSnapshot:
 
     def __post_init__(self) -> None:
         _bounded_percent(self.utilization_percent, "utilization_percent")
-        if self.memory_used_bytes is not None:
-            if type(self.memory_used_bytes) is not int or self.memory_used_bytes < 0:
-                raise ValueError("memory_used_bytes must be a non-negative integer")
+        if self.memory_used_bytes is not None and (
+            type(self.memory_used_bytes) is not int or self.memory_used_bytes < 0
+        ):
+            raise ValueError("memory_used_bytes must be a non-negative integer")
 
 
 class AcceleratorObserverPort(Protocol):

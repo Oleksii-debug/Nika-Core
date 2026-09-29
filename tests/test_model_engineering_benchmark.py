@@ -9,6 +9,7 @@ import pytest
 from nika_core.model_engineering import (
     AcceleratorSnapshot,
     BenchmarkExecutionConfig,
+    CaseBenchmarkResult,
     EvaluationCase,
     EvaluationPurpose,
     EvaluationSet,

@@ -273,7 +273,7 @@ class ModelBenchmarkRunner:
         raw = (
             f"nika-model-benchmark-v1\0{candidate.evidence_sha256}\0"
             f"{evaluation_set.content_sha256}\0{case.case_id}"
-        ).encode("utf-8")
+        ).encode()
         return f"model-bench-{hashlib.sha256(raw).hexdigest()[:32]}"
 
     @staticmethod
