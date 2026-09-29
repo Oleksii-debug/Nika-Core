@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 import pytest
@@ -20,6 +20,19 @@ from nika_core.runtime.idempotency import (
     IdempotencyLedger,
     IdempotencyStatus,
 )
+
+
+class _BehavioralTimezone(tzinfo):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def utcoffset(self, _dt):
+        self.calls += 1
+        raise AssertionError("behavioral tzinfo must not execute")
+
+    def dst(self, _dt):
+        self.calls += 1
+        raise AssertionError("behavioral tzinfo must not execute")
 
 
 class SequencePresence:
@@ -815,6 +828,20 @@ def test_guard_composes_with_canonical_task_runtime_coordinator(tmp_path: Path) 
     assert "background.dispatch_returned" in event_types
 
 
+def test_presence_observation_rejects_behavioral_tzinfo_before_execution() -> None:
+    zone = _BehavioralTimezone()
+
+    with pytest.raises(ValueError, match="UTC"):
+        OwnerPresenceObservation(
+            source_id="source",
+            sequence=1,
+            presence=OwnerPresence.AWAY,
+            observed_at=datetime(2030, 1, 1, tzinfo=zone),
+        )
+
+    assert zone.calls == 0
+
+
 def test_presence_observation_requires_exact_utc_carrier() -> None:
     now = datetime(2030, 1, 1, tzinfo=UTC)
 
@@ -833,6 +860,56 @@ def test_presence_observation_requires_exact_utc_carrier() -> None:
             presence=OwnerPresence.AWAY,
             observed_at=datetime(2030, 1, 1, tzinfo=timezone(timedelta(hours=1))),
         )
+
+
+def test_presence_clock_rejects_behavioral_tzinfo_before_execution(
+    tmp_path: Path,
+) -> None:
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    zone = _BehavioralTimezone()
+    bad_now = datetime(2030, 1, 1, tzinfo=zone)
+    store = _store(tmp_path)
+    queue = TaskQueue(store)
+    audit = AuditLog(store)
+    resources = ResourceManager(store, SequenceResourceObserver())
+    resources.set_budget(
+        ResourceBudget(
+            scope="background_life",
+            owner_id="living-agent",
+            max_concurrent=1,
+            max_cpu_percent=80.0,
+            max_memory_percent=80.0,
+        )
+    )
+    guard = BackgroundDispatchGuard(
+        queue=queue,
+        audit=audit,
+        resources=resources,
+        presence=SequencePresence([_obs(1, OwnerPresence.AWAY, now=now)]),
+        source_id="win32-owner-presence",
+        clock=lambda: bad_now,
+    )
+    task_id = _ready_task(queue)
+    calls = 0
+
+    async def effect() -> object:
+        nonlocal calls
+        calls += 1
+        return "must-not-run"
+
+    result = asyncio.run(
+        guard.dispatch(
+            task_id=task_id,
+            work_kind=BackgroundWorkKind.READING_RESEARCH,
+            effect=effect,
+        )
+    )
+
+    assert result.action is BackgroundAction.PAUSE
+    assert result.executed is False
+    assert calls == 0
+    assert zone.calls == 0
+    assert queue.get(task_id).state is TaskState.PAUSED
 
 
 def test_guard_rejects_negative_future_skew(tmp_path: Path) -> None:
