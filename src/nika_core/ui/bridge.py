@@ -118,23 +118,34 @@ class UIActionBridge:
         return {"ok": True, "state": state}
 
     def list_actions(self) -> list[dict[str, Any]]:
-        return [
-            UIActionView(
-                action_id=action.action_id,
-                label=action.label,
-                category=action.category,
-                scope=action.scope,
-                binding=self._keymap.resolve(action.action_id),
-                may_be_unbound=action.may_be_unbound,
-            ).model_dump()
-            for action in self._actions.all()
-        ]
+        try:
+            return [
+                UIActionView(
+                    action_id=action.action_id,
+                    label=action.label,
+                    category=action.category,
+                    scope=action.scope,
+                    binding=self._keymap.resolve(action.action_id),
+                    may_be_unbound=action.may_be_unbound,
+                ).model_dump()
+                for action in self._actions.all()
+            ]
+        except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
+            logger.error(
+                "UI action list failed: exception_type=%s",
+                type(exc).__name__,
+            )
+            raise RuntimeError(
+                "Не вдалося завантажити список дій через внутрішню помилку."
+            ) from None
 
     def set_binding(self, action_id: str, binding: str | None) -> dict[str, Any]:
         try:
             self._keymap.set_binding(action_id, binding)
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
+            return self._unexpected_keymap_failure("set_binding", exc)
         return {"ok": True, "message": "Shortcut saved."}
 
     def restore_default(self, action_id: str) -> dict[str, Any]:
@@ -142,10 +153,16 @@ class UIActionBridge:
             self._keymap.restore_default(action_id)
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
+            return self._unexpected_keymap_failure("restore_default", exc)
         return {"ok": True, "message": "Default shortcut restored."}
 
     def export_keymap(self) -> dict[str, Any]:
-        return {"ok": True, "data": self._keymap.export_json(), "message": "Shortcut map exported."}
+        try:
+            data = self._keymap.export_json()
+        except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
+            return self._unexpected_keymap_failure("export_keymap", exc)
+        return {"ok": True, "data": data, "message": "Shortcut map exported."}
 
     def import_keymap(self, data: str) -> dict[str, Any]:
         if not isinstance(data, str):
@@ -154,4 +171,18 @@ class UIActionBridge:
             self._keymap.import_json(data)
         except (KeyError, TypeError, ValueError) as exc:
             return {"ok": False, "message": str(exc)}
+        except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
+            return self._unexpected_keymap_failure("import_keymap", exc)
         return {"ok": True, "message": "Shortcut map imported."}
+
+    @staticmethod
+    def _unexpected_keymap_failure(operation: str, exc: Exception) -> dict[str, Any]:
+        logger.error(
+            "UI keymap operation failed: operation=%s exception_type=%s",
+            operation,
+            type(exc).__name__,
+        )
+        return {
+            "ok": False,
+            "message": "Не вдалося змінити комбінації клавіш через внутрішню помилку.",
+        }
