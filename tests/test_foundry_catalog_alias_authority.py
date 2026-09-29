@@ -87,6 +87,48 @@ class _DownloadAliasDriftModel(_SubstitutedModel):
         self.alias = "substituted-model"
 
 
+class _ChatClientAliasDriftModel(_SubstitutedModel):
+    def __init__(self) -> None:
+        super().__init__(cached=True)
+        self.alias = "authorized-model"
+        self.is_loaded = True
+
+    def get_chat_client(self) -> object:
+        client = super().get_chat_client()
+        self.alias = "substituted-model"
+        return client
+
+
+class _ChatCompletionIdentityDriftModel(_SubstitutedModel):
+    def __init__(self) -> None:
+        super().__init__(cached=True)
+        self.id = "authorized-model-id"
+        self.alias = "authorized-model"
+        self.is_loaded = True
+
+    def get_chat_client(self) -> object:
+        model = self
+
+        class _Client:
+            def complete_chat(self, messages: object) -> object:
+                model.chat_calls += 1
+                model.id = "substituted-model-id"
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="substituted response")
+                        )
+                    ],
+                    usage=SimpleNamespace(
+                        prompt_tokens=1,
+                        completion_tokens=1,
+                        total_tokens=2,
+                    ),
+                )
+
+        return _Client()
+
+
 class _SubstitutingCatalog:
     def __init__(self, model: _SubstitutedModel) -> None:
         self.model = model
@@ -210,3 +252,38 @@ def test_foundry_download_rejects_alias_drift_after_native_download() -> None:
     _assert_alias_substitution_failure(exc_info.value)
     assert manager.catalog.requested_aliases == ["authorized-model"]
     assert model.download_calls == 1
+
+
+def test_foundry_complete_revalidates_alias_after_chat_client_acquisition() -> None:
+    model = _ChatClientAliasDriftModel()
+    manager = _Manager(model)
+    provider = FoundryLocalProvider(
+        default_model="authorized-model",
+        manager_factory=lambda: manager,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(_request()))
+
+    _assert_alias_substitution_failure(exc_info.value)
+    assert manager.catalog.requested_aliases == ["authorized-model"]
+    assert model.chat_calls == 0
+
+
+def test_foundry_complete_revalidates_model_identity_after_native_chat() -> None:
+    model = _ChatCompletionIdentityDriftModel()
+    manager = _Manager(model)
+    provider = FoundryLocalProvider(
+        default_model="authorized-model",
+        expected_model_id="authorized-model-id",
+        manager_factory=lambda: manager,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        asyncio.run(provider.complete(_request()))
+
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.provider_id == "foundry-local"
+    assert exc_info.value.retryable is False
+    assert manager.catalog.requested_aliases == ["authorized-model"]
+    assert model.chat_calls == 1
