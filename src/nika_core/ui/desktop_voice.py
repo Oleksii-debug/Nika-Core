@@ -224,8 +224,14 @@ class DesktopVoiceTurnController:
 
         with self._lock:
             self._reap_cancelled_settlement_locked()
-            if self._active is active and active.done() and not active.cancelled():
-                raise RuntimeError("voice completion callback did not settle controller state")
+            if self._active is active:
+                if active.done() and not active.cancelled():
+                    raise RuntimeError(
+                        "voice completion callback did not settle controller state"
+                    )
+                raise RuntimeError(
+                    "voice turn remained active after the desktop shutdown deadline"
+                )
 
     async def _execute(
         self,
