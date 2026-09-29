@@ -38,6 +38,25 @@ _MAX_IDENTITY_LENGTH = 256
 _MAX_CONFIGURED_PRESENCE_AGE_SECONDS = 60.0
 
 
+def _require_identity(
+    value: object,
+    name: str,
+    *,
+    maximum: int | None = _MAX_IDENTITY_LENGTH,
+) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact built-in str")
+    if not value or value != value.strip():
+        raise ValueError(f"{name} must be non-empty without surrounding whitespace")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
+    if maximum is not None and len(value) > maximum:
+        raise ValueError(f"{name} is too long")
+    return value
+
+
 class PresenceEvidencePhase(StrEnum):
     PREFLIGHT = "preflight"
     EFFECT_RECHECK = "effect_recheck"
@@ -56,12 +75,7 @@ class OwnerPresenceObservation:
     observed_at: datetime
 
     def __post_init__(self) -> None:
-        if type(self.source_id) is not str:
-            raise TypeError("source_id must be exact built-in str")
-        if not self.source_id or self.source_id != self.source_id.strip():
-            raise ValueError("source_id must be non-empty without surrounding whitespace")
-        if len(self.source_id) > _MAX_IDENTITY_LENGTH:
-            raise ValueError("source_id is too long")
+        _require_identity(self.source_id, "source_id")
         if type(self.sequence) is not int:
             raise TypeError("sequence must be exact built-in int")
         if not 0 <= self.sequence <= _MAX_SIGNED_64:
@@ -114,12 +128,7 @@ class BackgroundDispatchGuard:
         max_future_skew_seconds: float = 1.0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if type(source_id) is not str:
-            raise TypeError("source_id must be exact built-in str")
-        if not source_id or source_id != source_id.strip():
-            raise ValueError("source_id must be non-empty without surrounding whitespace")
-        if len(source_id) > _MAX_IDENTITY_LENGTH:
-            raise ValueError("source_id is too long")
+        _require_identity(source_id, "source_id")
         if type(max_presence_age_seconds) not in (int, float):
             raise TypeError("max_presence_age_seconds must be exact built-in int or float")
         if type(max_presence_age_seconds) is float and not isfinite(max_presence_age_seconds):
@@ -164,12 +173,7 @@ class BackgroundDispatchGuard:
             raise TypeError("work_kind must be BackgroundWorkKind")
         if not callable(effect):
             raise TypeError("effect must be callable")
-        if type(owner_id) is not str:
-            raise TypeError("owner_id must be exact built-in str")
-        if not owner_id or owner_id != owner_id.strip():
-            raise ValueError("owner_id must be non-empty without surrounding whitespace")
-        if len(owner_id) > _MAX_IDENTITY_LENGTH:
-            raise ValueError("owner_id is too long")
+        _require_identity(owner_id, "owner_id")
 
         for phase in (
             PresenceEvidencePhase.PREFLIGHT,
@@ -416,12 +420,7 @@ class BackgroundDispatchGuard:
             raise TypeError("work_kind must be BackgroundWorkKind")
         if not callable(effect):
             raise TypeError("effect must be callable")
-        if type(owner_id) is not str:
-            raise TypeError("owner_id must be exact built-in str")
-        if not owner_id or owner_id != owner_id.strip():
-            raise ValueError("owner_id must be non-empty without surrounding whitespace")
-        if len(owner_id) > _MAX_IDENTITY_LENGTH:
-            raise ValueError("owner_id is too long")
+        _require_identity(owner_id, "owner_id")
 
         for phase in (
             PresenceEvidencePhase.PREFLIGHT,
@@ -1087,10 +1086,7 @@ class BackgroundDispatchGuard:
             )
 
     def _require_dispatchable_task(self, task_id: str) -> None:
-        if type(task_id) is not str:
-            raise TypeError("task_id must be exact built-in str")
-        if not task_id or task_id != task_id.strip():
-            raise ValueError("task_id must be non-empty without surrounding whitespace")
+        _require_identity(task_id, "task_id", maximum=None)
         with self._queue.store.connection() as conn:
             state = self._task_state_with_connection(conn, task_id)
             if state is TaskState.PAUSED:
@@ -1105,10 +1101,7 @@ class BackgroundDispatchGuard:
                 )
 
     def _require_owner_return_paused_task(self, task_id: str) -> int:
-        if type(task_id) is not str:
-            raise TypeError("task_id must be exact built-in str")
-        if not task_id or task_id != task_id.strip():
-            raise ValueError("task_id must be non-empty without surrounding whitespace")
+        _require_identity(task_id, "task_id", maximum=None)
         with self._queue.store.connection() as conn:
             return self._owner_return_pause_event_id_with_connection(conn, task_id)
 
