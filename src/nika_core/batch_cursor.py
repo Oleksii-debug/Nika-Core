@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal
 
@@ -1129,6 +1129,8 @@ def _as_utc(value: datetime) -> datetime:
         raise TypeError("datetime must be an exact datetime")
     if value.tzinfo is None:
         raise ValueError("datetime must be timezone-aware")
+    if type(value.tzinfo) is not timezone:
+        raise TypeError("datetime timezone must be canonical")
     return value.astimezone(UTC)
 
 
