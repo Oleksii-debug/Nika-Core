@@ -100,6 +100,7 @@ class DesktopVoiceTurnController:
         self._active: Future[VoiceTurnResult] | None = None
         self._active_started: threading.Event | None = None
         self._active_settled: threading.Event | None = None
+        self._active_cancel_intent = False
         self._submitting_request_id: str | None = None
         self._cancel_requested_while_submitting = False
         self._submission_settled: threading.Event | None = None
@@ -170,6 +171,7 @@ class DesktopVoiceTurnController:
             self._active = future
             self._active_started = started
             self._active_settled = settled
+            self._active_cancel_intent = cancel_requested
 
         submission_settled.set()
         future.add_done_callback(
@@ -223,6 +225,10 @@ class DesktopVoiceTurnController:
                     status="completed",
                     message="Голосовий ввід уже завершився.",
                 )
+
+        with self._lock:
+            if self._active is active:
+                self._active_cancel_intent = True
 
         accepted = active.cancel()
         if not accepted:
@@ -347,6 +353,10 @@ class DesktopVoiceTurnController:
     ) -> None:
         if type(cancellation_requested) is not bool:
             raise TypeError("cancellation_requested must be an exact bool")
+        with self._lock:
+            cancellation_requested = cancellation_requested or (
+                self._active is future and self._active_cancel_intent
+            )
         if cancellation_requested and not future.cancelled():
             try:
                 future.result()
@@ -424,6 +434,7 @@ class DesktopVoiceTurnController:
         self._active = None
         self._active_started = None
         self._active_settled = None
+        self._active_cancel_intent = False
 
     def _clear_submission_locked(self) -> None:
         self._submitting_request_id = None
