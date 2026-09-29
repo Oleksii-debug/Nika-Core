@@ -889,6 +889,37 @@ def test_non_hex_audio_digest_cannot_satisfy_success_evidence_binding() -> None:
     assert snapshot.status is DesktopVoiceStatus.FAILED
     assert snapshot.transcript is None
 
+
+@pytest.mark.parametrize("transcript", ["valid\\x00hidden", "valid\\ud800hidden"])
+def test_forged_completed_result_rejects_non_public_transcript(
+    transcript: str,
+) -> None:
+    result = asyncio.run(
+        _service(_MicrophoneAdapter()).run(_request("desktop-voice-test"))
+    )
+    assert result.evidence.transcription is not None
+    assert result.evidence.wake is not None
+    digest = hashlib.sha256(
+        transcript.encode("utf-8", errors="surrogatepass")
+    ).hexdigest()
+    object.__setattr__(result, "transcript", transcript)
+    object.__setattr__(
+        result.evidence.transcription,
+        "transcript_sha256",
+        digest,
+    )
+    object.__setattr__(result.evidence.wake, "transcript_sha256", digest)
+
+    snapshot = DesktopVoiceTurnController._result_snapshot(
+        "desktop-voice-test",
+        result,
+    )
+
+    assert snapshot.status is DesktopVoiceStatus.FAILED
+    assert snapshot.transcript is None
+
+
+
 def test_behavioral_digest_cannot_strand_precompleted_future_callback() -> None:
     class BehavioralStr(str):
         def __eq__(self, other: object) -> bool:
