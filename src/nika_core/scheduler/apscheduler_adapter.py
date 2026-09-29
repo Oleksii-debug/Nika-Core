@@ -40,8 +40,12 @@ class APSchedulerAdapter(SchedulerPort):
             return
         self._starting = True
         try:
-            for job in self._jobs.list_enabled():
-                self._sync_runtime_job(job.job_id)
+            try:
+                for job in self._jobs.list_enabled():
+                    self._sync_runtime_job(job.job_id)
+            except Exception:
+                self._scheduler = BackgroundScheduler(timezone="UTC")
+                raise
             self._scheduler.start()
             self._started = True
         finally:

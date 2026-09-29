@@ -275,13 +275,22 @@ def test_pause_and_resume_during_start_transition_reconcile_pending_jobs(tmp_pat
     adapter.shutdown(wait=False)
 
 
-def test_failed_start_rehydration_clears_starting_for_retry(tmp_path) -> None:
+def test_failed_start_rehydration_discards_stale_pending_state(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Scheduler Start Retry" / "nika core.db")
     store.initialize()
     jobs = ScheduledJobStore(store)
+    stale_at = datetime.now(UTC) + timedelta(days=1)
+    jobs.upsert(
+        _date_job(
+            job_id="a-stale-pending",
+            action_id="stale",
+            run_at=stale_at,
+            payload={},
+        )
+    )
     jobs.upsert(
         ScheduledJob(
-            job_id="job-start-retry",
+            job_id="z-start-retry",
             action_id="retry",
             trigger_kind=TriggerKind.CRON,
             trigger={"bogus_field": "*"},
@@ -289,18 +298,22 @@ def test_failed_start_rehydration_clears_starting_for_retry(tmp_path) -> None:
         )
     )
     adapter = APSchedulerAdapter(jobs, lambda _action_id: lambda _payload: None)
+    failed_scheduler = adapter._scheduler
 
     with pytest.raises(TypeError):
         adapter.start()
 
     assert adapter._starting is False
     assert adapter._started is False
-    assert not adapter.has_runtime_job("job-start-retry")
+    assert adapter._scheduler is not failed_scheduler
+    assert not adapter.has_runtime_job("a-stale-pending")
+    assert not adapter.has_runtime_job("z-start-retry")
 
-    run_at = datetime.now(UTC) + timedelta(days=1)
+    assert jobs.delete("a-stale-pending") is True
+    run_at = stale_at + timedelta(hours=1)
     jobs.upsert(
         _date_job(
-            job_id="job-start-retry",
+            job_id="z-start-retry",
             action_id="retry",
             run_at=run_at,
             payload={},
@@ -308,7 +321,8 @@ def test_failed_start_rehydration_clears_starting_for_retry(tmp_path) -> None:
     )
     adapter.start()
 
-    runtime = adapter._scheduler.get_job("job-start-retry")
+    assert not adapter.has_runtime_job("a-stale-pending")
+    runtime = adapter._scheduler.get_job("z-start-retry")
     assert runtime is not None
     assert runtime.trigger.run_date == run_at
     adapter.shutdown(wait=False)
