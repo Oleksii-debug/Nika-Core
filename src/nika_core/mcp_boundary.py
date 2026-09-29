@@ -16,6 +16,9 @@ from nika_core.tools import (
 )
 
 
+_MAX_MCP_SEGMENT_CHARS = 128
+
+
 def _exact_utf8_text(
     value: object,
     *,
@@ -35,6 +38,10 @@ def _exact_utf8_text(
 
 def _exact_mcp_segment(value: object, *, field: str) -> str:
     text = _exact_utf8_text(value, field=field, non_empty=True)
+    if len(text) > _MAX_MCP_SEGMENT_CHARS:
+        raise ValueError(
+            f"{field} must contain at most {_MAX_MCP_SEGMENT_CHARS} characters"
+        )
     if text != text.strip():
         raise ValueError(f"{field} must not contain edge whitespace")
     if ":" in text:
@@ -118,14 +125,19 @@ class MCPClientAdapter:
         async with Client(self._target) as client:
             result = await client.list_tools()
         specs: list[ToolSpec] = []
+        seen_tool_ids: set[str] = set()
         for tool in result.tools:
             tool_name = _exact_mcp_segment(
                 tool.name,
                 field="MCP tool name",
             )
+            tool_id = f"mcp:{self._server_id}:{tool_name}"
+            if tool_id in seen_tool_ids:
+                raise ValueError(f"duplicate MCP tool id: {tool_id}")
+            seen_tool_ids.add(tool_id)
             specs.append(
                 ToolSpec(
-                    tool_id=f"mcp:{self._server_id}:{tool_name}",
+                    tool_id=tool_id,
                     description=tool.description or tool.title or tool_name,
                     risk=self._default_risk,
                     input_schema=dict(tool.input_schema or {}),
