@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from math import ceil
+from statistics import fmean
 
 from nika_core.experiments.contracts import (
     ArtifactKind,
@@ -44,6 +46,10 @@ def build_experiment_definition(
 ) -> ExperimentDefinition:
     """Build an Experiment Engine definition without creating or promoting it."""
 
+    if type(experiment_id) is not str:
+        raise TypeError("experiment_id must be canonical text")
+    if not experiment_id or experiment_id != experiment_id.strip():
+        raise ValueError("experiment_id must be non-empty without surrounding whitespace")
     if type(champion) is not ModelCandidate:
         raise TypeError("champion must be an exact ModelCandidate")
     if type(challengers) is not tuple:
@@ -134,6 +140,7 @@ def benchmark_observations(
             raise ValueError(
                 "benchmark case pass evidence does not match the evaluation threshold"
             )
+    _validate_report_aggregates(report, evaluation_set)
 
     candidate_refs = (definition.champion, *definition.challengers)
     matching_refs = tuple(
@@ -171,6 +178,53 @@ def benchmark_observations(
             if metric != LATENCY_METRIC or result.completion_succeeded
         )
     return tuple(observations)
+
+
+def _validate_report_aggregates(
+    report: CandidateBenchmarkReport,
+    evaluation_set: EvaluationSet,
+) -> None:
+    total_weight = sum(float(case.weight) for case in evaluation_set.cases)
+    expected_quality = sum(
+        result.score * float(case.weight)
+        for case, result in zip(
+            evaluation_set.cases,
+            report.case_results,
+            strict=True,
+        )
+    ) / total_weight
+    expected_pass_rate = (
+        sum(result.passed for result in report.case_results)
+        / len(report.case_results)
+    )
+    expected_completion_rate = (
+        sum(result.completion_succeeded for result in report.case_results)
+        / len(report.case_results)
+    )
+    successful_latencies = [
+        result.latency_ms
+        for result in report.case_results
+        if result.completion_succeeded
+    ]
+    expected_mean_latency = (
+        fmean(successful_latencies)
+        if successful_latencies
+        else None
+    )
+    expected_p95_latency = None
+    if successful_latencies:
+        ordered = sorted(float(value) for value in successful_latencies)
+        index = max(0, ceil(0.95 * len(ordered)) - 1)
+        expected_p95_latency = ordered[index]
+
+    if (
+        report.weighted_quality_score != expected_quality
+        or report.task_pass_rate != expected_pass_rate
+        or report.completion_rate != expected_completion_rate
+        or report.mean_latency_ms != expected_mean_latency
+        or report.p95_latency_ms != expected_p95_latency
+    ):
+        raise ValueError("benchmark report aggregate metrics do not match case evidence")
 
 
 def _validate_policy_metrics(policy: PromotionPolicy) -> tuple[str, ...]:
