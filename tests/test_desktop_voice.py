@@ -700,6 +700,7 @@ def test_non_wake_transcript_is_completed_without_activation() -> None:
     finally:
         submitter.close()
 
+
 def test_behavioral_nested_evidence_scalars_fail_closed_without_dispatch() -> None:
     class BehavioralStr(str):
         def __eq__(self, other: object) -> bool:

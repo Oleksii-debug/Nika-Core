@@ -469,7 +469,6 @@ class DesktopVoiceTurnController:
             raise ValueError("voice desktop action does not accept payload authority")
 
 
-
 def _is_sha256(value: object) -> bool:
     return (
         type(value) is str
