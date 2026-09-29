@@ -172,7 +172,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         task_id: str,
     ) -> RuntimeResumeProbe | None:
         try:
-            if not self._task_has_model_selection(task_id):
+            if not self._task_has_model_selection(task_id, require_existing=True):
                 return None
             selection = self._model_settings.for_task(task_id)
         except Exception:  # noqa: BLE001 - recovery boundary exposes no stored diagnostics
@@ -557,7 +557,12 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             ).fetchone()
         return row is not None
 
-    def _task_has_model_selection(self, task_id: str) -> bool:
+    def _task_has_model_selection(
+        self,
+        task_id: str,
+        *,
+        require_existing: bool = False,
+    ) -> bool:
         with self._sqlite.connection() as conn:
             row = conn.execute(
                 "SELECT t.payload_json, b.selection_id AS bound_selection_id "
@@ -567,7 +572,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 (task_id,),
             ).fetchone()
         if row is None:
-            raise KeyError(f"task not found: {task_id}")
+            if require_existing:
+                raise KeyError(f"task not found: {task_id}")
+            return False
         payload = json.loads(row["payload_json"])
         if not isinstance(payload, dict):
             raise TypeError("task payload must be an object")
