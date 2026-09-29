@@ -234,15 +234,26 @@ class DesktopVoiceTurnController:
         settled: threading.Event,
     ) -> VoiceTurnResult:
         started.set()
+        loop = asyncio.get_running_loop()
+        factory_future = loop.run_in_executor(
+            None,
+            self._request_factory,
+            request_id,
+        )
         try:
-            request = await asyncio.to_thread(self._request_factory, request_id)
+            request = await asyncio.shield(factory_future)
             if type(request) is not VoiceTurnRequest:
                 raise TypeError("request_factory must return exact VoiceTurnRequest")
             if request.request_id != request_id:
                 raise ValueError("voice request factory changed the generated request identity")
             return await self._service.run(request)
         finally:
-            settled.set()
+            if factory_future.done():
+                settled.set()
+            else:
+                factory_future.add_done_callback(
+                    lambda done: _settle_late_factory_future(done, settled)
+                )
 
     def _finish(
         self,
@@ -441,3 +452,18 @@ class DesktopVoiceTurnController:
             raise TypeError("voice desktop action payload must be an exact dict")
         if payload:
             raise ValueError("voice desktop action does not accept payload authority")
+
+
+def _settle_late_factory_future(
+    future: asyncio.Future[VoiceTurnRequest],
+    settled: threading.Event,
+) -> None:
+    try:
+        future.result()
+    except asyncio.CancelledError:
+        settled.set()
+        return
+    except Exception:  # noqa: BLE001 - late factory result is intentionally discarded
+        settled.set()
+        return
+    settled.set()

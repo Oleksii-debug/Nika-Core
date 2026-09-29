@@ -333,6 +333,39 @@ def test_cancelled_outer_future_does_not_clear_active_before_coroutine_settles()
     submitter.close()
 
 
+def test_cancel_waits_for_blocking_request_factory_before_reentry() -> None:
+    submitter = _LoopSubmitter()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_factory(request_id: str) -> VoiceTurnRequest:
+        entered.set()
+        assert release.wait(timeout=2)
+        return _request(request_id)
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=blocking_factory,
+        submit=submitter.submit,
+    )
+    try:
+        assert controller.start({}).status == "accepted"
+        assert entered.wait(timeout=2)
+        assert controller.cancel({}).status == "accepted"
+        pending = controller.snapshot()
+        assert pending["status"] == DesktopVoiceStatus.CANCELLING.value
+        assert pending["active"] is True
+        with pytest.raises(ValueError, match="завершує скасування"):
+            controller.start({})
+
+        release.set()
+        final = _wait_status(controller, DesktopVoiceStatus.CANCELLED)
+        assert final["active"] is False
+    finally:
+        release.set()
+        submitter.close()
+
+
 def test_cancel_propagates_to_active_async_capture() -> None:
     submitter = _LoopSubmitter()
     entered = threading.Event()
