@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-from typing import ClassVar
 import io
 import threading
 import wave
+from typing import ClassVar
 
 import pytest
 
