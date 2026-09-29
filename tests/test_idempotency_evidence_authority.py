@@ -20,6 +20,16 @@ class _BehavioralText(str):
         return "trusted"
 
 
+class _BehavioralDict(dict):
+    def items(self):
+        raise AssertionError("behavioral dict.items() must not execute")
+
+
+class _BehavioralList(list):
+    def __iter__(self):
+        raise AssertionError("behavioral list.__iter__() must not execute")
+
+
 def _store_with_task(tmp_path):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -104,6 +114,29 @@ def test_complete_rejects_non_text_object_keys_without_status_mutation(
     _reserve(ledger, task_id)
 
     with pytest.raises(ValueError, match="object keys must be exact text"):
+        ledger.complete("effect:1", result)
+
+    persisted = ledger.require("effect:1")
+    assert persisted.status is IdempotencyStatus.PENDING
+    assert persisted.result is None
+
+
+@pytest.mark.parametrize(
+    "result",
+    (
+        {"nested": _BehavioralDict({"safe": "value"})},
+        {"nested": _BehavioralList(["safe"])},
+    ),
+)
+def test_complete_rejects_behavioral_json_containers_without_executing_them(
+    tmp_path,
+    result: dict[str, object],
+) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+
+    with pytest.raises(ValueError, match="containers must use exact built-in types"):
         ledger.complete("effect:1", result)
 
     persisted = ledger.require("effect:1")
