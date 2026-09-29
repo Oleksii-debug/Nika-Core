@@ -318,7 +318,6 @@ def test_worker_result_revalidates_forged_recovery_state_before_state_effect() -
     assert coordinator.snapshot() == before
 
 
-
 def test_worker_result_rejects_control_bearing_test_output_digest() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
@@ -346,6 +345,7 @@ def test_worker_result_rejects_control_bearing_test_output_digest() -> None:
         )
 
     assert coordinator.snapshot() == before
+
 
 def test_worker_result_rejects_oversized_artifact_text_before_state_effect() -> None:
     coordinator = _coordinator()
@@ -376,6 +376,7 @@ def test_worker_result_rejects_oversized_artifact_text_before_state_effect() -> 
 
     assert coordinator.snapshot() == before
 
+
 def test_worker_result_rejects_control_bearing_recovery_token() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
@@ -404,6 +405,8 @@ def test_worker_result_rejects_control_bearing_recovery_token() -> None:
         )
 
     assert coordinator.snapshot() == before
+
+
 class _FakePassingEvidence:
     command = ("python", "-m", "pytest", "tests/core")
     exit_code = 0
