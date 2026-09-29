@@ -323,6 +323,11 @@ class DesktopVoiceTurnController:
             with self._lock:
                 if self._active is active:
                     self._active_cancel_intent = True
+                    self._snapshot = DesktopVoiceSnapshot(
+                        status=DesktopVoiceStatus.CANCELLING,
+                        request_id=self._snapshot.request_id,
+                        message="Скасування голосового вводу завершується.",
+                    )
             active.cancel()
 
         remaining = max(0.0, deadline - time.monotonic())
