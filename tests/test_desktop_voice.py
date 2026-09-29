@@ -190,6 +190,30 @@ def test_start_returns_immediately_and_projects_bounded_success_state() -> None:
         submitter.close()
 
 
+def test_behavioral_future_subclass_is_rejected_before_callback_registration() -> None:
+    class BehavioralFuture(Future[Any]):
+        def add_done_callback(self, fn: Any) -> None:
+            raise AssertionError("behavioral Future callback must not execute")
+
+        def cancel(self) -> bool:
+            raise AssertionError("behavioral Future cancel must not execute")
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        coroutine.close()
+        return BehavioralFuture()
+
+    controller = DesktopVoiceTurnController(
+        service=_service(_MicrophoneAdapter()),
+        request_factory=_request,
+        submit=submit,
+    )
+
+    with pytest.raises(TypeError, match="concurrent.futures.Future"):
+        controller.start({})
+
+    assert controller.snapshot()["status"] == DesktopVoiceStatus.FAILED.value
+
+
 def test_precompleted_future_callback_does_not_deadlock_start() -> None:
     def immediate_submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
         coroutine.close()
