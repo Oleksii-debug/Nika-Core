@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from typing import ClassVar
 import io
 import threading
 import wave
@@ -336,7 +337,7 @@ def test_cancelled_decode_remains_inflight_and_blocks_overlap(fake_numpy: None) 
 
 def test_factory_binds_whisper_files_language_threads_and_cpu_provider() -> None:
     class _OfflineRecognizer:
-        calls: list[dict[str, object]] = []
+        calls: ClassVar[list[dict[str, object]]] = []
 
         @classmethod
         def from_whisper(cls, **kwargs):
