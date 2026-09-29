@@ -146,17 +146,6 @@ def test_string_loaded_flag_cannot_skip_provider_owned_load_boundary() -> None:
     assert model.completion_count == 0
 
 
-@pytest.mark.parametrize(
-    ("field", "value"),
-    [
-        ("id", 123),
-        ("alias", 456),
-        ("context_length", "4096"),
-        ("input_modalities", 1),
-        ("output_modalities", 1),
-        ("capabilities", 1),
-    ],
-)
 def test_usage_metadata_does_not_coerce_behavioral_or_lossy_values() -> None:
     class BehavioralInt(int):
         def __int__(self) -> int:
@@ -177,6 +166,17 @@ def test_usage_metadata_does_not_coerce_behavioral_or_lossy_values() -> None:
     assert usage.total_tokens is None
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("id", 123),
+        ("alias", 456),
+        ("context_length", "4096"),
+        ("input_modalities", 1),
+        ("output_modalities", 1),
+        ("capabilities", 1),
+    ],
+)
 def test_model_metadata_is_not_coerced_into_plausible_evidence(
     field: str,
     value: object,
