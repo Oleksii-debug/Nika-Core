@@ -42,6 +42,15 @@ def _resume_token_for_storage(value: object) -> str | None:
     return snapshot
 
 
+def _result_for_storage(result: object) -> tuple[RuntimeOutcome, object]:
+    if type(result) is not RuntimeResult:
+        raise TypeError("runtime result must be an exact RuntimeResult value")
+    outcome = result.outcome
+    if type(outcome) is not RuntimeOutcome:
+        raise TypeError("runtime result outcome must be an exact RuntimeOutcome value")
+    return outcome, result.resume_token
+
+
 def _stored_text(row: sqlite3.Row, field_name: str, *, non_empty: bool = True) -> str:
     value = row[field_name]
     if type(value) is not str:
@@ -285,6 +294,7 @@ class RuntimeSessionStore:
         task_id = _require_exact_text(task_id, field_name="task_id", non_empty=True)
         runtime_id = _require_exact_text(runtime_id, field_name="runtime_id", non_empty=True)
         thread_id = _require_exact_text(thread_id, field_name="thread_id", non_empty=True)
+        outcome, resume_token = _result_for_storage(result)
         if not conn.in_transaction:
             conn.execute("BEGIN IMMEDIATE")
         existing_row = conn.execute(
@@ -302,12 +312,12 @@ class RuntimeSessionStore:
             if existing.thread_id != thread_id:
                 raise ValueError("runtime result thread does not match persisted runtime session")
 
-        if result.outcome not in _RESUMABLE_OUTCOMES:
+        if outcome not in _RESUMABLE_OUTCOMES:
             self.delete_with_connection(conn, task_id)
             return
-        resume_token_snapshot = _resume_token_for_storage(result.resume_token)
+        resume_token_snapshot = _resume_token_for_storage(resume_token)
         if resume_token_snapshot is None:
-            if result.outcome in {
+            if outcome in {
                 RuntimeOutcome.WAITING_APPROVAL,
                 RuntimeOutcome.PAUSED,
             }:
@@ -335,7 +345,7 @@ class RuntimeSessionStore:
                 runtime_id,
                 thread_id,
                 resume_token_snapshot,
-                result.outcome.value,
+                outcome.value,
                 now,
             ),
         )

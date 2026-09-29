@@ -324,6 +324,60 @@ def test_resumable_result_cannot_rebind_existing_durable_route(
     assert dict(after) == before
 
 
+def test_duck_result_cannot_delete_existing_durable_session(tmp_path) -> None:
+    class _DuckResult:
+        outcome = RuntimeOutcome.COMPLETED
+        resume_token = None
+
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime-a",
+        thread_id="thread-a",
+        resume_token="resume-a",
+    )
+    before = dict(_raw_session(store, task_id))
+
+    with pytest.raises(TypeError, match="exact RuntimeResult"):
+        sessions.record_result(
+            task_id=task_id,
+            runtime_id="runtime-a",
+            thread_id="thread-a",
+            result=_DuckResult(),  # type: ignore[arg-type]
+        )
+
+    after = _raw_session(store, task_id)
+    assert after is not None
+    assert dict(after) == before
+
+
+def test_forged_result_outcome_cannot_delete_existing_durable_session(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    sessions = RuntimeSessionStore(store)
+    sessions.record_active(
+        task_id=task_id,
+        runtime_id="runtime-a",
+        thread_id="thread-a",
+        resume_token="resume-a",
+    )
+    before = dict(_raw_session(store, task_id))
+    result = RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+    object.__setattr__(result, "outcome", RuntimeOutcome.COMPLETED.value)
+
+    with pytest.raises(TypeError, match="exact RuntimeOutcome"):
+        sessions.record_result(
+            task_id=task_id,
+            runtime_id="runtime-a",
+            thread_id="thread-a",
+            result=result,
+        )
+
+    after = _raw_session(store, task_id)
+    assert after is not None
+    assert dict(after) == before
+
+
 def test_terminal_result_from_foreign_route_cannot_delete_existing_session(tmp_path) -> None:
     store, task_id = _store_with_task(tmp_path)
     sessions = RuntimeSessionStore(store)
