@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import threading
 import uuid
 from collections.abc import Callable, Coroutine, Mapping
@@ -9,6 +10,8 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from nika_core.microphone_capture import MicrophoneCaptureEvidence, MicrophoneCaptureStatus
+from nika_core.speech_to_text import SpeechToTextEvidence, SpeechToTextStatus
 from nika_core.ui.bridge_models import UIResult
 from nika_core.voice_turn import (
     OneShotVoiceTurnService,
@@ -212,24 +215,55 @@ class DesktopVoiceTurnController:
             or type(evidence.request_id) is not str
             or type(evidence.status) is not VoiceTurnStatus
             or type(evidence.activated) is not bool
+            or type(evidence.capture) is not MicrophoneCaptureEvidence
         ):
             return DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.FAILED,
                 request_id=request_id,
                 message="Голосовий сервіс повернув некоректні voice evidence.",
             )
-        if evidence.request_id != request_id:
+        if (
+            evidence.request_id != request_id
+            or evidence.capture.request_id != request_id
+        ):
             return DesktopVoiceSnapshot(
                 status=DesktopVoiceStatus.FAILED,
                 request_id=request_id,
                 message="Голосовий сервіс повернув неузгоджену ідентичність.",
             )
         if evidence.status is VoiceTurnStatus.COMPLETED:
-            if type(result.transcript) is not str or not result.transcript:
+            transcription = evidence.transcription
+            wake = evidence.wake
+            if (
+                evidence.capture.status is not MicrophoneCaptureStatus.SUCCEEDED
+                or type(transcription) is not SpeechToTextEvidence
+                or transcription.status is not SpeechToTextStatus.SUCCEEDED
+                or type(wake) is not WakeActivationEvidence
+                or transcription.request_id != request_id
+                or wake.request_id != request_id
+                or type(result.transcript) is not str
+                or not result.transcript
+            ):
                 return DesktopVoiceSnapshot(
                     status=DesktopVoiceStatus.FAILED,
                     request_id=request_id,
-                    message="Голосовий сервіс не повернув розпізнаний текст.",
+                    message="Голосовий сервіс повернув неузгоджений успішний результат.",
+                )
+            transcript_sha256 = hashlib.sha256(
+                result.transcript.encode("utf-8", errors="surrogatepass")
+            ).hexdigest()
+            if (
+                evidence.capture.audio_sha256 is None
+                or transcription.audio_sha256 != evidence.capture.audio_sha256
+                or transcription.transcript_sha256 != transcript_sha256
+                or wake.transcript_sha256 != transcript_sha256
+                or evidence.activated
+                is not (wake.outcome is WakeActivationOutcome.DETECTED)
+            ):
+                return DesktopVoiceSnapshot(
+                    status=DesktopVoiceStatus.FAILED,
+                    request_id=request_id,
+                    message="Голосовий сервіс повернув неузгоджені доказові дані.",
                 )
             message = (
                 "Мовлення розпізнано; ключову фразу Nika виявлено."
@@ -242,6 +276,31 @@ class DesktopVoiceTurnController:
                 message=message,
                 activated=evidence.activated,
                 transcript=result.transcript,
+            )
+
+        if result.transcript is not None or evidence.activated:
+            return DesktopVoiceSnapshot(
+                status=DesktopVoiceStatus.FAILED,
+                request_id=request_id,
+                message="Голосовий сервіс повернув дані, несумісні зі станом помилки.",
+            )
+        if evidence.transcription is not None and (
+            type(evidence.transcription) is not SpeechToTextEvidence
+            or evidence.transcription.request_id != request_id
+        ):
+            return DesktopVoiceSnapshot(
+                status=DesktopVoiceStatus.FAILED,
+                request_id=request_id,
+                message="Голосовий сервіс повернув некоректні STT evidence.",
+            )
+        if evidence.wake is not None and (
+            type(evidence.wake) is not WakeActivationEvidence
+            or evidence.wake.request_id != request_id
+        ):
+            return DesktopVoiceSnapshot(
+                status=DesktopVoiceStatus.FAILED,
+                request_id=request_id,
+                message="Голосовий сервіс повернув некоректні wake evidence.",
             )
 
         messages = {
