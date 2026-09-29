@@ -631,7 +631,6 @@ def test_case_result_rejects_behavioral_metrics_before_conversion() -> None:
         )
 
 
-
 class _ResourceAlias(ResourceSnapshot):
     pass
 
@@ -655,7 +654,6 @@ def test_case_result_requires_exact_resource_snapshot_carriers() -> None:
             accelerator_before=None,
             accelerator_after=None,
         )
-
 
 
 class _ResponseAlias(ModelResponse):
