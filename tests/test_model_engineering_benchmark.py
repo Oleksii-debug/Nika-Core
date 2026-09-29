@@ -863,7 +863,6 @@ def test_benchmark_suite_requires_canonical_candidate_tuple() -> None:
         )
 
 
-
 def test_execution_config_identity_binds_timeout_and_temperature() -> None:
     baseline = BenchmarkExecutionConfig(timeout_seconds=60.0, temperature=0.0)
     changed_timeout = BenchmarkExecutionConfig(timeout_seconds=30.0, temperature=0.0)
