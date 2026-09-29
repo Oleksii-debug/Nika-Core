@@ -157,6 +157,26 @@ def test_string_loaded_flag_cannot_skip_provider_owned_load_boundary() -> None:
         ("capabilities", 1),
     ],
 )
+def test_usage_metadata_does_not_coerce_behavioral_or_lossy_values() -> None:
+    class BehavioralInt(int):
+        def __int__(self) -> int:
+            raise AssertionError("usage __int__ must not execute")
+
+    response = SimpleNamespace(
+        usage=SimpleNamespace(
+            prompt_tokens=BehavioralInt(1),
+            completion_tokens="2",
+            total_tokens=2.5,
+        )
+    )
+
+    usage = FoundryLocalProvider._usage(response)
+
+    assert usage.input_tokens is None
+    assert usage.output_tokens is None
+    assert usage.total_tokens is None
+
+
 def test_model_metadata_is_not_coerced_into_plausible_evidence(
     field: str,
     value: object,
