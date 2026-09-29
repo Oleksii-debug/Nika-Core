@@ -271,19 +271,43 @@ class ProductFactoryProgramHost:
                 with self.store.connection() as connection:
                     connection.execute("BEGIN IMMEDIATE")
                     self._assert_lease(connection, lease)
-                    if operation.status is IdempotencyStatus.PENDING:
+                    try:
+                        current = self._ledger._require_with_connection(
+                            connection,
+                            operation_key,
+                        )
+                    except KeyError as exc:
+                        raise ProductFactoryProgramError(
+                            "durable result operation disappeared during reconciliation"
+                        ) from exc
+                    if (
+                        current.task_id != host_task_id
+                        or current.operation_type != _OPERATION_TYPE
+                        or current.input_fingerprint
+                        != _request_fingerprint(record.request)
+                    ):
+                        raise ProductFactoryProgramError(
+                            "durable result operation identity changed during reconciliation"
+                        )
+                    if current.status is IdempotencyStatus.COMPLETED:
+                        continue
+                    if current.status is IdempotencyStatus.PENDING:
                         self._ledger.complete_with_connection(
                             connection,
                             operation_key,
                             result,
                         )
-                    else:
+                    elif current.status is IdempotencyStatus.UNCERTAIN:
                         self._ledger._set_status_with_connection(
                             connection,
                             operation_key,
                             IdempotencyStatus.COMPLETED,
                             result,
                             allow_uncertain_completion=True,
+                        )
+                    else:  # pragma: no cover - enum is currently exhaustive
+                        raise ProductFactoryProgramError(
+                            "durable result operation has unsupported reconciliation status"
                         )
                 reconciled.append(operation_key)
             finally:

@@ -1862,3 +1862,110 @@ def test_unexpected_heartbeat_failure_cancels_inflight_effect_and_marks_uncertai
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.UNCERTAIN
 
+def _seed_durable_result_pending_for_reconcile(store, binding, task_id, coordinator):
+    host = ProductFactoryProgramHost(store, FakeProgramWorker())
+    request = coordinator.start("component-0")
+    lease = host._acquire(request)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(lease,),
+        )
+        operation, created = host._reserve_effect(
+            host_task_id=task_id,
+            request=request,
+            lease=lease,
+        )
+        assert created is True
+        assert operation.status is IdempotencyStatus.PENDING
+        updated = coordinator.record_result(_envelope(request))
+        assert updated.state is WorkState.REVIEW_REQUIRED
+        host._save_fenced(task_id, binding, coordinator, lease)
+    finally:
+        host._release_best_effort(lease)
+    operation_key = f"pf-worker:{request.work_id}"
+    assert IdempotencyLedger(store).require(operation_key).status is IdempotencyStatus.PENDING
+    return host, operation_key
+
+
+def test_reconcile_durable_results_preserves_concurrent_terminal_completion(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host, operation_key = _seed_durable_result_pending_for_reconcile(
+        store,
+        binding,
+        task_id,
+        coordinator,
+    )
+    external_result = {"manual_reconciliation": "external completion is authoritative"}
+
+    class CompleteOnFirstReadLedger(IdempotencyLedger):
+        def __init__(self, ledger_store) -> None:
+            super().__init__(ledger_store)
+            self.triggered = False
+
+        def get(self, key):
+            record = super().get(key)
+            if not self.triggered and key == operation_key:
+                self.triggered = True
+                IdempotencyLedger(store).complete(key, external_result)
+            return record
+
+    host._ledger = CompleteOnFirstReadLedger(store)
+
+    assert host.reconcile_durable_results(
+        host_task_id=task_id,
+        coordinator=coordinator,
+    ) == ()
+
+    durable = IdempotencyLedger(store).require(operation_key)
+    assert durable.status is IdempotencyStatus.COMPLETED
+    assert durable.result == external_result
+
+
+def test_reconcile_durable_results_rejects_concurrent_operation_rebinding(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host, operation_key = _seed_durable_result_pending_for_reconcile(
+        store,
+        binding,
+        task_id,
+        coordinator,
+    )
+    foreign_fingerprint = "f" * 64
+
+    class RebindOnFirstReadLedger(IdempotencyLedger):
+        def __init__(self, ledger_store) -> None:
+            super().__init__(ledger_store)
+            self.triggered = False
+
+        def get(self, key):
+            record = super().get(key)
+            if not self.triggered and key == operation_key:
+                self.triggered = True
+                replacement = IdempotencyLedger(store)
+                replacement.release_pending(key)
+                replacement.reserve_once(
+                    operation_key=key,
+                    task_id="foreign-task",
+                    operation_type="foreign.effect",
+                    input_fingerprint=foreign_fingerprint,
+                )
+            return record
+
+    host._ledger = RebindOnFirstReadLedger(store)
+
+    with pytest.raises(ProductFactoryProgramError, match="identity changed"):
+        host.reconcile_durable_results(
+            host_task_id=task_id,
+            coordinator=coordinator,
+        )
+
+    durable = IdempotencyLedger(store).require(operation_key)
+    assert durable.task_id == "foreign-task"
+    assert durable.operation_type == "foreign.effect"
+    assert durable.input_fingerprint == foreign_fingerprint
+    assert durable.status is IdempotencyStatus.PENDING
+    assert durable.result is None
+
