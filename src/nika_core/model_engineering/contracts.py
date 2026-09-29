@@ -314,10 +314,23 @@ class CaseBenchmarkResult:
             self.error_code is member for member in ModelErrorCode
         ):
             raise TypeError("error_code must be a ModelErrorCode")
-        if self.completion_succeeded and self.error_code is not None:
-            raise ValueError("successful completion cannot carry error_code")
-        if not self.completion_succeeded and self.error_code is None:
-            raise ValueError("failed completion requires error_code")
+        if self.completion_succeeded:
+            if self.error_code is not None:
+                raise ValueError("successful completion cannot carry error_code")
+            if self.response_sha256 is None:
+                raise ValueError("successful completion requires response_sha256")
+        else:
+            if self.error_code is None:
+                raise ValueError("failed completion requires error_code")
+            if self.passed or float(self.score) != 0.0:
+                raise ValueError("failed completion cannot carry passing quality evidence")
+            if self.response_sha256 is not None:
+                raise ValueError("failed completion cannot carry response_sha256")
+            if any(
+                value is not None
+                for value in (self.input_tokens, self.output_tokens, self.total_tokens)
+            ):
+                raise ValueError("failed completion cannot carry token evidence")
 
 
 @dataclass(frozen=True, slots=True)
