@@ -627,33 +627,23 @@ def _canonical_worker_result_envelope(value: object) -> WorkerResultEnvelope:
     canonical_result = CodingResult(
         job_id=source.job_id,
         changed_files=tuple(
-            ChangedFile(item.path, item.sha256, item.size_bytes)
-            for item in source.changed_files
+            _reconstruct_changed_file(item) for item in source.changed_files
         ),
         test_evidence=tuple(
-            TestEvidence(item.command, item.exit_code, item.output_digest)
-            for item in source.test_evidence
+            _reconstruct_test_evidence(item) for item in source.test_evidence
         ),
         artifacts=tuple(
-            ArtifactEvidence(item.name, item.digest, item.media_type)
-            for item in source.artifacts
+            _reconstruct_artifact_evidence(item) for item in source.artifacts
         ),
         recovery_state=(
             None
             if source.recovery_state is None
-            else RecoveryState(
-                source.recovery_state.phase,
-                source.recovery_state.opaque_token,
-            )
+            else _reconstruct_recovery_state(source.recovery_state)
         ),
         failure=(
             None
             if source.failure is None
-            else WorkerFailure(
-                source.failure.kind,
-                source.failure.message,
-                source.failure.retryable,
-            )
+            else _reconstruct_worker_failure(source.failure)
         ),
     )
     canonical = WorkerResultEnvelope(
@@ -668,6 +658,47 @@ def _canonical_worker_result_envelope(value: object) -> WorkerResultEnvelope:
     )
     _validate_worker_result_scalar_authority(canonical)
     return canonical
+
+
+def _reconstruct_changed_file(value: ChangedFile) -> ChangedFile:
+    try:
+        return ChangedFile(value.path, value.sha256, value.size_bytes)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError(
+            "worker result contains invalid changed-file evidence"
+        ) from exc
+
+
+def _reconstruct_test_evidence(value: TestEvidence) -> TestEvidence:
+    try:
+        return TestEvidence(value.command, value.exit_code, value.output_digest)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError("worker result contains invalid test evidence") from exc
+
+
+def _reconstruct_artifact_evidence(value: ArtifactEvidence) -> ArtifactEvidence:
+    try:
+        return ArtifactEvidence(value.name, value.digest, value.media_type)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError(
+            "worker result contains invalid artifact evidence"
+        ) from exc
+
+
+def _reconstruct_recovery_state(value: RecoveryState) -> RecoveryState:
+    try:
+        return RecoveryState(value.phase, value.opaque_token)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError(
+            "worker result contains invalid recovery-state evidence"
+        ) from exc
+
+
+def _reconstruct_worker_failure(value: WorkerFailure) -> WorkerFailure:
+    try:
+        return WorkerFailure(value.kind, value.message, value.retryable)
+    except (TypeError, ValueError) as exc:
+        raise CoordinatorError("worker result contains invalid failure evidence") from exc
 
 
 def _canonical_restored_record(record: WorkRecord) -> WorkRecord:

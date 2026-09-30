@@ -15,6 +15,7 @@ from nika_core.product_factory_orchestration import (
     RepositoryRef,
 )
 from nika_core.toolsmith.contracts import (
+    ChangedFile,
     CodingResult,
     TestEvidence,
     WorkerFailure,
@@ -135,6 +136,30 @@ def _request_envelope(request, coding_result: CodingResult) -> WorkerResultEnvel
         coding_result=coding_result,
         producer_actor_id="worker:builder",
     )
+
+
+def test_record_result_normalizes_nested_constructor_failure() -> None:
+    coordinator, request = _running_coordinator()
+    changed = ChangedFile("src/core.py", "a" * 64, 1)
+    object.__setattr__(changed, "path", "../outside.py")
+    envelope = _request_envelope(
+        request,
+        CodingResult(
+            job_id=request.work_id,
+            changed_files=(changed,),
+            test_evidence=(TestEvidence(("pytest",), 0, "tests-ok"),),
+        ),
+    )
+
+    with pytest.raises(
+        CoordinatorError,
+        match="worker result contains invalid changed-file evidence",
+    ):
+        coordinator.record_result(envelope)
+
+    record = coordinator.snapshot().records[0]
+    assert record.state is WorkState.RUNNING
+    assert record.result is None
 
 
 def test_record_result_rejects_forged_nested_failure_before_state_mutation() -> None:
