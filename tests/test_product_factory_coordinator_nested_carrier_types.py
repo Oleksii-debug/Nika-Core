@@ -94,7 +94,10 @@ def test_worker_result_rejects_coding_result_subclass_success_override() -> None
     assert forged.failure is not None
     assert forged.succeeded is True
 
-    with pytest.raises(CoordinatorError, match="worker result coding result must be an exact CodingResult"):
+    with pytest.raises(
+        CoordinatorError,
+        match="worker result coding result must be an exact CodingResult",
+    ):
         _envelope(coding_result=forged)
 
 
@@ -143,7 +146,10 @@ def test_record_result_rejects_forged_nested_failure_before_state_mutation() -> 
         CodingResult(job_id=request.work_id, failure=failure),
     )
 
-    with pytest.raises(CoordinatorError, match="worker failure message must be canonical single-line text"):
+    with pytest.raises(
+        CoordinatorError,
+        match="worker failure message must be canonical single-line text",
+    ):
         coordinator.record_result(envelope)
 
     record = coordinator.snapshot().records[0]
@@ -161,7 +167,10 @@ def test_record_result_rejects_forged_nested_test_evidence_before_state_mutation
         CodingResult(job_id=request.work_id, test_evidence=(evidence,)),
     )
 
-    with pytest.raises(CoordinatorError, match="test evidence output digest must be canonical single-line text"):
+    with pytest.raises(
+        CoordinatorError,
+        match="test evidence output digest must be canonical single-line text",
+    ):
         coordinator.record_result(envelope)
 
     record = coordinator.snapshot().records[0]

@@ -51,11 +51,20 @@ def _review(**overrides: Any) -> ReviewDecision:
     ("overrides", "message"),
     (
         ({"reviewer_id": 1}, "reviewer id must be canonical single-line text"),
-        ({"reviewer_id": _HostileText("attacker")}, "reviewer id must be canonical single-line text"),
+        (
+            {"reviewer_id": _HostileText("attacker")},
+            "reviewer id must be canonical single-line text",
+        ),
         ({"accepted": 1}, "exact boolean"),
         ({"reason": object()}, "review reason must be canonical single-line text"),
-        ({"reason": _HostileText("forged reason")}, "review reason must be canonical single-line text"),
-        ({"evidence_refs": ["review-evidence:trusted:1"]}, "independent review evidence refs must be canonical text"),
+        (
+            {"reason": _HostileText("forged reason")},
+            "review reason must be canonical single-line text",
+        ),
+        (
+            {"evidence_refs": ["review-evidence:trusted:1"]},
+            "independent review evidence refs must be canonical text",
+        ),
         ({"evidence_refs": (1,)}, "independent review evidence refs must be canonical text"),
         (
             {"evidence_refs": (_HostileText("review-evidence:trusted:1"),)},
@@ -77,7 +86,10 @@ def test_review_decision_malformed_authority_ingress_is_bounded(
         ({"work_id": 1}, "worker result identity must be exact strings"),
         ({"work_id": _HostileText("work-1")}, "worker result identity must be exact strings"),
         ({"base_sha": 1}, "base_sha must be a 40-character hexadecimal SHA"),
-        ({"coding_result": "not-a-coding-result"}, "worker result coding result must be an exact CodingResult"),
+        (
+            {"coding_result": "not-a-coding-result"},
+            "worker result coding result must be an exact CodingResult",
+        ),
         ({"producer_actor_id": 1}, "producer actor worker result identity must be exact strings"),
         (
             {"producer_actor_id": _HostileText("team-role:builder")},
