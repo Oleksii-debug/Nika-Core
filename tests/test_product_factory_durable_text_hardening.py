@@ -4,12 +4,15 @@ import pytest
 
 from nika_core.product_factory_coordinator import (
     CoordinatorError,
-    ProductFactoryCoordinator,
     ReviewDecision,
     WorkState,
 )
 from tests.test_product_factory_coordinator import _success
-from tests.test_product_factory_work_lifecycle import _coordinator, _core_record, _graph
+from tests.test_product_factory_work_lifecycle import (
+    _coordinator,
+    _core_record,
+    _fresh_coordinator,
+)
 
 
 class _BehavioralEvidenceRefs:
@@ -78,7 +81,7 @@ def test_review_durable_text_utf8_boundary_round_trips() -> None:
     coordinator.review("core", decision)
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     assert _core_record(restored).review == decision
 
@@ -102,7 +105,7 @@ def test_restore_revalidates_durable_review_text() -> None:
         for record in snapshot.records
     )
 
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     with pytest.raises(CoordinatorError, match="reviewer id must be canonical single-line text"):
         restored.restore(
             replace(snapshot, records=records),
@@ -131,7 +134,7 @@ def test_block_reason_utf8_boundary_round_trips() -> None:
     assert blocked.blocker == reason
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     restored_record = _core_record(restored)
     assert restored_record.state is WorkState.BLOCKED
@@ -149,7 +152,7 @@ def test_blocked_restore_rejects_noncanonical_tampered_reason() -> None:
         for record in snapshot.records
     )
 
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     with pytest.raises(CoordinatorError, match="blocker reason must be canonical single-line text"):
         restored.restore(
             replace(snapshot, records=records),

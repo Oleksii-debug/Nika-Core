@@ -13,7 +13,12 @@ from nika_core.product_factory_orchestration import (
     ProductRepositoryGraph,
     RepositoryRef,
 )
-from tests.test_product_factory_coordinator import PERMISSIONS, SHA_A, _success
+from tests.test_product_factory_coordinator import (
+    PERMISSIONS,
+    SHA_A,
+    _AllowReviewAuthority,
+    _success,
+)
 
 
 def _graph() -> ProductRepositoryGraph:
@@ -27,8 +32,15 @@ def _graph() -> ProductRepositoryGraph:
     )
 
 
+def _fresh_coordinator() -> ProductFactoryCoordinator:
+    return ProductFactoryCoordinator(
+        _graph(),
+        review_authority=_AllowReviewAuthority(),
+    )
+
+
 def _coordinator() -> ProductFactoryCoordinator:
-    coordinator = ProductFactoryCoordinator(_graph())
+    coordinator = _fresh_coordinator()
     coordinator.plan(
         base_shas={"repo-1": SHA_A},
         goals={"core": "build core", "ui": "build ui"},
@@ -55,7 +67,7 @@ def test_done_work_is_terminal_and_never_resurrects_after_restore() -> None:
     assert "core" not in {item.component_id for item in coordinator.ready_requests()}
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     assert next(
         record.state for record in restored.snapshot().records if record.request.component_id == "core"
@@ -84,7 +96,7 @@ def test_cancelled_work_is_terminal_and_does_not_unlock_dependents() -> None:
     assert "ui" not in {item.component_id for item in coordinator.ready_requests()}
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     assert "core" not in {item.component_id for item in restored.ready_requests()}
     assert "ui" not in {item.component_id for item in restored.ready_requests()}
@@ -116,7 +128,7 @@ def test_accepted_work_cannot_be_cancelled_after_unlocking_dependents() -> None:
         coordinator.cancel("core", reason="too late")
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     assert next(
         record.state for record in restored.snapshot().records if record.request.component_id == "core"
@@ -141,7 +153,7 @@ def test_cancel_from_review_required_preserves_result_across_restart() -> None:
         coordinator.cancel("core", reason="different cancellation reason")
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     restored_record = _core_record(restored)
     assert restored_record.state is WorkState.CANCELLED
@@ -169,7 +181,7 @@ def test_cancel_from_rejected_review_preserves_result_and_review_across_restart(
     assert cancelled.blocker == "cancel instead of repairing"
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     restored_record = _core_record(restored)
     assert restored_record.state is WorkState.CANCELLED
@@ -192,7 +204,7 @@ def test_cancelled_snapshot_rejects_accepted_review_provenance() -> None:
     )
     tampered = replace(snapshot, records=records)
 
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     with pytest.raises(CoordinatorError, match="cancelled snapshot review evidence"):
         restored.restore(tampered, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
 
@@ -221,7 +233,7 @@ def test_review_evidence_refs_enforce_utf8_count_and_aggregate_bounds() -> None:
     coordinator.review("core", decision)
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     assert _core_record(restored).review == decision
 
@@ -261,7 +273,7 @@ def test_block_is_idempotent_only_for_same_reason_and_survives_restart() -> None
         coordinator.block("core", "different dependency")
     assert coordinator.snapshot() == snapshot
 
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(
         snapshot,
         trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
@@ -320,7 +332,7 @@ def test_repair_reason_is_utf8_byte_bounded_and_restores_at_boundary() -> None:
     assert repaired.goal.endswith("\nRepair: " + "x" * 4096)
 
     snapshot = coordinator.snapshot()
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     restored.restore(snapshot, trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint)
     assert _core_record(restored).request == repaired
 
