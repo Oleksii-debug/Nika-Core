@@ -14,7 +14,13 @@ from nika_core.product_factory_coordinator import (
 )
 from nika_core.toolsmith.contracts import CodingResult
 from tests.test_product_factory_coordinator import DIGEST, PERMISSIONS, SHA_A, SHA_B
-from tests.test_product_factory_work_lifecycle import _coordinator, _core_record, _graph, _success
+from tests.test_product_factory_work_lifecycle import (
+    _coordinator,
+    _core_record,
+    _fresh_coordinator,
+    _graph,
+    _success,
+)
 
 
 @pytest.mark.parametrize("state", ("planned", "ready", "accepted", "done", "cancelled"))
@@ -51,7 +57,7 @@ def test_restore_rejects_forged_strenum_equal_work_state(state: str) -> None:
     restored = ProductFactoryCoordinator(_graph())
     with pytest.raises(
         CoordinatorError,
-        match="snapshot work state must be an exact WorkState",
+        match="work state must be an exact WorkState",
     ):
         restored.restore(
             tampered,
@@ -319,6 +325,7 @@ def _forge_worker_envelope(
         "result_sha",
         "diff_digest",
         "coding_result",
+        "producer_actor_id",
     ):
         object.__setattr__(
             forged,
@@ -419,7 +426,7 @@ def test_restore_rejects_behavioral_repair_blocker_before_truthiness() -> None:
     )
     tampered = replace(snapshot, records=records)
 
-    restored = ProductFactoryCoordinator(_graph())
+    restored = _fresh_coordinator()
     with pytest.raises(
         CoordinatorError,
         match="repair blocker must be canonical single-line text",

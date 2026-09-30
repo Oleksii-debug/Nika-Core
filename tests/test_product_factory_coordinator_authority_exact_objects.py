@@ -34,6 +34,30 @@ class _ReviewDecisionSubclass(ReviewDecision):
     pass
 
 
+def _forged_worker_result_subclass(request) -> WorkerResultEnvelope:
+    canonical = _result(request)
+    hostile = object.__new__(_WorkerResultEnvelopeSubclass)
+    for field_name in (
+        "work_id",
+        "component_id",
+        "repository_id",
+        "base_sha",
+        "result_sha",
+        "diff_digest",
+        "coding_result",
+        "producer_actor_id",
+    ):
+        object.__setattr__(hostile, field_name, getattr(canonical, field_name))
+    return hostile
+
+
+def _forged_review_subclass(review: ReviewDecision) -> ReviewDecision:
+    hostile = object.__new__(_ReviewDecisionSubclass)
+    for field_name in ("reviewer_id", "accepted", "reason", "evidence_refs"):
+        object.__setattr__(hostile, field_name, getattr(review, field_name))
+    return hostile
+
+
 def _coordinator() -> ProductFactoryCoordinator:
     graph = ProductRepositoryGraph(
         project_id="project-1",
@@ -88,7 +112,7 @@ def test_record_result_rejects_worker_result_subclass_before_state_mutation() ->
     request = coordinator.start("core")
 
     with pytest.raises(CoordinatorError, match="exact WorkerResultEnvelope"):
-        coordinator.record_result(_result(request, _WorkerResultEnvelopeSubclass))
+        coordinator.record_result(_forged_worker_result_subclass(request))
 
     record = coordinator.snapshot().records[0]
     assert record.state is WorkState.RUNNING
@@ -100,11 +124,13 @@ def test_review_rejects_review_decision_subclass_before_state_mutation() -> None
     request = coordinator.start("core")
     coordinator.record_result(_result(request))
 
-    decision = _ReviewDecisionSubclass(
-        "qa-1",
-        True,
-        "verified",
-        ("review:trusted:1",),
+    decision = _forged_review_subclass(
+        ReviewDecision(
+            "qa-1",
+            True,
+            "verified",
+            ("review:trusted:1",),
+        )
     )
     with pytest.raises(CoordinatorError, match="exact ReviewDecision"):
         coordinator.review("core", decision)
@@ -120,7 +146,7 @@ def test_restore_rejects_worker_result_subclass() -> None:
     source.record_result(_result(request))
     snapshot = source.snapshot()
     record = snapshot.records[0]
-    hostile = _result(record.request, _WorkerResultEnvelopeSubclass)
+    hostile = _forged_worker_result_subclass(record.request)
     forged_snapshot = CoordinatorSnapshot(
         project_id=snapshot.project_id,
         revision=snapshot.revision,
@@ -148,12 +174,8 @@ def test_restore_rejects_review_decision_subclass() -> None:
     source = _accepted_coordinator()
     snapshot = source.snapshot()
     record = snapshot.records[0]
-    hostile_review = _ReviewDecisionSubclass(
-        record.review.reviewer_id,
-        record.review.accepted,
-        record.review.reason,
-        record.review.evidence_refs,
-    )
+    assert record.review is not None
+    hostile_review = _forged_review_subclass(record.review)
     forged_snapshot = CoordinatorSnapshot(
         project_id=snapshot.project_id,
         revision=snapshot.revision,

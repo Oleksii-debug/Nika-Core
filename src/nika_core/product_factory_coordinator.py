@@ -1058,6 +1058,7 @@ def _validate_worker_failure_carrier(failure: object) -> None:
         raise CoordinatorError("worker failure kind must be an exact WorkerFailureKind")
     if type(failure.retryable) is not bool:
         raise CoordinatorError("worker failure retryable must be an exact boolean")
+    _canonical_worker_failure_message(failure.message)
 
 
 def _validate_sha(value: object, label: str) -> None:
