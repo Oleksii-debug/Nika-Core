@@ -303,3 +303,44 @@ def test_restore_snapshots_review_decision_before_accepting_snapshot() -> None:
     assert live.review.accepted is True
     assert live.review.evidence_refs == ("review:evidence",)
 
+
+class _DenyReviewAuthority:
+    def verify(self, _subject, _evidence_refs):
+        return False
+
+
+def test_restore_done_rechecks_trusted_review_authority() -> None:
+    source, request = _running_coordinator(review_authority=_AllowReviewAuthority())
+    source.record_result(
+        _request_envelope(
+            request,
+            CodingResult(
+                job_id=request.work_id,
+                test_evidence=(TestEvidence(("pytest",), 0, "tests-ok"),),
+            ),
+        )
+    )
+    source.review(
+        "core",
+        ReviewDecision(
+            reviewer_id="reviewer:qa",
+            accepted=True,
+            reason="verified",
+            evidence_refs=("review:evidence",),
+        ),
+    )
+    done = source.mark_done("core")
+    assert done.state is WorkState.DONE
+
+    restored = ProductFactoryCoordinator(
+        source.graph,
+        review_authority=_DenyReviewAuthority(),
+    )
+    with pytest.raises(
+        CoordinatorError,
+        match="trusted independent review authority rejected decision",
+    ):
+        restored.restore(
+            source.snapshot(),
+            trusted_plan_fingerprint=source.trusted_plan_fingerprint,
+        )
