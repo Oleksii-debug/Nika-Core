@@ -121,6 +121,26 @@
         Один запуск записує лише один короткий фрагмент з мікрофона та розпізнає його локально.
         Nika не слухає у фоні й не запускає розпізнаний текст як завдання автоматично.
       </p>
+      <div aria-labelledby="voice-model-heading">
+        <h3 id="voice-model-heading">Локальна модель розпізнавання</h3>
+        <p id="voice-model-help">
+          Якщо модель ще не встановлена, вкажіть повний шлях до локальної папки з
+          encoder.onnx, decoder.onnx і tokens.txt. Nika копіює лише ці три файли
+          у власну папку; мережа та автоматичне завантаження не використовуються.
+        </p>
+        <label for="voice-model-source">Папка локальної голосової моделі — повний шлях</label>
+        <input id="voice-model-source" type="text" spellcheck="false" autocomplete="off"
+               aria-describedby="voice-model-help voice-model-status">
+        <p id="voice-model-status">Перевірка встановлення локальної голосової моделі.</p>
+        <button type="button" id="voice-model-import" data-action-id="voice.model.import"
+                aria-describedby="voice-model-help voice-model-status"
+                data-error-focus-target="voice-model-source">Імпортувати голосову модель</button>
+        <button type="button" id="voice-model-cancel" data-action-id="voice.model.cancel"
+                aria-describedby="voice-model-status"
+                data-error-focus-target="voice-model-heading" disabled>
+          Скасувати імпорт голосової моделі
+        </button>
+      </div>
       <p id="voice-status">
         Перевірка локального голосового вводу.
       </p>

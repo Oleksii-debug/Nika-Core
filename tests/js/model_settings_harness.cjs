@@ -73,6 +73,8 @@ const tags = {
   "autostart-enabled": "INPUT",
   "autostart-save": "BUTTON",
   "command-input": "TEXTAREA",
+  "voice-model-source": "INPUT",
+  "voice-model-import": "BUTTON",
   "speech-text": "TEXTAREA",
   "speech-start": "BUTTON",
   "speech-cancel": "BUTTON",
@@ -90,9 +92,19 @@ element("model-save").dataset.actionId = "settings.model.configure";
 element("model-reload").dataset.actionId = "settings.model.refresh";
 element("model-reload").dataset.errorFocusTarget = "model-settings-heading";
 element("autostart-save").dataset.actionId = "settings.autostart.configure";
+element("voice-model-import").dataset.actionId = "voice.model.import";
+element("voice-model-import").dataset.errorFocusTarget = "voice-model-source";
 element("speech-start").dataset.actionId = "speech.start";
 element("speech-cancel").dataset.actionId = "speech.cancel";
 
+let currentVoiceModelSetup = {
+  schema: "nika.packaged-voice-model-setup:v1",
+  status: "missing",
+  installed: false,
+  can_import: true,
+  restart_required: false,
+  message: "Локальна голосова модель ще не встановлена.",
+};
 let currentSpeech = {
   schema: "nika.packaged-speech-state:v1",
   available: true,
@@ -152,6 +164,7 @@ function snapshot() {
       startup_recovery: currentRecovery,
       v01_sources: { status: "missing", revision: 0, root: "", source_a: "", source_b: "" },
       v01_model_settings: currentModel,
+      voice_model_setup: currentVoiceModelSetup,
       speech: currentSpeech,
       product_project: null,
       v01_team_task: null,
@@ -188,6 +201,21 @@ global.pywebview = { api: {
   dispatch: async (command) => {
     calls.push(command);
     if (dispatchMode === "disconnect") throw new Error("PRIVATE_MODEL_CANARY");
+    if (command.action_id === "voice.model.import") {
+      currentVoiceModelSetup = {
+        schema: "nika.packaged-voice-model-setup:v1",
+        status: "restart_required",
+        installed: true,
+        can_import: false,
+        restart_required: true,
+        message: "Локальну голосову модель встановлено. Перезапустіть Nika Core.",
+      };
+      return {
+        status: "completed",
+        message: "Локальну голосову модель встановлено. Перезапустіть Nika Core.",
+        focus_id: "voice-heading",
+      };
+    }
     if (command.action_id === "speech.start") {
       currentSpeech = {
         schema: "nika.packaged-speech-state:v1",
@@ -249,6 +277,8 @@ const timeout = element("model-timeout");
 const save = element("model-save");
 const reload = element("model-reload");
 const status = element("model-settings-status");
+const voiceModelSource = element("voice-model-source");
+const voiceModelImport = element("voice-model-import");
 const speechText = element("speech-text");
 const speechStart = element("speech-start");
 const speechCancel = element("speech-cancel");
@@ -267,6 +297,19 @@ const speechCancel = element("speech-cancel");
   assert.equal(element("recovery-summary").hidden, false);
   assert.equal(element("recovery-auto-count").textContent, "0");
   assert.equal(element("recovery-uncertain-count").textContent, "0");
+
+  assert.equal(voiceModelImport.disabled, false);
+  voiceModelSource.value = "C:\\models\\nika-whisper";
+  const voiceImportCallCount = calls.length;
+  click(voiceModelImport);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.length, voiceImportCallCount + 1);
+  assert.equal(calls.at(-1).action_id, "voice.model.import");
+  assert.deepEqual(calls.at(-1).payload, { source_root: "C:\\models\\nika-whisper" });
+  assert.equal(voiceModelSource.value, "");
+  assert.match(element("voice-model-status").textContent, /Перезапустіть Nika Core/);
+  assert.equal(voiceModelImport.disabled, true);
+  assert.match(element("app-status").textContent, /Перезапустіть Nika Core/);
 
   assert.equal(speechStart.disabled, false);
   assert.equal(speechCancel.disabled, true);
