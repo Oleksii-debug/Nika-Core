@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import threading
 from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
@@ -17,6 +19,9 @@ from nika_core.model_gateway.contracts import ProviderKind
 from nika_core.packaging.notices import RUNTIME_DISTRIBUTIONS
 from nika_core.packaging.windows import default_windows_plan
 from nika_core.speech_to_text import (
+    SpeechAudio,
+    SpeechAudioFormat,
+    SpeechToTextAdapterError,
     SpeechToTextAdapterResponse,
     SpeechToTextRequest,
 )
@@ -89,8 +94,11 @@ class _FakeStt:
 
 
 class _FakeSherpaFactory:
+    calls = 0
+
     @classmethod
     def from_whisper_files(cls, **_kwargs: object) -> _FakeStt:
+        cls.calls += 1
         return _FakeStt()
 
 
@@ -163,11 +171,13 @@ def test_packaged_voice_builds_canonical_controller_with_local_model_files(
     def unexpected_submit(_coroutine: Any) -> Any:
         raise AssertionError("building packaged voice must not submit a turn")
 
+    _FakeSherpaFactory.calls = 0
     feature = packaged_voice.build_packaged_voice(
         tmp_path,
         submit=unexpected_submit,
     )
     try:
+        assert _FakeSherpaFactory.calls == 0
         snapshot = feature.snapshot()
         assert snapshot["available"] is True
         turn = snapshot["turn"]
@@ -177,6 +187,135 @@ def test_packaged_voice_builds_canonical_controller_with_local_model_files(
         assert turn["transcript"] is None
     finally:
         feature.close()
+
+
+def _lazy_test_request() -> SpeechToTextRequest:
+    return SpeechToTextRequest(
+        request_id="lazy-load-test",
+        provider_id="sherpa-onnx-whisper",
+        model="whisper-local",
+        audio=SpeechAudio(
+            data=b"\x00\x00",
+            audio_format=SpeechAudioFormat.PCM_S16LE,
+            sample_rate_hz=16_000,
+            channels=1,
+        ),
+        language="uk",
+    )
+
+
+def test_lazy_whisper_load_reuses_one_inflight_factory_after_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    calls = 0
+
+    class _ReadyStt:
+        async def transcribe(
+            self,
+            request: SpeechToTextRequest,
+        ) -> SpeechToTextAdapterResponse:
+            return SpeechToTextAdapterResponse(
+                request_id=request.request_id,
+                provider_id=request.provider_id,
+                model=request.model,
+                text="ніка тест",
+            )
+
+    class _BlockingFactory:
+        @classmethod
+        def from_whisper_files(cls, **_kwargs: object) -> _ReadyStt:
+            nonlocal calls
+            calls += 1
+            entered.set()
+            assert release.wait(timeout=2)
+            return _ReadyStt()
+
+    monkeypatch.setattr(
+        packaged_voice,
+        "SherpaOnnxWhisperSpeechToTextAdapter",
+        _BlockingFactory,
+    )
+    adapter = packaged_voice._LazySherpaAdapter(
+        encoder=tmp_path / "encoder.onnx",
+        decoder=tmp_path / "decoder.onnx",
+        tokens=tmp_path / "tokens.txt",
+    )
+
+    async def scenario() -> None:
+        first = asyncio.create_task(adapter.transcribe(_lazy_test_request()))
+        for _ in range(200):
+            if entered.is_set():
+                break
+            await asyncio.sleep(0.005)
+        assert entered.is_set()
+
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+
+        second = asyncio.create_task(adapter.transcribe(_lazy_test_request()))
+        await asyncio.sleep(0)
+        assert calls == 1
+        release.set()
+        response = await second
+        assert response.text == "ніка тест"
+        assert calls == 1
+
+    try:
+        asyncio.run(scenario())
+    finally:
+        release.set()
+
+
+def test_lazy_whisper_load_failure_clears_slot_for_explicit_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    class _ReadyStt:
+        async def transcribe(
+            self,
+            request: SpeechToTextRequest,
+        ) -> SpeechToTextAdapterResponse:
+            return SpeechToTextAdapterResponse(
+                request_id=request.request_id,
+                provider_id=request.provider_id,
+                model=request.model,
+                text="повтор успішний",
+            )
+
+    class _FlakyFactory:
+        @classmethod
+        def from_whisper_files(cls, **_kwargs: object) -> _ReadyStt:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("synthetic native load failure")
+            return _ReadyStt()
+
+    monkeypatch.setattr(
+        packaged_voice,
+        "SherpaOnnxWhisperSpeechToTextAdapter",
+        _FlakyFactory,
+    )
+    adapter = packaged_voice._LazySherpaAdapter(
+        encoder=tmp_path / "encoder.onnx",
+        decoder=tmp_path / "decoder.onnx",
+        tokens=tmp_path / "tokens.txt",
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(SpeechToTextAdapterError):
+            await adapter.transcribe(_lazy_test_request())
+        response = await adapter.transcribe(_lazy_test_request())
+        assert response.text == "повтор успішний"
+        assert calls == 2
+
+    asyncio.run(scenario())
 
 
 def test_packaged_bridge_exposes_voice_actions_state_and_cleanup(
