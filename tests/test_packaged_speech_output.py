@@ -90,18 +90,18 @@ def test_packaged_speech_runs_explicit_bounded_text_without_projecting_text() ->
     port = _FakeSpeechPort()
     feature = PackagedSpeechFeature(output=port)
 
-    result = feature.speak({"text": "Привіт. Це локальне озвучення."})
+    result = feature.speak({"text": "Привіт, це локальне озвучення."})
     snapshot = _wait_for_status(feature, "completed")
 
     assert result.status == "completed"
     assert result.focus_id == "speech-cancel"
-    assert [item.text for item in port.requests] == ["Привіт. Це локальне озвучення."]
+    assert [item.text for item in port.requests] == ["Привіт, це локальне озвучення."]
     assert snapshot["schema"] == "nika.packaged-speech-state:v1"
     assert snapshot["available"] is True
     assert snapshot["active"] is False
     assert snapshot["generation"] == 1
-    assert snapshot["accepted_characters"] == len("Привіт. Це локальне озвучення.")
-    assert snapshot["spoken_characters"] == len("Привіт. Це локальне озвучення.")
+    assert snapshot["accepted_characters"] == len("Привіт, це локальне озвучення.")
+    assert snapshot["spoken_characters"] == len("Привіт, це локальне озвучення.")
     assert "text" not in snapshot
     assert "Привіт" not in repr(snapshot)
 
