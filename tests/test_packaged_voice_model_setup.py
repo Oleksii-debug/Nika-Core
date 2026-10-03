@@ -6,7 +6,11 @@ from pathlib import Path
 import pytest
 
 import nika_core.ui.packaged_voice_model_setup as model_setup
+from nika_core.config import AppConfig
+from nika_core.kernel.default_actions import build_default_action_registry
+from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.packaged_voice_model_setup import PackagedVoiceModelSetup
+from scripts import nika_windows
 
 
 def _write_source(root: Path) -> Path:
@@ -264,3 +268,113 @@ def test_voice_model_setup_rejects_hostile_string_subclass(tmp_path: Path) -> No
 
     with pytest.raises(TypeError):
         setup.install({"source_root": _HostileString(str(tmp_path))})
+
+
+
+def test_voice_model_import_action_and_ui_preserve_single_live_region() -> None:
+    actions = build_default_action_registry()
+    action = actions.get("voice.model.import")
+    assert action.label == "Імпортувати голосову модель"
+    assert action.default_binding is None
+
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "src/nika_core/ui/web/index.html").read_text(encoding="utf-8")
+    script = (root / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
+
+    assert 'id="voice-model-source"' in html
+    assert 'data-action-id="voice.model.import"' in html
+    assert '<p id="voice-model-status">' in html
+    assert html.count('role="status"') == 1
+    assert html.count('aria-live="polite"') == 1
+    assert "function renderVoiceModelSetup(snapshot)" in script
+    assert "state.voice_model_setup ?? null" in script
+    assert (
+        'payload.source_root = voiceModelSource?.value ?? ""'
+        in script
+    )
+    assert 'voiceModelSource.value = "";' in script
+
+
+def test_packaged_bridge_exposes_voice_model_setup_state_and_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _FakeVoice:
+        def start(self, payload: dict[str, object]) -> UIResult:
+            assert payload == {}
+            return UIResult("voice", "rejected", "voice unavailable")
+
+        def cancel(self, payload: dict[str, object]) -> UIResult:
+            assert payload == {}
+            return UIResult("voice", "completed", "no active voice")
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "schema": "nika.packaged-voice-state:v1",
+                "available": False,
+                "message": "voice unavailable",
+                "turn": None,
+            }
+
+        def close(self) -> None:
+            return None
+
+    class _FakeSetup:
+        def __init__(self, root: Path) -> None:
+            self.root = root
+            self.payloads: list[dict[str, object]] = []
+
+        def snapshot(self) -> dict[str, object]:
+            return {
+                "schema": "nika.packaged-voice-model-setup:v1",
+                "status": "missing",
+                "installed": False,
+                "can_import": True,
+                "restart_required": False,
+                "message": "setup ready",
+            }
+
+        def install(self, payload: dict[str, object]) -> UIResult:
+            self.payloads.append(payload)
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="model imported",
+                focus_id="voice-heading",
+            )
+
+    fake_voice = _FakeVoice()
+    setups: list[_FakeSetup] = []
+
+    def build_setup(root: Path) -> _FakeSetup:
+        setup = _FakeSetup(root)
+        setups.append(setup)
+        return setup
+
+    monkeypatch.setattr(
+        nika_windows,
+        "build_packaged_voice",
+        lambda _root, **_kwargs: fake_voice,
+    )
+    monkeypatch.setattr(nika_windows, "PackagedVoiceModelSetup", build_setup)
+
+    config = AppConfig(database_path=(tmp_path / "nika.db").resolve())
+    session = nika_windows.build_windows_session(config)
+    try:
+        response = session.bridge.get_state()
+        assert response["ok"] is True
+        state = response["state"]
+        assert state["voice_model_setup"] == setups[0].snapshot()
+        assert setups[0].root == config.database_path.parent
+
+        result = session.bridge.dispatch(
+            {
+                "request_id": "voice-model-import",
+                "action_id": "voice.model.import",
+                "payload": {"source_root": r"C:\models\nika-whisper"},
+            }
+        )
+        assert result["status"] == "completed"
+        assert setups[0].payloads == [{"source_root": r"C:\models\nika-whisper"}]
+    finally:
+        session.close()
