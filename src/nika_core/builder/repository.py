@@ -238,13 +238,13 @@ class AgentDefinitionRepository:
             raise ValueError("agent definition list limit must be an exact integer from 1 to 100")
         with self._store.connection() as conn:
             rows = conn.execute(
-                "SELECT current.version, current.definition_json, current.status, "
-                "current.required_approvals_json, current.highest_risk, current.created_at, "
-                "current.activated_at FROM agent_definitions AS current "
+                "SELECT defs.version, defs.definition_json, defs.status, "
+                "defs.required_approvals_json, defs.highest_risk, defs.created_at, "
+                "defs.activated_at FROM agent_definitions AS defs "
                 "JOIN (SELECT agent_id, MAX(version) AS version FROM agent_definitions "
                 "GROUP BY agent_id) AS latest "
-                "ON latest.agent_id = current.agent_id AND latest.version = current.version "
-                "ORDER BY current.created_at DESC, current.agent_id LIMIT ?",
+                "ON latest.agent_id = current.agent_id AND latest.version = defs.version "
+                "ORDER BY defs.created_at DESC, defs.agent_id LIMIT ?",
                 (limit,),
             ).fetchall()
         return tuple(self._decode(row) for row in rows)
