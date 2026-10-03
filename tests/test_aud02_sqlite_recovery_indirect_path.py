@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 import nika_core.reliability.backup as backup_module
-
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.reliability.backup import (
     BackupVerificationError,
