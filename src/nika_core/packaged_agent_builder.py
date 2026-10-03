@@ -107,7 +107,21 @@ class PackagedAgentBuilderDraftHandler:
             raise PermissionError(
                 "packaged safe-draft composition cannot create approval-bearing agent grants"
             )
-        self._repository.save_draft(compilation)
+        try:
+            self._repository.save_draft(compilation)
+        except ValueError:
+            latest_version = self._repository.next_version(agent_id) - 1
+            latest = (
+                self._repository.get(agent_id, latest_version)
+                if latest_version >= 1
+                else None
+            )
+            if latest is not None and _same_draft(latest, candidate):
+                return _result(
+                    latest.definition,
+                    "Чернетка Agent Builder уже збережена без змін",
+                )
+            raise
         return _result(candidate, "Чернетку Agent Builder збережено для окремого перегляду")
 
 
