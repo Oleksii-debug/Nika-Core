@@ -63,6 +63,33 @@ class _BlockingSpeechPort(_FakeSpeechPort):
         )
 
 
+class _StubbornCancellingSpeechPort(_FakeSpeechPort):
+    def __init__(self) -> None:
+        super().__init__()
+        self.started = Event()
+        self.release = Event()
+
+    def speak(
+        self,
+        request: SpeechRequest,
+        *,
+        timeout_seconds: float = 120.0,
+        cancel_event: Event | None = None,
+    ) -> SpeechReceipt:
+        del timeout_seconds
+        assert cancel_event is not None
+        self.requests.append(request)
+        self.started.set()
+        if not cancel_event.wait(timeout=2):
+            raise AssertionError("test did not request packaged speech cancellation")
+        if not self.release.wait(timeout=2):
+            raise AssertionError("test did not release cancelling packaged speech")
+        raise SpeechError(
+            SpeechErrorCode.PROCESS_CANCELLED,
+            "speech output was cancelled",
+        )
+
+
 class _HostileText(str):
     def strip(self, chars: str | None = None) -> str:
         del chars
@@ -124,6 +151,26 @@ def test_packaged_speech_rejects_parallel_start_and_supports_explicit_cancel() -
     snapshot = _wait_for_status(feature, "cancelled")
     assert snapshot["active"] is False
     assert snapshot["generation"] == 1
+
+
+def test_packaged_speech_exposes_cancelling_and_deduplicates_cancel() -> None:
+    port = _StubbornCancellingSpeechPort()
+    feature = PackagedSpeechFeature(output=port)
+    feature.speak({"text": "Контрольоване скасування."})
+    assert port.started.wait(timeout=1)
+
+    first_cancel = feature.cancel({})
+    snapshot = _wait_for_status(feature, "cancelling")
+    second_cancel = feature.cancel({})
+
+    assert first_cancel.status == "completed"
+    assert snapshot["active"] is True
+    assert snapshot["message"] == "Скасування озвучення виконується."
+    assert second_cancel.status == "completed"
+    assert second_cancel.message == "Скасування озвучення вже запитано."
+
+    port.release.set()
+    _wait_for_status(feature, "cancelled")
 
 
 def test_packaged_speech_close_cancels_active_work_and_is_idempotent() -> None:
