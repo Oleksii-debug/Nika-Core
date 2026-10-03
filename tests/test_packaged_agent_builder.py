@@ -223,6 +223,7 @@ def test_identical_concurrent_persistence_conflict_recovers_as_idempotent(
     assert repository.next_version(agent_id) == 2
     assert repository.active(agent_id) is None
 
+
 def test_windows_session_composes_builder_with_packaged_features_across_restart(
     tmp_path: Path,
 ) -> None:
