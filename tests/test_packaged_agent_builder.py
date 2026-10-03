@@ -7,7 +7,10 @@ import pytest
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
-from nika_core.packaged_agent_builder import PackagedAgentBuilderDraftHandler
+from nika_core.packaged_agent_builder import (
+    PackagedAgentBuilderDraftHandler,
+    PackagedAgentBuilderStateProjector,
+)
 
 
 def _handler(
@@ -131,3 +134,59 @@ def test_distinct_explicit_goals_get_distinct_draft_identities(tmp_path: Path) -
     assert {str(row["status"]) for row in rows} == {"draft"}
     assert {int(row["version"]) for row in rows} == {1}
     assert first.message != second.message
+
+
+def test_state_projector_exposes_bounded_review_state_without_authority_fields(
+    tmp_path: Path,
+) -> None:
+    handler, repository, _store = _handler(tmp_path / "projected.db")
+    handler({"command": "Create an agent for accessible report triage"})
+    projector = PackagedAgentBuilderStateProjector(repository)
+
+    state = projector.decorate(
+        {
+            "agents": [
+                {
+                    "agent_id": "nika.default",
+                    "version": 1,
+                    "name": "Nika",
+                    "goal": "Default packaged agent",
+                }
+            ]
+        }
+    )
+
+    assert len(state["agent_builder_definitions"]) == 1
+    projected = state["agent_builder_definitions"][0]
+    assert projected["status"] == "draft"
+    assert projected["version"] == 1
+    assert projected["highest_risk"] == 0
+    assert projected["requires_human_approval"] is False
+    assert set(projected) == {
+        "agent_id",
+        "version",
+        "name",
+        "goal",
+        "status",
+        "highest_risk",
+        "requires_human_approval",
+    }
+    assert len(state["agents"]) == 2
+    assert state["agents"][1]["agent_id"] == projected["agent_id"]
+    assert state["agents"][1]["name"].startswith("Agent Builder [чернетка]:")
+    assert repository.active(projected["agent_id"]) is None
+
+
+def test_repository_latest_view_is_bounded_and_integrity_validated(tmp_path: Path) -> None:
+    handler, repository, _store = _handler(tmp_path / "latest.db")
+    handler({"command": "Create an agent for first review"})
+    handler({"command": "Create an agent for second review"})
+
+    latest = repository.list_latest(limit=1)
+
+    assert len(latest) == 1
+    assert latest[0].status == "draft"
+    with pytest.raises(ValueError, match="exact integer"):
+        repository.list_latest(limit=True)
+    with pytest.raises(ValueError, match="1 to 100"):
+        repository.list_latest(limit=101)
