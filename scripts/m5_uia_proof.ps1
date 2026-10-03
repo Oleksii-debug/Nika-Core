@@ -48,6 +48,9 @@ $requiredNames = @(
     'Почати один голосовий ввід',
     'Скасувати голосовий ввід',
     'Перенести розпізнаний текст у поле команди',
+    'Локальна модель розпізнавання',
+    'Папка локальної голосової моделі — повний шлях',
+    'Імпортувати голосову модель',
     'Голос Nika',
     'Текст для озвучення',
     'Озвучити текст',
@@ -702,6 +705,15 @@ try {
             }
         }
         Write-Host 'Packaged voice controls are UIA-discoverable and fail closed without a local model. Microphone access was not invoked.'
+
+        $voiceModelSourceControl = Wait-DescendantName 'Папка локальної голосової моделі — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $voiceModelImportControl = Wait-DescendantName 'Імпортувати голосову модель' ([System.Windows.Automation.ControlType]::Button)
+        if (-not (Resolve-BoundControlIdentity $voiceModelImportControl).Current.IsEnabled) {
+            throw 'Local voice model Import control must be available when the packaged candidate has no model.'
+        }
+        Set-BoundControlFocus $voiceModelSourceControl
+        Wait-FocusName $voiceModelSourceControl
+        Write-Host 'Local voice model setup controls are UIA-discoverable and keyboard-focusable; no file import was invoked.'
 
         $speechTextControl = Wait-DescendantName 'Текст для озвучення' ([System.Windows.Automation.ControlType]::Edit)
         $speechStartControl = Wait-DescendantName 'Озвучити текст' ([System.Windows.Automation.ControlType]::Button)
