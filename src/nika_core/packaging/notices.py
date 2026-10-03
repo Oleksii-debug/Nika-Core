@@ -23,6 +23,7 @@ RUNTIME_DISTRIBUTIONS = (
     "pythonnet",
     "pywebview",
     "sherpa-onnx",
+    "sherpa-onnx-core",
     "sounddevice",
     "rich",
     "setuptools",
