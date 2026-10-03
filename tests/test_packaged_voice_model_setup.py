@@ -36,6 +36,8 @@ def test_voice_model_setup_is_bounded_off_windows(
     assert snapshot == {
         "schema": "nika.packaged-voice-model-setup:v1",
         "status": "missing",
+        "generation": 0,
+        "active": False,
         "installed": False,
         "can_import": False,
         "restart_required": False,
@@ -74,8 +76,6 @@ def test_voice_model_setup_imports_exact_files_and_requires_restart(
     assert (target / "tokens.txt").read_bytes() == "ніка\n".encode("utf-8")
     assert (source / "encoder.onnx").read_bytes() == b"encoder"
     assert not list((data_root / "voice").glob(".whisper-import-*"))
-    assert not (data_root / "voice" / ".whisper-import.lock").exists()
-
     restarted = PackagedVoiceModelSetup(data_root).snapshot()
     assert restarted["status"] == "installed"
     assert restarted["installed"] is True
@@ -186,25 +186,49 @@ def test_voice_model_setup_requires_all_fixed_files(
     assert not (data_root / "voice" / "whisper").exists()
 
 
-def test_voice_model_setup_cleans_stage_but_preserves_foreign_lock(
+def test_voice_model_setup_preserves_target_that_appears_during_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(model_setup.sys, "platform", "win32")
     source = _write_source(tmp_path)
     data_root = tmp_path / "nika-data"
-    voice_root = data_root / "voice"
-    voice_root.mkdir(parents=True)
-    lock = voice_root / ".whisper-import.lock"
-    lock.write_text("other-process", encoding="utf-8")
+    data_root.mkdir()
+    target = data_root / "voice" / "whisper"
+    original_copy = model_setup._copy_verified_regular_file
+    calls = 0
+
+    def create_competing_target(
+        source_file: Path,
+        destination: Path,
+        expected: os.stat_result,
+        *,
+        cancel_event: model_setup.Event | None,
+    ) -> None:
+        nonlocal calls
+        calls += 1
+        original_copy(
+            source_file,
+            destination,
+            expected,
+            cancel_event=cancel_event,
+        )
+        if calls == 3:
+            target.mkdir()
+            (target / "owner.txt").write_text("other-process", encoding="utf-8")
+
+    monkeypatch.setattr(
+        model_setup,
+        "_copy_verified_regular_file",
+        create_competing_target,
+    )
     setup = PackagedVoiceModelSetup(data_root)
 
     result = setup.install({"source_root": str(source)})
 
     assert result.status == "failed"
-    assert lock.read_text(encoding="utf-8") == "other-process"
-    assert not list(voice_root.glob(".whisper-import-*"))
-    assert not (voice_root / "whisper").exists()
+    assert (target / "owner.txt").read_text(encoding="utf-8") == "other-process"
+    assert not list((data_root / "voice").glob(".whisper-import-*"))
 
 
 def test_voice_model_setup_cleans_stage_after_copy_failure(
@@ -221,7 +245,10 @@ def test_voice_model_setup_cleans_stage_after_copy_failure(
         source_file: Path,
         destination: Path,
         expected: os.stat_result,
+        *,
+        cancel_event: model_setup.Event | None,
     ) -> None:
+        del cancel_event
         nonlocal calls
         calls += 1
         if calls == 2:
@@ -238,7 +265,6 @@ def test_voice_model_setup_cleans_stage_after_copy_failure(
     assert "PRIVATE" not in result.message
     assert not (data_root / "voice" / "whisper").exists()
     assert not list((data_root / "voice").glob(".whisper-import-*"))
-    assert not (data_root / "voice" / ".whisper-import.lock").exists()
 
 
 @pytest.mark.parametrize(
@@ -269,6 +295,7 @@ def test_voice_model_copy_rejects_partial_destination_write() -> None:
             io.BytesIO(b"model-bytes"),
             _PartialWriter(),  # type: ignore[arg-type]
             len(b"model-bytes"),
+            cancel_event=None,
         )
 
 
