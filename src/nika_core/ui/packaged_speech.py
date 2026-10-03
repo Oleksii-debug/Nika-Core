@@ -32,6 +32,7 @@ class PackagedSpeechFeature:
         self._unavailable_message = unavailable_message
         self._lock = Lock()
         self._stream: IncrementalSpeechStream | None = None
+        self._generation = 0
         self._closed = False
 
     @property
@@ -96,6 +97,7 @@ class PackagedSpeechFeature:
                     focus_id="speech-heading",
                 )
             self._stream = stream
+            self._generation += 1
 
         return UIResult(
             request_id="desktop-handler",
@@ -136,6 +138,7 @@ class PackagedSpeechFeature:
                 "schema": "nika.packaged-speech-state:v1",
                 "available": False,
                 "status": "unavailable",
+                "generation": self._generation,
                 "active": False,
                 "message": self._unavailable_message,
                 "accepted_characters": 0,
@@ -150,6 +153,7 @@ class PackagedSpeechFeature:
                     "schema": "nika.packaged-speech-state:v1",
                     "available": True,
                     "status": "idle",
+                    "generation": self._generation,
                     "active": False,
                     "message": "Локальне озвучення Windows готове.",
                     "accepted_characters": 0,
@@ -170,6 +174,7 @@ class PackagedSpeechFeature:
             "schema": "nika.packaged-speech-state:v1",
             "available": True,
             "status": snapshot.state.value,
+            "generation": self._generation,
             "active": snapshot.state in {
                 SpeechStreamState.RUNNING,
                 SpeechStreamState.DRAINING,
