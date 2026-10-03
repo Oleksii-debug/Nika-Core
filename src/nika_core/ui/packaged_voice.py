@@ -149,8 +149,8 @@ class PackagedVoiceFeature:
 def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
     """Build packaged one-shot voice from local model files, with no download fallback."""
 
-    if type(data_root) is not Path:
-        raise TypeError("data_root must be an exact pathlib.Path")
+    if not isinstance(data_root, Path):
+        raise TypeError("data_root must be a pathlib.Path")
     root = data_root.expanduser()
     if not root.is_absolute():
         raise ValueError("data_root must be absolute")
@@ -185,7 +185,7 @@ def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
             language=_LANGUAGE,
             num_threads=2,
         )
-    except Exception:
+    except Exception:  # noqa: BLE001 - local native/model initialization boundary
         return PackagedVoiceFeature(
             controller=None,
             loop=None,
