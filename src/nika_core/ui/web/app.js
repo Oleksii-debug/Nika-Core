@@ -20,6 +20,7 @@
     "idle",
     "running",
     "draining",
+    "cancelling",
     "completed",
     "cancelled",
     "failed",
@@ -1183,7 +1184,7 @@
       return true;
     }
 
-    const activeStatus = snapshot.status === "running" || snapshot.status === "draining";
+    const activeStatus = ["running", "draining", "cancelling"].includes(snapshot.status);
     if (snapshot.status === "unavailable" || snapshot.active !== activeStatus) {
       return failClosed();
     }
@@ -1193,7 +1194,9 @@
     }
     if (speechStatus) speechStatus.textContent = snapshot.message;
     if (speechStart) speechStart.disabled = snapshot.active;
-    if (speechCancel) speechCancel.disabled = !snapshot.active;
+    if (speechCancel) {
+      speechCancel.disabled = !snapshot.active || snapshot.status === "cancelling";
+    }
 
     const terminal = ["completed", "cancelled", "failed"].includes(snapshot.status);
     const signature = terminal
