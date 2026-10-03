@@ -21,7 +21,7 @@ from nika_core.speech_to_text import (
 )
 from nika_core.ui import packaged_voice
 from nika_core.ui.bridge_models import UIResult
-from scripts import nika_windows
+from scripts import m11_release, nika_windows
 
 
 class _FakeVoice:
@@ -246,3 +246,56 @@ def test_windows_release_explicitly_packages_voice_dependencies(tmp_path: Path) 
     assert "numpy" in RUNTIME_DISTRIBUTIONS
     assert "sherpa-onnx" in RUNTIME_DISTRIBUTIONS
     assert "sounddevice" in RUNTIME_DISTRIBUTIONS
+
+
+def test_release_proves_voice_dependencies_through_frozen_executable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = tmp_path / "NikaCore"
+    bundle.mkdir()
+    executable = bundle / "NikaCore.exe"
+    executable.write_bytes(b"synthetic executable")
+    source_sha = "0123456789abcdef0123456789abcdef01234567"
+    calls: list[list[str]] = []
+
+    def fake_run(
+        args: list[str],
+        *,
+        check: bool,
+        timeout: int,
+    ) -> Any:
+        assert check is False
+        assert timeout == 30
+        calls.append(args)
+        output = Path(args[args.index("--voice-runtime-proof-output") + 1])
+        output.write_text(
+            """{
+  "schema": "nika.packaged-voice-runtime-proof:v1",
+  "numpy_imported": true,
+  "sherpa_onnx_imported": true,
+  "sounddevice_imported": true,
+  "microphone_opened": false,
+  "model_loaded": false,
+  "human_tested": false,
+  "nvda_verified": false,
+  "production_release_ready": false
+}
+""",
+            encoding="utf-8",
+        )
+        return m11_release.subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(m11_release.subprocess, "run", fake_run)
+    target = m11_release.prove_packaged_voice_runtime(
+        bundle,
+        source_sha=source_sha,
+    )
+
+    assert calls and calls[0][0] == str(executable)
+    assert "--voice-runtime-proof" in calls[0]
+    evidence = target.read_text(encoding="utf-8")
+    assert source_sha in evidence
+    assert '"packaged_executable_proven": true' in evidence
+    assert '"microphone_opened": false' in evidence
+    assert '"model_loaded": false' in evidence
