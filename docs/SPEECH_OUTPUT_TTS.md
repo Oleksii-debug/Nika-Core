@@ -39,13 +39,15 @@ No dependency or packaging change is required.
 
 ## Accessibility boundary
 
-Speech output is **not automatic** in this batch. There is no UI/runtime hook that reads every Nika
-message aloud. That is intentional for NVDA-first operation: product integration must provide a
-clear user-controlled enable/action boundary and avoid double-speaking with a screen reader.
+Speech output is **not automatic**. The packaged Windows/NVDA surface provides one explicit local
+speech action: the user enters text, starts synthesis, and can cancel it. Task results, memory,
+model output and other private content are never routed into speech merely because they became
+visible. All status announcements continue through the application's single canonical live region,
+avoiding a second competing screen-reader announcement channel.
 
-Automated tests cannot set `HUMAN_TESTED` or `NVDA_VERIFIED`. A later packaged integration must be
-checked on physical Windows with NVDA for focus behavior, discoverability, cancellation and
-interaction with the user's selected screen-reader speech settings.
+Automated tests can prove semantic control discovery, keyboard focus and fail-closed state handling,
+but cannot set `HUMAN_TESTED` or `NVDA_VERIFIED`. Physical Windows/NVDA checking is still required
+for actual audio, cancellation timing and interaction with the user's screen-reader speech settings.
 
 ## Contract summary
 
@@ -65,7 +67,7 @@ invalid request and invalid engine response are distinct typed error states.
 - no speech-recognition/ASR changes;
 - no new voice/model installation;
 - no SSML or arbitrary PowerShell script execution API;
-- no UI/keymap/permission/approval integration;
+- no automatic result-reading, background narration, or hidden speech trigger;
 - no packaged physical-Windows TTS proof yet;
 - `HUMAN_TESTED=false`;
 - `NVDA_VERIFIED=false`.
