@@ -140,6 +140,9 @@
     text: document.getElementById("team-final-text"),
     task_id: document.getElementById("team-final-task-id"),
     team_id: document.getElementById("team-final-team-id"),
+    model_text: document.getElementById("team-final-model-text"),
+    model_provider: document.getElementById("team-final-model-provider"),
+    model_name: document.getElementById("team-final-model-name"),
   });
   const productProjectUnavailableMessage = "Стан поточного ProductProject недоступний.";
   const teamTaskUnavailableMessage = "Стан командного завдання недоступний.";
@@ -225,6 +228,7 @@
   let stateRefreshGeneration = 0;
   let lastStateReady = false;
   let teamStateSignature = null;
+  let teamModelResultAvailable = null;
 
   function announce(message, assertive = false) {
     statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite");
@@ -406,6 +410,7 @@
     teamTaskSummary.hidden = true;
     clearTeamTaskFields();
     teamStateSignature = "unavailable";
+    teamModelResultAvailable = null;
   }
 
   function validTeamMember(member) {
@@ -439,20 +444,137 @@
     );
   }
 
-  function validFinalResult(result, taskId, teamId) {
-    if (result == null) return true;
+  function validBoundedModelIdentity(value, maxLength, { rejectDelete = false } = {}) {
     return Boolean(
-      result
-      && typeof result === "object"
-      && !Array.isArray(result)
-      && Object.prototype.hasOwnProperty.call(finalMessages, result.status)
-      && result.task_id === taskId
-      && result.team_id === teamId
-      && Number.isInteger(result.terminal_member_count)
-      && result.terminal_member_count >= 0
-      && Number.isInteger(result.result_record_count)
-      && result.result_record_count >= 0,
+      typeof value === "string"
+      && value.length > 0
+      && value.length <= maxLength
+      && value === value.trim()
+      && ![...value].some((char) => (
+        char.charCodeAt(0) < 32 || (rejectDelete && char.charCodeAt(0) === 127)
+      ))
     );
+  }
+
+  function validModelResult(result) {
+    if (!result || typeof result !== "object" || Array.isArray(result)) return false;
+    const keys = Object.keys(result).sort();
+    const expectedKeys = [
+      "model",
+      "provenance_validated",
+      "provider_id",
+      "provider_kind",
+      "text",
+    ];
+    if (keys.length !== expectedKeys.length
+        || keys.some((key, index) => key !== expectedKeys[index])) return false;
+    return Boolean(
+      typeof result.text === "string"
+      && result.text.length > 0
+      && result.text.length <= 2000
+      && result.text === result.text.trim()
+      && !result.text.includes("\0")
+      && validBoundedModelIdentity(result.provider_id, 128, { rejectDelete: true })
+      && ["local", "cloud"].includes(result.provider_kind)
+      && validBoundedModelIdentity(result.model, 512)
+      && result.provenance_validated === true
+    );
+  }
+
+  function validComparison(comparison) {
+    if (comparison == null) return true;
+    if (typeof comparison !== "object" || Array.isArray(comparison)) return false;
+    const keys = Object.keys(comparison).sort();
+    const requiredKeys = [
+      "agreement_count",
+      "difference_count",
+      "source_states",
+      "status",
+      "validated",
+    ];
+    const allowedKeys = comparison.model_result == null
+      ? requiredKeys
+      : [...requiredKeys, "model_result"].sort();
+    if (keys.length !== allowedKeys.length
+        || keys.some((key, index) => key !== allowedKeys[index])) return false;
+    const validComparisonStatuses = ["agree", "disagree", "partial"];
+    const allowedComparisonStatuses = [
+      ...validComparisonStatuses,
+      "missing",
+      "worker_error",
+      "evidence_invalid",
+    ];
+    if (!allowedComparisonStatuses.includes(comparison.status)
+        || typeof comparison.validated !== "boolean") return false;
+    if (!Array.isArray(comparison.source_states)
+        || ![0, 2].includes(comparison.source_states.length)
+        || comparison.source_states.some((state) => (
+          !["valid", "missing", "worker_error", "evidence_invalid"].includes(state)
+        ))) return false;
+    let expectedNoncomparisonStatus = null;
+    if (comparison.source_states.length === 0) {
+      expectedNoncomparisonStatus = "evidence_invalid";
+    } else if (comparison.source_states.includes("evidence_invalid")) {
+      expectedNoncomparisonStatus = "evidence_invalid";
+    } else if (comparison.source_states.includes("worker_error")) {
+      expectedNoncomparisonStatus = "worker_error";
+    } else if (comparison.source_states.includes("missing")) {
+      expectedNoncomparisonStatus = "missing";
+    }
+    if (expectedNoncomparisonStatus === null) {
+      if (!validComparisonStatuses.includes(comparison.status)) return false;
+    } else if (comparison.status !== expectedNoncomparisonStatus) {
+      return false;
+    }
+    if (!Number.isSafeInteger(comparison.agreement_count)
+        || comparison.agreement_count < 0
+        || comparison.agreement_count > 100
+        || !Number.isSafeInteger(comparison.difference_count)
+        || comparison.difference_count < 0
+        || comparison.difference_count > 100) {
+      return false;
+    }
+    const countsCoherent = (
+      (comparison.status === "agree"
+        && comparison.agreement_count === 1
+        && comparison.difference_count === 0)
+      || (comparison.status === "disagree"
+        && comparison.agreement_count === 0
+        && comparison.difference_count === 1)
+      || (comparison.status === "partial"
+        && comparison.agreement_count >= 1
+        && comparison.difference_count === 1)
+      || (!validComparisonStatuses.includes(comparison.status)
+        && comparison.agreement_count === 0
+        && comparison.difference_count === 0)
+    );
+    if (!countsCoherent) return false;
+    const evidenceValid = validComparisonStatuses.includes(comparison.status)
+      && comparison.source_states.every((state) => state === "valid");
+    if (comparison.validated !== evidenceValid) return false;
+    if (comparison.model_result == null) return true;
+    return comparison.validated === true && validModelResult(comparison.model_result);
+  }
+
+  function validFinalResult(result, taskId, teamId, teamState, terminalMemberCount) {
+    if (result == null) return true;
+    if (
+      !result
+      || typeof result !== "object"
+      || Array.isArray(result)
+      || !Object.prototype.hasOwnProperty.call(finalMessages, result.status)
+      || result.status !== teamState
+      || result.task_id !== taskId
+      || result.team_id !== teamId
+      || !Number.isInteger(result.terminal_member_count)
+      || result.terminal_member_count !== terminalMemberCount
+      || !Number.isInteger(result.result_record_count)
+      || result.result_record_count < 0
+    ) {
+      return false;
+    }
+    if (result.comparison != null && result.status !== "completed") return false;
+    return validComparison(result.comparison);
   }
 
   function validTeamTaskProjection(projection) {
@@ -501,8 +623,19 @@
     if (!legacyRoster && !sourceRoster) return false;
     if (!team.roster_complete
         && (team.state === "completed" || finalResult?.status === "completed")) return false;
+    const terminalTeamState = team.state !== "active";
+    if (terminalTeamState !== (finalResult != null)) return false;
     if (!Array.isArray(events) || !events.every(validTeamEvent)) return false;
-    return validFinalResult(finalResult, task.task_id, team.team_id);
+    const terminalMemberCount = members.filter((member) => (
+      ["completed", "failed", "cancelled"].includes(member.state)
+    )).length;
+    return validFinalResult(
+      finalResult,
+      task.task_id,
+      team.team_id,
+      team.state,
+      terminalMemberCount,
+    );
   }
 
   function appendDefinitionItem(list, term, value) {
@@ -545,6 +678,13 @@
       ]),
       events: projection.events.map((event) => [event.code, event.time]),
       final_status: projection.final_result?.status || null,
+      final_model_result: projection.final_result?.comparison?.model_result
+        ? [
+          projection.final_result.comparison.model_result.text,
+          projection.final_result.comparison.model_result.provider_id,
+          projection.final_result.comparison.model_result.model,
+        ]
+        : null,
     });
   }
 
@@ -553,6 +693,7 @@
       const nextSignature = "none";
       const changed = teamStateSignature !== null && teamStateSignature !== nextSignature;
       teamStateSignature = nextSignature;
+      teamModelResultAvailable = null;
       teamTaskEmpty.textContent = "Реального командного завдання ще немає.";
       teamTaskEmpty.hidden = false;
       teamTaskSummary.hidden = true;
@@ -577,7 +718,10 @@
 
     const nextSignature = teamProjectionSignature(projection);
     const changed = teamStateSignature !== null && teamStateSignature !== nextSignature;
+    const modelResultAvailable = Boolean(projection.final_result?.comparison?.model_result);
+    const modelResultBecameAvailable = teamModelResultAvailable === false && modelResultAvailable;
     teamStateSignature = nextSignature;
+    teamModelResultAvailable = modelResultAvailable;
     const { task, team, members, events, final_result: finalResult } = projection;
     teamTaskFields.task_id.textContent = task.task_id;
     teamTaskFields.command.textContent = task.command || "Команда не збережена у bounded projection.";
@@ -609,13 +753,18 @@
       teamFinalFields.text.textContent = finalMessages[finalResult.status];
       teamFinalFields.task_id.textContent = finalResult.task_id;
       teamFinalFields.team_id.textContent = finalResult.team_id;
+      const modelResult = finalResult.comparison?.model_result || null;
+      teamFinalFields.model_text.textContent = modelResult?.text
+        || "Немає перевіреної відповіді моделі для цього результату.";
+      teamFinalFields.model_provider.textContent = modelResult?.provider_id || "Не застосовується";
+      teamFinalFields.model_name.textContent = modelResult?.model || "Не застосовується";
       teamFinalEmpty.hidden = true;
       teamFinalSummary.hidden = false;
     }
 
     teamTaskEmpty.hidden = true;
     teamTaskSummary.hidden = false;
-    return { ok: true, changed };
+    return { ok: true, changed, modelResultBecameAvailable };
   }
 
   function validStartupRecovery(snapshot) {
@@ -1420,9 +1569,18 @@
       return false;
     }
     if (announceTeamTransitions && recoveryRender.changed) {
-      announce(recoveryRender.message, recoveryRender.assertive);
+      announce(
+        teamRender.modelResultBecameAvailable
+          ? `${recoveryRender.message} Перевірена відповідь моделі доступна в підсумку командного завдання.`
+          : recoveryRender.message,
+        recoveryRender.assertive,
+      );
     } else if (announceTeamTransitions && teamRender.changed) {
-      announce("Стан командного завдання оновлено.");
+      announce(
+        teamRender.modelResultBecameAvailable
+          ? "Перевірена відповідь моделі доступна в підсумку командного завдання."
+          : "Стан командного завдання оновлено.",
+      );
     }
     lastStateReady = true;
     return true;
