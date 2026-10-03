@@ -214,7 +214,7 @@ def test_builder_fails_closed_when_windows_speech_host_is_missing(
 
 
 def test_packaged_speech_actions_are_registered() -> None:
-    actions = {item.action_id: item for item in build_default_action_registry().list_actions()}
+    actions = {item.action_id: item for item in build_default_action_registry().all()}
 
     assert actions["speech.start"].label == "Озвучити текст"
     assert actions["speech.cancel"].label == "Скасувати озвучення"
