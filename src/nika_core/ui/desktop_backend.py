@@ -113,6 +113,7 @@ class DesktopBackend:
         self._active_threads: dict[str, str] = {}
         self._active_futures: dict[str, Future[Any]] = {}
         self._cancel_futures: dict[str, Future[bool]] = {}
+        self._packaged_futures: set[Future[Any]] = set()
         self._startup_recovery_lock = threading.Lock()
         self._startup_recovery_started = False
         self._startup_recovery_future: Future[Any] | None = None
@@ -386,9 +387,13 @@ class DesktopBackend:
         self,
         coroutine: Coroutine[Any, Any, Any],
     ) -> Future[Any]:
-        """Run internal packaged async work on the single desktop event-loop host."""
+        """Run and track internal packaged async work on the single desktop host."""
 
-        return self._host().submit(coroutine)
+        with self._active_lock:
+            future = self._host().submit(coroutine)
+            self._packaged_futures.add(future)
+        future.add_done_callback(self._packaged_done)
+        return future
 
     def close(self) -> None:
         """Stop the private bridge event loop after all submitted runtime work has settled."""
@@ -396,6 +401,7 @@ class DesktopBackend:
             futures = [
                 *self._active_futures.values(),
                 *self._cancel_futures.values(),
+                *self._packaged_futures,
             ]
         with self._startup_recovery_lock:
             if (
@@ -419,6 +425,7 @@ class DesktopBackend:
             self._active_threads.clear()
             self._active_futures.clear()
             self._cancel_futures.clear()
+            self._packaged_futures.clear()
         if self._runtime_loop is not None:
             self._runtime_loop.close()
             self._runtime_loop = None
@@ -579,6 +586,10 @@ class DesktopBackend:
             future = self._host().submit(coroutine)
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
+
+    def _packaged_done(self, future: Future[Any]) -> None:
+        with self._active_lock:
+            self._packaged_futures.discard(future)
 
     def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:

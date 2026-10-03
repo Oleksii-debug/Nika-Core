@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -212,6 +213,45 @@ def test_packaged_bridge_exposes_voice_actions_state_and_cleanup(
     finally:
         session.close()
     assert fake.closed is True
+
+
+
+
+def test_shared_desktop_host_tracks_packaged_voice_future(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = _FakeVoice()
+    monkeypatch.setattr(
+        nika_windows,
+        "build_packaged_voice",
+        lambda _root, **_kwargs: fake,
+    )
+    session = nika_windows.build_windows_session(
+        AppConfig(database_path=(tmp_path / "nika.db").resolve())
+    )
+
+    async def packaged_work() -> None:
+        return None
+
+    coroutine = packaged_work()
+    pending: Future[Any] = Future()
+
+    class _FakeHost:
+        def submit(self, value: Any) -> Future[Any]:
+            assert value is coroutine
+            coroutine.close()
+            return pending
+
+    monkeypatch.setattr(session.backend, "_host", lambda: _FakeHost())
+    try:
+        returned = session.backend.submit_packaged_coroutine(coroutine)
+        assert returned is pending
+        assert pending in session.backend._packaged_futures
+        pending.set_result(None)
+        assert pending not in session.backend._packaged_futures
+    finally:
+        session.close()
 
 
 def test_packaged_voice_actions_are_registered_without_forced_shortcuts() -> None:
