@@ -302,11 +302,19 @@ def test_packaged_bridge_exposes_voice_model_setup_state_and_action(
     class _FakeVoice:
         def start(self, payload: dict[str, object]) -> UIResult:
             assert payload == {}
-            return UIResult("voice", "rejected", "voice unavailable")
+            return UIResult(
+                request_id="voice",
+                status="rejected",
+                message="voice unavailable",
+            )
 
         def cancel(self, payload: dict[str, object]) -> UIResult:
             assert payload == {}
-            return UIResult("voice", "completed", "no active voice")
+            return UIResult(
+                request_id="voice",
+                status="completed",
+                message="no active voice",
+            )
 
         def snapshot(self) -> dict[str, object]:
             return {
