@@ -100,6 +100,8 @@ element("speech-cancel").dataset.actionId = "speech.cancel";
 let currentVoiceModelSetup = {
   schema: "nika.packaged-voice-model-setup:v1",
   status: "missing",
+  generation: 0,
+  active: false,
   installed: false,
   can_import: true,
   restart_required: false,
@@ -172,14 +174,18 @@ function snapshot() {
   };
 }
 
-function holdNextStateRead() {
+function holdNextStateRead(response = null) {
   let release;
   deferredStateRead = new Promise((resolve) => {
-    release = () => {
-      const response = snapshot();
-      deferredStateRead = null;
-      resolve(response);
-    };
+    release = () => resolve(response ?? snapshot());
+  });
+  return release;
+}
+
+function holdNextStateReadFailure() {
+  let release;
+  deferredStateRead = new Promise((_resolve, reject) => {
+    release = () => reject(new Error("PRIVATE_STALE_STATE_CANARY"));
   });
   return release;
 }
@@ -195,7 +201,11 @@ global.pywebview = { api: {
   }],
   get_state: async () => {
     if (failRead) throw new Error("PRIVATE_MODEL_CANARY");
-    if (deferredStateRead) return deferredStateRead;
+    if (deferredStateRead) {
+      const pending = deferredStateRead;
+      deferredStateRead = null;
+      return pending;
+    }
     return snapshot();
   },
   dispatch: async (command) => {
@@ -205,6 +215,8 @@ global.pywebview = { api: {
       currentVoiceModelSetup = {
         schema: "nika.packaged-voice-model-setup:v1",
         status: "restart_required",
+        generation: currentVoiceModelSetup.generation + 1,
+        active: false,
         installed: true,
         can_import: false,
         restart_required: true,
@@ -345,6 +357,87 @@ const speechCancel = element("speech-cancel");
   assert.equal(element("speech-status").textContent, "Озвучення скасовано.");
   assert.equal(speechStart.disabled, false);
   assert.equal(speechCancel.disabled, true);
+
+  const staleResponse = snapshot();
+  staleResponse.state.voice_model_setup = {
+    ...currentVoiceModelSetup,
+    status: "missing",
+    generation: currentVoiceModelSetup.generation,
+    active: false,
+    installed: false,
+    can_import: true,
+    restart_required: false,
+    message: "STALE_VOICE_STATE_MUST_NOT_WIN",
+  };
+  staleResponse.state.speech = {
+    ...currentSpeech,
+    status: "running",
+    generation: currentSpeech.generation + 1,
+    active: true,
+    message: "STALE_SPEECH_STATE_MUST_NOT_WIN",
+    accepted_characters: 17,
+    spoken_characters: 0,
+    pending_characters: 17,
+  };
+  let releaseStaleRead = holdNextStateRead(staleResponse);
+  const staleSuccessPoll = poll();
+  await tick();
+
+  currentVoiceModelSetup = {
+    ...currentVoiceModelSetup,
+    generation: currentVoiceModelSetup.generation + 1,
+    message: "LATEST_VOICE_STATE_MUST_WIN",
+  };
+  currentSpeech = {
+    ...currentSpeech,
+    status: "completed",
+    generation: currentSpeech.generation + 2,
+    active: false,
+    message: "LATEST_SPEECH_STATE_MUST_WIN",
+    pending_characters: 0,
+  };
+  await poll();
+  assert.equal(element("voice-model-status").textContent, "LATEST_VOICE_STATE_MUST_WIN");
+  assert.equal(element("speech-status").textContent, "LATEST_SPEECH_STATE_MUST_WIN");
+  assert.equal(document.documentElement.dataset.nikaReady, "true");
+
+  releaseStaleRead();
+  await staleSuccessPoll;
+  await tick();
+  assert.equal(element("voice-model-status").textContent, "LATEST_VOICE_STATE_MUST_WIN");
+  assert.equal(element("speech-status").textContent, "LATEST_SPEECH_STATE_MUST_WIN");
+  assert.equal(document.documentElement.dataset.nikaReady, "true");
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent))
+      .includes("STALE_VOICE_STATE_MUST_NOT_WIN"),
+    false,
+  );
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent))
+      .includes("STALE_SPEECH_STATE_MUST_NOT_WIN"),
+    false,
+  );
+
+  const releaseStaleFailure = holdNextStateReadFailure();
+  const staleFailurePoll = poll();
+  await tick();
+  currentSpeech = {
+    ...currentSpeech,
+    generation: currentSpeech.generation + 1,
+    message: "LATEST_AFTER_STALE_FAILURE",
+  };
+  await poll();
+  assert.equal(element("speech-status").textContent, "LATEST_AFTER_STALE_FAILURE");
+  releaseStaleFailure();
+  await staleFailurePoll;
+  await tick();
+  assert.equal(element("speech-status").textContent, "LATEST_AFTER_STALE_FAILURE");
+  assert.equal(document.documentElement.dataset.nikaReady, "true");
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent))
+      .includes("PRIVATE_STALE_STATE_CANARY"),
+    false,
+  );
 
   model.focus();
   const recoveryFocus = document.activeElement;

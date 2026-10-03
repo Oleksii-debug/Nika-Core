@@ -484,6 +484,8 @@ def test_packaged_bridge_exposes_voice_model_setup_state_and_action(
             return {
                 "schema": "nika.packaged-voice-model-setup:v1",
                 "status": "missing",
+                "generation": 0,
+                "active": False,
                 "installed": False,
                 "can_import": True,
                 "restart_required": False,
