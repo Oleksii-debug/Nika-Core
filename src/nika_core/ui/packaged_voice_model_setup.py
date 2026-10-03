@@ -140,6 +140,12 @@ class PackagedVoiceModelSetup:
         source_root = Path(source_text).expanduser()
         if not source_root.is_absolute():
             raise _SetupInputError("Шлях до папки моделі має бути повним.")
+        if ".." in source_root.parts:
+            raise _SetupInputError("Шлях до папки моделі не може містити переходи ..")
+        if source_root.anchor.startswith("\\\\"):
+            raise _SetupInputError(
+                "Мережевий UNC-шлях не дозволений для локальної голосової моделі."
+            )
         try:
             self._require_regular_directory(source_root)
             self._require_no_reparse_ancestors(source_root)
@@ -316,6 +322,7 @@ def _copy_verified_regular_file(
         _require_same_regular_file(expected, opened)
         with destination.open("xb", buffering=0) as writer:
             copied = _stream_copy(reader, writer, expected.st_size)
+            _require_same_regular_file(expected, os.fstat(reader.fileno()))
             writer.flush()
             os.fsync(writer.fileno())
     if copied != expected.st_size:
@@ -331,7 +338,9 @@ def _stream_copy(reader: BinaryIO, writer: BinaryIO, expected_size: int) -> int:
         copied += len(chunk)
         if copied > expected_size:
             raise RuntimeError("source file grew during import")
-        writer.write(chunk)
+        written = writer.write(chunk)
+        if written != len(chunk):
+            raise RuntimeError("destination file accepted a partial write")
     return copied
 
 
@@ -342,5 +351,6 @@ def _require_same_regular_file(expected: os.stat_result, opened: os.stat_result)
         or opened.st_size != expected.st_size
         or opened.st_dev != expected.st_dev
         or opened.st_ino != expected.st_ino
+        or opened.st_mtime_ns != expected.st_mtime_ns
     ):
         raise RuntimeError("source file identity changed before copy")
