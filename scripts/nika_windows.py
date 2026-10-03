@@ -389,6 +389,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=("Створи застосунок для керування витратами малого бізнесу"),
     )
     args = parser.parse_args(argv)
+    if args.voice_runtime_proof:
+        return _run_voice_runtime_proof(args.voice_runtime_proof_output)
+
     from nika_core.reliability.legacy_database import LegacyDatabaseConflict
     from nika_core.ui.startup_error import show_recovery_error
 
@@ -397,8 +400,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
         return 1
-    if args.voice_runtime_proof:
-        return _run_voice_runtime_proof(args.voice_runtime_proof_output)
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
