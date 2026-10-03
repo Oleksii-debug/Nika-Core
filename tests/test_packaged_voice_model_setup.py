@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 
@@ -256,6 +257,48 @@ def test_voice_model_setup_rejects_noncanonical_payload(
 
     with pytest.raises((TypeError, ValueError)):
         setup.install(payload)  # type: ignore[arg-type]
+
+
+def test_voice_model_copy_rejects_partial_destination_write() -> None:
+    class _PartialWriter:
+        def write(self, data: bytes) -> int:
+            return max(0, len(data) - 1)
+
+    with pytest.raises(RuntimeError, match="partial write"):
+        model_setup._stream_copy(  # noqa: SLF001 - focused copy fence regression
+            io.BytesIO(b"model-bytes"),
+            _PartialWriter(),  # type: ignore[arg-type]
+            len(b"model-bytes"),
+        )
+
+
+def test_voice_model_copy_rejects_post_open_metadata_change(tmp_path: Path) -> None:
+    source = tmp_path / "encoder.onnx"
+    source.write_bytes(b"stable-model")
+    expected = os.lstat(source)
+    changed_mtime = expected.st_mtime_ns + 2_000_000_000
+    os.utime(source, ns=(expected.st_atime_ns, changed_mtime))
+
+    with source.open("rb", buffering=0) as reader:
+        with pytest.raises(RuntimeError, match="identity changed"):
+            model_setup._require_same_regular_file(  # noqa: SLF001
+                expected,
+                os.fstat(reader.fileno()),
+            )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="UNC path semantics are Windows-specific")
+def test_voice_model_setup_rejects_unc_before_filesystem_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    setup = PackagedVoiceModelSetup(tmp_path)
+
+    result = setup.install({"source_root": r"\\server\share\nika-whisper"})
+
+    assert result.status == "rejected"
+    assert "UNC" in result.message
 
 
 def test_voice_model_setup_rejects_hostile_string_subclass(tmp_path: Path) -> None:
