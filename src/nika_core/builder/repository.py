@@ -243,7 +243,7 @@ class AgentDefinitionRepository:
                 "defs.activated_at FROM agent_definitions AS defs "
                 "JOIN (SELECT agent_id, MAX(version) AS version FROM agent_definitions "
                 "GROUP BY agent_id) AS latest "
-                "ON latest.agent_id = current.agent_id AND latest.version = defs.version "
+                "ON latest.agent_id = defs.agent_id AND latest.version = defs.version "
                 "ORDER BY defs.created_at DESC, defs.agent_id LIMIT ?",
                 (limit,),
             ).fetchall()
