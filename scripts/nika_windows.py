@@ -7,6 +7,7 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
@@ -18,6 +19,7 @@ from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.packaged_agent_builder import PackagedAgentBuilderDraftHandler
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductSelectionStore,
@@ -68,9 +70,11 @@ def build_windows_bridge(
         ),
     )
     products = ProductProjectCommandService(ProductProjectRepository(store))
+    agent_definitions = AgentDefinitionRepository(store)
     product_router = PackagedProductCommandRouter(
         products=products,
         ordinary_handler=backend.create_task,
+        agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
         selection_store=PackagedProductSelectionStore(store),
     )
     command_center = ProductCommandCenter(products)
