@@ -166,7 +166,6 @@ def test_real_windows_composition_creates_review_only_agent_draft_without_task_l
     assert after["state"]["product_project"] is None
 
     store = SQLiteStore(database_path)
-    stored = None
     with store.connection() as conn:
         rows = conn.execute(
             "SELECT agent_id, version, status FROM agent_definitions"
