@@ -135,14 +135,13 @@ def test_packaged_router_fails_closed_when_agent_builder_is_not_composed(
         repository.get(product_project_identity(command))
 
 
-def test_real_windows_composition_rejects_agent_creation_without_task_leak(
+def test_real_windows_composition_creates_review_only_agent_draft_without_task_leak(
     tmp_path: Path,
 ) -> None:
     from scripts.nika_windows import build_windows_bridge
 
-    bridge, _products = build_windows_bridge(
-        AppConfig(database_path=tmp_path / "F10 packaged українська path.db")
-    )
+    database_path = tmp_path / "F10 packaged українська path.db"
+    bridge, _products = build_windows_bridge(AppConfig(database_path=database_path))
     before = bridge.get_state()
     assert before["ok"] is True
     assert before["state"]["tasks"] == []
@@ -156,12 +155,25 @@ def test_real_windows_composition_rejects_agent_creation_without_task_leak(
         }
     )
 
-    assert result["status"] == "rejected"
-    assert "Agent Builder" in result["message"]
+    assert result["status"] == "completed"
+    assert "Чернетку Agent Builder збережено" in result["message"]
+    assert "не активована" in result["message"]
+    assert result["focus_id"] == "agents-heading"
+
     after = bridge.get_state()
     assert after["ok"] is True
     assert after["state"]["tasks"] == []
     assert after["state"]["product_project"] is None
+
+    store = SQLiteStore(database_path)
+    stored = None
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT agent_id, version, status FROM agent_definitions"
+        ).fetchall()
+    assert len(rows) == 1
+    assert rows[0]["version"] == 1
+    assert rows[0]["status"] == "draft"
 
 
 def test_ambiguous_agent_command_invokes_no_specialized_or_ordinary_handler(
