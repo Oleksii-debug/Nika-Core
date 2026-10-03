@@ -23,6 +23,7 @@
     <a href="#model-settings-heading">Модель</a>
     <a href="#source-setup-heading">Джерела команди</a>
     <a href="#voice-heading">Голосовий ввід</a>
+    <a href="#speech-heading">Голос Nika</a>
     <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
     <a href="#autostart-heading">Автозапуск Windows</a>
@@ -134,6 +135,26 @@
         <button type="button" id="voice-use-command" disabled>
           Перенести розпізнаний текст у поле команди
         </button>
+      </div>
+    </section>
+
+    <section aria-labelledby="speech-heading">
+      <h2 id="speech-heading" tabindex="-1">Голос Nika</h2>
+      <p id="speech-help">
+        Явно озвучує введений нижче текст локальним системним голосом Windows.
+        Nika не читає результати, пам’ять або приватний вміст автоматично.
+        Це системний голос Windows, а не фінальний власний голос Nika.
+      </p>
+      <label for="speech-text">Текст для озвучення</label>
+      <textarea id="speech-text" rows="4" maxlength="20000"
+                aria-describedby="speech-help speech-status"></textarea>
+      <p id="speech-status">Перевірка локального озвучення.</p>
+      <div class="actions">
+        <button type="button" id="speech-start" data-action-id="speech.start"
+                aria-describedby="speech-help speech-status"
+                data-error-focus-target="speech-heading">Озвучити текст</button>
+        <button type="button" id="speech-cancel" data-action-id="speech.cancel"
+                data-error-focus-target="speech-heading" disabled>Скасувати озвучення</button>
       </div>
     </section>
 
