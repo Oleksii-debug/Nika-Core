@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
@@ -19,6 +20,10 @@ from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.packaged_agent_builder import (
+    PackagedAgentBuilderDraftHandler,
+    PackagedAgentBuilderStateProjector,
+)
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductSelectionStore,
@@ -135,6 +140,7 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
         ) from exc
 
     products = ProductProjectCommandService(ProductProjectRepository(store))
+    agent_definitions = AgentDefinitionRepository(store)
 
     def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
         try:
@@ -150,8 +156,10 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
     product_router = PackagedProductCommandRouter(
         products=products,
         ordinary_handler=create_ordinary_task,
+        agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
         selection_store=PackagedProductSelectionStore(store),
     )
+    agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
     command_center = ProductCommandCenter(products)
     product_state = PackagedProductStateProvider(
         base_state=backend.snapshot,
@@ -169,7 +177,7 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
         state["voice"] = voice.snapshot()
         state["voice_model_setup"] = voice_model_setup.snapshot()
         state["speech"] = speech.snapshot()
-        return state
+        return agent_builder_state.decorate(state)
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
         if payload:
