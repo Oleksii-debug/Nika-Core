@@ -206,4 +206,14 @@ def build_packaged_speech() -> PackagedSpeechFeature:
             output=None,
             unavailable_message="Озвучення доступне лише у застосунку Windows.",
         )
-    return PackagedSpeechFeature(output=WindowsSystemSpeechAdapter())
+    try:
+        output = WindowsSystemSpeechAdapter()
+    except SpeechError:
+        return PackagedSpeechFeature(
+            output=None,
+            unavailable_message=(
+                "Локальне озвучення Windows недоступне. "
+                "Перевірте системний компонент Windows System.Speech."
+            ),
+        )
+    return PackagedSpeechFeature(output=output)
