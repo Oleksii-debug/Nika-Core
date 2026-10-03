@@ -101,7 +101,9 @@ def prove_packaged_voice_runtime(bundle_dir: Path, *, source_sha: str) -> Path:
     required_true = (
         "numpy_imported",
         "sherpa_onnx_imported",
+        "sherpa_native_imported",
         "sounddevice_imported",
+        "sounddevice_data_proven",
     )
     if (
         payload.get("schema") != "nika.packaged-voice-runtime-proof:v1"
