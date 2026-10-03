@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sys
 from collections.abc import Mapping
 from pathlib import Path
@@ -10,8 +11,16 @@ from nika_core.microphone_capture import (
     MicrophoneCaptureRequest,
     MicrophoneCaptureService,
 )
+from nika_core.model_gateway.contracts import ProviderKind
 from nika_core.sherpa_onnx_stt import SherpaOnnxWhisperSpeechToTextAdapter
-from nika_core.speech_to_text import SpeechToTextPolicy, SpeechToTextService
+from nika_core.speech_to_text import (
+    SpeechToTextAdapterError,
+    SpeechToTextAdapterResponse,
+    SpeechToTextFailureCode,
+    SpeechToTextPolicy,
+    SpeechToTextRequest,
+    SpeechToTextService,
+)
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_voice import DesktopVoiceTurnController, VoiceSubmitter
 from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest
@@ -24,6 +33,72 @@ _CAPTURE_BYTES = _SAMPLE_RATE_HZ * _CAPTURE_SECONDS * 2
 _MODEL_ID = "whisper-local"
 _LANGUAGE = "uk"
 _MODEL_DIR = Path("voice") / "whisper"
+
+
+class _LazySherpaAdapter:
+    """Load local Whisper only after an explicit packaged voice turn starts."""
+
+    provider_kind = ProviderKind.LOCAL
+    provider_id = "sherpa-onnx-whisper"
+    supported_models = (_MODEL_ID,)
+
+    def __init__(self, *, encoder: Path, decoder: Path, tokens: Path) -> None:
+        self._encoder = encoder
+        self._decoder = decoder
+        self._tokens = tokens
+        self._delegate: SherpaOnnxWhisperSpeechToTextAdapter | None = None
+        self._load_future: asyncio.Future[Any] | None = None
+
+    async def transcribe(
+        self,
+        request: SpeechToTextRequest,
+    ) -> SpeechToTextAdapterResponse:
+        delegate = self._delegate
+        if delegate is None:
+            loop = asyncio.get_running_loop()
+            future = self._load_future
+            if future is None:
+                future = loop.run_in_executor(None, self._load_sync)
+                self._load_future = future
+                future.add_done_callback(self._on_load_done)
+            try:
+                delegate = await asyncio.shield(future)
+            except asyncio.CancelledError:
+                raise
+            except SpeechToTextAdapterError:
+                raise
+            except Exception:  # noqa: BLE001 - local native/model initialization boundary
+                raise SpeechToTextAdapterError(
+                    SpeechToTextFailureCode.UNAVAILABLE,
+                    "Sherpa ONNX Whisper model initialization failed.",
+                    retryable=False,
+                ) from None
+        return await delegate.transcribe(request)
+
+    def _load_sync(self) -> SherpaOnnxWhisperSpeechToTextAdapter:
+        return SherpaOnnxWhisperSpeechToTextAdapter.from_whisper_files(
+            encoder=str(self._encoder),
+            decoder=str(self._decoder),
+            tokens=str(self._tokens),
+            model_id=_MODEL_ID,
+            language=_LANGUAGE,
+            num_threads=2,
+        )
+
+    def _on_load_done(
+        self,
+        future: asyncio.Future[SherpaOnnxWhisperSpeechToTextAdapter],
+    ) -> None:
+        if self._load_future is not future:
+            return
+        self._load_future = None
+        if future.cancelled():
+            return
+        try:
+            delegate = future.result()
+        except Exception:  # noqa: BLE001 - late native/model initialization result
+            return
+        self._delegate = delegate
 
 
 class PackagedVoiceFeature:
@@ -160,27 +235,15 @@ def build_packaged_voice(
             ),
         )
 
-    microphone = WindowsWasapiMicrophoneCaptureAdapter()
-    try:
-        stt = SherpaOnnxWhisperSpeechToTextAdapter.from_whisper_files(
-            encoder=str(encoder),
-            decoder=str(decoder),
-            tokens=str(tokens),
-            model_id=_MODEL_ID,
-            language=_LANGUAGE,
-            num_threads=2,
-        )
-    except Exception:  # noqa: BLE001 - local native/model initialization boundary
-        return PackagedVoiceFeature(
-            controller=None,
-            unavailable_message=(
-                "Локальну голосову модель не вдалося відкрити. Перевірте файли "
-                "Whisper у папці NikaCore\\voice\\whisper."
-            ),
-        )
-
     if submit is None or not callable(submit):
         raise TypeError("available packaged voice requires a callable desktop submitter")
+
+    microphone = WindowsWasapiMicrophoneCaptureAdapter()
+    stt = _LazySherpaAdapter(
+        encoder=encoder,
+        decoder=decoder,
+        tokens=tokens,
+    )
 
     service = OneShotVoiceTurnService(
         microphone=MicrophoneCaptureService(microphone),
