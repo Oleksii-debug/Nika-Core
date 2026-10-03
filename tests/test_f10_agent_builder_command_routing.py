@@ -164,6 +164,15 @@ def test_real_windows_composition_creates_review_only_agent_draft_without_task_l
     assert after["ok"] is True
     assert after["state"]["tasks"] == []
     assert after["state"]["product_project"] is None
+    assert len(after["state"]["agent_builder_definitions"]) == 1
+    projected = after["state"]["agent_builder_definitions"][0]
+    assert projected["status"] == "draft"
+    assert projected["requires_human_approval"] is False
+    assert any(
+        item["agent_id"] == projected["agent_id"]
+        and item["name"].startswith("Agent Builder [чернетка]:")
+        for item in after["state"]["agents"]
+    )
 
     store = SQLiteStore(database_path)
     with store.connection() as conn:
