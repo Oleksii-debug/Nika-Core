@@ -48,6 +48,10 @@ $requiredNames = @(
     'Почати один голосовий ввід',
     'Скасувати голосовий ввід',
     'Перенести розпізнаний текст у поле команди',
+    'Голос Nika',
+    'Текст для озвучення',
+    'Озвучити текст',
+    'Скасувати озвучення',
     'Клавіатура'
 )
 
@@ -698,6 +702,19 @@ try {
             }
         }
         Write-Host 'Packaged voice controls are UIA-discoverable and fail closed without a local model. Microphone access was not invoked.'
+
+        $speechTextControl = Wait-DescendantName 'Текст для озвучення' ([System.Windows.Automation.ControlType]::Edit)
+        $speechStartControl = Wait-DescendantName 'Озвучити текст' ([System.Windows.Automation.ControlType]::Button)
+        $speechCancelControl = Wait-DescendantName 'Скасувати озвучення' ([System.Windows.Automation.ControlType]::Button)
+        if (-not (Resolve-BoundControlIdentity $speechStartControl).Current.IsEnabled) {
+            throw 'Packaged local speech Start control must be available on the Windows candidate.'
+        }
+        if ((Resolve-BoundControlIdentity $speechCancelControl).Current.IsEnabled) {
+            throw 'Packaged local speech Cancel control must be disabled while speech is idle.'
+        }
+        Set-BoundControlFocus $speechTextControl
+        Wait-FocusName $speechTextControl
+        Write-Host 'Packaged speech controls are UIA-discoverable and keyboard-focusable; no audio effect was invoked.'
 
         Set-BoundControlFocus $startControl
         [System.Windows.Forms.SendKeys]::SendWait('%1')

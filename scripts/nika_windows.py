@@ -29,6 +29,7 @@ from nika_core.product_project import ProductProjectRepository
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
+from nika_core.ui.packaged_speech import PackagedSpeechFeature, build_packaged_speech
 from nika_core.ui.packaged_voice import PackagedVoiceFeature, build_packaged_voice
 from nika_core.ui.shell import launch_windows_shell
 from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
@@ -48,6 +49,7 @@ class WindowsBridgeSession:
     products: ProductProjectCommandService
     backend: DesktopBackend
     voice: PackagedVoiceFeature
+    speech: PackagedSpeechFeature
     _closed: bool = False
 
     def close(self) -> None:
@@ -55,9 +57,12 @@ class WindowsBridgeSession:
             return
         self._closed = True
         try:
-            self.voice.close()
+            self.speech.close()
         finally:
-            self.backend.close()
+            try:
+                self.voice.close()
+            finally:
+                self.backend.close()
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -102,13 +107,17 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
         config.database_path.parent,
         submit=backend.submit_packaged_coroutine,
     )
+    speech = build_packaged_speech()
     try:
         backend.start_startup_recovery()
     except Exception as exc:
         try:
-            voice.close()
+            speech.close()
         finally:
-            backend.close()
+            try:
+                voice.close()
+            finally:
+                backend.close()
         raise _StartupRecoveryInventoryError(
             "packaged startup recovery inventory failed"
         ) from exc
@@ -146,6 +155,7 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
         state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
         state["v01_model_settings"] = model_settings.snapshot()
         state["voice"] = voice.snapshot()
+        state["speech"] = speech.snapshot()
         return state
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
@@ -181,6 +191,8 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             "agent.stop": backend.stop_agent,
             "voice.start": voice.start,
             "voice.cancel": voice.cancel,
+            "speech.start": speech.speak,
+            "speech.cancel": speech.cancel,
             "team.sources.configure": source_settings.configure,
             "settings.autostart.configure": backend.autostart_settings.configure,
             "settings.autostart.refresh": backend.autostart_settings.refresh,
@@ -201,6 +213,7 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
         products=products,
         backend=backend,
         voice=voice,
+        speech=speech,
     )
 
 
