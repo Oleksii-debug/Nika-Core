@@ -354,19 +354,33 @@ def _run_voice_runtime_proof(output_path: Path | None) -> int:
     if output_path is None:
         raise ValueError("--voice-runtime-proof-output is required")
     try:
+        import _sounddevice_data
         import numpy
         import sherpa_onnx
         import sounddevice
+        from sherpa_onnx.lib import _sherpa_onnx
     except Exception as exc:  # noqa: BLE001 - packaged native dependency proof boundary
         raise RuntimeError(
             f"packaged voice dependency import failed: {type(exc).__name__}"
         ) from None
 
+    sounddevice_roots = tuple(Path(item) for item in _sounddevice_data.__path__)
+    portaudio_dlls = tuple(
+        candidate
+        for root in sounddevice_roots
+        for candidate in (root / "portaudio-binaries").glob("libportaudio*.dll")
+        if candidate.is_file()
+    )
+    if not portaudio_dlls:
+        raise RuntimeError("packaged sounddevice data does not contain PortAudio DLLs")
+
     payload = {
         "schema": "nika.packaged-voice-runtime-proof:v1",
         "numpy_imported": numpy is not None,
         "sherpa_onnx_imported": sherpa_onnx is not None,
+        "sherpa_native_imported": _sherpa_onnx is not None,
         "sounddevice_imported": sounddevice is not None,
+        "sounddevice_data_proven": True,
         "microphone_opened": False,
         "model_loaded": False,
         "human_tested": False,
