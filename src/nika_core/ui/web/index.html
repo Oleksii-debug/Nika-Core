@@ -120,13 +120,14 @@
         Один запуск записує лише один короткий фрагмент з мікрофона та розпізнає його локально.
         Nika не слухає у фоні й не запускає розпізнаний текст як завдання автоматично.
       </p>
-      <p id="voice-status">
+      <p id="voice-status" role="status" aria-live="polite" aria-atomic="true">
         Перевірка локального голосового вводу.
       </p>
       <p id="voice-transcript-label">Розпізнаний текст:</p>
       <output id="voice-transcript" aria-labelledby="voice-transcript-label">Ще немає.</output>
       <div class="actions">
         <button type="button" id="voice-start" data-action-id="voice.start"
+                aria-describedby="voice-help voice-status"
                 data-error-focus-target="voice-heading">Почати один голосовий ввід</button>
         <button type="button" id="voice-cancel" data-action-id="voice.cancel"
                 data-error-focus-target="voice-heading" disabled>Скасувати голосовий ввід</button>
