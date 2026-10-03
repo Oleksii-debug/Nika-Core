@@ -190,3 +190,33 @@ def test_repository_latest_view_is_bounded_and_integrity_validated(tmp_path: Pat
         repository.list_latest(limit=True)
     with pytest.raises(ValueError, match="1 to 100"):
         repository.list_latest(limit=101)
+
+
+class _PersistThenConflictRepository(AgentDefinitionRepository):
+    def __init__(self, store: SQLiteStore) -> None:
+        super().__init__(store)
+        self._conflict_once = True
+
+    def save_draft(self, compilation) -> None:
+        if self._conflict_once:
+            self._conflict_once = False
+            super().save_draft(compilation)
+            raise ValueError("simulated concurrent version observation")
+        super().save_draft(compilation)
+
+
+def test_identical_concurrent_persistence_conflict_recovers_as_idempotent(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "concurrent.db")
+    store.initialize()
+    repository = _PersistThenConflictRepository(store)
+    handler = PackagedAgentBuilderDraftHandler(repository)
+
+    result = handler({"command": "Create an agent for concurrent report triage"})
+
+    assert result.status == "completed"
+    assert "вже збережена без змін" in result.message
+    agent_id = _only_agent_id(store)
+    assert repository.next_version(agent_id) == 2
+    assert repository.active(agent_id) is None
