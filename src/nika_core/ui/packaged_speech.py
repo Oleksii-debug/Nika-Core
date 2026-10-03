@@ -48,13 +48,6 @@ class PackagedSpeechFeature:
         if type(text) is not str:
             raise TypeError("packaged speech text must be an exact string")
 
-        if self._closed:
-            return UIResult(
-                request_id="desktop-handler",
-                status="rejected",
-                message="Озвучення вже завершило роботу разом із застосунком.",
-                focus_id="speech-heading",
-            )
         if self._output is None:
             return UIResult(
                 request_id="desktop-handler",
@@ -74,6 +67,13 @@ class PackagedSpeechFeature:
             )
 
         with self._lock:
+            if self._closed:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="rejected",
+                    message="Озвучення вже завершило роботу разом із застосунком.",
+                    focus_id="speech-heading",
+                )
             current = self._stream
             if current is not None and current.snapshot().state in {
                 SpeechStreamState.RUNNING,
@@ -133,35 +133,38 @@ class PackagedSpeechFeature:
         )
 
     def snapshot(self) -> dict[str, object]:
-        if self._output is None:
+        with self._lock:
+            available = self._output is not None
+            generation = self._generation
+            stream = self._stream
+            unavailable_message = self._unavailable_message
+        if not available:
             return {
                 "schema": "nika.packaged-speech-state:v1",
                 "available": False,
                 "status": "unavailable",
-                "generation": self._generation,
+                "generation": generation,
                 "active": False,
-                "message": self._unavailable_message,
+                "message": unavailable_message,
                 "accepted_characters": 0,
                 "spoken_characters": 0,
                 "chunk_count": 0,
                 "pending_characters": 0,
             }
-        with self._lock:
-            stream = self._stream
-            if stream is None:
-                return {
-                    "schema": "nika.packaged-speech-state:v1",
-                    "available": True,
-                    "status": "idle",
-                    "generation": self._generation,
-                    "active": False,
-                    "message": "Локальне озвучення Windows готове.",
-                    "accepted_characters": 0,
-                    "spoken_characters": 0,
-                    "chunk_count": 0,
-                    "pending_characters": 0,
-                }
-            snapshot = stream.snapshot()
+        if stream is None:
+            return {
+                "schema": "nika.packaged-speech-state:v1",
+                "available": True,
+                "status": "idle",
+                "generation": generation,
+                "active": False,
+                "message": "Локальне озвучення Windows готове.",
+                "accepted_characters": 0,
+                "spoken_characters": 0,
+                "chunk_count": 0,
+                "pending_characters": 0,
+            }
+        snapshot = stream.snapshot()
 
         messages = {
             SpeechStreamState.RUNNING: "Озвучення виконується.",
@@ -174,7 +177,7 @@ class PackagedSpeechFeature:
             "schema": "nika.packaged-speech-state:v1",
             "available": True,
             "status": snapshot.state.value,
-            "generation": self._generation,
+            "generation": generation,
             "active": snapshot.state in {
                 SpeechStreamState.RUNNING,
                 SpeechStreamState.DRAINING,
