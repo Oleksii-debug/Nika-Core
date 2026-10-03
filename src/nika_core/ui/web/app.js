@@ -11,6 +11,15 @@
   const voiceStart = document.getElementById("voice-start");
   const voiceCancel = document.getElementById("voice-cancel");
   const voiceUseCommand = document.getElementById("voice-use-command");
+  const voiceModelSource = document.getElementById("voice-model-source");
+  const voiceModelStatus = document.getElementById("voice-model-status");
+  const voiceModelImport = document.getElementById("voice-model-import");
+  const allowedVoiceModelSetupStatuses = new Set([
+    "missing",
+    "installed",
+    "partial",
+    "restart_required",
+  ]);
   const speechText = document.getElementById("speech-text");
   const speechStatus = document.getElementById("speech-status");
   const speechStart = document.getElementById("speech-start");
@@ -1068,6 +1077,47 @@
     }
   }
 
+  function renderVoiceModelSetup(snapshot) {
+    const failClosed = (message = "Стан локальної голосової моделі недоступний або несумісний.") => {
+      if (voiceModelStatus) voiceModelStatus.textContent = message;
+      if (voiceModelImport) voiceModelImport.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || snapshot.schema !== "nika.packaged-voice-model-setup:v1"
+      || !allowedVoiceModelSetupStatuses.has(snapshot.status)
+      || typeof snapshot.installed !== "boolean"
+      || typeof snapshot.can_import !== "boolean"
+      || typeof snapshot.restart_required !== "boolean"
+      || typeof snapshot.message !== "string"
+      || snapshot.message.length === 0
+    ) {
+      return failClosed();
+    }
+    const validState = (
+      (snapshot.status === "missing"
+        && !snapshot.installed
+        && !snapshot.restart_required)
+      || (snapshot.status === "installed"
+        && snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "partial"
+        && !snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "restart_required"
+        && snapshot.installed
+        && !snapshot.can_import
+        && snapshot.restart_required)
+    );
+    if (!validState) return failClosed();
+    if (voiceModelStatus) voiceModelStatus.textContent = snapshot.message;
+    if (voiceModelImport) voiceModelImport.disabled = !snapshot.can_import;
+    return true;
+  }
+
   function renderVoice(snapshot) {
     const failClosed = (message = "Стан голосового вводу недоступний або несумісний.") => {
       voiceTranscriptValue = "";
@@ -1279,6 +1329,7 @@
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
+    renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderVoice(state.voice ?? null);
     renderSpeech(state.speech ?? null);
     renderItems(
@@ -1323,6 +1374,7 @@
     }
     const payload = {};
     if (actionId === "task.create") payload.command = commandInput.value.trim();
+    if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
     if (actionId === "speech.start") payload.text = speechText?.value ?? "";
     if (actionId === "team.sources.configure") {
       payload.revision = sourceRevision;
@@ -1331,6 +1383,9 @@
     const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
     const failed = result.status === "failed" || result.status === "rejected";
     if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
+    if (actionId === "voice.model.import" && result.status === "completed" && voiceModelSource) {
+      voiceModelSource.value = "";
+    }
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
     appendLog(result.message);
     const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
