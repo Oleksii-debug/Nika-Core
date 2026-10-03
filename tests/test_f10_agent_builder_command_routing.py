@@ -183,6 +183,32 @@ def test_real_windows_composition_creates_review_only_agent_draft_without_task_l
     assert rows[0]["version"] == 1
     assert rows[0]["status"] == "draft"
 
+    restarted_bridge, _restarted_products = build_windows_bridge(
+        AppConfig(database_path=database_path)
+    )
+    recovered = restarted_bridge.get_state()
+    assert recovered["ok"] is True
+    recovered_definitions = recovered["state"]["agent_builder_definitions"]
+    assert len(recovered_definitions) == 1
+    assert recovered_definitions[0]["agent_id"] == projected["agent_id"]
+    assert recovered_definitions[0]["status"] == "draft"
+
+    replay = restarted_bridge.dispatch(
+        {
+            "request_id": "f10-packaged-agent-builder-replay",
+            "action_id": "task.create",
+            "payload": {"command": "Створи агента для аналізу доступних документів"},
+        }
+    )
+    assert replay["status"] == "completed"
+    assert "вже збережена без змін" in replay["message"]
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM agent_definitions WHERE agent_id = ?",
+            (projected["agent_id"],),
+        ).fetchone()[0]
+    assert count == 1
+
 
 def test_ambiguous_agent_command_invokes_no_specialized_or_ordinary_handler(
     tmp_path: Path,
