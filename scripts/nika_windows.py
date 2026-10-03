@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,7 @@ from nika_core.product_project import ProductProjectRepository
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
+from nika_core.ui.packaged_voice import PackagedVoiceFeature, build_packaged_voice
 from nika_core.ui.shell import launch_windows_shell
 from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
@@ -40,6 +42,32 @@ class _StartupRecoveryInventoryError(RuntimeError):
     """Fail-closed packaged startup boundary; never exposes raw recovery diagnostics."""
 
 
+@dataclass(slots=True)
+class WindowsBridgeSession:
+    bridge: UIActionBridge
+    products: ProductProjectCommandService
+    backend: DesktopBackend
+    voice: PackagedVoiceFeature
+    _closed: bool = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        voice_failure: BaseException | None = None
+        try:
+            self.voice.close()
+        except BaseException as exc:
+            voice_failure = exc
+        try:
+            self.backend.close()
+        except BaseException:
+            if voice_failure is None:
+                raise
+        if voice_failure is not None:
+            raise voice_failure
+
+
 def _focus(focus_id: str, message: str) -> UIResult:
     return UIResult(
         request_id="desktop-handler",
@@ -49,15 +77,14 @@ def _focus(focus_id: str, message: str) -> UIResult:
     )
 
 
-def build_windows_bridge(
-    config: AppConfig,
-) -> tuple[UIActionBridge, ProductProjectCommandService]:
+def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
     store = SQLiteStore(config.database_path)
     store.initialize()
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
+    voice = build_packaged_voice(config.database_path.parent)
 
     def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         source_bound = source_settings.prepare_task_payload(payload)
@@ -84,7 +111,10 @@ def build_windows_bridge(
     try:
         backend.start_startup_recovery()
     except Exception as exc:
-        backend.close()
+        try:
+            voice.close()
+        finally:
+            backend.close()
         raise _StartupRecoveryInventoryError(
             "packaged startup recovery inventory failed"
         ) from exc
@@ -121,6 +151,7 @@ def build_windows_bridge(
     def source_state() -> Mapping[str, Any]:
         state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
         state["v01_model_settings"] = model_settings.snapshot()
+        state["voice"] = voice.snapshot()
         return state
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
@@ -154,6 +185,8 @@ def build_windows_bridge(
             "task.pause": backend.pause_task,
             "task.resume": backend.resume_task,
             "agent.stop": backend.stop_agent,
+            "voice.start": voice.start,
+            "voice.cancel": voice.cancel,
             "team.sources.configure": source_settings.configure,
             "settings.autostart.configure": backend.autostart_settings.configure,
             "settings.autostart.refresh": backend.autostart_settings.refresh,
@@ -169,7 +202,19 @@ def build_windows_bridge(
         },
         state_provider=source_state,
     )
-    return bridge, products
+    return WindowsBridgeSession(
+        bridge=bridge,
+        products=products,
+        backend=backend,
+        voice=voice,
+    )
+
+
+def build_windows_bridge(
+    config: AppConfig,
+) -> tuple[UIActionBridge, ProductProjectCommandService]:
+    session = build_windows_session(config)
+    return session.bridge, session.products
 
 
 def _require_product_state(
@@ -235,7 +280,9 @@ def _run_pf11_proof(
     command: str,
     output_path: Path | None,
 ) -> int:
-    bridge, products = build_windows_bridge(config)
+    session = build_windows_session(config)
+    bridge = session.bridge
+    products = session.products
     decision = route_command(command)
     if decision.normalized_goal is None:
         raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")
@@ -290,12 +337,15 @@ def _run_pf11_proof(
         "production_release_ready": False,
     }
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    if output_path is None:
-        print(serialized)
-    else:
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(serialized + "\n", encoding="utf-8")
-    return 0
+    try:
+        if output_path is None:
+            print(serialized)
+        else:
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.write_text(serialized + "\n", encoding="utf-8")
+        return 0
+    finally:
+        session.close()
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -322,14 +372,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             output_path=args.pf11_proof_output,
         )
     try:
-        bridge, _products = build_windows_bridge(config)
+        session = build_windows_session(config)
     except _StartupRecoveryInventoryError:
         show_recovery_error(
             "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
             "Запуск зупинено без автоматичного повторення дій."
         )
         return 1
-    launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
+    try:
+        launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
+    finally:
+        session.close()
     return 0
 
 
