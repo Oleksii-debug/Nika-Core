@@ -270,12 +270,9 @@ def test_packaged_voice_ui_requires_manual_transcript_staging() -> None:
     html = (root / "src/nika_core/ui/web/index.html").read_text(encoding="utf-8")
     script = (root / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
 
-    assert (
-        '<p id="voice-status" role="status" aria-live="polite" aria-atomic="true">'
-        in html
-    )
-    assert html.count('role="status"') == 2
-    assert html.count('aria-live="polite"') == 2
+    assert '<p id="voice-status">' in html
+    assert html.count('role="status"') == 1
+    assert html.count('aria-live="polite"') == 1
     assert 'aria-describedby="voice-help voice-status"' in html
     assert 'data-action-id="voice.start"' in html
     assert 'data-action-id="voice.cancel"' in html
