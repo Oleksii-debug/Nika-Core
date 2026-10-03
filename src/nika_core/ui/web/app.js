@@ -1571,7 +1571,10 @@
     if (announceTeamTransitions && recoveryRender.changed) {
       announce(
         teamRender.modelResultBecameAvailable
-          ? `${recoveryRender.message} Перевірена відповідь моделі доступна в підсумку командного завдання.`
+          ? [
+            recoveryRender.message,
+            "Перевірена відповідь моделі доступна в підсумку командного завдання.",
+          ].join(" ")
           : recoveryRender.message,
         recoveryRender.assertive,
       );
