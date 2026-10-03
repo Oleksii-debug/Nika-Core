@@ -20,6 +20,55 @@ _INSTRUCTIONS = (
 )
 
 
+_STATUS_LABELS = {
+    "draft": "чернетка",
+    "active": "активний",
+    "retired": "архівна версія",
+}
+
+
+class PackagedAgentBuilderStateProjector:
+    """Add bounded canonical Agent Builder definitions to packaged presentation state."""
+
+    def __init__(self, repository: AgentDefinitionRepository) -> None:
+        self._repository = repository
+
+    def decorate(self, state: Mapping[str, Any]) -> dict[str, Any]:
+        projected: list[dict[str, Any]] = []
+        visible_agents: list[dict[str, Any]] = []
+        for stored in self._repository.list_latest(limit=50):
+            label = _STATUS_LABELS.get(stored.status)
+            if label is None:
+                raise PermissionError("stored Agent Builder status is invalid")
+            definition = stored.definition
+            item = {
+                "agent_id": definition.agent_id,
+                "version": definition.version,
+                "name": definition.name,
+                "goal": definition.goal,
+                "status": stored.status,
+                "highest_risk": stored.highest_risk,
+                "requires_human_approval": bool(stored.required_human_approvals),
+            }
+            projected.append(item)
+            visible_agents.append(
+                {
+                    "agent_id": definition.agent_id,
+                    "version": definition.version,
+                    "name": f"Agent Builder [{label}]: {definition.name}",
+                    "goal": definition.goal,
+                }
+            )
+
+        result = dict(state)
+        existing_agents = result.get("agents", [])
+        if not isinstance(existing_agents, list):
+            raise TypeError("packaged agents state must be a list")
+        result["agents"] = [*existing_agents, *visible_agents]
+        result["agent_builder_definitions"] = projected
+        return result
+
+
 class PackagedAgentBuilderDraftHandler:
     """Create one conservative durable Agent Builder draft from explicit packaged intent.
 
