@@ -113,7 +113,8 @@ class PackagedSpeechFeature:
             raise ValueError("packaged speech cancel does not accept payload authority")
         with self._lock:
             stream = self._stream
-            if stream is None or stream.snapshot().state in {
+            snapshot = stream.snapshot() if stream is not None else None
+            if snapshot is None or snapshot.state in {
                 SpeechStreamState.COMPLETED,
                 SpeechStreamState.CANCELLED,
                 SpeechStreamState.FAILED,
@@ -123,6 +124,13 @@ class PackagedSpeechFeature:
                     status="completed",
                     message="Активного озвучення немає.",
                     focus_id="speech-start",
+                )
+            if snapshot.cancellation_requested:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Скасування озвучення вже запитано.",
+                    focus_id="speech-heading",
                 )
             stream.cancel()
         return UIResult(
@@ -173,16 +181,24 @@ class PackagedSpeechFeature:
             SpeechStreamState.CANCELLED: "Озвучення скасовано.",
             SpeechStreamState.FAILED: "Локальне озвучення завершилося з помилкою.",
         }
+        public_status = snapshot.state.value
+        message = messages[snapshot.state]
+        if snapshot.cancellation_requested and snapshot.state in {
+            SpeechStreamState.RUNNING,
+            SpeechStreamState.DRAINING,
+        }:
+            public_status = "cancelling"
+            message = "Скасування озвучення виконується."
         return {
             "schema": "nika.packaged-speech-state:v1",
             "available": True,
-            "status": snapshot.state.value,
+            "status": public_status,
             "generation": generation,
             "active": snapshot.state in {
                 SpeechStreamState.RUNNING,
                 SpeechStreamState.DRAINING,
             },
-            "message": messages[snapshot.state],
+            "message": message,
             "accepted_characters": snapshot.accepted_characters,
             "spoken_characters": snapshot.spoken_characters,
             "chunk_count": snapshot.chunk_count,
