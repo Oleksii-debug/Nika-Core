@@ -159,7 +159,13 @@ def test_packaged_voice_builds_canonical_controller_with_local_model_files(
         _FakeSherpaFactory,
     )
 
-    feature = packaged_voice.build_packaged_voice(tmp_path)
+    def unexpected_submit(_coroutine: Any) -> Any:
+        raise AssertionError("building packaged voice must not submit a turn")
+
+    feature = packaged_voice.build_packaged_voice(
+        tmp_path,
+        submit=unexpected_submit,
+    )
     try:
         snapshot = feature.snapshot()
         assert snapshot["available"] is True
@@ -177,7 +183,13 @@ def test_packaged_bridge_exposes_voice_actions_state_and_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake = _FakeVoice()
-    monkeypatch.setattr(nika_windows, "build_packaged_voice", lambda _root: fake)
+    captured_submit: list[Any] = []
+
+    def fake_build(_root: Path, *, submit: Any = None) -> _FakeVoice:
+        captured_submit.append(submit)
+        return fake
+
+    monkeypatch.setattr(nika_windows, "build_packaged_voice", fake_build)
     config = AppConfig(database_path=(tmp_path / "nika.db").resolve())
 
     session = nika_windows.build_windows_session(config)
@@ -185,6 +197,7 @@ def test_packaged_bridge_exposes_voice_actions_state_and_cleanup(
         state = session.bridge.get_state()
         assert state["ok"] is True
         assert state["state"]["voice"] == fake.snapshot()
+        assert captured_submit == [session.backend.submit_packaged_coroutine]
 
         start = session.bridge.dispatch(
             {"request_id": "voice-start", "action_id": "voice.start", "payload": {}}
@@ -217,13 +230,21 @@ def test_packaged_voice_ui_requires_manual_transcript_staging() -> None:
     html = (root / "src/nika_core/ui/web/index.html").read_text(encoding="utf-8")
     script = (root / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
 
-    assert 'id="voice-status" role="status" aria-live="polite"' in html
+    assert '<p id="voice-status">' in html
+    assert html.count('aria-live="') == 1
     assert 'data-action-id="voice.start"' in html
     assert 'data-action-id="voice.cancel"' in html
     assert 'id="voice-use-command" disabled' in html
     assert "commandInput.value = voiceTranscriptValue;" in script
     assert 'turn.activated === true' in script
     assert "Перевірте його перед створенням завдання." in script
+    assert "voiceTerminalSignature" in script
+    assert "announce(turn.message, turn.status === \"failed\")" in script
+
+    packaged_source = (root / "src/nika_core/ui/packaged_voice.py").read_text(
+        encoding="utf-8"
+    )
+    assert "class _VoiceLoop" not in packaged_source
 
 
 def test_windows_release_explicitly_packages_voice_dependencies(tmp_path: Path) -> None:

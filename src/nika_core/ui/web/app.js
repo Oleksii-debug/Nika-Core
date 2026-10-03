@@ -20,6 +20,7 @@
     "cancelled",
   ]);
   let voiceTranscriptValue = "";
+  let voiceTerminalSignature = null;
 
   const sourceInputs = Object.freeze({
     root: document.getElementById("source-root"),
@@ -1055,6 +1056,7 @@
   function renderVoice(snapshot) {
     const failClosed = (message = "Стан голосового вводу недоступний або несумісний.") => {
       voiceTranscriptValue = "";
+      voiceTerminalSignature = null;
       if (voiceStatus) voiceStatus.textContent = message;
       if (voiceTranscript) voiceTranscript.textContent = "Недоступно.";
       if (voiceStart) voiceStart.disabled = true;
@@ -1074,6 +1076,7 @@
     if (!snapshot.available) {
       if (snapshot.turn !== null) return failClosed();
       voiceTranscriptValue = "";
+      voiceTerminalSignature = null;
       if (voiceStatus) voiceStatus.textContent = snapshot.message;
       if (voiceTranscript) voiceTranscript.textContent = "Голосовий ввід недоступний.";
       if (voiceStart) voiceStart.disabled = true;
@@ -1113,6 +1116,17 @@
         : "Ще немає.";
     }
     if (voiceUseCommand) voiceUseCommand.disabled = !canUseTranscript;
+
+    const terminalVoiceState = ["completed", "failed", "cancelled"].includes(turn.status);
+    const terminalSignature = terminalVoiceState
+      ? JSON.stringify([turn.request_id, turn.status, turn.activated, turn.message])
+      : null;
+    if (terminalSignature !== null && terminalSignature !== voiceTerminalSignature) {
+      voiceTerminalSignature = terminalSignature;
+      announce(turn.message, turn.status === "failed");
+    } else if (!terminalVoiceState) {
+      voiceTerminalSignature = null;
+    }
     return true;
   }
 

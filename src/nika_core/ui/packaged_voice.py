@@ -1,10 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import sys
-import threading
-from collections.abc import Coroutine, Mapping
-from concurrent.futures import Future
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +13,7 @@ from nika_core.microphone_capture import (
 from nika_core.sherpa_onnx_stt import SherpaOnnxWhisperSpeechToTextAdapter
 from nika_core.speech_to_text import SpeechToTextPolicy, SpeechToTextService
 from nika_core.ui.bridge_models import UIResult
-from nika_core.ui.desktop_voice import DesktopVoiceTurnController
+from nika_core.ui.desktop_voice import DesktopVoiceTurnController, VoiceSubmitter
 from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest
 from nika_core.wake_activation import MAX_TRANSCRIPT_CHARS, WakeActivationDetector
 from nika_core.windows_microphone_capture import WindowsWasapiMicrophoneCaptureAdapter
@@ -29,38 +26,6 @@ _LANGUAGE = "uk"
 _MODEL_DIR = Path("voice") / "whisper"
 
 
-class _VoiceLoop:
-    """One private asyncio host for explicit packaged voice turns only."""
-
-    def __init__(self) -> None:
-        self._loop = asyncio.new_event_loop()
-        self._ready = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run,
-            name="nika-desktop-voice",
-            daemon=True,
-        )
-        self._thread.start()
-        self._ready.wait()
-
-    def _run(self) -> None:
-        asyncio.set_event_loop(self._loop)
-        self._ready.set()
-        try:
-            self._loop.run_forever()
-        finally:
-            self._loop.close()
-
-    def submit(self, coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
-        return asyncio.run_coroutine_threadsafe(coroutine, self._loop)
-
-    def close(self) -> None:
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=2)
-        if self._thread.is_alive():
-            raise RuntimeError("packaged voice event loop did not stop")
-
-
 class PackagedVoiceFeature:
     """Bounded packaged facade over the canonical one-shot voice controller."""
 
@@ -68,23 +33,17 @@ class PackagedVoiceFeature:
         self,
         *,
         controller: DesktopVoiceTurnController | None,
-        loop: _VoiceLoop | None,
         unavailable_message: str | None = None,
     ) -> None:
         if controller is None:
-            if loop is not None:
-                raise ValueError("unavailable packaged voice must not own an event loop")
             if type(unavailable_message) is not str or not unavailable_message:
                 raise ValueError("unavailable packaged voice requires a bounded message")
         else:
             if type(controller) is not DesktopVoiceTurnController:
                 raise TypeError("controller must be an exact DesktopVoiceTurnController")
-            if type(loop) is not _VoiceLoop:
-                raise TypeError("available packaged voice requires an exact voice loop")
             if unavailable_message is not None:
                 raise ValueError("available packaged voice must not carry unavailable text")
         self._controller = controller
-        self._loop = loop
         self._unavailable_message = unavailable_message
         self._closed = False
 
@@ -158,12 +117,9 @@ class PackagedVoiceFeature:
         if self._closed:
             return
         self._closed = True
-        if self._controller is None or self._loop is None:
+        if self._controller is None:
             return
-        try:
-            self._controller.close()
-        finally:
-            self._loop.close()
+        self._controller.close()
 
     @staticmethod
     def _require_empty_payload(payload: Mapping[str, Any]) -> None:
@@ -173,7 +129,11 @@ class PackagedVoiceFeature:
             raise ValueError("packaged voice action does not accept payload authority")
 
 
-def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
+def build_packaged_voice(
+    data_root: Path,
+    *,
+    submit: VoiceSubmitter | None = None,
+) -> PackagedVoiceFeature:
     """Build packaged one-shot voice from local model files, with no download fallback."""
 
     if not isinstance(data_root, Path):
@@ -184,7 +144,6 @@ def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
     if sys.platform != "win32":
         return PackagedVoiceFeature(
             controller=None,
-            loop=None,
             unavailable_message="Голосовий ввід доступний лише у застосунку Windows.",
         )
 
@@ -195,7 +154,6 @@ def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
     if not all(path.is_file() for path in (encoder, decoder, tokens)):
         return PackagedVoiceFeature(
             controller=None,
-            loop=None,
             unavailable_message=(
                 "Локальна голосова модель не встановлена. Додайте encoder.onnx, "
                 "decoder.onnx і tokens.txt до папки NikaCore\\voice\\whisper."
@@ -215,20 +173,20 @@ def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
     except Exception:  # noqa: BLE001 - local native/model initialization boundary
         return PackagedVoiceFeature(
             controller=None,
-            loop=None,
             unavailable_message=(
                 "Локальну голосову модель не вдалося відкрити. Перевірте файли "
                 "Whisper у папці NikaCore\\voice\\whisper."
             ),
         )
 
+    if submit is None or not callable(submit):
+        raise TypeError("available packaged voice requires a callable desktop submitter")
+
     service = OneShotVoiceTurnService(
         microphone=MicrophoneCaptureService(microphone),
         speech_to_text=SpeechToTextService(stt),
         wake_detector=WakeActivationDetector(),
     )
-    loop = _VoiceLoop()
-
     def request_factory(request_id: str) -> VoiceTurnRequest:
         capabilities = microphone.capabilities
         return VoiceTurnRequest(
@@ -258,7 +216,6 @@ def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
         controller=DesktopVoiceTurnController(
             service=service,
             request_factory=request_factory,
-            submit=loop.submit,
+            submit=submit,
         ),
-        loop=loop,
     )

@@ -76,8 +76,6 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
-    voice = build_packaged_voice(config.database_path.parent)
-
     def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         source_bound = source_settings.prepare_task_payload(payload)
         return model_settings.prepare_task_payload(source_bound)
@@ -99,6 +97,10 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             if sys.platform == "win32" and getattr(sys, "frozen", False)
             else None
         ),
+    )
+    voice = build_packaged_voice(
+        config.database_path.parent,
+        submit=backend.submit_packaged_coroutine,
     )
     try:
         backend.start_startup_recovery()

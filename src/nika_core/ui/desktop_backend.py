@@ -382,6 +382,14 @@ class DesktopBackend:
             ],
         }
 
+    def submit_packaged_coroutine(
+        self,
+        coroutine: Coroutine[Any, Any, Any],
+    ) -> Future[Any]:
+        """Run internal packaged async work on the single desktop event-loop host."""
+
+        return self._host().submit(coroutine)
+
     def close(self) -> None:
         """Stop the private bridge event loop after all submitted runtime work has settled."""
         with self._active_lock:
