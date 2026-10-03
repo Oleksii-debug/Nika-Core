@@ -6,6 +6,21 @@
   const keymapBody = document.getElementById("keymap-body");
   const keymapJson = document.getElementById("keymap-json");
   const commandInput = document.getElementById("command-input");
+  const voiceStatus = document.getElementById("voice-status");
+  const voiceTranscript = document.getElementById("voice-transcript");
+  const voiceStart = document.getElementById("voice-start");
+  const voiceCancel = document.getElementById("voice-cancel");
+  const voiceUseCommand = document.getElementById("voice-use-command");
+  const allowedVoiceStatuses = new Set([
+    "idle",
+    "running",
+    "cancelling",
+    "completed",
+    "failed",
+    "cancelled",
+  ]);
+  let voiceTranscriptValue = "";
+
   const sourceInputs = Object.freeze({
     root: document.getElementById("source-root"),
     source_a: document.getElementById("source-a"),
@@ -1037,6 +1052,70 @@
     }
   }
 
+  function renderVoice(snapshot) {
+    const failClosed = (message = "Стан голосового вводу недоступний або несумісний.") => {
+      voiceTranscriptValue = "";
+      if (voiceStatus) voiceStatus.textContent = message;
+      if (voiceTranscript) voiceTranscript.textContent = "Недоступно.";
+      if (voiceStart) voiceStart.disabled = true;
+      if (voiceCancel) voiceCancel.disabled = true;
+      if (voiceUseCommand) voiceUseCommand.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || snapshot.schema !== "nika.packaged-voice-state:v1"
+      || typeof snapshot.available !== "boolean"
+      || typeof snapshot.message !== "string"
+      || snapshot.message.length === 0
+    ) {
+      return failClosed();
+    }
+    if (!snapshot.available) {
+      if (snapshot.turn !== null) return failClosed();
+      voiceTranscriptValue = "";
+      if (voiceStatus) voiceStatus.textContent = snapshot.message;
+      if (voiceTranscript) voiceTranscript.textContent = "Голосовий ввід недоступний.";
+      if (voiceStart) voiceStart.disabled = true;
+      if (voiceCancel) voiceCancel.disabled = true;
+      if (voiceUseCommand) voiceUseCommand.disabled = true;
+      return true;
+    }
+
+    const turn = snapshot.turn;
+    if (
+      !turn
+      || turn.schema !== "nika.desktop-voice-state:v1"
+      || !allowedVoiceStatuses.has(turn.status)
+      || typeof turn.message !== "string"
+      || turn.message.length === 0
+      || typeof turn.active !== "boolean"
+      || ![null, true, false].includes(turn.activated)
+      || !(turn.transcript === null || typeof turn.transcript === "string")
+    ) {
+      return failClosed();
+    }
+    const activeStatus = turn.status === "running" || turn.status === "cancelling";
+    if (turn.active !== activeStatus) return failClosed();
+
+    if (voiceStatus) voiceStatus.textContent = turn.message;
+    if (voiceStart) voiceStart.disabled = turn.active;
+    if (voiceCancel) voiceCancel.disabled = !turn.active;
+
+    const canUseTranscript = turn.status === "completed"
+      && turn.activated === true
+      && typeof turn.transcript === "string"
+      && turn.transcript.length > 0;
+    voiceTranscriptValue = canUseTranscript ? turn.transcript : "";
+    if (voiceTranscript) {
+      voiceTranscript.textContent = typeof turn.transcript === "string" && turn.transcript.length > 0
+        ? turn.transcript
+        : "Ще немає.";
+    }
+    if (voiceUseCommand) voiceUseCommand.disabled = !canUseTranscript;
+    return true;
+  }
+
   function renderSourceSetup(selection) {
     if (!sourceStatus || selection == null) return;
     if (!["ready", "missing"].includes(selection.status)
@@ -1065,6 +1144,15 @@
   document.getElementById("source-reload")?.addEventListener("click", async () => {
     sourceDirty = false;
     if (await refreshState()) announce("Збережені налаштування перечитано.");
+  });
+
+  voiceUseCommand?.addEventListener("click", () => {
+    if (!voiceTranscriptValue) return;
+    commandInput.value = voiceTranscriptValue;
+    commandInput.focus();
+    announce(
+      "Розпізнаний текст перенесено в поле команди. Перевірте його перед створенням завдання.",
+    );
   });
 
   async function refreshState({ announceTeamTransitions = true } = {}) {
@@ -1096,6 +1184,7 @@
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
+    renderVoice(state.voice ?? null);
     renderItems(
       tasksList,
       tasksEmpty,
