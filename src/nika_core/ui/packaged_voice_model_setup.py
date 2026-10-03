@@ -24,8 +24,8 @@ class PackagedVoiceModelSetup:
     """Explicit local-only first-run installer for the packaged Whisper files."""
 
     def __init__(self, data_root: Path) -> None:
-        if type(data_root) is not Path:
-            raise TypeError("data_root must be an exact pathlib.Path")
+        if not isinstance(data_root, Path):
+            raise TypeError("data_root must be a pathlib.Path")
         root = data_root.expanduser()
         if not root.is_absolute():
             raise ValueError("data_root must be absolute")
@@ -182,6 +182,8 @@ class PackagedVoiceModelSetup:
         voice_root = self._data_root / "voice"
         model_root = self._data_root / _MODEL_DIR
         voice_root.mkdir(parents=True, exist_ok=True)
+        self._require_regular_directory(voice_root)
+        self._require_no_reparse_ancestors(voice_root)
         if _path_lexists(model_root):
             raise RuntimeError("canonical model target appeared during import")
 
