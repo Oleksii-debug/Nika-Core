@@ -13,8 +13,14 @@ from nika_core.microphone_capture import (
     MicrophoneCaptureRequest,
     MicrophoneCaptureService,
 )
+from nika_core.model_gateway.contracts import ProviderKind
 from nika_core.sherpa_onnx_stt import SherpaOnnxWhisperSpeechToTextAdapter
-from nika_core.speech_to_text import SpeechToTextPolicy, SpeechToTextService
+from nika_core.speech_to_text import (
+    SpeechToTextAdapterResponse,
+    SpeechToTextPolicy,
+    SpeechToTextRequest,
+    SpeechToTextService,
+)
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_voice import DesktopVoiceTurnController
 from nika_core.voice_turn import OneShotVoiceTurnService, VoiceTurnRequest
@@ -27,6 +33,42 @@ _CAPTURE_BYTES = _SAMPLE_RATE_HZ * _CAPTURE_SECONDS * 2
 _MODEL_ID = "whisper-local"
 _LANGUAGE = "uk"
 _MODEL_DIR = Path("voice") / "whisper"
+
+
+class _LazySherpaAdapter:
+    """Load the local Whisper model on the voice loop only after explicit user start."""
+
+    provider_kind = ProviderKind.LOCAL
+    provider_id = "sherpa-onnx-whisper"
+    supported_models = (_MODEL_ID,)
+
+    def __init__(self, *, encoder: Path, decoder: Path, tokens: Path) -> None:
+        self._encoder = encoder
+        self._decoder = decoder
+        self._tokens = tokens
+        self._delegate: SherpaOnnxWhisperSpeechToTextAdapter | None = None
+        self._load_lock = asyncio.Lock()
+
+    async def transcribe(
+        self,
+        request: SpeechToTextRequest,
+    ) -> SpeechToTextAdapterResponse:
+        delegate = self._delegate
+        if delegate is None:
+            async with self._load_lock:
+                delegate = self._delegate
+                if delegate is None:
+                    delegate = await asyncio.to_thread(
+                        SherpaOnnxWhisperSpeechToTextAdapter.from_whisper_files,
+                        encoder=str(self._encoder),
+                        decoder=str(self._decoder),
+                        tokens=str(self._tokens),
+                        model_id=_MODEL_ID,
+                        language=_LANGUAGE,
+                        num_threads=2,
+                    )
+                    self._delegate = delegate
+        return await delegate.transcribe(request)
 
 
 class _VoiceLoop:
@@ -176,24 +218,11 @@ def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
         )
 
     microphone = WindowsWasapiMicrophoneCaptureAdapter()
-    try:
-        stt = SherpaOnnxWhisperSpeechToTextAdapter.from_whisper_files(
-            encoder=str(encoder),
-            decoder=str(decoder),
-            tokens=str(tokens),
-            model_id=_MODEL_ID,
-            language=_LANGUAGE,
-            num_threads=2,
-        )
-    except Exception:  # noqa: BLE001 - local native/model initialization boundary
-        return PackagedVoiceFeature(
-            controller=None,
-            loop=None,
-            unavailable_message=(
-                "Локальну голосову модель не вдалося відкрити. Перевірте файли "
-                "Whisper у папці NikaCore\\voice\\whisper."
-            ),
-        )
+    stt = _LazySherpaAdapter(
+        encoder=encoder,
+        decoder=decoder,
+        tokens=tokens,
+    )
 
     service = OneShotVoiceTurnService(
         microphone=MicrophoneCaptureService(microphone),
