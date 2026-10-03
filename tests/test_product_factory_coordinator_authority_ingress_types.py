@@ -90,10 +90,10 @@ def test_review_decision_malformed_authority_ingress_is_bounded(
             {"coding_result": "not-a-coding-result"},
             "worker result coding result must be an exact CodingResult",
         ),
-        ({"producer_actor_id": 1}, "producer actor worker result identity must be exact strings"),
+        ({"producer_actor_id": 1}, "producer actor id must be canonical single-line text"),
         (
             {"producer_actor_id": _HostileText("team-role:builder")},
-            "producer actor worker result identity must be exact strings",
+            "producer actor id must be canonical single-line text",
         ),
     ),
 )

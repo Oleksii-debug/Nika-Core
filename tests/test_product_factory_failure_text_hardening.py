@@ -149,20 +149,18 @@ def test_restore_revalidates_worker_failure_message_before_accepting_durable_sta
     assert core.result is not None
     assert core.result.coding_result.failure is not None
 
-    forged_failure = replace(
-        core.result.coding_result.failure,
-        message=" forged failure",
-    )
+    forged_failure = replace(core.result.coding_result.failure)
     forged_result = replace(
         core.result,
         coding_result=replace(core.result.coding_result, failure=forged_failure),
     )
     records = tuple(
-        replace(record, result=forged_result, blocker=" forged failure")
+        replace(record, result=forged_result, blocker="forged failure")
         if record.request.component_id == "core"
         else record
         for record in snapshot.records
     )
+    object.__setattr__(forged_failure, "message", " forged failure")
 
     restored = ProductFactoryCoordinator(_graph())
     with pytest.raises(
@@ -212,10 +210,7 @@ def test_restore_revalidates_failed_result_retained_by_cancelled_state() -> None
     core = _core_record(coordinator)
     assert core.result is not None
     assert core.result.coding_result.failure is not None
-    forged_failure = replace(
-        core.result.coding_result.failure,
-        message=" forged\nmessage",
-    )
+    forged_failure = replace(core.result.coding_result.failure)
     forged_result = replace(
         core.result,
         coding_result=replace(core.result.coding_result, failure=forged_failure),
@@ -226,6 +221,7 @@ def test_restore_revalidates_failed_result_retained_by_cancelled_state() -> None
         else record
         for record in snapshot.records
     )
+    object.__setattr__(forged_failure, "message", " forged\nmessage")
 
     restored = ProductFactoryCoordinator(_graph())
     with pytest.raises(

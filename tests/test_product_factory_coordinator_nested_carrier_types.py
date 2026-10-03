@@ -165,11 +165,11 @@ def test_record_result_normalizes_nested_constructor_failure() -> None:
 def test_record_result_rejects_forged_nested_failure_before_state_mutation() -> None:
     coordinator, request = _running_coordinator()
     failure = WorkerFailure(WorkerFailureKind.INTERNAL_ERROR, "worker failed")
-    object.__setattr__(failure, "message", "")
     envelope = _request_envelope(
         request,
         CodingResult(job_id=request.work_id, failure=failure),
     )
+    object.__setattr__(failure, "message", "")
 
     with pytest.raises(
         CoordinatorError,
@@ -186,11 +186,11 @@ def test_record_result_rejects_forged_nested_failure_before_state_mutation() -> 
 def test_record_result_rejects_forged_nested_test_evidence_before_state_mutation() -> None:
     coordinator, request = _running_coordinator()
     evidence = TestEvidence(("pytest",), 0, "tests-ok")
-    object.__setattr__(evidence, "output_digest", "")
     envelope = _request_envelope(
         request,
         CodingResult(job_id=request.work_id, test_evidence=(evidence,)),
     )
+    object.__setattr__(evidence, "output_digest", "")
 
     with pytest.raises(
         CoordinatorError,
