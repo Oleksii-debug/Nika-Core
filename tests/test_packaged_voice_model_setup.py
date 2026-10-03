@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import io
 import os
+from collections.abc import Coroutine
+from concurrent.futures import Future
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -80,6 +84,80 @@ def test_voice_model_setup_imports_exact_files_and_requires_restart(
     assert restarted["status"] == "installed"
     assert restarted["installed"] is True
     assert restarted["restart_required"] is False
+
+
+def test_voice_model_setup_background_start_is_nonblocking_and_terminal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[tuple[Coroutine[Any, Any, Any], Future[Any]]] = []
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        future: Future[Any] = Future()
+        submitted.append((coroutine, future))
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+
+    result = setup.start({"source_root": str(source)})
+    active = setup.snapshot()
+
+    assert result.status == "accepted"
+    assert active["status"] == "importing"
+    assert active["generation"] == 1
+    assert active["active"] is True
+    assert active["can_import"] is False
+    assert len(submitted) == 1
+
+    asyncio.run(submitted[0][0])
+    submitted[0][1].set_result(None)
+    terminal = setup.snapshot()
+
+    assert terminal["status"] == "restart_required"
+    assert terminal["generation"] == 1
+    assert terminal["active"] is False
+    assert terminal["installed"] is True
+    assert str(source) not in repr(terminal)
+
+
+def test_voice_model_setup_background_cancel_is_cooperative(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return Future()
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    started = setup.start({"source_root": str(source)})
+    cancelled = setup.cancel({})
+    cancelling = setup.snapshot()
+    duplicate = setup.cancel({})
+
+    assert started.status == "accepted"
+    assert cancelled.status == "completed"
+    assert cancelling["status"] == "cancelling"
+    assert cancelling["active"] is True
+    assert duplicate.message == "Скасування імпорту голосової моделі вже запитано."
+
+    asyncio.run(submitted[0])
+    terminal = setup.snapshot()
+
+    assert terminal["status"] == "cancelled"
+    assert terminal["active"] is False
+    assert terminal["can_import"] is True
+    assert not (data_root / "voice" / "whisper").exists()
+    assert not list((data_root / "voice").glob(".whisper-import-*"))
 
 
 def test_voice_model_setup_existing_install_is_idempotent(
