@@ -128,12 +128,21 @@ class PackagedVoiceFeature:
         self._controller = controller
         self._loop = loop
         self._unavailable_message = unavailable_message
+        self._closed = False
 
     @property
     def available(self) -> bool:
         return self._controller is not None
 
     def start(self, payload: Mapping[str, Any]) -> UIResult:
+        self._require_empty_payload(payload)
+        if self._closed:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message="Голосовий ввід уже завершив роботу разом із застосунком.",
+                focus_id="voice-heading",
+            )
         if self._controller is None:
             return UIResult(
                 request_id="desktop-handler",
@@ -152,6 +161,14 @@ class PackagedVoiceFeature:
             )
 
     def cancel(self, payload: Mapping[str, Any]) -> UIResult:
+        self._require_empty_payload(payload)
+        if self._closed:
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="Активного голосового вводу немає.",
+                focus_id="voice-heading",
+            )
         if self._controller is None:
             return UIResult(
                 request_id="desktop-handler",
@@ -180,12 +197,22 @@ class PackagedVoiceFeature:
         }
 
     def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
         if self._controller is None or self._loop is None:
             return
         try:
             self._controller.close()
         finally:
             self._loop.close()
+
+    @staticmethod
+    def _require_empty_payload(payload: Mapping[str, Any]) -> None:
+        if type(payload) is not dict:
+            raise TypeError("packaged voice action payload must be an exact dict")
+        if payload:
+            raise ValueError("packaged voice action does not accept payload authority")
 
 
 def build_packaged_voice(data_root: Path) -> PackagedVoiceFeature:
