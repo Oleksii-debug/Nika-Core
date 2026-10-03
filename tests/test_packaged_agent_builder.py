@@ -10,7 +10,9 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.packaged_agent_builder import PackagedAgentBuilderDraftHandler
 
 
-def _handler(path: Path) -> tuple[PackagedAgentBuilderDraftHandler, AgentDefinitionRepository, SQLiteStore]:
+def _handler(
+    path: Path,
+) -> tuple[PackagedAgentBuilderDraftHandler, AgentDefinitionRepository, SQLiteStore]:
     store = SQLiteStore(path)
     store.initialize()
     repository = AgentDefinitionRepository(store)
