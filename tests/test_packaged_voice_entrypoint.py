@@ -109,7 +109,11 @@ def test_packaged_voice_is_bounded_unavailable_off_windows(
     }
     assert feature.start({}).status == "rejected"
     assert feature.cancel({}).status == "completed"
+    with pytest.raises(ValueError, match="does not accept payload authority"):
+        feature.start({"unexpected": True})
     feature.close()
+    feature.close()
+    assert feature.start({}).status == "rejected"
 
 
 def test_packaged_voice_missing_local_model_fails_closed_before_native_load(
