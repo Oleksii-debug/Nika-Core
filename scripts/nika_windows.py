@@ -345,10 +345,45 @@ def _run_pf11_proof(
         session.close()
 
 
+
+def _run_voice_runtime_proof(output_path: Path | None) -> int:
+    if sys.platform != "win32":
+        raise RuntimeError("packaged voice runtime proof requires Windows")
+    if output_path is None:
+        raise ValueError("--voice-runtime-proof-output is required")
+    try:
+        import numpy
+        import sherpa_onnx
+        import sounddevice
+    except Exception as exc:  # noqa: BLE001 - packaged native dependency proof boundary
+        raise RuntimeError(
+            f"packaged voice dependency import failed: {type(exc).__name__}"
+        ) from None
+
+    payload = {
+        "schema": "nika.packaged-voice-runtime-proof:v1",
+        "numpy_imported": numpy is not None,
+        "sherpa_onnx_imported": sherpa_onnx is not None,
+        "sounddevice_imported": sounddevice is not None,
+        "microphone_opened": False,
+        "model_loaded": False,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return 0
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pf11-proof", action="store_true")
     parser.add_argument("--pf11-proof-output", type=Path)
+    parser.add_argument("--voice-runtime-proof", action="store_true")
+    parser.add_argument("--voice-runtime-proof-output", type=Path)
     parser.add_argument(
         "--pf11-proof-command",
         default=("Створи застосунок для керування витратами малого бізнесу"),
@@ -362,6 +397,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
         return 1
+    if args.voice_runtime_proof:
+        return _run_voice_runtime_proof(args.voice_runtime_proof_output)
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
