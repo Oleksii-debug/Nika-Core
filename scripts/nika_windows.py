@@ -50,6 +50,7 @@ class WindowsBridgeSession:
     products: ProductProjectCommandService
     backend: DesktopBackend
     voice: PackagedVoiceFeature
+    voice_model_setup: PackagedVoiceModelSetup
     speech: PackagedSpeechFeature
     _closed: bool = False
 
@@ -58,12 +59,15 @@ class WindowsBridgeSession:
             return
         self._closed = True
         try:
-            self.speech.close()
+            self.voice_model_setup.close()
         finally:
             try:
-                self.voice.close()
+                self.speech.close()
             finally:
-                self.backend.close()
+                try:
+                    self.voice.close()
+                finally:
+                    self.backend.close()
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -108,18 +112,24 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
         config.database_path.parent,
         submit=backend.submit_packaged_coroutine,
     )
-    voice_model_setup = PackagedVoiceModelSetup(config.database_path.parent)
+    voice_model_setup = PackagedVoiceModelSetup(
+        config.database_path.parent,
+        submit=backend.submit_packaged_coroutine,
+    )
     speech = build_packaged_speech()
     try:
         backend.start_startup_recovery()
     except Exception as exc:
         try:
-            speech.close()
+            voice_model_setup.close()
         finally:
             try:
-                voice.close()
+                speech.close()
             finally:
-                backend.close()
+                try:
+                    voice.close()
+                finally:
+                    backend.close()
         raise _StartupRecoveryInventoryError(
             "packaged startup recovery inventory failed"
         ) from exc
@@ -194,7 +204,8 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             "agent.stop": backend.stop_agent,
             "voice.start": voice.start,
             "voice.cancel": voice.cancel,
-            "voice.model.import": voice_model_setup.install,
+            "voice.model.import": voice_model_setup.start,
+            "voice.model.cancel": voice_model_setup.cancel,
             "speech.start": speech.speak,
             "speech.cancel": speech.cancel,
             "team.sources.configure": source_settings.configure,
@@ -217,6 +228,7 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
         products=products,
         backend=backend,
         voice=voice,
+        voice_model_setup=voice_model_setup,
         speech=speech,
     )
 
