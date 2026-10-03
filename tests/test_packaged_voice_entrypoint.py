@@ -264,12 +264,16 @@ def test_windows_release_explicitly_packages_voice_dependencies(tmp_path: Path) 
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>\n", encoding="utf-8")
     args = default_windows_plan(tmp_path).pyinstaller_args()
-    for module_name in ("numpy", "sherpa_onnx", "sounddevice"):
+    for module_name in ("numpy", "sounddevice"):
         index = args.index(module_name)
         assert args[index - 1] == "--hidden-import"
+    for package_name in ("sherpa_onnx", "_sounddevice_data"):
+        index = args.index(package_name)
+        assert args[index - 1] == "--collect-all"
 
     assert "numpy" in RUNTIME_DISTRIBUTIONS
     assert "sherpa-onnx" in RUNTIME_DISTRIBUTIONS
+    assert "sherpa-onnx-core" in RUNTIME_DISTRIBUTIONS
     assert "sounddevice" in RUNTIME_DISTRIBUTIONS
 
 
