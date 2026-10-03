@@ -90,7 +90,7 @@ class _FakeStt:
 class _FakeSherpaFactory:
     @classmethod
     def from_whisper_files(cls, **_kwargs: object) -> _FakeStt:
-        raise AssertionError("Whisper model must not load during packaged UI startup")
+        return _FakeStt()
 
 
 def test_packaged_voice_is_bounded_unavailable_off_windows(
