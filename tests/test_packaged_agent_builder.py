@@ -227,7 +227,7 @@ def test_windows_session_composes_builder_with_packaged_features_across_restart(
     tmp_path: Path,
 ) -> None:
     path = (tmp_path / "composed-windows.db").resolve()
-    command = "Create an agent for accessible report triage"
+    command = "Create an agent that summarizes accessible documents"
 
     first = nika_windows.build_windows_session(AppConfig(database_path=path))
     try:
