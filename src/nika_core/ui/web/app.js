@@ -11,6 +11,20 @@
   const voiceStart = document.getElementById("voice-start");
   const voiceCancel = document.getElementById("voice-cancel");
   const voiceUseCommand = document.getElementById("voice-use-command");
+  const speechText = document.getElementById("speech-text");
+  const speechStatus = document.getElementById("speech-status");
+  const speechStart = document.getElementById("speech-start");
+  const speechCancel = document.getElementById("speech-cancel");
+  const allowedSpeechStatuses = new Set([
+    "unavailable",
+    "idle",
+    "running",
+    "draining",
+    "completed",
+    "cancelled",
+    "failed",
+  ]);
+  let speechTerminalSignature = null;
   const allowedVoiceStatuses = new Set([
     "idle",
     "running",
@@ -1130,6 +1144,70 @@
     return true;
   }
 
+  function renderSpeech(snapshot) {
+    const failClosed = (message = "Стан озвучення недоступний або несумісний.") => {
+      speechTerminalSignature = null;
+      if (speechStatus) speechStatus.textContent = message;
+      if (speechStart) speechStart.disabled = true;
+      if (speechCancel) speechCancel.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || snapshot.schema !== "nika.packaged-speech-state:v1"
+      || typeof snapshot.available !== "boolean"
+      || !allowedSpeechStatuses.has(snapshot.status)
+      || !Number.isSafeInteger(snapshot.generation)
+      || snapshot.generation < 0
+      || typeof snapshot.active !== "boolean"
+      || typeof snapshot.message !== "string"
+      || snapshot.message.length === 0
+    ) {
+      return failClosed();
+    }
+    const counters = [
+      snapshot.accepted_characters,
+      snapshot.spoken_characters,
+      snapshot.chunk_count,
+      snapshot.pending_characters,
+    ];
+    if (counters.some((value) => !Number.isSafeInteger(value) || value < 0)) {
+      return failClosed();
+    }
+    if (!snapshot.available) {
+      if (snapshot.status !== "unavailable" || snapshot.active) return failClosed();
+      if (speechStatus) speechStatus.textContent = snapshot.message;
+      if (speechStart) speechStart.disabled = true;
+      if (speechCancel) speechCancel.disabled = true;
+      speechTerminalSignature = null;
+      return true;
+    }
+
+    const activeStatus = snapshot.status === "running" || snapshot.status === "draining";
+    if (snapshot.status === "unavailable" || snapshot.active !== activeStatus) {
+      return failClosed();
+    }
+    if (snapshot.spoken_characters > snapshot.accepted_characters
+        || snapshot.pending_characters > snapshot.accepted_characters) {
+      return failClosed();
+    }
+    if (speechStatus) speechStatus.textContent = snapshot.message;
+    if (speechStart) speechStart.disabled = snapshot.active;
+    if (speechCancel) speechCancel.disabled = !snapshot.active;
+
+    const terminal = ["completed", "cancelled", "failed"].includes(snapshot.status);
+    const signature = terminal
+      ? JSON.stringify([snapshot.generation, snapshot.status, snapshot.message])
+      : null;
+    if (signature !== null && signature !== speechTerminalSignature) {
+      speechTerminalSignature = signature;
+      announce(snapshot.message, snapshot.status === "failed");
+    } else if (!terminal) {
+      speechTerminalSignature = null;
+    }
+    return true;
+  }
+
   function renderSourceSetup(selection) {
     if (!sourceStatus || selection == null) return;
     if (!["ready", "missing"].includes(selection.status)
@@ -1199,6 +1277,7 @@
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
     renderVoice(state.voice ?? null);
+    renderSpeech(state.speech ?? null);
     renderItems(
       tasksList,
       tasksEmpty,
@@ -1241,6 +1320,7 @@
     }
     const payload = {};
     if (actionId === "task.create") payload.command = commandInput.value.trim();
+    if (actionId === "speech.start") payload.text = speechText?.value ?? "";
     if (actionId === "team.sources.configure") {
       payload.revision = sourceRevision;
       for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
