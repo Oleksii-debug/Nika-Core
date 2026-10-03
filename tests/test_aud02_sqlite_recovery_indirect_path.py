@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import nika_core.reliability.backup as backup_module
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.reliability.backup import (
@@ -98,3 +101,35 @@ def test_create_backup_rejects_top_level_symlink_live_source_before_side_effects
     assert not backup.exists()
     assert not backup.with_name(f"{backup.name}.manifest.json").exists()
     assert not canonical.with_name(f".{canonical.name}.nika-recovery.lock").exists()
+
+
+def test_create_backup_rejects_windows_reparse_destination_without_symlink_privilege(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    live = _initialize(tmp_path / "live-reparse.db")
+    manager = SQLiteRecoveryManager(live)
+    destination = tmp_path / "reparse-destination.db"
+    real_lstat = backup_module.os.lstat
+    reparse_flag = 0x400
+
+    def fake_lstat(path):
+        if Path(path) == destination:
+            return SimpleNamespace(
+                st_mode=stat.S_IFREG,
+                st_file_attributes=reparse_flag,
+            )
+        return real_lstat(path)
+
+    monkeypatch.setattr(
+        backup_module.stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        reparse_flag,
+        raising=False,
+    )
+    monkeypatch.setattr(backup_module.os, "lstat", fake_lstat)
+
+    with pytest.raises(RestoreSafetyError, match="backup destination.*indirect"):
+        manager.create_backup(destination)
+
+    assert not destination.exists()
+    assert not destination.with_name(f"{destination.name}.manifest.json").exists()
