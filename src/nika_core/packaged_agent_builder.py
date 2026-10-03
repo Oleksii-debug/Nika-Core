@@ -96,7 +96,7 @@ def _definition(*, agent_id: str, version: int, goal: str) -> AgentDefinition:
 
 
 def _same_draft(previous: StoredAgentDefinition, candidate: AgentDefinition) -> bool:
-    if previous.status not in {"draft", "active"}:
+    if previous.status != "draft":
         return False
     old = previous.definition.model_dump(mode="json", exclude={"version"})
     new = candidate.model_dump(mode="json", exclude={"version"})
