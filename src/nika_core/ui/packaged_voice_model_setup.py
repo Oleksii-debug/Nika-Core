@@ -203,10 +203,10 @@ class PackagedVoiceModelSetup:
         finally:
             if lock_fd is not None:
                 os.close(lock_fd)
-            try:
-                lock_path.unlink(missing_ok=True)
-            except OSError:
-                pass
+                try:
+                    lock_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
             if stage is not None:
                 shutil.rmtree(stage, ignore_errors=True)
 
