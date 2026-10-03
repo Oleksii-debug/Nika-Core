@@ -54,18 +54,10 @@ class WindowsBridgeSession:
         if self._closed:
             return
         self._closed = True
-        voice_failure: BaseException | None = None
         try:
             self.voice.close()
-        except BaseException as exc:
-            voice_failure = exc
-        try:
+        finally:
             self.backend.close()
-        except BaseException:
-            if voice_failure is None:
-                raise
-        if voice_failure is not None:
-            raise voice_failure
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -281,63 +273,68 @@ def _run_pf11_proof(
     output_path: Path | None,
 ) -> int:
     session = build_windows_session(config)
-    bridge = session.bridge
-    products = session.products
-    decision = route_command(command)
-    if decision.normalized_goal is None:
-        raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")
-    project_id = product_project_identity(decision.normalized_goal)
-    recovered_before_command = bridge.get_state()
-    recovered_project = recovered_before_command.get("state", {}).get("product_project")
-    if isinstance(recovered_project, Mapping) and recovered_project.get("project_id") != project_id:
-        raise RuntimeError("PF11 restart restored a different ProductProject selection")
-    result = bridge.dispatch(
-        {
-            "request_id": "pf11-packaged-proof",
-            "action_id": "task.create",
-            "payload": {"command": command},
-        }
-    )
-    if result.get("status") != "completed":
-        raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
-    detail = products.inspect_project(project_id)
-    if detail.summary.project_id != project_id or detail.summary.version != 1:
-        raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
-    product_state = _require_product_state(bridge.get_state(), project_id=project_id)
-    current_result = bridge.dispatch(
-        {
-            "request_id": "pf11-packaged-current-proof",
-            "action_id": "task.create",
-            "payload": {"command": "Show current ProductProject"},
-        }
-    )
-    _require_current_product_result(
-        current_result,
-        project_id=project_id,
-        spec_version=detail.summary.version,
-        state=detail.summary.state,
-        goal=detail.summary.goal,
-    )
-    payload = {
-        "route": decision.route.value,
-        "project_id": project_id,
-        "spec_version": detail.summary.version,
-        "state": detail.summary.state,
-        "command_center_state_proven": True,
-        "current_command_proven": True,
-        "current_command_focus_proven": True,
-        "bridge_state_project_id": product_state["project_id"],
-        "bridge_state_spec_version": product_state["spec_version"],
-        "bridge_state_status_count": product_state["status_count"],
-        "bridge_state_decision_count": product_state["decision_count"],
-        "restart_selection_integrity_proven": True,
-        "bounded_projection_proven": True,
-        "human_tested": False,
-        "nvda_verified": False,
-        "production_release_ready": False,
-    }
-    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
     try:
+        bridge = session.bridge
+        products = session.products
+        decision = route_command(command)
+        if decision.normalized_goal is None:
+            raise RuntimeError(
+                "PF11 proof command did not produce a normalized ProductProject goal"
+            )
+        project_id = product_project_identity(decision.normalized_goal)
+        recovered_before_command = bridge.get_state()
+        recovered_project = recovered_before_command.get("state", {}).get("product_project")
+        if (
+            isinstance(recovered_project, Mapping)
+            and recovered_project.get("project_id") != project_id
+        ):
+            raise RuntimeError("PF11 restart restored a different ProductProject selection")
+        result = bridge.dispatch(
+            {
+                "request_id": "pf11-packaged-proof",
+                "action_id": "task.create",
+                "payload": {"command": command},
+            }
+        )
+        if result.get("status") != "completed":
+            raise RuntimeError(f"PF11 packaged ProductProject route failed: {result}")
+        detail = products.inspect_project(project_id)
+        if detail.summary.project_id != project_id or detail.summary.version != 1:
+            raise RuntimeError("PF11 packaged ProductProject identity/version proof failed")
+        product_state = _require_product_state(bridge.get_state(), project_id=project_id)
+        current_result = bridge.dispatch(
+            {
+                "request_id": "pf11-packaged-current-proof",
+                "action_id": "task.create",
+                "payload": {"command": "Show current ProductProject"},
+            }
+        )
+        _require_current_product_result(
+            current_result,
+            project_id=project_id,
+            spec_version=detail.summary.version,
+            state=detail.summary.state,
+            goal=detail.summary.goal,
+        )
+        payload = {
+            "route": decision.route.value,
+            "project_id": project_id,
+            "spec_version": detail.summary.version,
+            "state": detail.summary.state,
+            "command_center_state_proven": True,
+            "current_command_proven": True,
+            "current_command_focus_proven": True,
+            "bridge_state_project_id": product_state["project_id"],
+            "bridge_state_spec_version": product_state["spec_version"],
+            "bridge_state_status_count": product_state["status_count"],
+            "bridge_state_decision_count": product_state["decision_count"],
+            "restart_selection_integrity_proven": True,
+            "bounded_projection_proven": True,
+            "human_tested": False,
+            "nvda_verified": False,
+            "production_release_ready": False,
+        }
+        serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         if output_path is None:
             print(serialized)
         else:
