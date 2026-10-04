@@ -556,3 +556,29 @@ def test_immutable_backup_inspection_rejects_unbound_sidecars(tmp_path, suffix):
     with pytest.raises(adoption.BackupRecoveryError):
         adoption._inspect(backup, immutable=True)
     assert sidecar.exists()
+
+
+def test_wal_adoption_internal_pipeline_preserves_live_wal_and_receipt(tmp_path):
+    """Expose the internal stage of a live-WAL failure without the UI error wrapper."""
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        wal = source.with_name(source.name + "-wal")
+        assert wal.stat().st_size > 0
+        expected = adoption._inspect(source)
+        assert expected is not None
+        with adoption._startup_lock(target):
+            adoption._prepare_locked(target, [source])
+        assert json.loads(_rows(target, "tasks")[0][4]) == {"from_wal": True}
+        assert wal.stat().st_size > 0
+        assert adoption._inspect(source).digest == expected.digest
+        archives = list((target.parent / "legacy-adoption-backups").glob("*.sqlite3"))
+        assert len(archives) == 2
+        for archive in archives:
+            assert not archive.with_name(archive.name + "-wal").exists()
+            assert not archive.with_name(archive.name + "-shm").exists()
+        assert not target.with_name(f".{target.name}.legacy-adoption.json").exists()
