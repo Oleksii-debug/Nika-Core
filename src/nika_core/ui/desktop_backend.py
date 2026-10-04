@@ -414,10 +414,16 @@ class DesktopBackend:
             try:
                 future.result(timeout=2)
             except TimeoutError as exc:
-                # An active task cannot be abandoned merely to force the host loop closed.
-                raise RuntimeError(
-                    "cannot close desktop runtime loop while tasks are active"
-                ) from exc
+                if not future.done():
+                    # An active task cannot be abandoned merely to force the host loop closed.
+                    raise RuntimeError(
+                        "cannot close desktop runtime loop while tasks are active"
+                    ) from exc
+                # An already-completed task can itself fail with TimeoutError.
+                _LOGGER.warning(
+                    "Desktop runtime future failed before close; exception_type=%s",
+                    type(exc).__name__,
+                )
             except BaseException as exc:
                 # A completed future may carry KeyboardInterrupt or SystemExit.
                 # Still settle the remaining futures and release the desktop host.
