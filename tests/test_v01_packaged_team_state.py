@@ -5,6 +5,7 @@ import json
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
 from nika_core.multi_agent.contracts import AgentHandoff, HandoffKind, MemberState, TeamQuota
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
@@ -461,3 +462,42 @@ def test_team_event_projection_reads_only_latest_twenty_in_chronological_order(
         f"2031-01-01T00:00:{index:02}+00:00" for index in range(10, 30)
     ]
     assert all(event["code"] == "worker.result" for event in events)
+
+
+@pytest.mark.parametrize(
+    "invalid_payload",
+    [
+        pytest.param(
+            '{"meta":{"first":1,"first":2}}',
+            id="duplicate-nested-task-field",
+        ),
+        pytest.param('{"unrelated":NaN}', id="task-nan"),
+        pytest.param('{"unrelated":1e999}', id="task-float-overflow"),
+        pytest.param(b"{}", id="task-sqlite-blob"),
+        pytest.param("[]", id="task-non-object"),
+        pytest.param('{"unterminated":', id="task-truncated"),
+    ],
+)
+def test_frozen_model_projection_uses_canonical_task_decoder(
+    tmp_path, invalid_payload
+) -> None:
+    store = SQLiteStore(tmp_path / "моделі та завдання.db")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="test-workspace",
+        agent_id="test-agent",
+        payload={},
+    )
+    with store.connection() as conn:
+        assert V01PackagedTeamStateProvider._frozen_model_identity(
+            conn, shared_task_id=task.task_id
+        ) is None
+        changed = conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (invalid_payload, task.task_id),
+        )
+        assert changed.rowcount == 1
+        with pytest.raises(TaskPayloadCorruptionError, match="пошкоджені"):
+            V01PackagedTeamStateProvider._frozen_model_identity(
+                conn, shared_task_id=task.task_id
+            )
