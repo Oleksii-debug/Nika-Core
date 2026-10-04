@@ -316,10 +316,15 @@ class OllamaModelHealthProbe:
                 ):
                     return None
                 payload = bytearray()
-                for chunk in response.iter_raw(chunk_size=16384):
-                    if len(chunk) > _MAX_CATALOG_BYTES - len(payload):
-                        return None
-                    payload.extend(chunk)
+                try:
+                    for chunk in response.iter_raw(chunk_size=16384):
+                        if len(chunk) > _MAX_CATALOG_BYTES - len(payload):
+                            return None
+                        payload.extend(chunk)
+                except httpx.TransportError:
+                    # Headers arrived: the server is reachable, but its truncated
+                    # catalog cannot prove presence, absence, or readiness.
+                    return None
                 return httpx.Response(status_code=response.status_code, content=bytes(payload))
         except httpx.StreamError:
             # A consumed/invalid injected stream is not reliable health evidence.
