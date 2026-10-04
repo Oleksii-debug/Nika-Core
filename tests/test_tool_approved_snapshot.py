@@ -208,9 +208,13 @@ def test_direct_guard_rejects_authorization_argument_mismatch_without_reservatio
         ("task_id", None),
         ("task_id", 42),
         ("task_id", chr(0xD800)),
+        ("task_id", "x" * 513),
+        ("task_id", "😀" * 129),
         ("call_id", ""),
         ("call_id", 42),
         ("call_id", chr(0xD800)),
+        ("call_id", "x" * 513),
+        ("call_id", "😀" * 129),
     ),
 )
 def test_direct_guard_rejects_invalid_identity_before_ledger(
@@ -310,3 +314,15 @@ def test_rejected_malformed_call_id_is_audited_without_unicode_escape(
     assert len(events) == 1
     assert events[0].event_type == "tool.denied"
     assert events[0].payload["reason"] == "ValueError"
+
+
+def test_512_byte_identity_boundary_is_supported(tmp_path: Path) -> None:
+    task_id = "x" * 512
+    guard, ledger = _durable_guard(tmp_path / "identity-bound.db", task_id=task_id)
+    call = ToolCall(
+        call_id="😀" * 128, tool_id=SPEC.tool_id, task_id=task_id,
+        arguments={"command": "safe"},
+    )
+    reservation = guard.reserve(spec=SPEC, call=call)
+    assert reservation.operation_key.startswith("tool:")
+    assert len(ledger.list_for_task(task_id)) == 1
