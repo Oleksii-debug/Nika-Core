@@ -12,7 +12,7 @@ from nika_core.security import (
     ExecutionBudgetLedger,
     SandboxPolicy,
 )
-from nika_core.tools import ToolRisk
+from nika_core.tools import ToolRisk, tool_arguments_fingerprint
 
 BAD_UNICODE = chr(0xD800)
 
@@ -114,6 +114,21 @@ def test_unencodable_argument_values_and_keys_fail_at_admission(
         _intent(arguments=arguments)
 
 
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        {"title": BAD_UNICODE},
+        {"nested": {"title": BAD_UNICODE}},
+        {BAD_UNICODE: "value"},
+    ),
+)
+def test_direct_tool_argument_fingerprint_rejects_unencodable_text(
+    arguments: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="UTF-8"):
+        tool_arguments_fingerprint(arguments)
+
+
 def test_sandbox_rejects_unencodable_paths_and_executables(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="UTF-8"):
         SandboxPolicy(workspace_root=tmp_path, writable_roots=("artifacts/" + BAD_UNICODE,))
@@ -143,6 +158,7 @@ def test_valid_unicode_identity_and_approval_continue_to_work() -> None:
         arguments={"é": ["Київ", "😀"]},
         scope=(("проєкт", "Ніка"),),
     )
+    assert intent.arguments_fingerprint == tool_arguments_fingerprint({"é": ["Київ", "😀"]})
     assert intent.effect_fingerprint == same.effect_fingerprint
     assert intent.approval_fingerprint == same.approval_fingerprint
     authority = ApprovalAuthority(secret=b"test-only-no-production-secret-123456789")
