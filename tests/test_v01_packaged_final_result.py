@@ -581,7 +581,6 @@ def test_completed_comparison_rejects_oversubscribed_handoff_history(
     assert restarted == corrupted
 
 
-
 @pytest.mark.parametrize(
     ("member_id", "validated"),
     [
