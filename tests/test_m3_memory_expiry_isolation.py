@@ -130,3 +130,57 @@ def test_namespace_expiry_accepts_aware_offset_and_rejects_naive_time(tmp_path: 
         namespace="scratch",
         now=datetime(2035, 1, 1, 1, tzinfo=timezone(-timedelta(hours=2))),
     ) == ()
+
+@pytest.mark.parametrize("approval", [1, "true", None, [], {"approved": True}])
+def test_user_memory_requires_literal_boolean_approval(tmp_path: Path, approval: object) -> None:
+    memory = _memory(tmp_path)
+    with pytest.raises(ValueError, match="user_approved must be a boolean"):
+        memory.put(
+            scope=MemoryScope.USER,
+            owner_id="owner",
+            namespace="preferences",
+            key="language",
+            value="uk",
+            user_approved=approval,
+        )
+    assert memory.get(
+        scope=MemoryScope.USER,
+        owner_id="owner",
+        namespace="preferences",
+        key="language",
+    ) is None
+    with pytest.raises(PermissionError, match="explicit approval"):
+        memory.put(
+            scope=MemoryScope.USER,
+            owner_id="owner",
+            namespace="preferences",
+            key="language",
+            value="uk",
+            user_approved=False,
+        )
+    assert memory.put(
+        scope=MemoryScope.USER,
+        owner_id="owner",
+        namespace="preferences",
+        key="language",
+        value="uk",
+        user_approved=True,
+    ).user_approved is True
+
+
+@pytest.mark.parametrize(
+    "invalid", [float("nan"), float("inf"), -float("inf"), {"nested": float("nan")}]
+)
+def test_invalid_json_numbers_cannot_overwrite_memory(tmp_path: Path, invalid: object) -> None:
+    memory = _memory(tmp_path)
+    params = {
+        "scope": MemoryScope.TASK,
+        "owner_id": "task",
+        "namespace": "scratch",
+        "key": "value",
+    }
+    memory.put(**params, value={"safe": True})
+    with pytest.raises(ValueError, match="Out of range float values"):
+        memory.put(**params, value=invalid)
+    record = memory.get(**params)
+    assert record is not None and record.value == {"safe": True}
