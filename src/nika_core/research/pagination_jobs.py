@@ -127,6 +127,9 @@ class PaginatedResearchRefreshService:
         raw_frontier = checkpoint.payload.get("frontier")
         if not isinstance(raw_frontier, list):
             raise TypeError("paginated Research checkpoint frontier is invalid")
+        policy = _policy_from_payload(task.payload.get("pagination_policy"))
+        if not raw_frontier or len(raw_frontier) > policy.max_pages:
+            raise ValueError("paginated Research checkpoint frontier exceeds its policy")
         frontier: list[_FrontierItem] = []
         for item in raw_frontier:
             if not isinstance(item, dict):
@@ -138,16 +141,29 @@ class PaginatedResearchRefreshService:
             if not valid_source_id or not valid_url:
                 raise ValueError("paginated Research checkpoint item fields are invalid")
             frontier.append(_FrontierItem(source_id, url))
-        next_index = int(checkpoint.payload.get("next_index", 0))
-        if not frontier or next_index < 0 or next_index > len(frontier):
+
+        next_index = checkpoint.payload.get("next_index", 0)
+        counts = tuple(checkpoint.payload.get(key, 0) for key in ("changed", "unchanged", "failed"))
+        if type(next_index) is not int or not 0 <= next_index <= len(frontier):
             raise ValueError("paginated Research checkpoint index is outside frontier")
-        return (
-            frontier,
-            next_index,
-            int(checkpoint.payload.get("changed", 0)),
-            int(checkpoint.payload.get("unchanged", 0)),
-            int(checkpoint.payload.get("failed", 0)),
-        )
+        if any(type(count) is not int or count < 0 for count in counts):
+            raise ValueError("paginated Research checkpoint counters are invalid")
+        if sum(counts) != next_index:
+            raise ValueError("paginated Research checkpoint counters disagree with progress")
+
+        for position, item in enumerate(frontier):
+            if position == 0 and item.source_id != root_source_id:
+                raise ValueError("paginated Research checkpoint root source changed")
+            source = self._network.get_source(item.source_id)
+            if source.workspace_id != root.workspace_id:
+                raise ValueError("paginated Research checkpoint source belongs to another workspace")
+            if position > 0 and item.source_id != _page_source_id(root_source_id, source.url):
+                raise ValueError("paginated Research checkpoint page source identity is invalid")
+            # Processed pages can have a redirected final URL; queued pages must
+            # retain their registered fetch URL, not an arbitrary checkpoint URL.
+            if position >= next_index and item.url != source.url:
+                raise ValueError("paginated Research checkpoint pending URL changed")
+        return frontier, next_index, *counts
 
     def _save_progress(
         self,
