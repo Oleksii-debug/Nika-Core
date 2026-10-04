@@ -89,6 +89,34 @@ def _focus(focus_id: str, message: str) -> UIResult:
     )
 
 
+def _close_failed_startup_resources(
+    backend: DesktopBackend,
+    *,
+    voice: PackagedVoiceFeature | None,
+    voice_model_setup: PackagedVoiceModelSetup | None,
+    speech: PackagedSpeechFeature | None,
+) -> None:
+    """Release every successfully constructed component after a failed startup."""
+    for name, resource in (
+        ("voice_model_setup", voice_model_setup),
+        ("speech", speech),
+        ("voice", voice),
+        ("backend", backend),
+    ):
+        if resource is None:
+            continue
+        try:
+            resource.close()
+        except Exception as exc:
+            # Failure diagnostics may contain private paths or model details.
+            logging.getLogger(__name__).error(
+                "Packaged startup cleanup failed: component=%s exception_type=%s",
+                name,
+                type(exc).__name__,
+            )
+
+
+
 def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
     store = SQLiteStore(config.database_path)
     store.initialize()
@@ -118,28 +146,30 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             else None
         ),
     )
-    voice = build_packaged_voice(
-        config.database_path.parent,
-        submit=backend.submit_packaged_coroutine,
-    )
-    voice_model_setup = PackagedVoiceModelSetup(
-        config.database_path.parent,
-        submit=backend.submit_packaged_coroutine,
-    )
-    speech = build_packaged_speech()
+    voice: PackagedVoiceFeature | None = None
+    voice_model_setup: PackagedVoiceModelSetup | None = None
+    speech: PackagedSpeechFeature | None = None
+    try:
+        voice = build_packaged_voice(
+            config.database_path.parent,
+            submit=backend.submit_packaged_coroutine,
+        )
+        voice_model_setup = PackagedVoiceModelSetup(
+            config.database_path.parent,
+            submit=backend.submit_packaged_coroutine,
+        )
+        speech = build_packaged_speech()
+    except Exception:
+        _close_failed_startup_resources(
+            backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
+        )
+        raise
     try:
         backend.start_startup_recovery()
     except Exception as exc:
-        try:
-            voice_model_setup.close()
-        finally:
-            try:
-                speech.close()
-            finally:
-                try:
-                    voice.close()
-                finally:
-                    backend.close()
+        _close_failed_startup_resources(
+            backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
+        )
         raise _StartupRecoveryInventoryError(
             "packaged startup recovery inventory failed"
         ) from exc
