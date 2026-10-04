@@ -41,6 +41,15 @@ _EVIDENCE_FIELDS = tuple(field for field, _ in _AUTOMATED_REQUIREMENTS) + (
 
 
 def evaluate_release_gate(evidence: ReleaseGateEvidence) -> ReleaseGateResult:
+    # Reject arbitrary duck-typed carriers before reading their attributes.
+    # A caller-supplied object cannot supply release clearance via getters.
+    if type(evidence) is not ReleaseGateEvidence:
+        return ReleaseGateResult(
+            stage="IMPLEMENTED",
+            release_candidate_ready=False,
+            production_release_ready=False,
+            blockers=("Invalid release evidence carrier",),
+        )
     # Dataclass annotations do not enforce runtime types. Never let truthy strings,
     # integers or corrupted/missing attributes certify an acceptance gate.
     values = {field: getattr(evidence, field, None) for field in _EVIDENCE_FIELDS}
