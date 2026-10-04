@@ -235,3 +235,35 @@ def test_incomplete_host_sample_keeps_queued_work_and_sanitizes_status(
         cpu_percent=20, memory_percent=30, available_memory_bytes=1_000_000
     )
     assert manager.request(scope="agent", owner_id="worker", request_id="one").granted
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("max_concurrent", 1 << 63),
+        ("max_concurrent", 10**1000),
+        ("max_process_memory_bytes", 1 << 63),
+        ("max_process_memory_bytes", 10**1000),
+    ),
+)
+def test_sqlite_unrepresentable_budget_is_rejected_before_write(
+    tmp_path: Path, field: str, value: int
+) -> None:
+    manager, _, _ = _manager(tmp_path)
+    budget = replace(ResourceBudget(scope="agent", owner_id="worker"), **{field: value})
+    with pytest.raises(ValueError, match="SQLite-sized integer"):
+        manager.set_budget(budget)
+    assert manager.get_budget(scope="agent", owner_id="worker") == ResourceBudget(
+        scope="agent", owner_id="worker"
+    )
+
+
+def test_sqlite_integer_boundary_round_trips_without_truncation(tmp_path: Path) -> None:
+    manager, _, _ = _manager(tmp_path)
+    budget = ResourceBudget(
+        scope="agent",
+        owner_id="worker",
+        max_concurrent=(1 << 63) - 1,
+        max_process_memory_bytes=(1 << 63) - 1,
+    )
+    manager.set_budget(budget)
+    assert manager.get_budget(scope="agent", owner_id="worker") == budget
