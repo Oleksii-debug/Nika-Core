@@ -41,9 +41,17 @@ def _result_count(store: SQLiteStore) -> int:
     return int(row["count"])
 
 
+def _created_task(store: SQLiteStore, command: str) -> str:
+    return TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": command},
+    ).task_id
+
+
 def test_packaged_runtime_executes_canonical_three_agent_team(tmp_path: Path) -> None:
     store, runtime = _configured_runtime(tmp_path)
-    task_id = "packaged-task-001"
+    task_id = _created_task(store, "Compare the two declared local sources.")
     request = RuntimeRequest(
         task_id=task_id,
         thread_id=f"desktop-{task_id}",
@@ -74,7 +82,7 @@ def test_packaged_runtime_resume_replays_terminal_team_without_member_rerun(
     tmp_path: Path,
 ) -> None:
     store, runtime = _configured_runtime(tmp_path)
-    task_id = "packaged-task-restart"
+    task_id = _created_task(store, "Compare the two declared local sources.")
     thread_id = f"desktop-{task_id}"
     first = asyncio.run(
         runtime.run(
@@ -114,7 +122,7 @@ def test_packaged_runtime_missing_source_config_fails_closed_without_team(
         store=store,
         config=AppConfig(database_path=tmp_path / "nika.db"),
     )
-    task_id = "packaged-task-unconfigured"
+    task_id = _created_task(store, "Run the representative team.")
 
     result = asyncio.run(
         runtime.run(
@@ -155,11 +163,12 @@ def test_packaged_runtime_rejects_source_outside_declared_root_without_team(
         ),
     )
 
+    task_id = _created_task(store, "Run the representative team.")
     result = asyncio.run(
         runtime.run(
             RuntimeRequest(
-                task_id="packaged-task-outside-root",
-                thread_id="desktop-packaged-task-outside-root",
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
                 payload={"command": "Run the representative team."},
             )
         )
@@ -202,3 +211,26 @@ def test_packaged_runtime_uses_canonical_task_payload_for_model_and_resume(
     with pytest.raises(TaskPayloadCorruptionError, match="пошкоджені"):
         runtime._task_has_model_selection(task.task_id)
     assert runtime._stored_outer_command(task.task_id) == ""
+
+
+def test_unknown_packaged_task_cannot_create_orphan_source_binding(
+    tmp_path: Path,
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    missing_id = "never-queued"
+    result = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=missing_id,
+                thread_id=f"desktop-{missing_id}",
+                payload={"command": "Compare the two declared local sources."},
+            )
+        )
+    )
+    assert result.outcome is RuntimeOutcome.FAILED
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            (missing_id,),
+        ).fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM multi_agent_teams").fetchone()[0] == 0
