@@ -228,3 +228,58 @@ def test_packaged_session_preserves_first_error_over_host_interrupt(
     assert host.closed
     assert "component=backend exception_type=SystemExit" in caplog.text
     assert "PRIVATE_" not in caplog.text
+
+
+def test_packaged_session_retries_real_backend_after_pending_work_settles(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path)
+    host = _Host()
+    backend._runtime_loop = host
+
+    class Pending:
+        settled = False
+
+        def result(self, *, timeout: float) -> None:
+            assert timeout == 2
+            if not self.settled:
+                raise TimeoutError("PRIVATE_WORK_STILL_ACTIVE")
+
+        def done(self) -> bool:
+            return self.settled
+
+    pending = Pending()
+    backend._packaged_futures.add(pending)
+    closed: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.closed = False
+
+        def close(self) -> None:
+            if not self.closed:
+                self.closed = True
+                closed.append(self.name)
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=backend,
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=Resource("speech"),
+    )
+    with pytest.raises(RuntimeError, match="tasks are active"):
+        session.close()
+    assert not session._closed
+    assert not host.closed
+    assert pending in backend._packaged_futures
+
+    pending.settled = True
+    session.close()
+    assert session._closed
+    assert host.closed
+    assert backend._runtime_loop is None
+    assert backend._packaged_futures == set()
+    assert closed == ["speech", "voice_model_setup", "voice"]
