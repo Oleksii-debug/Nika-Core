@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -757,3 +758,76 @@ def test_clock_jump_persists_range_exhaustion_after_one_effect(tmp_path: Path) -
     restarted, _ = _service(store, clock, calls)
     restarted.action_handler({"recurrence_id": "range-exhaustion"})
     assert len(calls) == 1
+
+@pytest.mark.parametrize(
+    ("column", "bad"),
+    (
+        ("trigger_kind", "cron"),
+        ("coalesce", 0),
+        ("max_instances", 2),
+        ("misfire_grace_seconds", 60),
+        ("trigger_json", '{"run_date":"2030-01-01T12:01:00+00:00"}'),
+    ),
+)
+def test_corrupt_scheduler_envelope_blocks_recovery_and_dispatch(
+    tmp_path: Path, column: str, bad: object
+) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="bad-envelope",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    job_id = scheduler.upserts[-1].job_id
+    with store.connection() as conn:
+        conn.execute(f"UPDATE scheduled_jobs SET {column} = ? WHERE job_id = ?", (bad, job_id))
+    jobs = ScheduledJobStore(store)
+    corrupted = jobs.get(job_id)
+    assert corrupted is not None
+    restarted, _ = _service(store, clock, calls)
+    with pytest.raises(ValueError, match="scheduler envelope|scheduled trigger"):
+        restarted.get("bad-envelope")
+    with pytest.raises(ValueError, match="scheduler envelope|scheduled trigger"):
+        restarted.action_handler({"recurrence_id": "bad-envelope"})
+    assert jobs.get(job_id) == corrupted
+    assert calls == []
+
+
+def test_noninteger_recurrence_version_blocks_recovery_and_dispatch(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="bad-version",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    job_id = scheduler.upserts[-1].job_id
+    with store.connection() as conn:
+        raw = conn.execute(
+            "SELECT payload_json FROM scheduled_jobs WHERE job_id = ?",
+            (job_id,),
+        ).fetchone()["payload_json"]
+        payload = json.loads(raw)
+        payload["_nika_recurrence_v1"]["version"] = 2.0
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            (json.dumps(payload, ensure_ascii=False), job_id),
+        )
+    jobs = ScheduledJobStore(store)
+    corrupted = jobs.get(job_id)
+    restarted, _ = _service(store, clock, calls)
+    with pytest.raises(ValueError, match="unsupported durable recurrence payload version"):
+        restarted.get("bad-version")
+    with pytest.raises(ValueError, match="unsupported durable recurrence payload version"):
+        restarted.action_handler({"recurrence_id": "bad-version"})
+    assert jobs.get(job_id) == corrupted
+    assert calls == []
