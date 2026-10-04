@@ -162,10 +162,11 @@ class V01PackagedTeamStateProvider:
         ):
             raise ValueError("incomplete V0.1 team identity")
 
+        # A fourth member makes this fixed-size packaged V0.1 roster invalid.
         member_rows = conn.execute(
             "SELECT member_id, parent_id, state, created_at, updated_at "
             "FROM multi_agent_members WHERE team_id = ? "
-            "ORDER BY depth, created_at, member_id",
+            "ORDER BY depth, created_at, member_id LIMIT 4",
             (team_id,),
         ).fetchall()
         if not 2 <= len(member_rows) <= 3:
@@ -215,12 +216,16 @@ class V01PackagedTeamStateProvider:
                 result_rows.append(row)
                 latest_result[member_id] = row
 
+        # Only errors from roster members affect the public member projection.
+        # Distinct roster identities avoid materializing duplicate/foreign history.
+        roster_placeholders = ", ".join("?" for _ in roles)
         error_members = {
             str(row["sender_id"])
             for row in conn.execute(
-                "SELECT sender_id FROM multi_agent_handoffs "
-                "WHERE team_id = ? AND kind = 'error'",
-                (team_id,),
+                "SELECT DISTINCT sender_id FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND kind = 'error' "
+                f"AND sender_id IN ({roster_placeholders}) LIMIT 3",
+                (team_id, *roles),
             ).fetchall()
         }
 
