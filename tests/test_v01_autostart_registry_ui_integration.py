@@ -129,22 +129,67 @@ def test_expandable_registry_value_requires_explicit_ui_repair_and_restart(
     )
 
 
-def test_malformed_registry_type_does_not_leak_or_mutate_on_read(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("value", "value_type"),
+    [
+        ("PRIVATE_REGISTRY_CANARY", 255),
+        ("", _Registry.REG_SZ),
+        ("", _Registry.REG_EXPAND_SZ),
+    ],
+)
+def test_malformed_registry_cannot_be_mutated_through_ui_or_service(
+    tmp_path: Path, value: str, value_type: int
 ) -> None:
     store = SQLiteStore(tmp_path / "autostart.db")
     store.initialize()
     audit = AuditLog(store)
-    registry = _Registry("PRIVATE_REGISTRY_CANARY", 255)
-    settings = AutostartSettings(
-        WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), _Backend(registry)),
-        audit,
-    )
+    registry = _Registry(value, value_type)
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), _Backend(registry))
+    settings = AutostartSettings(service, audit)
+
     snapshot = settings.snapshot()
     assert snapshot["state"] == "error"
     assert snapshot["can_change"] is False
     assert "PRIVATE_REGISTRY_CANARY" not in json.dumps(snapshot)
+    assert settings.refresh({}).status == "failed"
+
+    # A forged UI command must not bypass the disabled control.
+    for enabled in (False, True):
+        result = settings.configure({"enabled": enabled})
+        assert result.status == "failed"
+        assert result.focus_id == "autostart-enabled"
+        assert "PRIVATE_REGISTRY_CANARY" not in result.model_dump_json()
+
+    # The service itself must also reject direct deletes of malformed values.
+    with pytest.raises(RuntimeError):
+        service.disable()
+    with pytest.raises(RuntimeError):
+        service.enable()
+
+    assert registry.value == value and registry.value_type == value_type
     assert registry.writes == 0 and registry.deletes == 0
     assert audit.list_for(
         entity_type="application_setting", entity_id="windows.autostart"
     ) == ()
+
+
+def test_expandable_registration_remains_explicitly_removable(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "autostart.db")
+    store.initialize()
+    audit = AuditLog(store)
+    registry = _Registry("", _Registry.REG_EXPAND_SZ)
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), _Backend(registry))
+    registry.value = service.expected_command
+    settings = AutostartSettings(service, audit)
+
+    assert settings.snapshot()["state"] == "stale"
+    assert settings.configure({"enabled": False}).status == "completed"
+    assert settings.snapshot()["state"] == "disabled"
+    assert registry.deletes == 1 and registry.writes == 0
+    events = audit.list_for(
+        entity_type="application_setting", entity_id="windows.autostart"
+    )
+    assert [event.event_type for event in events] == [
+        "settings.autostart.requested",
+        "settings.autostart.confirmed",
+    ]
