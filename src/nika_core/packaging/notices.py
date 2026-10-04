@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import re
+import stat
 import sys
 from importlib import metadata
 from pathlib import Path
@@ -29,6 +31,7 @@ RUNTIME_DISTRIBUTIONS = (
 )
 
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
+_MAX_NOTICES_BYTES = 16 * 1024 * 1024
 
 
 def _python_license() -> str:
@@ -141,12 +144,44 @@ def _sections(text: str) -> tuple[dict[str, str], tuple[str, ...]]:
     return parsed, tuple(duplicates)
 
 
+def _read_notices(target: Path) -> str | None:
+    """Admit only bounded, regular, stable UTF-8 license evidence."""
+    try:
+        before = target.lstat()
+        if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_NOTICES_BYTES:
+            return None
+        with target.open("rb") as source:
+            opened = os.fstat(source.fileno())
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            ):
+                return None
+            data = source.read(_MAX_NOTICES_BYTES + 1)
+            after = os.fstat(source.fileno())
+        if (
+            len(data) > _MAX_NOTICES_BYTES
+            or len(data) != after.st_size
+            or (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+        ):
+            return None
+        return data.decode("utf-8")
+    except (OSError, UnicodeError):
+        return None
+
+
 def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
-    if not target.is_file():
+    try:
+        target.lstat()
+    except FileNotFoundError:
         return ("missing:THIRD_PARTY_NOTICES.txt",)
+    except OSError:
+        return ("notices:unreadable",)
 
-    text = target.read_text(encoding="utf-8", errors="replace")
+    text = _read_notices(target)
+    if text is None:
+        return ("notices:unreadable",)
     sections, duplicates = _sections(text)
     findings: list[str] = []
     if "Python runtime" in duplicates:
