@@ -20,6 +20,7 @@ _MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
+_UNSAFE_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 _SECRET_RELEASE_BASENAMES = frozenset({".env", "token.json", "cookies.txt"})
 _SECRET_CONTENT_SUFFIXES = frozenset(
     {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties", ".txt", ".log"}
@@ -161,7 +162,7 @@ def _canonical_relative_path(value: object) -> bool:
             return False
         if any(
             character in _WINDOWS_FORBIDDEN_CHARS
-            or unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            or unicodedata.category(character) in _UNSAFE_UNICODE_CATEGORIES
             for character in part
         ):
             return False
@@ -202,13 +203,20 @@ def _release_file_directory_collisions(
     return tuple(collisions)
 
 
+def _contains_unsafe_unicode(value: str) -> bool:
+    return any(
+        unicodedata.category(character) in _UNSAFE_UNICODE_CATEGORIES
+        for character in value
+    )
+
+
 def _valid_product_version(value: object) -> bool:
     return (
         isinstance(value, str)
         and bool(value)
         and len(value) <= _MAX_PRODUCT_VERSION_CHARS
         and value == value.strip()
-        and not any(ord(character) < 32 for character in value)
+        and not _contains_unsafe_unicode(value)
     )
 
 
@@ -271,13 +279,10 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
         not isinstance(manifest.product, str)
         or not manifest.product
         or manifest.product != manifest.product.strip()
+        or _contains_unsafe_unicode(manifest.product)
     ):
         findings.append("manifest:product")
-    if (
-        not isinstance(manifest.version, str)
-        or not manifest.version
-        or manifest.version != manifest.version.strip()
-    ):
+    if not _valid_product_version(manifest.version):
         findings.append("manifest:product-version")
     if (
         not isinstance(manifest.source_sha, str)
