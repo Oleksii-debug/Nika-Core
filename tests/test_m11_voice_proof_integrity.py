@@ -86,6 +86,12 @@ def test_valid_voice_proof_publishes_source_bound_evidence(
             "nonfinite",
             json.dumps({**_valid_voice_proof(), "extra": float("nan")}).encode("utf-8"),
         ),
+        (
+            "overflow-exponent",
+            (json.dumps(_valid_voice_proof())[:-1] + ', "extra": 1e10000}').encode(
+                "utf-8"
+            ),
+        ),
         ("oversized", json.dumps(
             {**_valid_voice_proof(), "extra": "x" * (1024 * 1024)}
         ).encode("utf-8")),
