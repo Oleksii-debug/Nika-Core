@@ -22,8 +22,14 @@ class WindowsBuildPlan:
             if not path.exists():
                 raise FileNotFoundError(f"{label} does not exist: {path}")
         for label, path in (("entrypoint", self.entrypoint), ("web_assets", self.web_assets)):
-            if path.is_symlink() or path.is_junction():
-                raise ValueError(f"{label} must not be a symbolic link or junction")
+            # A linked ancestor is just as capable of importing external files
+            # as a directly linked entrypoint or web root. Check the lexical
+            # path before any part of it is resolved or handed to PyInstaller.
+            for component in (path, *path.parents):
+                if component.is_symlink() or component.is_junction():
+                    raise ValueError(
+                        f"{label} path traverses a symbolic link or junction: {component}"
+                    )
         if not self.entrypoint.is_file():
             raise ValueError("entrypoint must be a file")
         if not self.web_assets.is_dir():
