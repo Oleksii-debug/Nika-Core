@@ -232,3 +232,21 @@ def test_m11_requalifies_packaged_pf11_and_voice_source_changes() -> None:
     regressions = regressions.split("- name: Build standalone", 1)[0]
     for test in M11_FOCUSED_RESTART_TESTS:
         assert test in regressions, test
+
+def test_m11_requalifies_backup_recovery_before_windows_package() -> None:
+    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    paths = (
+        "src/nika_core/reliability/backup.py",
+        "tests/test_backup_restore_wal_stale_preview.py",
+        "tests/test_backup_restore_recovery_process_loss.py",
+        "tests/test_backup_restore_recovery_lease.py",
+        "tests/test_backup_restore_guardrails.py",
+        "tests/test_backup_restore_recovery.py",
+    )
+    for path in paths:
+        assert workflow.count(f'      - "{path}"') == 2, path
+
+    regressions = workflow.split("- name: Run M11 M12 source regressions", 1)[1]
+    regressions = regressions.split("- name: Build standalone", 1)[0]
+    for path in paths[1:]:
+        assert f"          {path}" in regressions, path
