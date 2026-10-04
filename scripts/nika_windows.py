@@ -69,10 +69,10 @@ class WindowsBridgeSession:
             return
         self._closed = True
         try:
-            self.voice_model_setup.close()
+            self.speech.close()
         finally:
             try:
-                self.speech.close()
+                self.voice_model_setup.close()
             finally:
                 try:
                     self.voice.close()
@@ -98,8 +98,8 @@ def _close_failed_startup_resources(
 ) -> None:
     """Release every successfully constructed component after a failed startup."""
     for name, resource in (
-        ("voice_model_setup", voice_model_setup),
         ("speech", speech),
+        ("voice_model_setup", voice_model_setup),
         ("voice", voice),
         ("backend", backend),
     ):

@@ -29,8 +29,8 @@ class _Resource:
         ("voice", ["backend"]),
         ("model_setup", ["voice", "backend"]),
         ("speech", ["model_setup", "voice", "backend"]),
-        ("recovery", ["model_setup", "speech", "voice", "backend"]),
-        ("assembly", ["model_setup", "speech", "voice", "backend"]),
+        ("recovery", ["speech", "model_setup", "voice", "backend"]),
+        ("assembly", ["speech", "model_setup", "voice", "backend"]),
     ],
 )
 def test_partial_packaged_startup_closes_only_constructed_resources(
@@ -134,4 +134,38 @@ def test_cleanup_failure_preserves_original_error_and_sanitizes_log(
     assert captured.value is failure
     assert closed == ["model_setup", "voice", "backend"]
     assert "component=voice exception_type=OSError" in caplog.text
+    assert "PRIVATE_" not in caplog.text
+
+
+def test_successful_session_closes_in_reverse_order_once() -> None:
+    closed: list[str] = []
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=_Resource("backend", closed),
+        voice=_Resource("voice", closed),
+        voice_model_setup=_Resource("model_setup", closed),
+        speech=_Resource("speech", closed),
+    )
+
+    session.close()
+    session.close()
+    assert closed == ["speech", "model_setup", "voice", "backend"]
+
+
+def test_failed_startup_cleanup_continues_after_multiple_close_errors(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    closed: list[str] = []
+    with caplog.at_level(logging.ERROR):
+        nika_windows._close_failed_startup_resources(
+            _Resource("backend", closed),
+            voice=_Resource("voice", closed),
+            voice_model_setup=_Resource("model_setup", closed, close_error=True),
+            speech=_Resource("speech", closed, close_error=True),
+        )
+
+    assert closed == ["speech", "model_setup", "voice", "backend"]
+    assert "component=speech exception_type=OSError" in caplog.text
+    assert "component=voice_model_setup exception_type=OSError" in caplog.text
     assert "PRIVATE_" not in caplog.text
