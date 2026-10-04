@@ -13,7 +13,9 @@ from nika_core.media.ffprobe import FFprobeAdapter
 
 class FakeRunner:
     def __init__(self, payload: object) -> None:
-        self.stdout = json.dumps(payload).encode("utf-8")
+        self.stdout = (
+            payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
+        )
 
     def run(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
         return SimpleNamespace(stdout=self.stdout)
@@ -106,3 +108,26 @@ def test_preserves_valid_metadata_and_optional_absent_fields(tmp_path: Path) -> 
     missing = _probe(tmp_path, {})
     assert missing.duration_seconds is None
     assert missing.streams == ()
+
+
+@pytest.mark.parametrize(
+    "raw_json",
+    (
+        b'{"format":{"bit_rate":' + (b"9" * 5000) + b'},"streams":[]}',
+        b'{"format":{"duration":' + (b"[" * 1500) + b"0"
+        + (b"]" * 1500) + b'},"streams":[]}',
+    ),
+)
+def test_invalid_json_resource_limits_return_typed_probe_failure(
+    tmp_path: Path, raw_json: bytes
+) -> None:
+    with pytest.raises(MediaError) as caught:
+        _probe(tmp_path, raw_json)
+    assert caught.value.code == MediaErrorCode.PROBE_FAILED
+
+
+@pytest.mark.parametrize("format_name", (True, ["matroska"], {"name": "matroska"}))
+def test_format_name_must_be_text(tmp_path: Path, format_name: object) -> None:
+    with pytest.raises(MediaError) as caught:
+        _probe(tmp_path, {"format": {"format_name": format_name}, "streams": []})
+    assert caught.value.code == MediaErrorCode.PROBE_FAILED
