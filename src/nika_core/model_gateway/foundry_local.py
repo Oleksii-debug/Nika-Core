@@ -299,7 +299,12 @@ class FoundryLocalProvider:
                     provider_id=self.capabilities.provider_id,
                     retryable=False,
                 )
-            expected_model_id = authorization.expected_model_id or self._expected_model_id
+            # Capture the first resolved artifact when no explicit release pin exists.
+            expected_model_id = (
+                authorization.expected_model_id
+                or self._expected_model_id
+                or self._sdk_text(model, "id")
+            )
             self._validate_model_identity(model, expected_model_id)
             if self._sdk_bool(model, "is_cached"):
                 evidence = self._model_evidence(
@@ -333,6 +338,9 @@ class FoundryLocalProvider:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
+            # Metadata getters or lock waits must not retarget the approved artifact.
+            self._validate_model_alias(model, authorization.model)
+            self._validate_model_identity(model, expected_model_id)
             worker = asyncio.create_task(
                 asyncio.to_thread(model.download, cancel_event=effective_cancel_event)
             )
@@ -611,7 +619,9 @@ class FoundryLocalProvider:
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             )
-        self._validate_model_identity(model, self._expected_model_id)
+        # A logical alias must not silently change its actual model mid-attempt.
+        operation_model_id = self._expected_model_id or self._sdk_text(model, "id")
+        self._validate_model_identity(model, operation_model_id)
 
         if not self._sdk_bool(model, "is_cached"):
             raise ModelGatewayError(
@@ -624,7 +634,10 @@ class FoundryLocalProvider:
                 retryable=False,
             )
 
-        if not self._sdk_bool(model, "is_loaded"):
+        already_loaded = self._sdk_bool(model, "is_loaded")
+        self._validate_model_alias(model, model_alias)
+        self._validate_model_identity(model, operation_model_id)
+        if not already_loaded:
             try:
                 model.load()
                 if not self._sdk_bool(model, "is_loaded"):
@@ -635,7 +648,7 @@ class FoundryLocalProvider:
                         retryable=False,
                     )
                 self._validate_model_alias(model, model_alias)
-                self._validate_model_identity(model, self._expected_model_id)
+                self._validate_model_identity(model, operation_model_id)
                 model_id = self._sdk_text(model, "id")
             except Exception:
                 self._cleanup_failed_load(model)
@@ -654,7 +667,7 @@ class FoundryLocalProvider:
 
         client = model.get_chat_client()
         self._validate_model_alias(model, model_alias)
-        self._validate_model_identity(model, self._expected_model_id)
+        self._validate_model_identity(model, operation_model_id)
         if request.temperature is not None and hasattr(client, "settings"):
             client.settings.temperature = request.temperature
 
@@ -662,12 +675,13 @@ class FoundryLocalProvider:
             [{"role": message.role, "content": message.content} for message in request.messages]
         )
         self._validate_model_alias(model, model_alias)
-        self._validate_model_identity(model, self._expected_model_id)
+        self._validate_model_identity(model, operation_model_id)
         raw_text = response.choices[0].message.content
         if type(raw_text) is not str:
             raise TypeError("Foundry Local response content must be text")
         usage = self._usage(response)
         resolved_model = self._sdk_text(model, "alias")
+        self._validate_model_identity(model, operation_model_id)
         return raw_text, resolved_model, usage
 
     def _get_model(self, alias: str) -> Any:
@@ -752,7 +766,8 @@ class FoundryLocalProvider:
                 retryable=False,
             )
         self._validate_model_alias(model, expected_alias)
-        self._validate_model_identity(model, expected_model_id)
+        # Recheck the initially observed ID even when the caller omitted a pin.
+        self._validate_model_identity(model, expected_model_id or model_id)
         return evidence
 
     def _validate_model_alias(self, model: Any, expected_alias: str) -> None:
