@@ -269,6 +269,14 @@ def test_terminal_task_suppresses_recurrence_on_restart_before_handler(
         assert effective.next_occurrence_id is None
         assert restarted.resume(recurrence_id) == effective
         assert restarted.cancel(recurrence_id) == effective
+        assert restarted.create(
+            recurrence_id=recurrence_id,
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+        ) == effective
+        restarted.action_handler({"recurrence_id": recurrence_id})
         assert jobs.get(persisted.job_id) == suppressed
         assert calls == []
     finally:
@@ -325,6 +333,14 @@ def test_missing_task_suppresses_recurrence_on_restart_before_handler(tmp_path: 
         assert effective.next_occurrence_id is None
         assert restarted.resume("missing-task") == effective
         assert restarted.cancel("missing-task") == effective
+        assert restarted.create(
+            recurrence_id="missing-task",
+            task_id=TASK_ID,
+            action_id="monitor.check",
+            interval_seconds=60,
+            start_at=clock.value,
+        ) == effective
+        restarted.action_handler({"recurrence_id": "missing-task"})
         assert jobs.get(persisted.job_id) == suppressed
         assert calls == []
     finally:
