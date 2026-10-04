@@ -285,3 +285,106 @@ def test_bad_next_url_does_not_stop_paginated_refresh(tmp_path: Path) -> None:
         "https://example.com/page",
         "https://example.com/page2",
     }
+
+
+def test_foreign_checkpoint_source_cannot_be_fetched_by_restarted_job(
+    tmp_path: Path,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, network, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    ResearchRepository(store).upsert_workspace(ResearchWorkspace("foreign", "Foreign"))
+    network.register_source(
+        SourceSpec("foreign-source", "foreign", SourceKind.HTTP, "https://example.com/other")
+    )
+    task_id = paginated.create_job(root_source_id="root")
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [
+                {"source_id": "root", "url": "https://example.com/page"},
+                {"source_id": "foreign-source", "url": "https://example.com/other"},
+            ],
+            "next_index": 0,
+            "changed": 0,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+    with pytest.raises(ValueError, match="another workspace"):
+        paginated.run(task_id)
+    assert requested == []
+
+
+@pytest.mark.parametrize(
+    ("next_index", "changed", "expected"),
+    [
+        (True, 0, "index"),
+        (1, 0, "disagree"),
+        (0, -1, "counters"),
+        (0, True, "counters"),
+    ],
+)
+def test_invalid_checkpoint_progress_cannot_skip_fetch(
+    tmp_path: Path, next_index: object, changed: object, expected: str,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, _, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [{"source_id": "root", "url": "https://example.com/page"}],
+            "next_index": next_index,
+            "changed": changed,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+    with pytest.raises(ValueError, match=expected):
+        paginated.run(task_id)
+    assert requested == []
+
+
+def test_checkpoint_cannot_expand_beyond_persisted_page_limit(tmp_path: Path) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, _, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(
+        root_source_id="root", policy=PaginationPolicy(max_pages=1)
+    )
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [
+                {"source_id": "root", "url": "https://example.com/page"},
+                {"source_id": "root", "url": "https://example.com/page"},
+            ],
+            "next_index": 0,
+            "changed": 0,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+    with pytest.raises(ValueError, match="exceeds its policy"):
+        paginated.run(task_id)
+    assert requested == []
