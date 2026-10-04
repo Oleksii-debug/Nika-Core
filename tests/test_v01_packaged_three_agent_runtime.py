@@ -286,3 +286,28 @@ def test_packaged_resume_rejects_corrupt_task_even_with_cached_checker_goal(
     )
     assert result.outcome is RuntimeOutcome.FAILED
     assert _result_count(store) == prior_results
+
+
+def test_packaged_cached_legacy_goal_survives_missing_task_row(tmp_path: Path) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    with store.connection() as conn:
+        conn.execute("DELETE FROM task_events WHERE task_id = ?", (task_id,))
+        conn.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+
+    assert runtime._multi_store.task_payload(runtime._team_id(task_id), "checker")[
+        "user_goal"
+    ] == command
+    assert runtime._stored_outer_command(task_id) == command
