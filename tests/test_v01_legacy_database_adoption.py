@@ -193,6 +193,33 @@ def test_source_aliases_are_one_candidate(tmp_path):
     assert len(_rows(target, "tasks")) == 1
 
 
+
+@pytest.mark.parametrize("alias_first", [False, True])
+def test_hardlink_alias_with_uncheckpointed_wal_is_ambiguous(tmp_path, alias_first):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "alias.db"
+    try:
+        alias.hardlink_to(source)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        assert source.with_name(source.name + "-wal").stat().st_size > 0
+        # Repeating an identical path is still one unambiguous WAL source.
+        assert adoption._known_sources(target, [source, source]) == [source.resolve()]
+        before = source.read_bytes()
+        candidates = [alias, source] if alias_first else [source, alias]
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption.prepare_default_database(target, candidates)
+        assert not target.exists()
+        assert source.read_bytes() == before
+        assert json.loads(_rows(source, "tasks")[0][4]) == {"from_wal": True}
+
+
 def test_packaged_conflict_is_displayed_before_any_runtime_starts(monkeypatch):
     from scripts import nika_windows
 
