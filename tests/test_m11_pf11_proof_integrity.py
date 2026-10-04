@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -38,10 +39,13 @@ def _run_proofs(
     monkeypatch: pytest.MonkeyPatch,
     first: str,
     second: str,
+    existing_evidence: bytes | None = None,
 ) -> tuple[Path, int]:
     bundle = tmp_path / "NikaCore"
     bundle.mkdir()
     (bundle / "NikaCore.exe").write_bytes(b"stand-in: process is mocked")
+    if existing_evidence is not None:
+        (bundle / "pf11-packaged-product-journey.json").write_bytes(existing_evidence)
     evidence = iter((first, second))
     attempts: list[int] = []
 
@@ -139,3 +143,20 @@ def test_project_version_rejects_invalid_toml_carrier(
     )
     with pytest.raises(RuntimeError, match="must be a nonempty, unpadded string"):
         project_version(tmp_path)
+
+
+def test_failed_fsync_preserves_previous_pf11_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    valid = json.dumps(_valid_proof())
+    previous = b"previous validated artifact"
+
+    def fail_fsync(_: int) -> None:
+        raise OSError("simulated proof write interruption")
+
+    monkeypatch.setattr(os, "fsync", fail_fsync)
+    with pytest.raises(OSError, match="simulated proof write interruption"):
+        _run_proofs(tmp_path, monkeypatch, valid, valid, existing_evidence=previous)
+    bundle = tmp_path / "NikaCore"
+    assert (bundle / "pf11-packaged-product-journey.json").read_bytes() == previous
+    assert not tuple(bundle.glob(".pf11-proof-*.tmp"))
