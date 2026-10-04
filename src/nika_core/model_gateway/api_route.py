@@ -103,6 +103,24 @@ class ApiModelRouteConfig:
         if parsed.query or parsed.fragment:
             raise ValueError("API model route base_url must not contain query or fragment")
 
+        # urlsplit preserves Unicode dot variants in the hostname, whereas
+        # HTTPX/IDNA maps them to ASCII dots before making the real request.
+        # Never authorize one displayed hostname and send a credential to
+        # another. Accept ordinary Unicode domains and their punycode spelling.
+        try:
+            transport_host = httpx.URL(self.base_url).host
+        except (httpx.InvalidURL, ValueError) as exc:
+            raise ValueError("API model route base_url has invalid HTTP authority") from exc
+        expected_host = parsed.hostname.lower().rstrip(".")
+        actual_host = transport_host.lower().rstrip(".") if transport_host else ""
+        if expected_host != actual_host:
+            try:
+                actual_idna_host = actual_host.encode("idna").decode("ascii")
+            except UnicodeError:
+                actual_idna_host = ""
+            if expected_host != actual_idna_host:
+                raise ValueError("API model route host differs from HTTP transport")
+
 
 class CredentialRefOpenAICompatibleProvider:
     """Thin credential-reference wrapper over Nika's OpenAI-compatible provider.
