@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -356,3 +356,70 @@ def test_scale_many_services_remain_independent_across_restart() -> None:
     assert len(provider.deploy_calls) == 30
     assert len(set(provider.deploy_calls)) == 30
     assert all(restored.get(spec.operation_id).state is OperationState.SUCCEEDED for spec in specs)
+
+
+@pytest.mark.parametrize("elapsed_seconds", [300, 301])
+def test_expired_node_lease_blocks_provider_and_allows_fresh_retry(
+    elapsed_seconds: int,
+) -> None:
+    coordinator, _, provider, _ = _coordinator()
+    spec = replace(
+        _spec("project-a", "messages"),
+        credential_ttl_seconds=600,
+        node_lease_seconds=300,
+    )
+    coordinator.submit(spec, now=NOW)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    later = NOW + timedelta(seconds=elapsed_seconds)
+
+    waiting = coordinator.complete(spec.operation_id, now=later)
+    assert waiting.state is OperationState.WAITING_FOR_NODE
+    assert waiting.node_id is None
+    assert provider.deploy_calls == []
+    assert coordinator.nodes.snapshot().leases == ()
+
+    assert coordinator.retry(spec.operation_id, now=later).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=later).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [spec.intent.intent_id]
+
+
+def test_reassigned_node_lease_is_not_released_by_stale_completion() -> None:
+    coordinator, _, provider, _ = _coordinator()
+    first = _spec("project-a", "messages")
+    second = _spec("project-a", "profiles", SHA2)
+    coordinator.submit(first, now=NOW)
+    assert coordinator.prepare(first.operation_id, now=NOW).state is OperationState.PREPARED
+
+    later = NOW + timedelta(seconds=301)
+    successor_lease = coordinator.nodes.acquire(second.request, now=later)
+    assert successor_lease.node_id == "local-linux"
+
+    stale = coordinator.complete(first.operation_id, now=later)
+    assert stale.state is OperationState.WAITING_FOR_NODE
+    assert provider.deploy_calls == []
+    assert coordinator.nodes.snapshot().leases == (successor_lease,)
+    assert not coordinator.nodes.is_active_for(successor_lease, first.request, now=later)
+    assert coordinator.nodes.is_active_for(successor_lease, second.request, now=later)
+
+    coordinator.nodes.release(successor_lease.lease_id)
+    assert coordinator.retry(first.operation_id, now=later).state is OperationState.PREPARED
+    assert coordinator.complete(first.operation_id, now=later).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [first.intent.intent_id]
+
+
+def test_disabled_node_blocks_prepared_deployment_before_provider() -> None:
+    coordinator, _, provider, _ = _coordinator()
+    spec = _spec("project-a", "messages")
+    coordinator.submit(spec, now=NOW)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+
+    coordinator.nodes.register(replace(local_linux_node(), enabled=False))
+    waiting = coordinator.complete(spec.operation_id, now=NOW)
+    assert waiting.state is OperationState.WAITING_FOR_NODE
+    assert waiting.node_id is None
+    assert provider.deploy_calls == []
+
+    coordinator.nodes.register(local_linux_node())
+    assert coordinator.retry(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [spec.intent.intent_id]
