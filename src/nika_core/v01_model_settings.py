@@ -98,8 +98,15 @@ class ModelSelection(BaseModel):
     def clean_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if value != value.strip() or not value or any(ord(char) < 32 for char in value):
+        if value != value.strip() or not value or any(not char.isprintable() for char in value):
             raise ValueError("invalid model route text")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def bound_model_identity_bytes(cls, value: str | None) -> str | None:
+        if value is not None and len(value.encode("utf-8")) > 512:
+            raise ValueError("model identity exceeds local health byte budget")
         return value
 
     @field_validator("credential_ref")
@@ -116,7 +123,10 @@ class ModelSelection(BaseModel):
     def finite_timeout(cls, value: Any) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError("timeout_seconds must be numeric")
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise ValueError("timeout_seconds must be finite") from exc
         if not math.isfinite(number):
             raise ValueError("timeout_seconds must be finite")
         return number
@@ -167,6 +177,8 @@ class ModelSelection(BaseModel):
                 raise ValueError("Ollama route requires an explicit non-zero port")
             if parsed.username is not None or parsed.password is not None:
                 raise ValueError("Ollama route must not contain userinfo")
+            if "?" in self.base_url or "#" in self.base_url:
+                raise ValueError("Ollama base URL must not contain query or fragment delimiters")
             if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
                 raise ValueError("Ollama base URL must not contain path, query, or fragment")
             return self
@@ -218,6 +230,8 @@ class ModelSelection(BaseModel):
     @classmethod
     def from_stored(cls, value: str) -> ModelSelection:
         try:
+            if type(value) is not str:
+                raise TypeError("stored model selection must be text")
             return cls.model_validate_json(value)
         except (TypeError, ValueError, ValidationError) as exc:
             raise ModelSetupError(
@@ -241,6 +255,10 @@ class V01ModelSettings:
                 "CREATE TABLE IF NOT EXISTS v01_model_settings_schema ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            if conn.execute(
+                "SELECT 1 FROM v01_model_settings_schema WHERE version < 1 LIMIT 1"
+            ).fetchone() is not None:
+                raise ModelSetupError("Версія налаштувань моделі некоректна.")
             current = (
                 conn.execute("SELECT MAX(version) FROM v01_model_settings_schema").fetchone()[0]
                 or 0
@@ -432,13 +450,14 @@ class V01ModelSettings:
 
         if not isinstance(task_id, str) or not task_id.strip():
             raise ModelSetupError("Немає коректного ідентифікатора завдання.")
-        try:
-            payload = TaskQueue(self._store).get(task_id).payload
-        except KeyError as exc:
-            raise ModelSetupError("Завдання для вибраної моделі не знайдено.") from exc
-        selection_id = payload.get(_TASK_SELECTION_FIELD)
         with self._store.connection() as conn:
+            # Capture the task inside the same write fence as its binding.
             conn.execute("BEGIN IMMEDIATE")
+            try:
+                payload = TaskQueue(self._store).get(task_id).payload
+            except KeyError as exc:
+                raise ModelSetupError("Завдання для вибраної моделі не знайдено.") from exc
+            selection_id = payload.get(_TASK_SELECTION_FIELD)
             accepted = self._selection_by_id(conn, selection_id)
             row = conn.execute(
                 "SELECT selection_id, selection_json FROM v01_task_model_bindings "
