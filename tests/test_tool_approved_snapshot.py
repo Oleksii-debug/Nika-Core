@@ -36,7 +36,9 @@ def _authorization(*, task_id: str = "task-1") -> ToolAuthorization:
     )
 
 
-def _durable_guard(path: Path, task_id: str = "task-1") -> tuple[ToolEffectGuard, IdempotencyLedger]:
+def _durable_guard(
+    path: Path, task_id: str = "task-1"
+) -> tuple[ToolEffectGuard, IdempotencyLedger]:
     store = SQLiteStore(path)
     store.initialize()
     with store.connection() as conn:
