@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sqlite3
 from pathlib import Path
 
@@ -493,3 +494,247 @@ def test_corrupt_checker_handoff_cannot_authorize_outer_resume(
     )
     assert result.outcome is RuntimeOutcome.FAILED
     assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize(
+    "supplied",
+    [
+        pytest.param(True, id="boolean"),
+        pytest.param(42, id="number"),
+        pytest.param({"goal": "other"}, id="object"),
+        pytest.param("Different instruction.", id="mismatched-text"),
+    ],
+)
+def test_initial_outer_run_rejects_nontext_or_unbound_command(
+    tmp_path: Path, supplied: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    task_id = _created_task(store, "Compare the two declared local sources.")
+    result = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": supplied},
+            )
+        )
+    )
+    assert result.outcome is RuntimeOutcome.FAILED
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM multi_agent_teams").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("carrier", "replacement"),
+    [
+        pytest.param("task", True, id="task-boolean"),
+        pytest.param("task", None, id="task-null"),
+        pytest.param("task", "", id="task-empty"),
+        pytest.param("task", {"goal": "other"}, id="task-object"),
+        pytest.param("task", "Different instruction.", id="task-mismatch"),
+        pytest.param("checker", True, id="checker-boolean"),
+        pytest.param("checker", {"goal": "other"}, id="checker-object"),
+        pytest.param("checker", None, id="checker-null"),
+        pytest.param("checker", "Different instruction.", id="checker-mismatch"),
+    ],
+)
+def test_resume_rejects_malformed_or_mismatched_persisted_command(
+    tmp_path: Path, carrier: str, replacement: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    team_id = runtime._team_id(task_id)
+    prior_results = _result_count(store)
+    with store.connection() as conn:
+        if carrier == "task":
+            cursor = conn.execute(
+                "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+                (json.dumps({"command": replacement}), task_id),
+            )
+        else:
+            row = conn.execute(
+                "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'task'",
+                (team_id,),
+            ).fetchone()
+            assert row is not None
+            handoff = json.loads(row["payload_json"])
+            handoff["user_goal"] = replacement
+            cursor = conn.execute(
+                "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+                (json.dumps(handoff, ensure_ascii=False), row["handoff_id"]),
+            )
+        assert cursor.rowcount == 1
+
+    assert runtime._stored_outer_command(task_id) == ""
+    outer_token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=outer_token
+        )
+    ).status is RuntimeResumeProbeStatus.INVALID
+
+    member_task_id = f"team:{team_id}:worker-a"
+    member_thread = f"v01:{team_id}:worker-a"
+    member_token = runtime.initial_resume_token(
+        task_id=member_task_id, thread_id=member_thread
+    )
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=member_task_id,
+            thread_id=member_thread,
+            resume_token=member_token,
+        )
+    ).status is RuntimeResumeProbeStatus.INVALID
+    assert asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                resume_token=outer_token,
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    ).outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == prior_results
+    assert asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                payload={"command": command},
+            )
+        )
+    ).outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == prior_results
+
+    reopened = V01PackagedThreeAgentRuntime(
+        store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
+    )
+    assert reopened._stored_outer_command(task_id) == ""
+
+
+def test_unicode_and_whitespace_command_remains_restart_safe(tmp_path: Path) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    task_id = _created_task(store, "  Порівняй два локальні джерела. \t")
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                payload={"command": "Порівняй два локальні джерела."},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    assert runtime._stored_outer_command(task_id) == "Порівняй два локальні джерела."
+    token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=token
+        )
+    ).status is RuntimeResumeProbeStatus.READY
+    assert asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                resume_token=token,
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    ).outcome is RuntimeOutcome.COMPLETED
+
+
+@pytest.mark.parametrize("fallback", ("blank", "missing"))
+def test_legacy_empty_checker_goal_uses_valid_durable_task_command(
+    tmp_path: Path, fallback: str
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id, thread_id=thread_id, payload={"command": command}
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'task'",
+            (runtime._team_id(task_id),),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        if fallback == "blank":
+            payload["user_goal"] = ""
+        else:
+            payload.pop("user_goal", None)
+        conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+            (json.dumps(payload, ensure_ascii=False), row["handoff_id"]),
+        )
+    assert runtime._stored_outer_command(task_id) == command
+    token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=token
+        )
+    ).status is RuntimeResumeProbeStatus.READY
+
+
+@pytest.mark.parametrize(
+    "stored_command",
+    [
+        pytest.param(True, id="nontext-stored-command"),
+        pytest.param("Changed after queueing.", id="stale-request-command"),
+    ],
+)
+def test_first_run_rejects_corrupt_or_rebound_durable_command_before_effects(
+    tmp_path: Path, stored_command: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (json.dumps({"command": stored_command}), task_id),
+        )
+    result = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert result.outcome is RuntimeOutcome.FAILED
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM multi_agent_teams").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0] == 0

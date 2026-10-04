@@ -659,3 +659,60 @@ def test_permission_expansion_fails_before_any_runtime_execution(tmp_path: Path)
     assert runtime.requests == []
     with pytest.raises(KeyError):
         store.team_state("team-permission")
+
+
+@pytest.mark.parametrize("surplus", (1, 64))
+def test_checker_inbound_history_is_bounded_before_restart_execution(
+    tmp_path: Path, surplus: int
+) -> None:
+    db_path, source_a, source_b = _fixture(tmp_path)
+    _, _store, first_coordinator, first_adapter = _open(db_path, source_a, source_b)
+
+    async def crash_before_checker(**kwargs: object):
+        del kwargs
+        raise SimulatedProcessCrash("workers completed before checker")
+
+    first_coordinator.run_root_member = crash_before_checker  # type: ignore[method-assign]
+    with pytest.raises(SimulatedProcessCrash, match="workers completed"):
+        asyncio.run(
+            first_adapter.run(
+                user_goal="Compare after restart.",
+                shared_task_id="task-bounded-replay",
+                team_id="team-bounded-replay",
+            )
+        )
+
+    with SQLiteStore(db_path).connection() as conn:
+        original = conn.execute(
+            "SELECT handoff_id FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND kind = 'result' LIMIT 1",
+            ("team-bounded-replay",),
+        ).fetchone()
+        assert original is not None
+        for index in range(surplus):
+            conn.execute(
+                "INSERT INTO multi_agent_handoffs("
+                "handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at) "
+                "SELECT ?, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, ?, created_at "
+                "FROM multi_agent_handoffs WHERE handoff_id = ?",
+                (f"surplus-result-{index:03}", '{"invalid":true}', original["handoff_id"]),
+            )
+
+    resumed_runtime, _, _, resumed_adapter = _open(db_path, source_a, source_b)
+    resumed = resumed_adapter.run(
+        user_goal="Compare after restart.",
+        shared_task_id="task-bounded-replay",
+        team_id="team-bounded-replay",
+    )
+    if surplus == 1:
+        result = asyncio.run(resumed)
+        assert result.final_output["status"] == CheckerStatus.EVIDENCE_INVALID.value
+        assert [request.payload["member_id"] for request in resumed_runtime.requests] == [
+            "checker"
+        ]
+    else:
+        with pytest.raises(RuntimeError, match="excess inbound result handoffs"):
+            asyncio.run(resumed)
+        assert resumed_runtime.requests == []

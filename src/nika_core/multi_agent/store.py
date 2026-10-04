@@ -36,6 +36,9 @@ _TERMINAL_MEMBER_STATES = frozenset(
 )
 
 
+_MAX_INBOUND_HANDOFFS = 256
+
+
 class MultiAgentStore:
     """Durable Nika-owned team identity, lineage and evidence store."""
 
@@ -227,22 +230,32 @@ class MultiAgentStore:
         self,
         team_id: str,
         recipient_id: str,
+        *,
+        max_handoffs: int = _MAX_INBOUND_HANDOFFS,
     ) -> tuple[AgentHandoff, ...]:
-        """Return durable RESULT/ERROR inputs addressed to one team member."""
+        """Return bounded durable RESULT/ERROR inputs addressed to one member."""
+        if isinstance(max_handoffs, bool) or not isinstance(max_handoffs, int):
+            raise TypeError("max_handoffs must be an integer")
+        if not 1 <= max_handoffs <= _MAX_INBOUND_HANDOFFS:
+            raise ValueError("max_handoffs is outside supported bounds")
         self.member(team_id, recipient_id)
         with self._store.connection() as conn:
             rows = conn.execute(
                 "SELECT handoff_id, team_id, sender_id, recipient_id, kind, "
                 "correlation_id, payload_json FROM multi_agent_handoffs "
                 "WHERE team_id = ? AND recipient_id = ? AND kind IN (?, ?) "
-                "ORDER BY created_at, handoff_id",
+                "ORDER BY created_at, handoff_id LIMIT ?",
                 (
                     team_id,
                     recipient_id,
                     HandoffKind.RESULT.value,
                     HandoffKind.ERROR.value,
+                    max_handoffs + 1,
                 ),
             ).fetchall()
+        # Never decode or forward a truncated evidence set as complete.
+        if len(rows) > max_handoffs:
+            raise RuntimeError("excess inbound result handoffs")
         handoffs: list[AgentHandoff] = []
         for row in rows:
             payload = _decode_task_payload(row["payload_json"])
