@@ -70,6 +70,7 @@ def test_public_evidence_contract_hashes_sensitive_and_oversized_references() ->
         "https://service.invalid/callback?api_key=raw-api-key",
         "https://service.invalid/callback?api%5Fkey=raw-encoded-key",
         "https://service.invalid/callback?api%255Fkey=raw-twice-encoded-key",
+        "https://service.invalid/callback?api%2525255Fkey=raw-deeply-encoded-key",
         "https://service.invalid/callback?client_secret=raw-client-secret",
         "https://service.invalid/callback?password=raw-password",
         "https://service.invalid/callback?session_token=raw-session-token",
@@ -92,6 +93,7 @@ def test_public_evidence_hides_common_url_and_header_credentials(reference: str)
     "reference",
     (
         "https://service.invalid/report?status=healthy",
+        "https://service.invalid/report?name=important%20report",
         "health://project-1/service-api/healthy",
         "evidence://project-1/build/123",
     ),
@@ -101,6 +103,34 @@ def test_public_evidence_retains_nonsensitive_references(reference: str) -> None
         EvidenceReference(kind="test", reference=reference, label="Evidence").reference
         == reference
     )
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "api_key",
+        "api-key",
+        "apikey",
+        "client_secret",
+        "client-secret",
+        "password",
+        "passwd",
+        "secret",
+        "secret_key",
+        "private_key",
+        "access_key",
+        "id_token",
+        "session_token",
+        "auth_token",
+        "x-api-key",
+        "authorization",
+    ),
+)
+def test_public_evidence_redacts_all_common_credential_query_keys(key: str) -> None:
+    reference = f"https://service.invalid/evidence?{key}=raw-credential"
+    presented = EvidenceReference(kind="test", reference=reference, label="Evidence")
+    assert presented.reference.startswith("evidence-sha256:")
+    assert "raw-credential" not in presented.reference
 
 
 def test_execution_projection_never_surfaces_raw_credential_use_event_id() -> None:
