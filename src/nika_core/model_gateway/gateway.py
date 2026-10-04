@@ -245,6 +245,12 @@ class ModelGateway:
                 raise asyncio.CancelledError()
             if terminal_error is not None:
                 raise terminal_error
+            # An async timeout cannot interrupt a provider that blocks the
+            # event loop synchronously. A late successful return is not a
+            # timely completion, regardless of its response envelope.
+            self._enforce_completion_deadline(
+                request, capabilities.provider_id, deadline, loop
+            )
             if response is None:
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
@@ -270,6 +276,12 @@ class ModelGateway:
                 raise response_error
             if canonical_response is None:
                 raise AssertionError("validated model response snapshot is unavailable")
+            # Untrusted synchronous response getters may consume the remaining
+            # budget after provider.complete has returned. Never publish their
+            # late result as a successful durable completion.
+            self._enforce_completion_deadline(
+                request, capabilities.provider_id, deadline, loop
+            )
 
             self._audit(
                 event_type="model.completed",
@@ -291,6 +303,27 @@ class ModelGateway:
             "model fallback route was exhausted",
             retryable=True,
         )
+
+    def _enforce_completion_deadline(
+        self,
+        request: ModelRequest,
+        provider_id: str,
+        deadline: float,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        if loop.time() < deadline:
+            return
+        error = ModelGatewayError(
+            ModelErrorCode.TIMEOUT,
+            "model request exceeded its deadline after provider execution",
+            provider_id=provider_id,
+            retryable=False,
+            # A provider was invoked; a late response does not prove that its
+            # underlying model effect was cancelled or safe to replay.
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+        self._audit_failure(request, provider_id, error)
+        raise error
 
     def _authorize_cloud_effect(
         self,
@@ -519,46 +552,63 @@ class ModelGateway:
     def _normalize_provider_error(
         error: ModelGatewayError, provider_id: str
     ) -> ModelGatewayError:
-        if not isinstance(error.code, ModelErrorCode):
+        # A provider owns its exception object, including potentially hostile
+        # attribute accessors. Read every field once under containment; never
+        # retain raw provider exception diagnostics or use its fields again.
+        try:
+            code = error.code
+            retryable = error.retryable
+            failure_effect = error.failure_effect
+            reported_provider_id = error.provider_id
+        except Exception:  # noqa: BLE001 - untrusted exception envelope
+            code = None
+            retryable = None
+            failure_effect = None
+            reported_provider_id = None
+
+        if type(code) is not ModelErrorCode:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid error code",
                 provider_id=provider_id,
                 retryable=False,
             )
-        if not isinstance(error.retryable, bool):
+        if type(retryable) is not bool:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid retryable flag",
                 provider_id=provider_id,
                 retryable=False,
             )
-        if not isinstance(error.failure_effect, ModelFailureEffect):
+        if type(failure_effect) is not ModelFailureEffect:
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an invalid failure effect state",
                 provider_id=provider_id,
                 retryable=False,
             )
-        if error.provider_id is not None and error.provider_id != provider_id:
+        if reported_provider_id is not None and (
+            type(reported_provider_id) is not str
+            or reported_provider_id != provider_id
+        ):
             return ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "model provider returned an error for another provider identity",
                 provider_id=provider_id,
                 retryable=False,
             )
-        safe_message = _SAFE_PROVIDER_MESSAGES[error.code]
-        if provider_id == "foundry-local" and error.code is ModelErrorCode.UNAVAILABLE:
+        safe_message = _SAFE_PROVIDER_MESSAGES[code]
+        if provider_id == "foundry-local" and code is ModelErrorCode.UNAVAILABLE:
             safe_message = (
                 "Foundry Local model is unavailable; use the explicit model download "
                 "action before inference if the model is not cached"
             )
         return ModelGatewayError(
-            error.code,
+            code,
             safe_message,
             provider_id=provider_id,
-            retryable=error.retryable,
-            failure_effect=error.failure_effect,
+            retryable=retryable,
+            failure_effect=failure_effect,
         )
 
     @staticmethod
