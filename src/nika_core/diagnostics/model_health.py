@@ -12,6 +12,12 @@ import httpx
 from nika_core.diagnostics.health import HealthCheck, HealthStatus
 
 
+# Metadata probes must not let a local HTTP responder exhaust the desktop process.
+_MAX_CATALOG_BYTES = 1024 * 1024
+_MAX_CATALOG_MODELS = 4096
+_MAX_MODEL_ID_BYTES = 512
+
+
 class ModelHealthFact(StrEnum):
     YES = "yes"
     NO = "no"
@@ -159,9 +165,13 @@ class OllamaModelHealthProbe:
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                tags_response = client.get(f"{self._base_url}/api/tags")
+                tags_response = self._bounded_get(client, f"{self._base_url}/api/tags")
                 reachable = ModelHealthFact.YES
-                present = self._presence_from_response(tags_response)
+                present = (
+                    self._presence_from_response(tags_response)
+                    if tags_response is not None
+                    else ModelHealthFact.UNKNOWN
+                )
                 if present is ModelHealthFact.NO:
                     return ModelHealthSnapshot(
                         configured=configured,
@@ -179,11 +189,15 @@ class OllamaModelHealthProbe:
                         inference_proven=inference_proven,
                     )
                 try:
-                    running_response = client.get(f"{self._base_url}/api/ps")
+                    running_response = self._bounded_get(client, f"{self._base_url}/api/ps")
                 except httpx.TransportError:
                     ready = ModelHealthFact.UNKNOWN
                 else:
-                    ready = self._readiness_from_response(running_response)
+                    ready = (
+                        self._readiness_from_response(running_response)
+                        if running_response is not None
+                        else ModelHealthFact.UNKNOWN
+                    )
         except httpx.TransportError:
             return ModelHealthSnapshot(
                 configured=configured,
@@ -207,6 +221,8 @@ class OllamaModelHealthProbe:
             or not self._model_id.strip()
             or self._model_id != self._model_id.strip()
             or any(not char.isprintable() for char in self._model_id)
+            or len(self._model_id) > _MAX_MODEL_ID_BYTES
+            or len(self._model_id.encode("utf-8")) > _MAX_MODEL_ID_BYTES
             or type(self._base_url) is not str
             or not self._base_url.strip()
             or self._base_url != self._base_url.strip()
@@ -274,6 +290,37 @@ class OllamaModelHealthProbe:
             return ModelHealthFact.NO
         return ModelHealthFact.UNKNOWN
 
+    @staticmethod
+    def _bounded_get(client: httpx.Client, url: str) -> httpx.Response | None:
+        """Bound real HTTP responses *before* buffering or decoding provider JSON.
+
+        Tests may inject a trusted minimal client exposing only get(). Production
+        httpx.Client always exposes stream(), which is the enforced network path.
+        None means malformed or excessive HTTP evidence, never model absence.
+        """
+        stream = getattr(client, "stream", None)
+        if not callable(stream):
+            return client.get(url)
+        with stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
+            if not OllamaModelHealthProbe._successful_response(response):
+                return httpx.Response(status_code=response.status_code)
+            if response.headers.get("content-encoding", "identity").lower() != "identity":
+                return None
+            declared = response.headers.get("content-length")
+            if declared is not None and (
+                not declared.isascii()
+                or not declared.isdecimal()
+                or len(declared) > 7
+                or int(declared) > _MAX_CATALOG_BYTES
+            ):
+                return None
+            payload = bytearray()
+            for chunk in response.iter_raw(chunk_size=16384):
+                if len(chunk) > _MAX_CATALOG_BYTES - len(payload):
+                    return None
+                payload.extend(chunk)
+            return httpx.Response(status_code=response.status_code, content=bytes(payload))
+
     def _presence_from_response(self, response: httpx.Response) -> ModelHealthFact:
         if not self._successful_response(response):
             return ModelHealthFact.UNKNOWN
@@ -316,7 +363,7 @@ class OllamaModelHealthProbe:
         if type(body) is not dict:
             return None
         raw_models = body.get("models")
-        if type(raw_models) is not list:
+        if type(raw_models) is not list or len(raw_models) > _MAX_CATALOG_MODELS:
             return None
         identities: set[str] = set()
         for item in raw_models:
@@ -332,6 +379,8 @@ class OllamaModelHealthProbe:
                     or not value
                     or value != value.strip()
                     or any(not char.isprintable() for char in value)
+                    or len(value) > _MAX_MODEL_ID_BYTES
+                    or len(value.encode("utf-8")) > _MAX_MODEL_ID_BYTES
                 ):
                     return None
                 item_identities.append(value)
