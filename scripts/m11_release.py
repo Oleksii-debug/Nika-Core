@@ -118,10 +118,13 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
                     f"exit {completed.returncode}"
                 )
             try:
-                if output.stat().st_size > 1024 * 1024:
+                # Bound the actual open/read, not a separate stat susceptible to file replacement.
+                with output.open("rb") as handle:
+                    encoded = handle.read(1024 * 1024 + 1)
+                if len(encoded) > 1024 * 1024:
                     raise ValueError("packaged PF11 proof is too large")
                 payload = json.loads(
-                    output.read_text(encoding="utf-8"),
+                    encoded.decode("utf-8"),
                     object_pairs_hook=_unique_proof_fields,
                     parse_constant=_reject_nonfinite_proof_number,
                 )
