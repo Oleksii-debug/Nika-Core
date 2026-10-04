@@ -269,7 +269,15 @@ class CredentialRefOpenAICompatibleProvider:
                 retryable=False,
                 failure_effect=ModelFailureEffect.NO_EFFECT,
             ) from None
-        if type(material) is not str or not material or "\x00" in material:
+        # Bearer material becomes an HTTP header. ASCII visible non-space
+        # characters are required by this transport; CR/LF, DEL, Unicode and
+        # whitespace must fail before any client construction or network effect.
+        if (
+            type(material) is not str
+            or not material
+            or not material.isascii()
+            or any(not 33 <= ord(character) <= 126 for character in material)
+        ):
             raise ModelGatewayError(
                 ModelErrorCode.AUTHENTICATION,
                 "model credential could not be resolved",
