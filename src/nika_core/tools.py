@@ -5,6 +5,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
@@ -309,12 +310,20 @@ class ToolExecutor:
         self._effect_guard = effect_guard
 
     def register(self, spec: ToolSpec, handler: ToolHandler) -> None:
-        if spec.tool_id in self._tools:
-            raise ValueError(f"duplicate tool_id: {spec.tool_id}")
-        self._tools[spec.tool_id] = (spec, handler)
+        # A frozen dataclass can still be changed through object.__setattr__, and
+        # input_schema contains mutable nested data. Never let a caller's original
+        # spec change the registered risk, identity or deadline after admission.
+        admitted = replace(spec, input_schema=deepcopy(spec.input_schema))
+        if admitted.tool_id in self._tools:
+            raise ValueError(f"duplicate tool_id: {admitted.tool_id}")
+        self._tools[admitted.tool_id] = (admitted, handler)
 
     def specs(self) -> tuple[ToolSpec, ...]:
-        return tuple(spec for spec, _handler in self._tools.values())
+        # Catalog consumers must not receive the authority-bearing registry objects.
+        return tuple(
+            replace(spec, input_schema=deepcopy(spec.input_schema))
+            for spec, _handler in self._tools.values()
+        )
 
     async def execute(self, call: ToolCall) -> ToolResult:
         try:
