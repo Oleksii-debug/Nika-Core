@@ -781,3 +781,80 @@ def test_initial_run_rejects_missing_task_even_with_legacy_checker_goal(
     )
     assert second.outcome is RuntimeOutcome.FAILED
     assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize("surplus", (2, 64))
+def test_packaged_checker_rejects_surplus_inbound_before_decode_or_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, surplus: int
+) -> None:
+    import nika_core.multi_agent.store as multi_agent_store
+
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    team_id = runtime._team_id(task_id)
+    previous_results = _result_count(store)
+    surplus_payload = '{"surplus":true}'
+    with store.connection() as conn:
+        original = conn.execute(
+            "SELECT handoff_id FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'result' "
+            "ORDER BY created_at, handoff_id LIMIT 1",
+            (team_id,),
+        ).fetchone()
+        assert original is not None
+        for index in range(surplus):
+            conn.execute(
+                "INSERT INTO multi_agent_handoffs("
+                "handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at) "
+                "SELECT ?, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, ?, created_at "
+                "FROM multi_agent_handoffs WHERE handoff_id = ?",
+                (f"checker-overflow-{index:03}", surplus_payload, original["handoff_id"]),
+            )
+
+    original_decode = multi_agent_store._decode_task_payload
+    decoded_surplus: list[str] = []
+
+    def guarded_decode(payload: object):
+        if payload == surplus_payload:
+            decoded_surplus.append(str(payload))
+        return original_decode(payload)
+
+    def forbidden_model(_task_id: str):
+        raise AssertionError("corrupt checker history must not reach model synthesis")
+
+    monkeypatch.setattr(multi_agent_store, "_decode_task_payload", guarded_decode)
+    member_task_id = f"team:{team_id}:checker"
+    member_thread = f"v01:{team_id}:checker"
+    for current in (
+        runtime,
+        V01PackagedThreeAgentRuntime(
+            store=SQLiteStore(store.path),
+            config=AppConfig(database_path=store.path),
+        ),
+    ):
+        monkeypatch.setattr(current, "_model_runtime_for_task", forbidden_model)
+        result = asyncio.run(
+            current.run(
+                RuntimeRequest(
+                    task_id=member_task_id,
+                    thread_id=member_thread,
+                    payload={},
+                )
+            )
+        )
+        assert result.outcome is RuntimeOutcome.FAILED
+        assert decoded_surplus == []
+        assert _result_count(store) == previous_results
