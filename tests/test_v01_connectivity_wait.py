@@ -670,3 +670,109 @@ def test_exact_defer_replay_recovers_failed_runtime_activation(tmp_path) -> None
     assert healthy_scheduler.jobs == [original_job]
     events = audit.list_for(entity_type="scheduled_job", entity_id="durable-replay")
     assert [event.event_type for event in events] == ["runtime.connectivity_wait_deferred"]
+
+
+def test_defer_skips_stale_runtime_activation_after_job_reassignment(
+    tmp_path, monkeypatch
+) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Activation Reassignment" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    scheduler = _RecordingScheduler()
+    policy = RetryPolicy(max_retries=2, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 9, 3, 11, 0, tzinfo=UTC)
+    task_id = _running_task(queue)
+    service = ConnectivityWaitService(
+        queue=queue,
+        jobs=jobs,
+        audit=audit,
+        probe=_ConnectivityProbe(available=False),
+        scheduler=scheduler,
+    )
+    original_get = jobs.get
+    reassigned = False
+
+    def reassign_before_activation(job_id):
+        nonlocal reassigned
+        current = original_get(job_id)
+        if current is not None and not reassigned:
+            jobs.upsert(replace(current, action_id="runtime.successor_action"))
+            reassigned = True
+        return original_get(job_id)
+
+    monkeypatch.setattr(jobs, "get", reassign_before_activation)
+    service.defer(
+        task_id=task_id,
+        job_id="activation-race",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id="activation-op", now=now),
+    )
+
+    assert reassigned
+    assert scheduler.jobs == []
+    assert original_get("activation-race").action_id == "runtime.successor_action"
+    assert queue.get(task_id).state is TaskState.WAITING_TOOL
+    events = audit.list_for(entity_type="scheduled_job", entity_id="activation-race")
+    assert [event.event_type for event in events] == ["runtime.connectivity_wait_deferred"]
+
+
+def test_reschedule_skips_stale_runtime_activation_after_job_reassignment(
+    tmp_path, monkeypatch
+) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Reschedule Reassignment" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    scheduler = _RecordingScheduler()
+    policy = RetryPolicy(max_retries=2, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 9, 3, 12, 0, tzinfo=UTC)
+    task_id = _running_task(queue)
+    service = ConnectivityWaitService(
+        queue=queue,
+        jobs=jobs,
+        audit=audit,
+        probe=_ConnectivityProbe(available=False),
+        scheduler=scheduler,
+    )
+    service.defer(
+        task_id=task_id,
+        job_id="reschedule-race",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id="reschedule-op", now=now),
+    )
+    assert len(scheduler.jobs) == 1
+    scheduler.jobs.clear()
+    original_get = jobs.get
+    reads = 0
+
+    def reassign_after_reschedule(job_id):
+        nonlocal reads
+        reads += 1
+        current = original_get(job_id)
+        if reads == 2:
+            jobs.upsert(replace(current, action_id="runtime.successor_action"))
+            return original_get(job_id)
+        return current
+
+    monkeypatch.setattr(jobs, "get", reassign_after_reschedule)
+    result = service.evaluate(
+        job_id="reschedule-race",
+        policy=policy,
+        now=now + timedelta(seconds=2),
+        replay_safe=True,
+    )
+
+    assert result.disposition is ScriptRetryDisposition.SCHEDULED
+    assert not result.continuation_granted
+    assert reads == 2
+    assert scheduler.jobs == []
+    assert original_get("reschedule-race").action_id == "runtime.successor_action"
+    assert queue.get(task_id).state is TaskState.WAITING_TOOL
+    events = audit.list_for(entity_type="scheduled_job", entity_id="reschedule-race")
+    assert [event.event_type for event in events] == [
+        "runtime.connectivity_wait_deferred",
+        "runtime.connectivity_wait_rescheduled",
+    ]
