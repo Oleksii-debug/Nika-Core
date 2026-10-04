@@ -66,8 +66,10 @@ def test_stale_dispatch_removes_obsolete_runtime_after_durable_mutation(
         adapter._dispatch(old.job_id, old)
         assert adapter._scheduler.get_job(old.job_id) is None
         current = jobs.get(old.job_id)
-        assert current is None if mutation == "delete" else current is not None
-        if current is not None:
+        if mutation == "delete":
+            assert current is None
+        else:
+            assert current is not None
             assert current.enabled is False
         resolver.assert_not_called()
     finally:
