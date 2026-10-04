@@ -169,7 +169,8 @@ def _canonical_relative_path(value: object) -> bool:
             return False
         # NTFS counts UTF-16 code units, not Python Unicode code points.
         # Extended-length path support never lifts the per-component limit.
-        if sum(2 if ord(char) > 0xFFFF else 1 for char in part) > _MAX_WINDOWS_COMPONENT_UTF16_UNITS:
+        component_units = sum(2 if ord(char) > 0xFFFF else 1 for char in part)
+        if component_units > _MAX_WINDOWS_COMPONENT_UTF16_UNITS:
             return False
         if PureWindowsPath(part).is_reserved():
             return False
