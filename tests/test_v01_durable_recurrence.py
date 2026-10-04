@@ -262,6 +262,14 @@ def test_terminal_task_suppresses_recurrence_on_restart_before_handler(
         suppressed = jobs.get(persisted.job_id)
         assert suppressed is not None
         assert suppressed.enabled is False
+        recurrence_id = f"terminal-{terminal_state.value.lower()}"
+        effective = restarted.get(recurrence_id)
+        assert effective is not None
+        assert effective.status is RecurrenceStatus.CANCELLED
+        assert effective.next_occurrence_id is None
+        assert restarted.resume(recurrence_id) == effective
+        assert restarted.cancel(recurrence_id) == effective
+        assert jobs.get(persisted.job_id) == suppressed
         assert calls == []
     finally:
         adapter.shutdown()
@@ -311,9 +319,47 @@ def test_missing_task_suppresses_recurrence_on_restart_before_handler(tmp_path: 
         suppressed = jobs.get(persisted.job_id)
         assert suppressed is not None
         assert suppressed.enabled is False
+        effective = restarted.get("missing-task")
+        assert effective is not None
+        assert effective.status is RecurrenceStatus.CANCELLED
+        assert effective.next_occurrence_id is None
+        assert restarted.resume("missing-task") == effective
+        assert restarted.cancel("missing-task") == effective
+        assert jobs.get(persisted.job_id) == suppressed
         assert calls == []
     finally:
         adapter.shutdown()
+
+
+def test_manual_disable_of_live_recurrence_is_not_laundered(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    _set_task_state(store, TASK_ID, TaskState.RUNNING)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    service.create(
+        recurrence_id="live-manual-disable",
+        task_id=TASK_ID,
+        action_id="monitor.check",
+        interval_seconds=60,
+        start_at=clock.value,
+    )
+    original = scheduler.upserts[-1]
+    jobs = ScheduledJobStore(store)
+    assert jobs.set_enabled(original.job_id, False)
+    disabled = jobs.get(original.job_id)
+    assert disabled is not None
+
+    with pytest.raises(ValueError, match="enabled state does not match lifecycle"):
+        service.get("live-manual-disable")
+    with pytest.raises(ValueError, match="enabled state does not match lifecycle"):
+        service.resume("live-manual-disable")
+    with pytest.raises(ValueError, match="enabled state does not match lifecycle"):
+        service.cancel("live-manual-disable")
+    assert jobs.get(original.job_id) == disabled
+    assert calls == []
 
 
 def test_completed_occurrence_is_not_repeated_and_missed_runs_coalesce_once(
