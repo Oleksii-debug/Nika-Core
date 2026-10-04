@@ -18,6 +18,21 @@ from nika_core.model_gateway.contracts import (
 )
 
 
+def _direct_httpx_client(*, timeout: float) -> httpx.AsyncClient:
+    """Keep the authorized HTTPS route off environment-configured proxies.
+
+    httpx normally honors HTTP(S)_PROXY / ALL_PROXY via trust_env=True.
+    Credential-bearing CLOUD requests must not silently change egress
+    authority because of inherited Windows process environment settings.
+    Custom client factories are intended for injected transport tests.
+    """
+    return httpx.AsyncClient(
+        timeout=timeout,
+        trust_env=False,
+        follow_redirects=False,
+    )
+
+
 class DeterministicMockProvider:
     def __init__(self, *, provider_id: str = "mock", prefix: str = "mock") -> None:
         self._capabilities = ProviderCapabilities(
@@ -53,7 +68,7 @@ class OpenAICompatibleProvider:
         api_key: str | None = None,
         supports_private_data: bool = False,
         supports_hard_cancellation: bool = False,
-        client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+        client_factory: Callable[..., httpx.AsyncClient] = _direct_httpx_client,
     ) -> None:
         if kind is ProviderKind.NO_LLM:
             raise ValueError("HTTP provider cannot be no_llm")
