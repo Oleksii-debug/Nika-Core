@@ -221,21 +221,32 @@ class ModelGateway:
                 )
                 cancelled = True
             except ModelGatewayError as raw_error:
-                error = self._normalize_provider_error(
-                    raw_error, capabilities.provider_id
-                )
+                # A synchronous provider may raise after the deadline; even
+                # reading its error envelope can consume the remaining budget.
+                # Do not accept a late NO_EFFECT claim or authorize fallback.
+                if loop.time() >= deadline:
+                    error = self._late_completion_error(capabilities.provider_id)
+                else:
+                    error = self._normalize_provider_error(
+                        raw_error, capabilities.provider_id
+                    )
+                    if loop.time() >= deadline:
+                        error = self._late_completion_error(capabilities.provider_id)
                 self._audit_failure(request, capabilities.provider_id, error)
                 if self._can_fallback(error=error, index=index, providers=providers):
                     self._audit_fallback(request, registered, providers[index + 1], error)
                     continue
                 terminal_error = error
             except Exception:  # noqa: BLE001 - provider implementations are untrusted
-                error = ModelGatewayError(
-                    ModelErrorCode.PROVIDER_ERROR,
-                    "model provider failed without a typed Nika error",
-                    provider_id=capabilities.provider_id,
-                    retryable=False,
-                )
+                if loop.time() >= deadline:
+                    error = self._late_completion_error(capabilities.provider_id)
+                else:
+                    error = ModelGatewayError(
+                        ModelErrorCode.PROVIDER_ERROR,
+                        "model provider failed without a typed Nika error",
+                        provider_id=capabilities.provider_id,
+                        retryable=False,
+                    )
                 self._audit_failure(request, capabilities.provider_id, error)
                 terminal_error = error
 
@@ -267,6 +278,12 @@ class ModelGateway:
                 trusted_provider_id=capabilities.provider_id,
                 trusted_provider_kind=capabilities.kind,
             )
+            # Response getters can exceed the deadline even when they return
+            # invalid data. Classify the expired attempt as TIMEOUT before
+            # publishing any provider-error or success audit event.
+            self._enforce_completion_deadline(
+                request, capabilities.provider_id, deadline, loop
+            )
             if response_error is not None:
                 self._audit_failure(
                     request,
@@ -276,12 +293,6 @@ class ModelGateway:
                 raise response_error
             if canonical_response is None:
                 raise AssertionError("validated model response snapshot is unavailable")
-            # Untrusted synchronous response getters may consume the remaining
-            # budget after provider.complete has returned. Never publish their
-            # late result as a successful durable completion.
-            self._enforce_completion_deadline(
-                request, capabilities.provider_id, deadline, loop
-            )
 
             self._audit(
                 event_type="model.completed",
@@ -313,17 +324,21 @@ class ModelGateway:
     ) -> None:
         if loop.time() < deadline:
             return
-        error = ModelGatewayError(
+        error = self._late_completion_error(provider_id)
+        self._audit_failure(request, provider_id, error)
+        raise error
+
+    @staticmethod
+    def _late_completion_error(provider_id: str) -> ModelGatewayError:
+        # The provider was invoked: a late response or failure does not prove
+        # cancellation or make a replay/fallback safe.
+        return ModelGatewayError(
             ModelErrorCode.TIMEOUT,
             "model request exceeded its deadline after provider execution",
             provider_id=provider_id,
             retryable=False,
-            # A provider was invoked; a late response does not prove that its
-            # underlying model effect was cancelled or safe to replay.
             failure_effect=ModelFailureEffect.UNKNOWN,
         )
-        self._audit_failure(request, provider_id, error)
-        raise error
 
     def _authorize_cloud_effect(
         self,
