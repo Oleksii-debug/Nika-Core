@@ -41,9 +41,12 @@ class WindowsBuildPlan:
                     raise ValueError(f"web_assets contains a symbolic link or junction: {relative}")
                 if asset.is_dir():
                     pending.append(asset)
-        index = self.web_assets / "index.html"
-        if not index.is_file() or index.stat().st_size == 0:
-            raise ValueError("web_assets must contain a non-empty index.html")
+        # index.html references both app.js and styles.css: shipping without
+        # either breaks the accessible, keyboard-operated Windows user journey.
+        for required in ("index.html", "app.js", "styles.css"):
+            asset = self.web_assets / required
+            if not asset.is_file() or asset.stat().st_size == 0:
+                raise ValueError(f"web_assets must contain a non-empty {required}")
 
     def pyinstaller_args(self) -> tuple[str, ...]:
         self.validate()
