@@ -199,9 +199,13 @@ class ModelGateway:
             response: ModelResponse | None = None
             terminal_error: ModelGatewayError | None = None
             cancelled = False
+            # Approval binds the immutable semantic request, not an extended
+            # lease. Reduce only its timeout after audit/authorization consumed
+            # time so blocking provider setup cannot spend a stale allowance.
+            effect_request = replace(attempt_request, timeout_seconds=remaining)
             try:
                 async with asyncio.timeout(remaining):
-                    response = await provider.complete(attempt_request)
+                    response = await provider.complete(effect_request)
             except TimeoutError:
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,

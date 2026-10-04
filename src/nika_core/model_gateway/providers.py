@@ -9,6 +9,7 @@ import httpx
 
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelRequest,
     ModelResponse,
@@ -88,6 +89,9 @@ class OpenAICompatibleProvider:
         return self._capabilities
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        # Include synchronous payload/client construction in the provider budget.
+        started = time.perf_counter()
+        deadline = started + request.timeout_seconds
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["Authorization"] = f"Bearer {self._api_key}"
@@ -101,9 +105,15 @@ class OpenAICompatibleProvider:
         if request.temperature is not None:
             payload["temperature"] = request.temperature
 
-        started = time.perf_counter()
         try:
-            async with self._client_factory(timeout=request.timeout_seconds) as client:
+            remaining = deadline - time.perf_counter()
+            if remaining <= 0:
+                raise _pretransport_timeout(self.capabilities.provider_id)
+            async with self._client_factory(timeout=remaining) as client:
+                # A synchronous factory or slow __aenter__ cannot start a late
+                # credential-bearing network effect after the caller's deadline.
+                if time.perf_counter() >= deadline:
+                    raise _pretransport_timeout(self.capabilities.provider_id)
                 response = await client.post(
                     f"{self._base_url}/chat/completions", headers=headers, json=payload
                 )
@@ -327,6 +337,16 @@ class OllamaProvider:
             usage=usage,
             latency_ms=(time.perf_counter() - started) * 1000,
         )
+
+
+def _pretransport_timeout(provider_id: str) -> ModelGatewayError:
+    return ModelGatewayError(
+        ModelErrorCode.TIMEOUT,
+        "model request deadline expired before HTTP effect",
+        provider_id=provider_id,
+        retryable=False,
+        failure_effect=ModelFailureEffect.NO_EFFECT,
+    )
 
 
 def _classify_http_status(status: int) -> tuple[ModelErrorCode, bool]:
