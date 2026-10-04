@@ -161,9 +161,12 @@ class PaginatedResearchRefreshService:
                 raise ValueError("paginated Research checkpoint source belongs to another workspace")
             if position > 0 and item.source_id != _page_source_id(root_source_id, source.url):
                 raise ValueError("paginated Research checkpoint page source identity is invalid")
-            # Processed pages can have a redirected final URL; queued pages must
-            # retain their registered fetch URL, not an arbitrary checkpoint URL.
-            if position >= next_index and item.url != source.url:
+            # A completed page may use its registered URL or its recorded redirect,
+            # but arbitrary checkpoint URLs must not poison the visited frontier.
+            if position < next_index:
+                if item.url not in {source.url, source.final_url}:
+                    raise ValueError("paginated Research checkpoint processed URL changed")
+            elif item.url != source.url:
                 raise ValueError("paginated Research checkpoint pending URL changed")
         return frontier, next_index, *counts
 
