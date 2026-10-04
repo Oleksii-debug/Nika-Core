@@ -678,8 +678,10 @@ def test_nested_completion_fails_before_changing_durable_state(tmp_path, depth) 
     for _ in range(depth):
         nested = [nested]
 
-    with pytest.raises(ValueError, match="nesting depth"):
+    with pytest.raises(ValueError, match="JSON serializable") as failure:
         ledger.complete("effect:1", {"output": nested})
+    assert failure.value.__cause__ is not None
+    assert "nesting depth" in str(failure.value.__cause__)
 
     assert ledger.require("effect:1") == before
     raw = _raw_record(store, "effect:1")
