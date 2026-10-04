@@ -327,6 +327,10 @@ class ActionIntent:
     _executable_identity: str | None = field(init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        if type(self.risk) is not ToolRisk:
+            raise ValueError("risk must be a ToolRisk value")
+        if type(self.approval_required) is not bool:
+            raise ValueError("approval_required must be a boolean")
         object.__setattr__(self, "action_id", _normalize_text(self.action_id, label="action_id"))
         object.__setattr__(self, "tool_id", _normalize_text(self.tool_id, label="tool_id"))
         object.__setattr__(self, "target", _normalize_text(self.target, label="target"))
