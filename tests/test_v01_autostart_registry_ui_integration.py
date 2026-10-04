@@ -239,3 +239,49 @@ def test_packaged_bridge_rejects_forged_disable_on_unreadable_registry(
     assert AuditLog(SQLiteStore(config.database_path)).list_for(
         entity_type="application_setting", entity_id="windows.autostart"
     ) == ()
+
+
+def test_packaged_uia_proof_checks_exact_run_key_type_and_presence() -> None:
+    proof = (Path(__file__).resolve().parents[1] / "scripts/m5_uia_proof.ps1").read_text(
+        encoding="utf-8"
+    )
+    preflight = proof.index("    if ($AutostartPhase -ne 'None') {")
+    launch = proof.index("    $process = Start-Process", preflight)
+    expected_kind = "[Microsoft.Win32.RegistryValueKind]::String"
+    preflight_text = proof[preflight:launch]
+    assert "$existingPresent = " in preflight_text
+    assert "$runKey.GetValueNames() -ccontains 'NikaCore'" in preflight_text
+    assert "$runKey.GetValueKind('NikaCore')" in preflight_text
+    assert "$AutostartPhase -eq 'Enable' -and $existingPresent" in preflight_text
+    assert "$existingKind -ne " + expected_kind in preflight_text
+
+    readback = proof.index("        $actualPresent = ", launch)
+    receipt = proof.index("        Write-Host \"Packaged autostart phase ", readback)
+    receipt_text = proof[readback:receipt]
+    assert "$runKey.GetValueNames() -ccontains 'NikaCore'" in receipt_text
+    assert "$runKey.GetValueKind('NikaCore')" in receipt_text
+    assert "$AutostartPhase -eq 'Disable' -and $actualPresent" in receipt_text
+    assert "$actualKind -ne " + expected_kind in receipt_text
+
+
+def test_hosted_proof_retry_and_cleanup_never_take_foreign_registry_type() -> None:
+    wrapper = (
+        Path(__file__).resolve().parents[1] / "scripts/v01_autostart_uia_proof.ps1"
+    ).read_text(encoding="utf-8")
+    expected_kind = "[Microsoft.Win32.RegistryValueKind]::String"
+    enable = wrapper.index("        $afterFailedEnablePresent = ")
+    disable = wrapper.index("        $afterFailedDisablePresent = ", enable)
+    cleanup = wrapper.index("    $currentPresent = ", disable)
+    assert "$key.GetValueNames() -ccontains 'NikaCore'" in wrapper[enable:disable]
+    assert (
+        "$null -eq $afterFailedEnable -and -not $afterFailedEnablePresent"
+        in wrapper[enable:disable]
+    )
+    disable_text = wrapper[disable:cleanup]
+    assert "$key.GetValueKind('NikaCore')" in disable_text
+    assert "$afterFailedDisableKind -eq " + expected_kind in disable_text
+    assert "$key.GetValueNames() -ccontains 'NikaCore'" in wrapper[cleanup:]
+    assert "$currentKind = if ($currentPresent)" in wrapper[cleanup:]
+    assert "$currentKind -eq " + expected_kind in wrapper[cleanup:]
+    assert "$key.DeleteValue('NikaCore', $false)" in wrapper[cleanup:]
+    assert "elseif ($currentPresent)" in wrapper[cleanup:]
