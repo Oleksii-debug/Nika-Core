@@ -18,6 +18,7 @@ from nika_core.research import (
     PaginatedResearchRefreshService,
     PaginationPolicy,
     ResearchRepository,
+    RefreshDisposition,
     ResearchWorkspace,
     SourceKind,
     SourceSpec,
@@ -410,3 +411,69 @@ def test_source_reassigned_to_another_workspace_cannot_run_old_task(
         paginated.run(task_id)
     assert requested == []
     assert TaskQueue(store).get(task_id).state.value.casefold() == "ready"
+
+
+def test_processed_checkpoint_url_tampering_cannot_complete_a_job(
+    tmp_path: Path,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, _, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [{"source_id": "root", "url": "https://other.example/spoof"}],
+            "next_index": 1,
+            "changed": 1,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="processed URL changed"):
+        paginated.run(task_id)
+    assert TaskQueue(store).get(task_id).state.value.casefold() == "ready"
+    assert requested == []
+
+
+def test_processed_checkpoint_accepts_recorded_final_redirect(
+    tmp_path: Path,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, network, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    network.finalize_source(
+        "root",
+        disposition=RefreshDisposition.CHANGED,
+        final_url="https://example.com/redirected",
+        status_code=200,
+    )
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [{"source_id": "root", "url": "https://example.com/redirected"}],
+            "next_index": 1,
+            "changed": 1,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+
+    summary = paginated.run(task_id)
+    assert summary.state == "completed"
+    assert summary.processed == 1
+    assert requested == []
