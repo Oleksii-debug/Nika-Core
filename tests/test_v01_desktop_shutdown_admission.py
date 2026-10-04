@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -13,7 +14,10 @@ from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.runtime.contracts import RuntimeCapability
+from nika_core.speech import SpeechStreamState
 from nika_core.ui.desktop_backend import DesktopBackend
+from nika_core.ui.packaged_speech import PackagedSpeechFeature
+from scripts import nika_windows
 
 
 class _Host:
@@ -165,3 +169,73 @@ def test_local_cancel_cannot_mutate_after_close_fence(
         backend.stop_agent({})
     assert backend._queue.get(task.task_id).state is TaskState.READY
     assert host.closed
+
+def test_real_packaged_speech_and_backend_retry_together(tmp_path: Path) -> None:
+    """Use actual close boundaries; fake only external audio and pending host work."""
+    host = _Host()
+    backend = _backend(tmp_path, host)
+    pending = _Pending()
+    backend._packaged_futures.add(pending)
+
+    class SlowStream:
+        waits = 0
+
+        def snapshot(self) -> SimpleNamespace:
+            return SimpleNamespace(state=SpeechStreamState.RUNNING)
+
+        def cancel(self) -> None:
+            pass
+
+        def wait(self, timeout: float) -> bool:
+            assert timeout == 5.0
+            self.waits += 1
+            return self.waits > 1
+
+    stream = SlowStream()
+    speech = PackagedSpeechFeature(output=object())
+    speech._stream = stream
+    closed: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.settled = False
+
+        def close(self) -> None:
+            if not self.settled:
+                self.settled = True
+                closed.append(self.name)
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=backend,
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=speech,
+    )
+
+    with pytest.raises(RuntimeError, match="packaged speech worker did not settle"):
+        session.close()
+    assert session._closed is False
+    assert speech._closed is True
+    assert speech._shutdown_settled is False
+    assert speech.speak({"text": "Do not restart speech"}).status == "rejected"
+    assert backend._shutdown_pending
+    assert backend._accepting
+    assert not host.closed
+    assert closed == ["voice_model_setup", "voice"]
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        backend.create_task({"command": "Do not restart runtime"})
+    assert backend._queue.list_recent(limit=10) == []
+
+    pending.set_result(None)
+    session.close()
+    session.close()
+    assert session._closed is True
+    assert speech._shutdown_settled is True
+    assert stream.waits == 2
+    assert host.closed
+    assert backend._packaged_futures == set()
+    assert closed == ["voice_model_setup", "voice"]
