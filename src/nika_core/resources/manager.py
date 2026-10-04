@@ -499,35 +499,48 @@ def _resource_pressure_reason(
 def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
     if type(snapshot) is not ResourceSnapshot:
         return False
+    try:
+        # Frozen dataclass instances can still be partially initialized or have
+        # slots deleted by faulty host adapters/deserialization. Read once so
+        # an incomplete sample cannot escape admission as AttributeError.
+        cpu_percent = snapshot.cpu_percent
+        memory_percent = snapshot.memory_percent
+        disk_percent = snapshot.disk_percent
+        gpu_percent = snapshot.gpu_percent
+        battery_percent = snapshot.battery_percent
+        available_memory_bytes = snapshot.available_memory_bytes
+        available_disk_bytes = snapshot.available_disk_bytes
+        process_rss_bytes = snapshot.process_rss_bytes
+        total_memory_bytes = snapshot.total_memory_bytes
+        logical_cpu_count = snapshot.logical_cpu_count
+        power_plugged = snapshot.power_plugged
+    except AttributeError:
+        return False
+
     percent_values = (
-        snapshot.cpu_percent,
-        snapshot.memory_percent,
-        snapshot.disk_percent,
-        snapshot.gpu_percent,
-        snapshot.battery_percent,
+        cpu_percent,
+        memory_percent,
+        disk_percent,
+        gpu_percent,
+        battery_percent,
     )
-    if snapshot.cpu_percent is None or snapshot.memory_percent is None:
+    if cpu_percent is None or memory_percent is None:
         return False
     for value in percent_values:
         if value is not None and (
             type(value) not in (int, float) or not 0 <= value <= 100 or not math.isfinite(value)
         ):
             return False
-    if type(snapshot.available_memory_bytes) is not int or snapshot.available_memory_bytes < 0:
+    if type(available_memory_bytes) is not int or available_memory_bytes < 0:
         return False
-    byte_values = (
-        snapshot.available_disk_bytes,
-        snapshot.process_rss_bytes,
-        snapshot.total_memory_bytes,
-    )
+    byte_values = (available_disk_bytes, process_rss_bytes, total_memory_bytes)
     if any(value is not None and (type(value) is not int or value < 0) for value in byte_values):
         return False
-    if snapshot.logical_cpu_count is not None and (
-        type(snapshot.logical_cpu_count) is not int or snapshot.logical_cpu_count <= 0
+    if logical_cpu_count is not None and (
+        type(logical_cpu_count) is not int or logical_cpu_count <= 0
     ):
         return False
-    return snapshot.power_plugged is None or type(snapshot.power_plugged) is bool
-
+    return power_plugged is None or type(power_plugged) is bool
 
 def _validate_budget(budget: ResourceBudget) -> None:
     if not budget.scope.strip() or not budget.owner_id.strip():
