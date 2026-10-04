@@ -193,6 +193,8 @@ def test_continuous_download_stream_fails_closed_at_a_finite_limit(browser: Any)
 
     def emit_next() -> None:
         download = _Download(browser.context, browser.page)
+        # Exercise the cardinality limit independently of the no-clobber filename gate.
+        download.suggested_filename = f"evidence-{len(emitted)}.txt"
         download.on_save = emit_next
         emitted.append(download)
         browser.context.emit_download(download)
