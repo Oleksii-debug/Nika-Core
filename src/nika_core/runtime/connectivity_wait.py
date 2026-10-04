@@ -429,8 +429,15 @@ class ConnectivityWaitService:
         )
 
     def _activate_runtime(self, job: ScheduledJob) -> None:
-        if self._scheduler is not None:
-            self._scheduler.upsert(job)
+        if self._scheduler is None:
+            return
+        # Durable state may have changed after defer/reschedule committed.
+        # In particular APSchedulerAdapter.upsert() persists its argument, so
+        # activating an obsolete snapshot would overwrite a successor job.
+        current = self._jobs.get(job.job_id)
+        if current != job or not current.enabled:
+            return
+        self._scheduler.upsert(current)
 
 
 def _job_from_intent(
