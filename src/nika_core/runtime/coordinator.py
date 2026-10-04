@@ -722,7 +722,7 @@ class TaskRuntimeCoordinator:
                         "runtime_id": runtime_id,
                         "thread_id": thread_id,
                         "operation_key": operation_key,
-                        "error": str(exc),
+                        "error": type(exc).__name__,
                     },
                 )
             raise
@@ -1109,10 +1109,10 @@ class TaskRuntimeCoordinator:
     ) -> RuntimeResult:
         try:
             return await runtime.run(request)
-        except Exception as exc:  # noqa: BLE001 - runtime adapter boundary normalizes failures
+        except Exception:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
-                error=str(exc),
+                error="runtime execution failed",
                 error_code=RuntimeErrorCode.INTERNAL,
             )
 
@@ -1123,10 +1123,10 @@ class TaskRuntimeCoordinator:
     ) -> RuntimeResult:
         try:
             return await runtime.resume(request)
-        except Exception as exc:  # noqa: BLE001 - runtime adapter boundary normalizes failures
+        except Exception:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
-                error=str(exc),
+                error="runtime resume failed",
                 error_code=RuntimeErrorCode.INTERNAL,
             )
 
