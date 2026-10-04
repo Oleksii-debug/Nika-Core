@@ -94,17 +94,25 @@ class ConnectivityWaitService:
         )
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            if self._jobs.get_with_connection(conn, job_id) is not None:
-                raise ValueError("connectivity wait job_id already exists")
-            self._queue.transition_with_connection(conn, task_id, TaskState.WAITING_TOOL)
-            self._jobs.upsert_with_connection(conn, job)
-            self._audit.append_with_connection(
-                conn,
-                event_type="runtime.connectivity_wait_deferred",
-                entity_type="scheduled_job",
-                entity_id=job_id,
-                payload=_audit_payload(task_id=task_id, intent=intent),
-            )
+            existing = self._jobs.get_with_connection(conn, job_id)
+            if existing is not None:
+                # Replaying the exact persisted defer after a scheduler failure
+                # may retry runtime activation, but may never rewrite task authority.
+                if (
+                    existing != job
+                    or _task_state_with_connection(conn, task_id) is not TaskState.WAITING_TOOL
+                ):
+                    raise ValueError("connectivity wait job_id already exists")
+            else:
+                self._queue.transition_with_connection(conn, task_id, TaskState.WAITING_TOOL)
+                self._jobs.upsert_with_connection(conn, job)
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.connectivity_wait_deferred",
+                    entity_type="scheduled_job",
+                    entity_id=job_id,
+                    payload=_audit_payload(task_id=task_id, intent=intent),
+                )
 
         # Durable DB state is already authoritative. If runtime installation fails, expose
         # that failure to the caller; scheduler startup can rehydrate the enabled DATE job.
