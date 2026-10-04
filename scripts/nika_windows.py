@@ -68,7 +68,7 @@ class WindowsBridgeSession:
             return
         self._closed = True
         first_error: BaseException | None = None
-        retry_pending_backend = False
+        retry_incomplete_resource = False
         for name, resource in (
             ("speech", self.speech),
             ("voice_model_setup", self.voice_model_setup),
@@ -78,14 +78,21 @@ class WindowsBridgeSession:
             try:
                 resource.close()
             except BaseException as exc:
-                if (
-                    name == "backend"
-                    and type(exc) is RuntimeError
-                    and exc.args == ("cannot close desktop runtime loop while tasks are active",)
+                if type(exc) is RuntimeError and (
+                    (
+                        name == "backend"
+                        and exc.args == (
+                            "cannot close desktop runtime loop while tasks are active",
+                        )
+                    )
+                    or (
+                        name == "speech"
+                        and exc.args == ("packaged speech worker did not settle during shutdown",)
+                    )
                 ):
-                    # The live runtime was not abandoned: allow a later, explicit close retry.
-                    # Earlier resources have idempotent close() boundaries.
-                    retry_pending_backend = True
+                    # Neither a pending runtime nor an unfinished speech worker is abandoned.
+                    # Other resources expose idempotent close() boundaries.
+                    retry_incomplete_resource = True
                 if first_error is None:
                     first_error = exc
                 else:
@@ -95,7 +102,7 @@ class WindowsBridgeSession:
                         name,
                         type(exc).__name__,
                     )
-        if retry_pending_backend:
+        if retry_incomplete_resource:
             self._closed = False
         if first_error is not None:
             raise first_error
