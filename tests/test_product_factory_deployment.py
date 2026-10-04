@@ -393,3 +393,25 @@ def test_node_restore_rejects_noninteger_or_zero_counter(bad_counter: object) ->
     with pytest.raises(DeploymentFabricError, match="counter is invalid"):
         registry.restore(bad_snapshot)
     assert registry.snapshot() == original
+
+
+def test_release_if_current_never_releases_reassigned_work() -> None:
+    registry = ExecutionNodeRegistry()
+    registry.register(local_windows_node())
+    first_request = ExecutionRequest(
+        "project-1",
+        "work-1",
+        Platform.WINDOWS,
+        frozenset(),
+        frozenset(),
+        ResourceEnvelope(1, 512, 512),
+    )
+    other_request = replace(first_request, work_id="work-2")
+    old = registry.acquire(first_request, now=NOW)
+    assert registry.release_if_current(old)
+    new = registry.acquire(other_request, now=NOW)
+    assert not registry.release_if_current(old)
+    assert registry.snapshot().leases == (new,)
+    assert registry.is_active_for(new, other_request, now=NOW)
+    assert registry.release_if_current(new)
+    assert registry.snapshot().leases == ()
