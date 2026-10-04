@@ -179,6 +179,12 @@ class _ArgumentLimits:
         self.bytes_left -= len(encoded)
         return text
 
+    def normalize(self, text: str, *, path: str) -> str:
+        # Reject oversized raw strings before NFC allocates a normalized copy.
+        if len(text) > self.bytes_left:
+            raise ValueError("arguments exceed maximum argument byte size")
+        return self.charge(unicodedata.normalize("NFC", text), path=path)
+
 
 def _normalize_json_value(
     value: object,
@@ -197,8 +203,7 @@ def _normalize_json_value(
         limits.charge(json.dumps(value), path=path)
         return value
     if isinstance(value, str):
-        normalized = unicodedata.normalize("NFC", value)
-        return limits.charge(normalized, path=path)
+        return limits.normalize(value, path=path)
     if isinstance(value, (list, tuple)):
         return [
             _normalize_json_value(
@@ -212,9 +217,7 @@ def _normalize_json_value(
             if not isinstance(raw_key, str):
                 raise TypeError(f"{path} keys must be strings")
             limits.visit(path=f"{path} key", depth=depth + 1)
-            key = limits.charge(
-                unicodedata.normalize("NFC", raw_key), path=f"{path} key"
-            )
+            key = limits.normalize(raw_key, path=f"{path} key")
             if key in normalized:
                 raise ValueError(f"{path} contains duplicate normalized key {key!r}")
             normalized[key] = _normalize_json_value(
