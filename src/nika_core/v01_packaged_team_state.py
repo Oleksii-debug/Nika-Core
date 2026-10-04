@@ -326,11 +326,11 @@ class V01PackagedTeamStateProvider:
         rows = conn.execute(
             "SELECT sender_id, recipient_id, kind, created_at "
             "FROM multi_agent_handoffs WHERE team_id = ? "
-            "ORDER BY created_at, handoff_id",
+            "ORDER BY created_at DESC, handoff_id DESC LIMIT 20",
             (team_id,),
         ).fetchall()
         events: list[dict[str, str]] = []
-        for row in rows[-20:]:
+        for row in reversed(rows):
             kind = str(row["kind"])
             sender_id = str(row["sender_id"])
             recipient_id = str(row["recipient_id"])
