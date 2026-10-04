@@ -24,6 +24,12 @@ $serverScript = Join-Path $qaRoot 'ollama_loopback.py'
 $readyPath = Join-Path $qaRoot 'ready.txt'
 $requestLog = Join-Path $qaRoot 'requests.jsonl'
 $qaServer = $null
+$previousResultCanary = [System.Environment]::GetEnvironmentVariable(
+    'NIKA_UIA_MODEL_RESULT_CANARY',
+    'Process'
+)
+$resultCanary = 'NIKA_UIA_MODEL_RESULT_' + [guid]::NewGuid().ToString('N')
+
 
 function Assert-SelectedModelRequests {
     if (-not (Test-Path -LiteralPath $requestLog)) {
@@ -65,6 +71,7 @@ $serverSource = @'
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -72,6 +79,9 @@ from pathlib import Path
 
 READY = Path(sys.argv[1])
 REQUESTS = Path(sys.argv[2])
+RESULT_TEXT = sys.argv[3]
+if re.fullmatch(r"NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}", RESULT_TEXT) is None:
+    raise SystemExit("invalid UIA model-result canary")
 LOCK = threading.Lock()
 MAX_BODY_BYTES = 2_000_000
 
@@ -108,7 +118,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model": payload.get("model"),
                 "message": {
                     "role": "assistant",
-                    "content": "controlled loopback response",
+                    "content": RESULT_TEXT,
                 },
                 "done": True,
                 "prompt_eval_count": 1,
@@ -136,6 +146,8 @@ server.serve_forever(poll_interval=0.1)
 $serverSource | Set-Content -LiteralPath $serverScript -Encoding utf8
 
 try {
+    $env:NIKA_UIA_MODEL_RESULT_CANARY = $resultCanary
+
     # Own the exact loopback port before launching Nika. If anything else (including
     # physical Ollama) already owns it, the QA server exits and this proof fails
     # closed rather than sending controlled source text to a foreign process.
@@ -143,7 +155,8 @@ try {
     $qaServer = Start-Process -FilePath $python -ArgumentList @(
         "`"$serverScript`"",
         "`"$readyPath`"",
-        "`"$requestLog`""
+        "`"$requestLog`"",
+        "`"$resultCanary`""
     ) -PassThru -WindowStyle Hidden
     $readyDeadline = [DateTime]::UtcNow.AddSeconds(10)
     while (-not (Test-Path -LiteralPath $readyPath)) {
@@ -190,14 +203,13 @@ try {
         # failed attempt left the test-owned registration completely absent.
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
         try {
-            $afterFailedEnable = if ($null -eq $key) {
-                $null
-            } else {
+            $afterFailedEnablePresent = $null -ne $key -and $key.GetValueNames() -ccontains 'NikaCore'
+            $afterFailedEnable = if ($afterFailedEnablePresent) {
                 $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-            }
+            } else { $null }
         } finally { if ($null -ne $key) { $key.Dispose() } }
 
-        if ($null -eq $afterFailedEnable) {
+        if ($null -eq $afterFailedEnable -and -not $afterFailedEnablePresent) {
             Write-Host 'Autostart enable attempt made no OS registration mutation; retrying once in a fresh process.'
             & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable
             if ($LASTEXITCODE -ne 0) {
@@ -219,14 +231,17 @@ try {
         # the OS proves that the failed attempt made no registration mutation at all.
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
         try {
-            $afterFailedDisable = if ($null -eq $key) {
-                $null
-            } else {
+            $afterFailedDisablePresent = $null -ne $key -and $key.GetValueNames() -ccontains 'NikaCore'
+            $afterFailedDisable = if ($afterFailedDisablePresent) {
                 $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-            }
+            } else { $null }
+            $afterFailedDisableKind = if ($afterFailedDisablePresent) {
+                $key.GetValueKind('NikaCore')
+            } else { $null }
         } finally { if ($null -ne $key) { $key.Dispose() } }
 
-        if ($afterFailedDisable -ceq $expectedCommand) {
+        if ($afterFailedDisable -ceq $expectedCommand -and
+            $afterFailedDisableKind -eq [Microsoft.Win32.RegistryValueKind]::String) {
             Write-Host 'Autostart disable attempt made no OS registration mutation; retrying once in a fresh process.'
             & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Disable
             if ($LASTEXITCODE -ne 0) {
@@ -253,15 +268,29 @@ try {
     if (Test-Path -LiteralPath $qaRoot) {
         Remove-Item -LiteralPath $qaRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+    [System.Environment]::SetEnvironmentVariable(
+        'NIKA_UIA_MODEL_RESULT_CANARY',
+        $previousResultCanary,
+        'Process'
+    )
+
 
     # Remove only our exact test-owned value if a later phase failed. Preserve any
     # concurrently replaced registration; never delete the Run key or other values.
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath, $true)
     try {
         if ($null -ne $key) {
-            $current = $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-            if ($current -ceq $expectedCommand) { $key.DeleteValue('NikaCore', $false) }
-            elseif ($null -ne $current) { Write-Warning 'A foreign registration appeared; left untouched.' }
+            $currentPresent = $key.GetValueNames() -ccontains 'NikaCore'
+            $current = if ($currentPresent) {
+                $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            } else { $null }
+            $currentKind = if ($currentPresent) { $key.GetValueKind('NikaCore') } else { $null }
+            if ($current -ceq $expectedCommand -and
+                $currentKind -eq [Microsoft.Win32.RegistryValueKind]::String) {
+                $key.DeleteValue('NikaCore', $false)
+            } elseif ($currentPresent) {
+                Write-Warning 'A foreign registration appeared; left untouched.'
+            }
         }
     } finally { if ($null -ne $key) { $key.Dispose() } }
 }

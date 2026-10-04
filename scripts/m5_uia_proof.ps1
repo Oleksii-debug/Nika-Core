@@ -167,13 +167,21 @@ try {
     $autostartCommand = if ($ExePath -match '[ \t]') { '"' + $ExePath + '"' } else { $ExePath }
     if ($AutostartPhase -ne 'None') {
         $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
-        try { $existingAutostart = if ($null -eq $runKey) { $null } else { $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } }
-        finally { if ($null -ne $runKey) { $runKey.Dispose() } }
-        if ($AutostartPhase -eq 'Enable' -and $null -ne $existingAutostart) {
+        try {
+            $existingPresent = $null -ne $runKey -and $runKey.GetValueNames() -ccontains 'NikaCore'
+            $existingAutostart = if ($existingPresent) {
+                $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            } else { $null }
+            $existingKind = if ($existingPresent) { $runKey.GetValueKind('NikaCore') } else { $null }
+        } finally { if ($null -ne $runKey) { $runKey.Dispose() } }
+        if ($AutostartPhase -eq 'Enable' -and $existingPresent) {
             throw 'Autostart enable proof refuses an existing NikaCore registration.'
         }
-        if ($AutostartPhase -ne 'Enable' -and $existingAutostart -cne $autostartCommand) {
-            throw 'Autostart continuation requires the exact proof-owned executable registration.'
+        if ($AutostartPhase -ne 'Enable' -and (
+            $existingAutostart -cne $autostartCommand -or
+            $existingKind -ne [Microsoft.Win32.RegistryValueKind]::String
+        )) {
+            throw 'Autostart continuation requires the exact proof-owned REG_SZ registration.'
         }
     }
     $expectedExecutablePath = $ExePath
@@ -585,6 +593,44 @@ try {
         throw "Expected bound read-only UI Automation text '$Expected' did not appear."
     }
 
+    function Wait-BoundTextSequence(
+        [string[]]$ExpectedSequence,
+        [int]$Attempts = 80
+    ) {
+        if ($ExpectedSequence.Count -eq 0) {
+            throw 'Bound UI Automation text sequence must not be empty.'
+        }
+        for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+            Start-Sleep -Milliseconds 250
+            Assert-BoundProcessGeneration
+            $currentWindow = Find-ExactWindow
+            if ($null -eq $currentWindow) { continue }
+            try {
+                foreach ($searchRoot in (Get-BoundSearchRoots $currentWindow)) {
+                    $names = New-Object 'System.Collections.Generic.List[string]'
+                    if ($searchRoot.Current.Name) { $names.Add($searchRoot.Current.Name) }
+                    $descendants = $searchRoot.FindAll(
+                        [System.Windows.Automation.TreeScope]::Descendants,
+                        [System.Windows.Automation.Condition]::TrueCondition
+                    )
+                    foreach ($element in $descendants) {
+                        if ($element.Current.Name) { $names.Add($element.Current.Name) }
+                    }
+                    $sequenceIndex = 0
+                    foreach ($name in $names) {
+                        if ($name -ceq $ExpectedSequence[$sequenceIndex]) {
+                            $sequenceIndex += 1
+                            if ($sequenceIndex -eq $ExpectedSequence.Count) { return }
+                        }
+                    }
+                }
+            } catch [System.Windows.Automation.ElementNotAvailableException] {
+                continue
+            }
+        }
+        throw "Expected ordered bound UI Automation text sequence did not appear in one bound search root: $($ExpectedSequence -join ' -> ')."
+    }
+
     function Wait-DescendantName(
         [string]$Expected,
         [System.Windows.Automation.ControlType]$ExpectedControlType = $null,
@@ -779,17 +825,35 @@ try {
             throw 'Packaged autostart checkbox acknowledgement is inconsistent.'
         }
         $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
-        try { $actualAutostart = if ($null -eq $runKey) { $null } else { $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } }
-        finally { if ($null -ne $runKey) { $runKey.Dispose() } }
+        try {
+            $actualPresent = $null -ne $runKey -and $runKey.GetValueNames() -ccontains 'NikaCore'
+            $actualAutostart = if ($actualPresent) {
+                $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            } else { $null }
+            $actualKind = if ($actualPresent) { $runKey.GetValueKind('NikaCore') } else { $null }
+        } finally { if ($null -ne $runKey) { $runKey.Dispose() } }
         $expectedAutostart = if ($AutostartPhase -eq 'Disable') { $null } else { $autostartCommand }
-        if ($actualAutostart -cne $expectedAutostart) { throw 'Actual per-user autostart registration does not match the UI acknowledgement.' }
+        if ($actualAutostart -cne $expectedAutostart) {
+            throw 'Actual per-user autostart registration does not match the UI acknowledgement.'
+        }
+        if ($AutostartPhase -eq 'Disable' -and $actualPresent) {
+            throw 'Autostart disable proof found an unexpected NikaCore registry value.'
+        }
+        if ($AutostartPhase -ne 'Disable' -and $actualKind -ne [Microsoft.Win32.RegistryValueKind]::String) {
+            throw 'Autostart enable/observe proof requires exact REG_SZ registry authority.'
+        }
         Write-Host "Packaged autostart phase $AutostartPhase verified through exact semantic controls and OS readback."
     }
 
     if ($VerifySourceSetup) {
+        $expectedModelResult = $env:NIKA_UIA_MODEL_RESULT_CANARY
+        if ($expectedModelResult -cnotmatch '^NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}$') {
+            throw 'Source/model UIA proof requires the bounded per-run model-result canary.'
+        }
+
         # The same packaged journey must expose and persist the canonical model choice before
-        # task acceptance. This proof stores only a fake local model identity; it never contacts
-        # Ollama, downloads a model, or claims live model inference/NVDA verification.
+        # task acceptance. VerifySourceSetup is driven by the proof-owned Ollama-compatible
+        # loopback wrapper; it never proves physical Ollama/model inference or NVDA verification.
         Wait-BoundTextEvidence 'Модель для нових завдань'
         $modelRouteControl = Wait-DescendantName 'Тип маршруту моделі' ([System.Windows.Automation.ControlType]::ComboBox)
         $modelNameControl = Wait-DescendantName 'Назва моделі' ([System.Windows.Automation.ControlType]::Edit)
@@ -821,6 +885,19 @@ try {
             [System.Windows.Forms.SendKeys]::SendWait('^n')
             Wait-FocusName $tasksControl
             Wait-BoundTextEvidence 'Командне завдання завершено; збережені результати учасників доступні.'
+
+            # Prove the new durable model-result presentation through the same bound packaged
+            # WebView2 accessibility tree. Read-only Text evidence cannot authorize an action,
+            # so equivalent provider duplicates are harmless; exact labels + the per-run
+            # transport canary must be physically exposed before DB binding receives credit.
+            Wait-BoundTextSequence @(
+                'Відповідь моделі',
+                $expectedModelResult,
+                'Постачальник моделі',
+                'ollama',
+                'Модель',
+                'uia-proof-model'
+            )
 
             $modelBindingProbe = @'
 import hashlib
