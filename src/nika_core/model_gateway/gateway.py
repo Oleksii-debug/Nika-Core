@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Protocol
@@ -251,6 +252,11 @@ class ModelGateway:
                 # This is a synchronous, exception-based authority contract.
                 # False, True or an unawaited async result cannot grant access.
                 if result is not None:
+                    # A mistaken async authorizer must never grant CLOUD access.
+                    # Close native coroutine objects to prevent an unawaited
+                    # coroutine warning without executing their body.
+                    if inspect.iscoroutine(result):
+                        result.close()
                     raise PermissionError("cloud authorizer returned invalid authority")
                 return
             except Exception:  # noqa: BLE001, S110
