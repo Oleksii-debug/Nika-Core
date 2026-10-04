@@ -398,7 +398,12 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             SourceInspectionAssignment.from_payload(cast(Mapping[str, object], item))
             for item in raw_assignments
         )
-        inbound = self._multi_store.inbound_result_handoffs(team_id, member_id)
+        # A V0.1 checker accepts two source reports and at most one extra
+        # ambiguity record. Reject a fourth before decoding or model synthesis.
+        # The generic MultiAgentStore retains its separate 256-record ceiling.
+        inbound = self._multi_store.inbound_result_handoffs(
+            team_id, member_id, max_handoffs=3
+        )
         summary = V01CheckerAgent().compare(
             team_id=team_id,
             task_id=str(handoff["shared_task_id"]),
