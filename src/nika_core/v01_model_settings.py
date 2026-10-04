@@ -98,8 +98,15 @@ class ModelSelection(BaseModel):
     def clean_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if value != value.strip() or not value or any(ord(char) < 32 for char in value):
+        if value != value.strip() or not value or any(not char.isprintable() for char in value):
             raise ValueError("invalid model route text")
+        return value
+
+    @field_validator("model")
+    @classmethod
+    def bound_model_identity_bytes(cls, value: str | None) -> str | None:
+        if value is not None and len(value.encode("utf-8")) > 512:
+            raise ValueError("model identity exceeds local health byte budget")
         return value
 
     @field_validator("credential_ref")
@@ -167,6 +174,8 @@ class ModelSelection(BaseModel):
                 raise ValueError("Ollama route requires an explicit non-zero port")
             if parsed.username is not None or parsed.password is not None:
                 raise ValueError("Ollama route must not contain userinfo")
+            if "?" in self.base_url or "#" in self.base_url:
+                raise ValueError("Ollama base URL must not contain query or fragment delimiters")
             if parsed.query or parsed.fragment or parsed.path not in {"", "/"}:
                 raise ValueError("Ollama base URL must not contain path, query, or fragment")
             return self
