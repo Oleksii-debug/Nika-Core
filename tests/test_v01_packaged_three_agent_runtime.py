@@ -219,11 +219,22 @@ def test_unknown_packaged_task_cannot_create_orphan_source_binding(
 ) -> None:
     store, runtime = _configured_runtime(tmp_path)
     missing_id = "never-queued"
+    missing_thread = f"desktop-{missing_id}"
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=missing_id,
+            thread_id=missing_thread,
+            resume_token=runtime.initial_resume_token(
+                task_id=missing_id, thread_id=missing_thread
+            ),
+        )
+    )
+    assert probe.status is RuntimeResumeProbeStatus.INVALID
     result = asyncio.run(
         runtime.run(
             RuntimeRequest(
                 task_id=missing_id,
-                thread_id=f"desktop-{missing_id}",
+                thread_id=missing_thread,
                 payload={"command": "Compare the two declared local sources."},
             )
         )
@@ -428,4 +439,57 @@ def test_member_resume_never_rebinds_another_member_task_id(tmp_path: Path) -> N
         )
     )
     assert forged_run.outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize(
+    "persisted",
+    [
+        pytest.param("[]", id="non-object"),
+        pytest.param(b'{"shared_task_id":"untrusted"}', id="sqlite-blob"),
+    ],
+)
+def test_corrupt_checker_handoff_cannot_authorize_outer_resume(
+    tmp_path: Path, persisted: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id, thread_id=thread_id, payload={"command": command}
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    previous_results = _result_count(store)
+    with store.connection() as conn:
+        changed = conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? "
+            "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'task'",
+            (persisted, runtime._team_id(task_id)),
+        )
+        assert changed.rowcount == 1
+
+    assert runtime._stored_outer_command(task_id) == ""
+    token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=token
+        )
+    )
+    assert probe.status is RuntimeResumeProbeStatus.INVALID
+    result = asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                resume_token=token,
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    )
+    assert result.outcome is RuntimeOutcome.FAILED
     assert _result_count(store) == previous_results
