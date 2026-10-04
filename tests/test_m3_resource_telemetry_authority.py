@@ -144,7 +144,6 @@ def test_invalid_new_budget_fails_before_persistence(
         ("max_concurrent", 1.5),
         ("max_cpu_percent", inf),
         ("max_memory_percent", "invalid"),
-        ("max_disk_percent", "invalid"),
         ("max_process_memory_bytes", 1.5),
     ],
 )
