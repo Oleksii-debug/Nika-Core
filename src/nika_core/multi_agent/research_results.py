@@ -18,6 +18,7 @@ from nika_core.research.models import (
 
 _ASSIGNMENT_SCHEMA = "nika.multi_agent.source-inspection-assignment:v2"
 _RESULT_SCHEMA = "nika.multi_agent.source-inspection-result:v2"
+_MAX_RESULT_JSON_BYTES = 8 * 1024 * 1024
 
 
 class SourceResultBindingError(ValueError):
@@ -233,17 +234,32 @@ def _unsigned_result_payload(
 
 
 def _payload_digest(payload: Mapping[str, object]) -> str:
+    # Hash canonical JSON incrementally: worker evidence must not require a
+    # second, unbounded in-memory serialization merely to check its digest.
+    digest = hashlib.sha256()
+    encoded_size = 0
     try:
-        encoded = json.dumps(
-            payload,
+        encoder = json.JSONEncoder(
             ensure_ascii=False,
             allow_nan=False,
             sort_keys=True,
             separators=(",", ":"),
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+        )
+        for chunk in encoder.iterencode(payload):
+            # UTF-8 cannot use fewer bytes than the number of code points.
+            # Reject an oversized string without first allocating its bytes.
+            if encoded_size + len(chunk) > _MAX_RESULT_JSON_BYTES:
+                raise SourceResultBindingError("result evidence exceeds maximum JSON size")
+            encoded_chunk = chunk.encode("utf-8")
+            encoded_size += len(encoded_chunk)
+            if encoded_size > _MAX_RESULT_JSON_BYTES:
+                raise SourceResultBindingError("result evidence exceeds maximum JSON size")
+            digest.update(encoded_chunk)
+    except (TypeError, ValueError, OverflowError) as exc:
+        if isinstance(exc, SourceResultBindingError):
+            raise
         raise SourceResultBindingError("result evidence must be canonical JSON") from exc
-    return hashlib.sha256(encoded).hexdigest()
+    return digest.hexdigest()
 
 
 def _validate_result_set(
