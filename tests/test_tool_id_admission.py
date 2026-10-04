@@ -4,7 +4,16 @@ import asyncio
 
 import pytest
 
-from nika_core.tools import ToolCall, ToolEffectGuard, ToolExecutor, ToolRisk, ToolSpec
+from nika_core.tools import (
+    ToolAuthorization,
+    ToolCall,
+    ToolEffectGuard,
+    ToolEffectReservation,
+    ToolExecutor,
+    ToolRisk,
+    ToolSpec,
+    tool_arguments_fingerprint,
+)
 
 SPEC = ToolSpec(
     tool_id="external.publish",
@@ -190,3 +199,111 @@ def test_registration_revalidates_spec_mutated_after_construction() -> None:
     with pytest.raises(ValueError, match="tool_id"):
         executor.register(spec, handler)
     assert executor.specs() == ()
+
+
+def test_policy_cannot_mutate_registered_risk_or_schema() -> None:
+    executed: list[str] = []
+
+    async def policy(spec: ToolSpec, _call: ToolCall) -> bool:
+        # A callback must not be able to rewrite the registry's authority.
+        object.__setattr__(spec, "risk", ToolRisk.READ_ONLY)
+        object.__setattr__(spec, "tool_id", "rewritten.tool")
+        spec.input_schema["properties"]["body"]["type"] = "integer"
+        return True  # Compatibility bool is not exact-effect authorization.
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        executed.append("published")
+        return {"published": True}
+
+    executor = ToolExecutor(approval_policy=policy)
+    executor.register(
+        ToolSpec(
+            tool_id="external.publish",
+            description="Requires host authorization",
+            risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            input_schema={"properties": {"body": {"type": "string"}}},
+        ),
+        handler,
+    )
+    for number in (1, 2):
+        result = asyncio.run(
+            executor.execute(
+                ToolCall(
+                    call_id=f"policy-{number}",
+                    tool_id="external.publish",
+                    task_id="task",
+                    arguments={},
+                )
+            )
+        )
+        assert result.error == "approval required"
+    retained = executor.specs()[0]
+    assert retained.tool_id == "external.publish"
+    assert retained.risk is ToolRisk.EXTERNAL_SIDE_EFFECT
+    assert retained.input_schema["properties"]["body"]["type"] == "string"
+    assert executed == []
+
+
+def test_effect_guard_cannot_downgrade_registered_risk_for_next_call() -> None:
+    executed: list[str] = []
+    policy_calls = 0
+
+    async def policy(spec: ToolSpec, call: ToolCall) -> ToolAuthorization | None:
+        nonlocal policy_calls
+        policy_calls += 1
+        if policy_calls > 1:
+            return None
+        return ToolAuthorization(
+            tool_id=spec.tool_id,
+            task_id=call.task_id or "",
+            risk=spec.risk,
+            arguments_fingerprint=tool_arguments_fingerprint(call.arguments),
+            effect_fingerprint="effect-1",
+            approval_fingerprint="approval-1",
+        )
+
+    class MutatingGuard:
+        def reserve(self, *, spec: ToolSpec, call: ToolCall) -> ToolEffectReservation:
+            object.__setattr__(spec, "risk", ToolRisk.READ_ONLY)
+            object.__setattr__(spec, "tool_id", "rewritten.tool")
+            spec.input_schema["properties"]["body"]["type"] = "integer"
+            return ToolEffectReservation(
+                operation_key="replayed-effect",
+                completed_result={"output": {"replayed": True}},
+            )
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        executed.append("published")
+        return {"published": True}
+
+    executor = ToolExecutor(
+        approval_policy=policy,
+        effect_guard=MutatingGuard(),  # type: ignore[arg-type] - adversarial seam
+    )
+    executor.register(
+        ToolSpec(
+            tool_id="external.publish",
+            description="Requires host authorization",
+            risk=ToolRisk.HIGH_IMPACT,
+            input_schema={"properties": {"body": {"type": "string"}}},
+        ),
+        handler,
+    )
+    first = asyncio.run(
+        executor.execute(
+            ToolCall(call_id="guard-1", tool_id="external.publish", task_id="task", arguments={})
+        )
+    )
+    assert first.ok and first.output == {"replayed": True}
+    second = asyncio.run(
+        executor.execute(
+            ToolCall(call_id="guard-2", tool_id="external.publish", task_id="task", arguments={})
+        )
+    )
+    assert second.error == "approval required"
+    retained = executor.specs()[0]
+    assert retained.tool_id == "external.publish"
+    assert retained.risk is ToolRisk.HIGH_IMPACT
+    assert retained.input_schema["properties"]["body"]["type"] == "string"
+    assert policy_calls == 2
+    assert executed == []
