@@ -113,17 +113,37 @@ def test_m12_runs_when_upstream_release_workflows_change() -> None:
         assert m12.count(workflow_path) == 2, workflow_path
 
 
+
 def test_post_proof_identity_checks_follow_proofs_before_publication() -> None:
     m11 = WORKFLOWS[1].read_text(encoding="utf-8")
-    assert m11.index("- name: Verify packaged WebView2 UI Automation") < m11.index(
-        "- name: Reverify source after tests, build and packaged UIA"
-    ) < m11.index("- name: Create distributable ZIP")
+    assert (
+        m11.index("- name: Verify packaged WebView2 UI Automation")
+        < m11.index("- name: Reverify source after tests, build and packaged UIA")
+        < m11.index("- name: Create distributable ZIP")
+    )
 
     m12 = M12_WORKFLOW.read_text(encoding="utf-8")
-    for end_step, reverify_step, next_job in (
-        ("- name: Re-prove browser semantic interaction", "- name: Reverify source after integrated Ubuntu proofs", "\n  integrated-windows:"),
-        ("- name: Re-prove Windows semantic interaction", "- name: Reverify source after integrated Windows proofs", "\n  packaged-windows:"),
-        ("- name: Verify exact final distributable evidence binding", "- name: Reverify source after final ZIP and evidence checks", "- name: Upload exact pre-human candidate evidence"),
-        ("- name: Re-verify downloaded final distributable before signing", "- name: Reverify trusted-main source before signing", "- name: Attest exact final distributable"),
-    ):
-        assert m12.index(end_step) < m12.index(reverify_step) < m12.index(next_job)
+    proof_steps = (
+        (
+            "- name: Re-prove browser semantic interaction",
+            "- name: Reverify source after integrated Ubuntu proofs",
+            "\n  integrated-windows:",
+        ),
+        (
+            "- name: Re-prove Windows semantic interaction",
+            "- name: Reverify source after integrated Windows proofs",
+            "\n  packaged-windows:",
+        ),
+        (
+            "- name: Verify exact final distributable evidence binding",
+            "- name: Reverify source after final ZIP and evidence checks",
+            "- name: Upload exact pre-human candidate evidence",
+        ),
+        (
+            "- name: Re-verify downloaded final distributable before signing",
+            "- name: Reverify trusted-main source before signing",
+            "- name: Attest exact final distributable",
+        ),
+    )
+    for end_step, reverify_step, next_step in proof_steps:
+        assert m12.index(end_step) < m12.index(reverify_step) < m12.index(next_step)
