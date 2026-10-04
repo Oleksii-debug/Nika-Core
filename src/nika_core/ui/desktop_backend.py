@@ -153,7 +153,11 @@ class DesktopBackend:
             payload=task_payload,
         )
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except BaseException:
+            self._preserve_rejected_start(record.task_id)
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -234,7 +238,11 @@ class DesktopBackend:
         if not command:
             raise ValueError("Збережене завдання не містить команди для безпечного запуску.")
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except BaseException:
+            self._preserve_rejected_start(record.task_id)
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -627,6 +635,25 @@ class DesktopBackend:
             # Never replace the original submission failure with cleanup failure.
             _LOGGER.warning(
                 "Desktop coroutine cleanup failed; exception_type=%s",
+                type(exc).__name__,
+            )
+
+    def _preserve_rejected_start(self, task_id: str) -> None:
+        """Keep an unsubmitted READY task available for explicit manual resume.
+
+        The caller holds _active_lock. Never turn a host rejection into an
+        implicit retry or hide the original submission exception.
+        """
+        try:
+            if (
+                task_id not in self._active_futures
+                and self._queue.get(task_id).state is TaskState.READY
+            ):
+                self._queue.transition(task_id, TaskState.PAUSED)
+            self._record_background_failure(task_id, "desktop.runtime_submission_failed")
+        except BaseException as exc:
+            _LOGGER.error(
+                "Desktop rejected-start reconciliation failed; exception_type=%s",
                 type(exc).__name__,
             )
 
