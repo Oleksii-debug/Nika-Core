@@ -102,6 +102,27 @@ def test_message_preserves_readable_unicode_and_line_endings(content: str) -> No
     assert message.content == content
 
 
+@pytest.mark.parametrize(
+    "directional_control",
+    ("\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+     "\u2066", "\u2067", "\u2068", "\u2069"),
+)
+def test_directional_formatting_cannot_spoof_message_or_metadata(
+    directional_control: str,
+) -> None:
+    poisoned = f"Привіт{directional_control}світ"
+    with pytest.raises(ValueError, match="unsafe control characters"):
+        ModelMessage(role="user", content=poisoned)
+    with pytest.raises(ValueError, match="unsafe control characters"):
+        _request(metadata={"note": poisoned})
+
+
+def test_natural_right_to_left_text_and_emoji_joiner_remain_readable() -> None:
+    text = "Привіт, مرحبا, שלום 👩\u200d💻\r\nНаступний рядок"
+    assert ModelMessage(role="user", content=text).content == text
+    assert _request(metadata={"note": text}).metadata["note"] == text
+
+
 def test_message_content_rejects_non_string_values() -> None:
     with pytest.raises(TypeError, match="message content must be text"):
         ModelMessage(role="user", content=123)  # type: ignore[arg-type]
