@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import threading
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -239,3 +240,58 @@ def test_real_packaged_speech_and_backend_retry_together(tmp_path: Path) -> None
     assert host.closed
     assert backend._packaged_futures == set()
     assert closed == ["voice_model_setup", "voice"]
+
+def test_cancel_is_refused_during_close_but_admitted_after_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = _Host()
+    backend = _backend(tmp_path, host)
+    monkeypatch.setattr(
+        backend._runtime, "capabilities", frozenset({RuntimeCapability.CANCELLATION})
+    )
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingPending(Future[object]):
+        def result(self, timeout: float | None = None) -> object:
+            entered.set()
+            assert release.wait(timeout=5)
+            if not self.done():
+                raise TimeoutError("PRIVATE_PENDING_RUNTIME")
+            return super().result(timeout=timeout)
+
+    pending = BlockingPending()
+    backend._active_futures["task"] = pending
+    backend._active_threads["task"] = "existing-thread"
+    errors: list[BaseException] = []
+
+    def close_backend() -> None:
+        try:
+            backend.close()
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=close_backend)
+    worker.start()
+    try:
+        assert entered.wait(timeout=2)
+        assert backend._closing
+        with backend._active_lock, pytest.raises(RuntimeError, match="shutting down"):
+            backend._schedule_cancel_locked("task", "existing-thread")
+        assert host.submissions == 0
+    finally:
+        release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(errors) == 1
+    assert isinstance(errors[0], RuntimeError)
+    assert backend._accepting
+    assert not backend._closing
+    with backend._active_lock:
+        cancelled = backend._schedule_cancel_locked("task", "existing-thread")
+    assert cancelled.result() is True
+    assert host.submissions == 1
+    pending.set_result(None)
+    backend.close()
+    assert host.closed

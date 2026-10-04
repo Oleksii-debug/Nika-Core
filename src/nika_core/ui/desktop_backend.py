@@ -460,6 +460,7 @@ class DesktopBackend:
                 *self._cancel_futures.values(),
                 *self._packaged_futures,
             ]
+        pending_refusal = False
         try:
             with self._startup_recovery_lock:
                 if (
@@ -474,8 +475,7 @@ class DesktopBackend:
                 except TimeoutError as exc:
                     if not future.done():
                         # Preserve a later explicit cancel and close retry when work is still live.
-                        with self._active_lock:
-                            self._accepting = True
+                        pending_refusal = True
                         raise RuntimeError(
                             "cannot close desktop runtime loop while tasks are active"
                         ) from exc
@@ -515,6 +515,8 @@ class DesktopBackend:
         finally:
             with self._active_lock:
                 self._closing = False
+                if pending_refusal:
+                    self._accepting = True
 
     def _set_startup_recovery_state(self, state: Mapping[str, Any]) -> None:
         with self._startup_recovery_lock:
