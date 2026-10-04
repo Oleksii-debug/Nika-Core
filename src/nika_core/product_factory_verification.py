@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 MAX_EVIDENCE_REF_LENGTH = 512
@@ -59,6 +59,9 @@ class CandidateVerification:
     candidate_sha: str
     state: VerificationState
     evidence_refs: tuple[str, ...]
+    _classified_identity: tuple[str, VerificationState, tuple[str, ...]] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __init__(
         self,
@@ -72,12 +75,26 @@ class CandidateVerification:
         object.__setattr__(self, "candidate_sha", candidate_sha)
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "evidence_refs", evidence_refs)
+        object.__setattr__(
+            self, "_classified_identity", (candidate_sha, state, evidence_refs)
+        )
 
     @property
     def merge_clearance(self) -> bool:
-        """Verification can only clear its own exact head after all required checks pass."""
+        """Only an unchanged classifier-issued PASS is a clearance signal.
 
-        return self.state is VerificationState.PASS
+        This protects against one-field post-construction mutation; arbitrary hostile
+        in-process Python can also forge private fields. Never use a caller-supplied
+        carrier as independent authorization: recheck trusted exact-SHA CI evidence.
+        """
+
+        if type(self) is not CandidateVerification or self.state is not VerificationState.PASS:
+            return False
+        return getattr(self, "_classified_identity", None) == (
+            self.candidate_sha,
+            self.state,
+            self.evidence_refs,
+        )
 
 
 def classify_candidate_verification(
@@ -141,6 +158,9 @@ def classify_candidate_verification(
     object.__setattr__(result, "candidate_sha", candidate_sha)
     object.__setattr__(result, "state", VerificationState.PASS)
     object.__setattr__(result, "evidence_refs", refs)
+    object.__setattr__(
+        result, "_classified_identity", (candidate_sha, VerificationState.PASS, refs)
+    )
     return result
 
 
