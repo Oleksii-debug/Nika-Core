@@ -285,3 +285,105 @@ def test_hosted_proof_retry_and_cleanup_never_take_foreign_registry_type() -> No
     assert "$currentKind -eq " + expected_kind in wrapper[cleanup:]
     assert "$key.DeleteValue('NikaCore', $false)" in wrapper[cleanup:]
     assert "elseif ($currentPresent)" in wrapper[cleanup:]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_registration_changed_during_audit_cannot_be_overwritten_or_deleted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    store = SQLiteStore(tmp_path / "autostart.db")
+    store.initialize()
+    audit = AuditLog(store)
+    registry = _Registry("", _Registry.REG_SZ)
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), _Backend(registry))
+    registry.value = None if enabled else service.expected_command
+    settings = AutostartSettings(service, audit)
+    foreign_command = r"C:\Different\Foreign.exe"
+    append = audit.append
+
+    def change_after_requested_audit(**kwargs):
+        result = append(**kwargs)
+        if kwargs["event_type"] == "settings.autostart.requested":
+            registry.value = foreign_command
+        return result
+
+    monkeypatch.setattr(audit, "append", change_after_requested_audit)
+    assert settings.configure({"enabled": enabled}).status == "failed"
+    assert registry.value == foreign_command
+    assert registry.writes == 0 and registry.deletes == 0
+    assert settings.snapshot()["state"] == "stale"
+    events = audit.list_for(
+        entity_type="application_setting", entity_id="windows.autostart"
+    )
+    assert [event.event_type for event in events] == ["settings.autostart.requested"]
+    assert events[0].payload == {"enabled": enabled}
+    assert foreign_command not in json.dumps(events[0].payload)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_direct_service_rejects_observed_registration_that_has_changed(
+    enabled: bool,
+) -> None:
+    registry = _Registry("", _Registry.REG_SZ)
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), _Backend(registry))
+    registry.value = None if enabled else service.expected_command
+    observed = service.status()
+    registry.value = r"C:\Different\Foreign.exe"
+
+    with pytest.raises(RuntimeError, match="changed before update"):
+        if enabled:
+            service.enable(observed=observed)
+        else:
+            service.disable(observed=observed)
+    assert registry.writes == 0 and registry.deletes == 0
+    assert registry.value == r"C:\Different\Foreign.exe"
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_registry_kind_change_with_identical_text_during_audit_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool
+) -> None:
+    store = SQLiteStore(tmp_path / "autostart.db")
+    store.initialize()
+    audit = AuditLog(store)
+    foreign_command = r"C:\Different\Foreign.exe"
+    registry = _Registry(foreign_command, _Registry.REG_EXPAND_SZ)
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), _Backend(registry))
+    settings = AutostartSettings(service, audit)
+    observed = service.status()
+    assert observed.state.value == "stale"
+    assert observed.registration_type == "REG_EXPAND_SZ"
+    append = audit.append
+
+    def change_kind_after_requested_audit(**kwargs):
+        result = append(**kwargs)
+        if kwargs["event_type"] == "settings.autostart.requested":
+            registry.value_type = _Registry.REG_SZ
+        return result
+
+    monkeypatch.setattr(audit, "append", change_kind_after_requested_audit)
+    assert settings.configure({"enabled": enabled}).status == "failed"
+    assert registry.value == foreign_command
+    assert registry.value_type == _Registry.REG_SZ
+    assert registry.writes == 0 and registry.deletes == 0
+    assert service.status().registration_type == "REG_SZ"
+    events = audit.list_for(
+        entity_type="application_setting", entity_id="windows.autostart"
+    )
+    assert [event.event_type for event in events] == ["settings.autostart.requested"]
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_direct_service_rejects_same_text_different_registry_kind(enabled: bool) -> None:
+    foreign_command = r"C:\Different\Foreign.exe"
+    registry = _Registry(foreign_command, _Registry.REG_EXPAND_SZ)
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), _Backend(registry))
+    observed = service.status()
+    registry.value_type = _Registry.REG_SZ
+
+    with pytest.raises(RuntimeError, match="changed before update"):
+        if enabled:
+            service.enable(observed=observed)
+        else:
+            service.disable(observed=observed)
+    assert registry.value == foreign_command
+    assert registry.writes == 0 and registry.deletes == 0

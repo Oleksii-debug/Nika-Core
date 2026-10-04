@@ -35,6 +35,8 @@ class AutostartState(StrEnum):
 class AutostartStatus:
     state: AutostartState
     registered_command: str | None
+    # An equally named stale value of another registry kind is a new target.
+    registration_type: str | None = None
 
 
 class AutostartBackend(Protocol):
@@ -136,6 +138,7 @@ class WindowsAutostartService:
             return AutostartStatus(
                 AutostartState.STALE,
                 _exact_registered_command(exc.registered_command),
+                "REG_EXPAND_SZ",
             )
         if registered is None:
             return AutostartStatus(AutostartState.DISABLED, None)
@@ -143,23 +146,33 @@ class WindowsAutostartService:
         try:
             registered_units = _windows_utf16_code_units(registered)
         except ValueError:
-            return AutostartStatus(AutostartState.STALE, registered)
+            return AutostartStatus(AutostartState.STALE, registered, "REG_SZ")
         if registered_units > _MAX_RUN_COMMAND_LENGTH:
-            return AutostartStatus(AutostartState.STALE, registered)
+            return AutostartStatus(AutostartState.STALE, registered, "REG_SZ")
         expected = self.expected_command
         try:
             expected_units = _windows_utf16_code_units(expected)
         except ValueError:
-            return AutostartStatus(AutostartState.STALE, registered)
+            return AutostartStatus(AutostartState.STALE, registered, "REG_SZ")
         if expected_units > _MAX_RUN_COMMAND_LENGTH:
-            return AutostartStatus(AutostartState.STALE, registered)
+            return AutostartStatus(AutostartState.STALE, registered, "REG_SZ")
         if registered == expected:
-            return AutostartStatus(AutostartState.ENABLED, registered)
-        return AutostartStatus(AutostartState.STALE, registered)
+            return AutostartStatus(AutostartState.ENABLED, registered, "REG_SZ")
+        return AutostartStatus(AutostartState.STALE, registered, "REG_SZ")
 
-    def enable(self) -> AutostartStatus:
-        command = self._validated_command()
+    def _current_for_change(
+        self, observed: AutostartStatus | None
+    ) -> AutostartStatus:
         current = self.status()
+        if observed is not None and current != observed:
+            raise RuntimeError("Nika autostart registration changed before update")
+        return current
+
+    def enable(
+        self, *, observed: AutostartStatus | None = None
+    ) -> AutostartStatus:
+        command = self._validated_command()
+        current = self._current_for_change(observed)
         if current.state is AutostartState.ENABLED:
             return current
         self._backend.write(command)
@@ -168,10 +181,13 @@ class WindowsAutostartService:
             raise RuntimeError("Nika autostart registration did not verify after write")
         return verified
 
-    def disable(self) -> AutostartStatus:
-        # An invalid registry value is an error, not a removable STALE value.
-        # Callers must not erase it by bypassing the UI's disabled control.
-        self.status()
+    def disable(
+        self, *, observed: AutostartStatus | None = None
+    ) -> AutostartStatus:
+        # Recheck the state observed before the audit: another Nika instance
+        # or process must not silently replace the target during the audit gap.
+        # Windows Run-key APIs offer no atomic compare-and-delete operation.
+        self._current_for_change(observed)
         self._backend.delete()
         verified = self.status()
         if verified.state is not AutostartState.DISABLED:

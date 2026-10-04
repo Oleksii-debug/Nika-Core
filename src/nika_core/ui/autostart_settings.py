@@ -60,10 +60,16 @@ class AutostartSettings:
             try:
                 # A disabled UI control is not an authorization boundary: reject
                 # unreadable/malformed OS state before auditing or any mutation.
-                self._service.status()
+                observed = self._service.status()
                 # Record intent before an OS mutation. A failed audit stops the write.
                 self._record("requested", enabled)
-                status = self._service.enable() if enabled else self._service.disable()
+                # Audit/storage work can release the GIL or take time; reject a
+                # registration changed since the pre-audit OS observation.
+                status = (
+                    self._service.enable(observed=observed)
+                    if enabled
+                    else self._service.disable(observed=observed)
+                )
                 expected = AutostartState.ENABLED if enabled else AutostartState.DISABLED
                 if status.state is not expected:
                     raise RuntimeError("Autostart acknowledgement did not match intent")
