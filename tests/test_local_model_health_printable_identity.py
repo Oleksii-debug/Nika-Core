@@ -47,11 +47,11 @@ class _Evidence:
 @pytest.mark.parametrize(
     "model_id",
     [
-        "selected\\n:1",
-        "selected\\t:1",
-        "selected\\x7f:1",
-        "selected\\u202e:1",
-        "selected\\u200b:1",
+        "selected\n:1",
+        "selected\t:1",
+        "selected\x7f:1",
+        "selected\u202e:1",
+        "selected\u200b:1",
     ],
 )
 def test_nonprintable_selected_model_fails_before_external_effects(model_id: str) -> None:
@@ -81,10 +81,10 @@ def test_nonprintable_selected_model_fails_before_external_effects(model_id: str
     [
         " other:1",
         "other:1 ",
-        "other\\n:1",
-        "other\\x7f:1",
-        "other\\u202e:1",
-        "other\\u200b:1",
+        "other\n:1",
+        "other\x7f:1",
+        "other\u202e:1",
+        "other\u200b:1",
     ],
 )
 def test_malformed_catalog_entry_cannot_prove_presence_or_absence(
@@ -118,7 +118,7 @@ def test_malformed_running_catalog_never_promotes_readiness(bad_field: str) -> N
     responses = {
         f"{base}/api/tags": _Response([{"model": "selected:1"}]),
         f"{base}/api/ps": _Response(
-            [{"model": "selected:1"}, {bad_field: "other\\u202e:1"}]
+            [{"model": "selected:1"}, {bad_field: "other\u202e:1"}]
         ),
     }
     probe = OllamaModelHealthProbe(
