@@ -297,8 +297,10 @@ class V01SourceSettings:
             raise SourceSetupError("Немає коректного ідентифікатора завдання.")
         try:
             payload = TaskQueue(self._store).get(task_id).payload
+            task_found = True
         except KeyError:
             payload = {}
+            task_found = False
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             accepted = (
@@ -316,6 +318,16 @@ class V01SourceSettings:
                         "Джерела не збігаються з початковою конфігурацією завдання."
                     )
                 return selected
+            # A pre-existing binding may belong to a legacy task; creating a NEW
+            # binding requires a live task. Recheck under the same write transaction
+            # so a deleted task cannot leave an orphaned, future-reusable identity.
+            if (
+                not task_found
+                or conn.execute(
+                    "SELECT 1 FROM tasks WHERE task_id = ? LIMIT 1", (task_id,)
+                ).fetchone() is None
+            ):
+                raise SourceSetupError("Завдання для прив’язки джерел не знайдено.")
             selection = accepted if accepted is not None else self._selected(conn)
             if legacy_sources is not None and legacy_sources != (
                 selection.source_a,
