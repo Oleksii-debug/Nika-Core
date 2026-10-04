@@ -684,9 +684,14 @@ class V01PackagedTeamStateProvider:
                 "SELECT handoff_id, team_id, sender_id, recipient_id, kind, correlation_id, "
                 "payload_json FROM multi_agent_handoffs "
                 "WHERE team_id = ? AND recipient_id = ? AND kind IN ('result', 'error') "
-                "ORDER BY created_at, handoff_id",
+                "ORDER BY created_at, handoff_id LIMIT 3",
                 (team_id, root_id),
             ).fetchall()
+            # The checker accepts at most one result/error from each of two
+            # workers. A third is ambiguous; reject it before decoding untrusted
+            # payloads instead of materializing an unbounded handoff history.
+            if len(handoff_rows) > 2:
+                return invalid
             handoffs: list[AgentHandoff] = []
             for row in handoff_rows:
                 payload = _decode_task_payload(row["payload_json"])
