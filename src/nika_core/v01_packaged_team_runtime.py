@@ -581,6 +581,14 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 raise PermissionError("existing V0.1 packaged agent definition differs")
 
     def _stored_outer_command(self, task_id: str) -> str:
+        try:
+            task = TaskQueue(self._sqlite).get(task_id)
+        except TaskPayloadCorruptionError:
+            # A cached checker goal must never bypass corrupt durable task data.
+            return ""
+        except KeyError:
+            # Preserve pre-queue legacy teams that have a persisted checker handoff.
+            task = None
         team_id = self._team_id(task_id)
         try:
             handoff = self._multi_store.task_payload(team_id, "checker")
@@ -590,13 +598,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             goal = str(handoff.get("user_goal", "")).strip()
             if goal:
                 return goal
-        try:
-            payload = TaskQueue(self._sqlite).get(task_id).payload
-        except (KeyError, TaskPayloadCorruptionError):
-            # Resume must fail through its RuntimeResult contract, never
-            # reconstruct a command from ambiguous or corrupt stored data.
-            return ""
-        return str(payload.get("command", "")).strip()
+        return str(task.payload.get("command", "")).strip() if task is not None else ""
 
     @staticmethod
     def _failed() -> RuntimeResult:
