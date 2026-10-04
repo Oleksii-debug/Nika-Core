@@ -13,6 +13,8 @@ on:
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_m11_pf11_proof_integrity.py"
+      - "tests/test_pf11_proof_precommand.py"
       - "tests/test_windows_packaging_input_safety.py"
       - "tests/test_windows_packaging_ancestor_links.py"
       - "tests/test_m5_shell_required_assets.py"
@@ -33,6 +35,8 @@ on:
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_m11_pf11_proof_integrity.py"
+      - "tests/test_pf11_proof_precommand.py"
       - "tests/test_windows_packaging_input_safety.py"
       - "tests/test_windows_packaging_ancestor_links.py"
       - "tests/test_m5_shell_required_assets.py"
@@ -79,6 +83,8 @@ jobs:
         run: >-
           python -m pytest
           tests/test_m11_m12_release.py
+          tests/test_m11_pf11_proof_integrity.py
+          tests/test_pf11_proof_precommand.py
           tests/test_windows_packaging_input_safety.py
           tests/test_windows_packaging_ancestor_links.py
           tests/test_m5_shell_required_assets.py

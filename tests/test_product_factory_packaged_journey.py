@@ -349,7 +349,15 @@ def test_headless_pf11_composition_proof_survives_process_restart(tmp_path: Path
 
     first_payload = json.loads(first.stdout.strip())
     second_payload = json.loads(second.stdout.strip())
-    assert first_payload == second_payload
+    assert first_payload["selection_before_command"] == "absent"
+    assert second_payload["selection_before_command"] == "restored"
+    assert {
+        key: value for key, value in first_payload.items()
+        if key != "selection_before_command"
+    } == {
+        key: value for key, value in second_payload.items()
+        if key != "selection_before_command"
+    }
     assert first_payload["route"] == "product_project"
     assert first_payload["spec_version"] == 1
     assert first_payload["command_center_state_proven"] is True
@@ -389,6 +397,10 @@ def test_release_builder_records_packaged_pf11_restart_evidence(
                     "spec_version": 1,
                     "state": "active",
                     "command_center_state_proven": True,
+                    "current_command_proven": True,
+                    "current_command_focus_proven": True,
+                    "restart_selection_integrity_proven": True,
+                    "selection_before_command": "absent" if not calls else "restored",
                     "bridge_state_project_id": project_id,
                     "bridge_state_spec_version": 1,
                     "bridge_state_status_count": 0,
@@ -429,11 +441,11 @@ def test_release_builder_records_packaged_pf11_restart_evidence(
     assert payload["bridge_state_decision_count"] == 0
     assert payload["packaged_executable_proven"] is True
     assert payload["restart_replay_proven"] is True
+    assert payload["first_run_selection_absent"] is True
+    assert payload["second_run_selection_restored"] is True
     assert payload["human_tested"] is False
     assert payload["nvda_verified"] is False
     assert payload["production_release_ready"] is False
-
-
 class _HostileDirectHelperText(str):
     def split(self, *args: object, **kwargs: object) -> list[str]:
         del args, kwargs
