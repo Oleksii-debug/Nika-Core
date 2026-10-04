@@ -847,7 +847,7 @@ def test_non_utf8_recurrence_creation_has_no_persisted_effect(
         "interval_seconds": 60,
         "start_at": clock.value,
     }
-    options[field] = "\\ud800"
+    options[field] = "\ud800"
     with pytest.raises(ValueError, match=field):
         service.create(**options)
     assert scheduler.upserts == []
@@ -860,7 +860,7 @@ def test_non_utf8_recurrence_lookup_and_callback_have_no_effect(tmp_path: Path) 
     clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
     calls: list[RecurrenceInvocation] = []
     service, scheduler = _service(store, clock, calls)
-    bad_id = "\\ud800"
+    bad_id = "\ud800"
     for operation in (
         service.get,
         service.pause,
