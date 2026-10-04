@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -40,7 +41,7 @@ def _settings(tmp_path: Path) -> tuple[SQLiteStore, AppConfig, V01SourceSettings
         sqlite3.Binary(b'{"schema_version":1,"root":"C:/PRIVATE_SOURCE_CORRUPTION_CANARY"}'),
         _CANARY,
         _TOO_LARGE,
-        "ї" * (200 * 1024),
+        "ї" * (280 * 1024),
     ],
 )
 def test_malformed_stored_selection_returns_user_safe_error(stored: object) -> None:
@@ -65,7 +66,7 @@ def test_corrupt_global_selection_blocks_task_and_preserves_row(
         )
     assert settings.snapshot() == {"status": "invalid"}
     assert settings.configure(
-        {"root": "C:/missing", "source_a": "a.txt", "source_b": "b.txt", "revision": 1}
+        {**json.loads(body), "revision": 1}
     ).status == "rejected"
     with pytest.raises(SourceSetupError) as failure:
         settings.prepare_task_payload({"command": "Порівняй"})
