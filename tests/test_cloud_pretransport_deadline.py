@@ -259,6 +259,7 @@ def test_gateway_passes_current_post_authorization_budget_to_provider() -> None:
             self.capabilities = ProviderCapabilities(
                 provider_id="deadline-cloud",
                 kind=ProviderKind.CLOUD,
+                supports_private_data=False,
             )
 
         async def complete(self, request: ModelRequest) -> ModelResponse:
