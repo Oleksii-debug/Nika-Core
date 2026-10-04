@@ -138,8 +138,13 @@ class DeploymentExecutionCoordinator:
                 )
             )
         # A health callback may expire, disable, or reassign the prepared node.
+        try:
+            node_healthy = self.node_health.is_available(node_lease.node_id)
+        except Exception:
+            self.nodes.release_if_current(node_lease)
+            raise
         if (
-            not self.node_health.is_available(node_lease.node_id)
+            not node_healthy
             or not self.nodes.is_active_for(
                 node_lease, record.spec.request, now=_aware(now or datetime.now(UTC))
             )
@@ -180,6 +185,9 @@ class DeploymentExecutionCoordinator:
                     updated_at=instant,
                 )
             )
+        except Exception:
+            self.nodes.release_if_current(node_lease)
+            raise
         # Credential broker callbacks can also change registry ownership.
         if not self.nodes.is_active_for(
             node_lease, record.spec.request, now=_aware(now or datetime.now(UTC))
