@@ -135,3 +135,74 @@ def test_corrupt_persisted_payload_never_reconstructs_as_valid_object(
             reopened.inbound_result_handoffs(_TEAM_ID, _ROOT)
         else:
             reopened.member_result(_TEAM_ID, _CHILD)
+
+
+def test_inbound_handoff_limit_preserves_complete_valid_prefix(tmp_path) -> None:
+    sqlite, teams = _stored_team(tmp_path)
+    teams.record_handoff(
+        AgentHandoff(
+            team_id=_TEAM_ID,
+            sender_id=_CHILD,
+            recipient_id=_ROOT,
+            kind=HandoffKind.RESULT,
+            payload={"second": "так"},
+        )
+    )
+    assert len(teams.inbound_result_handoffs(_TEAM_ID, _ROOT, max_handoffs=2)) == 2
+    reopened = MultiAgentStore(SQLiteStore(sqlite.path))
+    assert len(reopened.inbound_result_handoffs(_TEAM_ID, _ROOT, max_handoffs=2)) == 2
+
+    teams.record_handoff(
+        AgentHandoff(
+            team_id=_TEAM_ID,
+            sender_id=_CHILD,
+            recipient_id=_ROOT,
+            kind=HandoffKind.ERROR,
+            payload={"third": "помилка"},
+        )
+    )
+    with pytest.raises(RuntimeError, match="excess inbound result handoffs"):
+        reopened.inbound_result_handoffs(_TEAM_ID, _ROOT, max_handoffs=2)
+    assert len(reopened.inbound_result_handoffs(_TEAM_ID, _ROOT, max_handoffs=3)) == 3
+
+
+@pytest.mark.parametrize("bad_limit", (True, False, 0, -1, 257, 2.5, "2", None))
+def test_inbound_handoff_limit_rejects_invalid_values(tmp_path, bad_limit: object) -> None:
+    _sqlite, teams = _stored_team(tmp_path)
+    with pytest.raises((TypeError, ValueError)):
+        teams.inbound_result_handoffs(_TEAM_ID, _ROOT, max_handoffs=bad_limit)
+
+
+def test_surplus_inbound_handoffs_reject_before_decoding_after_reopen(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sqlite, teams = _stored_team(tmp_path)
+    with sqlite.connection() as conn:
+        original = conn.execute(
+            "SELECT handoff_id FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND kind = 'result' LIMIT 1",
+            (_TEAM_ID,),
+        ).fetchone()
+        assert original is not None
+        for index in range(64):
+            conn.execute(
+                "INSERT INTO multi_agent_handoffs("
+                "handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at) "
+                "SELECT ?, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, ?, created_at "
+                "FROM multi_agent_handoffs WHERE handoff_id = ?",
+                (f"overflow-{index:03}", '{"malformed":NaN}', original["handoff_id"]),
+            )
+
+    def decoding_is_forbidden(_payload: object) -> dict[str, object]:
+        raise AssertionError("surplus rows must reject before JSON decoding")
+
+    monkeypatch.setattr(
+        "nika_core.multi_agent.store._decode_task_payload", decoding_is_forbidden
+    )
+    for current in (teams, MultiAgentStore(SQLiteStore(sqlite.path))):
+        with pytest.raises(RuntimeError, match="excess inbound result handoffs"):
+            current.inbound_result_handoffs(_TEAM_ID, _ROOT, max_handoffs=3)
+        with pytest.raises(RuntimeError, match="excess inbound result handoffs"):
+            current.inbound_result_handoffs(_TEAM_ID, _ROOT)
