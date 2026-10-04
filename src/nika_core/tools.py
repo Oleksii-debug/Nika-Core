@@ -76,21 +76,48 @@ class ToolAuthorization:
             self.effect_fingerprint,
             self.approval_fingerprint,
         )
-        if any(not value.strip() for value in required):
-            raise ValueError("tool authorization fingerprints must not be empty")
+        if type(self.risk) is not ToolRisk:
+            raise ValueError("authorization risk must be a ToolRisk value")
+        for value in required:
+            if type(value) is not str or not value.strip():
+                raise ValueError("tool authorization identities must be nonempty text")
+            try:
+                encoded = value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("tool authorization must use valid UTF-8") from exc
+            if len(encoded) > 512:
+                raise ValueError("tool authorization identity exceeds 512 UTF-8 bytes")
 
     def matches(self, *, spec: ToolSpec, call: ToolCall) -> bool:
+        try:
+            admitted = _snapshot_tool_authorization(self)
+        except (TypeError, ValueError):
+            return False
         if not (
-            self.tool_id == spec.tool_id == call.tool_id
-            and self.task_id == call.task_id
-            and self.risk is spec.risk
+            admitted.tool_id == spec.tool_id == call.tool_id
+            and admitted.task_id == call.task_id
+            and admitted.risk is spec.risk
         ):
             return False
         try:
-            return self.arguments_fingerprint == tool_arguments_fingerprint(call.arguments)
+            return admitted.arguments_fingerprint == tool_arguments_fingerprint(call.arguments)
         except (TypeError, ValueError):
             # Malformed model/tool arguments are never affirmative authorization.
             return False
+
+
+def _snapshot_tool_authorization(value: ToolAuthorization) -> ToolAuthorization:
+    """Revalidate and detach an authorization token at every trust boundary."""
+    if type(value) is not ToolAuthorization:
+        raise ValueError("invalid tool authorization carrier")
+    return ToolAuthorization(
+        tool_id=value.tool_id,
+        task_id=value.task_id,
+        risk=value.risk,
+        arguments_fingerprint=value.arguments_fingerprint,
+        effect_fingerprint=value.effect_fingerprint,
+        approval_fingerprint=value.approval_fingerprint,
+    )
 
 
 def _canonical_tool_arguments(arguments: Mapping[str, object]) -> str:
@@ -186,11 +213,14 @@ class ToolEffectGuard:
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("durable tool arguments must be JSON-compatible") from exc
-        if (
-            admitted_call.authorization is not None
-            and not admitted_call.authorization.matches(spec=spec, call=admitted_call)
-        ):
-            raise ValueError("durable tool arguments do not match host authorization")
+        if admitted_call.authorization is not None:
+            try:
+                approved = _snapshot_tool_authorization(admitted_call.authorization)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid durable host authorization") from exc
+            admitted_call = replace(admitted_call, authorization=approved)
+            if not approved.matches(spec=spec, call=admitted_call):
+                raise ValueError("durable tool arguments do not match host authorization")
 
         operation_key = self._operation_key(task_id=task_id, call_id=call_id)
         input_fingerprint = self._fingerprint(spec=spec, call=admitted_call)
@@ -367,6 +397,7 @@ class ToolExecutor:
                     try:
                         # Snapshot only once from caller-owned data after policy returns.
                         # Both approval matching and later execution use this snapshot.
+                        approved_authorization = _snapshot_tool_authorization(decision)
                         approved_arguments = _snapshot_tool_arguments(call.arguments)
                     except (TypeError, ValueError):
                         self._audit(
@@ -377,10 +408,11 @@ class ToolExecutor:
                         )
                     else:
                         authorized_call = replace(
-                            call, arguments=approved_arguments, authorization=decision
+                            call, arguments=approved_arguments,
+                            authorization=approved_authorization
                         )
-                        if decision.matches(spec=spec, call=authorized_call):
-                            authorization = decision
+                        if approved_authorization.matches(spec=spec, call=authorized_call):
+                            authorization = approved_authorization
                         else:
                             self._audit(
                                 "tool.denied",
