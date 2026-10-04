@@ -21,10 +21,22 @@ class WindowsBuildPlan:
         for label, path in (("entrypoint", self.entrypoint), ("web_assets", self.web_assets)):
             if not path.exists():
                 raise FileNotFoundError(f"{label} does not exist: {path}")
+        for label, path in (("entrypoint", self.entrypoint), ("web_assets", self.web_assets)):
+            if path.is_symlink() or path.is_junction():
+                raise ValueError(f"{label} must not be a symbolic link or junction")
         if not self.entrypoint.is_file():
             raise ValueError("entrypoint must be a file")
         if not self.web_assets.is_dir():
             raise ValueError("web_assets must be a directory")
+        # Do not let a link in the web source tree import files outside the
+        # intended UI payload into a public Windows distributable.
+        for asset in self.web_assets.rglob("*"):
+            if asset.is_symlink() or asset.is_junction():
+                relative = asset.relative_to(self.web_assets)
+                raise ValueError(f"web_assets contains a symbolic link or junction: {relative}")
+        index = self.web_assets / "index.html"
+        if not index.is_file() or index.stat().st_size == 0:
+            raise ValueError("web_assets must contain a non-empty index.html")
 
     def pyinstaller_args(self) -> tuple[str, ...]:
         self.validate()
