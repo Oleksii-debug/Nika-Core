@@ -85,7 +85,10 @@ def test_disabling_or_removing_during_install_clears_old_runtime(
         assert adapter._sync_runtime_job(old.job_id) is None
         assert adapter._scheduler.get_job(old.job_id) is None
         current = jobs.get(old.job_id)
-        assert current is None if change == "delete" else current is not None and not current.enabled
+        if change == "delete":
+            assert current is None
+        else:
+            assert current is not None and not current.enabled
         resolver.assert_not_called()
     finally:
         adapter.shutdown()
