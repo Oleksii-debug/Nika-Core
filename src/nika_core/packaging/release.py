@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import lzma
 import re
 import stat
 import tempfile
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -489,6 +491,17 @@ def _decode_release_manifest(content: bytes) -> ReleaseManifest | None:
     )
 
 
+_ZIP_READ_ERRORS = (
+    OSError,
+    RuntimeError,
+    NotImplementedError,
+    EOFError,
+    zipfile.BadZipFile,
+    zlib.error,
+    lzma.LZMAError,
+)
+
+
 def _sha256_archive_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> str:
     digest = hashlib.sha256()
     with archive.open(member, "r") as handle:
@@ -605,7 +618,7 @@ def verify_release_archive(
                 return ("archive:manifest-too-large",)
             try:
                 manifest_content = archive.read(manifest_member)
-            except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+            except _ZIP_READ_ERRORS:
                 return ("archive:invalid-manifest",)
             manifest = _decode_release_manifest(manifest_content)
             if manifest is None:
@@ -639,7 +652,7 @@ def verify_release_archive(
                     continue
                 try:
                     actual_sha256 = _sha256_archive_member(archive, member)
-                except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                except _ZIP_READ_ERRORS:
                     findings.append(f"archive:unreadable:{relative_path}")
                     continue
                 if actual_sha256 != entry.sha256:
@@ -647,7 +660,7 @@ def verify_release_archive(
                     continue
                 try:
                     has_secret_content = _archive_member_contains_secret_assignment(archive, member)
-                except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                except _ZIP_READ_ERRORS:
                     findings.append(f"archive:unreadable:{relative_path}")
                     continue
                 if has_secret_content:
