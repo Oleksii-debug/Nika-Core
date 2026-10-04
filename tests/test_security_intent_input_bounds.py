@@ -31,6 +31,23 @@ def _intent(**changes: object) -> ActionIntent:
     return ActionIntent(**data)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("risk", (ToolRisk.HIGH_IMPACT.value, "HIGH_IMPACT", "unknown", 1, None))
+def test_risk_carrier_must_be_canonical_enum(risk: object) -> None:
+    with pytest.raises(ValueError, match="ToolRisk"):
+        _intent(risk=risk)
+
+
+@pytest.mark.parametrize("approval_required", ("false", "true", 0, 1, None))
+def test_approval_flag_must_be_a_real_boolean(approval_required: object) -> None:
+    with pytest.raises(ValueError, match="boolean"):
+        _intent(approval_required=approval_required)
+
+
+def test_valid_explicit_approval_flag_retains_existing_semantics() -> None:
+    assert not _intent(approval_required=False).requires_approval
+    assert _intent(approval_required=True).requires_approval
+
+
 @pytest.mark.parametrize("field", ("max_write_bytes", "max_network_calls", "max_process_launches"))
 @pytest.mark.parametrize("invalid", (True, 1.5, float("nan"), float("inf"), "10", -1))
 def test_execution_budget_rejects_non_integral_or_unbounded_limits(
