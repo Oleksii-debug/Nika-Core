@@ -583,8 +583,6 @@ def test_oversized_member_roster_fails_closed_after_restart(tmp_path) -> None:
         base_state=lambda: _base_state("task-v01-71"), store=SQLiteStore(store.path)
     )()["v01_team_task"] == expected
 
-
-
 def test_surplus_task_history_rejects_before_decoding_and_after_restart(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
