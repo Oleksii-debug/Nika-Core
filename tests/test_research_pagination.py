@@ -99,8 +99,8 @@ def test_pagination_policy_rejects_unbounded_or_empty_configuration() -> None:
         "https://[::1/next",
         "https://user:password@example.com/next",
         "//token@example.com/next",
-        "/next\\nheader-injection",
-        "\\t/next",
+        "/next\nheader-injection",
+        "\t/next",
     ],
 )
 def test_untrusted_next_is_skipped_without_losing_valid_html_pages(
@@ -127,6 +127,6 @@ def test_json_discovery_rejects_credentials_even_when_cross_origin_is_allowed() 
 def test_json_discovery_skips_control_characters_in_url() -> None:
     discovery = discover_json_pagination(
         "https://example.com/api",
-        '{"next": "/unsafe\\\\nurl", "next_url": "/safe-next"}',
+        '{"next": "/unsafe\\nurl", "next_url": "/safe-next"}',
     )
     assert discovery.next_urls == ("https://example.com/safe-next",)
