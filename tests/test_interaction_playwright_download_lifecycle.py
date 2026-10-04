@@ -209,3 +209,22 @@ def test_continuous_download_stream_fails_closed_at_a_finite_limit(browser: Any)
     with pytest.raises(UnsupportedInteractionError, match="download limit"):
         _verify(browser)
     assert sum(download.attempts for download in emitted) == attempts
+
+
+def test_existing_download_name_reports_safe_collision_and_never_retries(
+    browser: Any,
+) -> None:
+    existing = browser.session.downloads.approved_root / "доказ.txt"
+    existing.write_text("previous artifact", encoding="utf-8")
+    download = _Download(browser.context, browser.page)
+    browser.state.on_click = lambda: browser.context.emit_download(download)
+    _invoke(browser)
+    with pytest.raises(UnsupportedInteractionError, match="destination already exists") as error:
+        _verify(browser)
+    assert "доказ.txt" not in str(error.value)
+    assert existing.read_text(encoding="utf-8") == "previous artifact"
+    assert download.attempts == 0
+    assert browser.session.downloads.saved == []
+    with pytest.raises(UnsupportedInteractionError, match="download could not be saved"):
+        _verify(browser)
+    assert download.attempts == 0
