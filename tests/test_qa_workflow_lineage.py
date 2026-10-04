@@ -208,3 +208,18 @@ def test_m11_runs_for_packaged_runtime_source_and_resume_regressions() -> None:
         '      - "tests/test_v01_packaged_three_agent_runtime.py"',
     ):
         assert event_configuration.count(path) == 2, path
+
+
+def test_m11_runs_for_bounded_checker_handoff_replay() -> None:
+    m11 = (ROOT / ".github" / "workflows" / "m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    event_configuration, separator, _jobs = m11.partition("\njobs:\n")
+    assert separator
+    for path in (
+        "src/nika_core/multi_agent/store.py",
+        "src/nika_core/v01_three_agent_supervisor.py",
+        "tests/test_multi_agent_persisted_json_integrity.py",
+        "tests/test_v01_three_agent_supervisor.py",
+    ):
+        assert event_configuration.count(f'      - "{path}"') == 2
