@@ -24,8 +24,14 @@ def _backend(tmp_path: Path) -> DesktopBackend:
     )
 
 
-def test_stale_failed_runtime_callback_preserves_replacement(tmp_path: Path) -> None:
+def test_stale_failed_runtime_callback_preserves_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     backend = _backend(tmp_path)
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        backend, "_record_background_failure", lambda task, event: events.append((task, event))
+    )
     stale: Future[object] = Future()
     stale.set_exception(RuntimeError("old runtime failed"))
     current: Future[object] = Future()
@@ -37,12 +43,19 @@ def test_stale_failed_runtime_callback_preserves_replacement(tmp_path: Path) -> 
 
     assert backend._active_futures["task"] is current
     assert backend._active_threads["task"] == "current-thread"
+    assert events == [("task", "desktop.runtime_host_failed")]
     current.set_result(None)
     backend.close()
 
 
-def test_stale_cancel_callback_preserves_replacement(tmp_path: Path) -> None:
+def test_stale_cancel_callback_preserves_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     backend = _backend(tmp_path)
+    events: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        backend, "_record_background_failure", lambda task, event: events.append((task, event))
+    )
     stale: Future[bool] = Future()
     stale.set_result(False)
     current: Future[bool] = Future()
@@ -51,6 +64,7 @@ def test_stale_cancel_callback_preserves_replacement(tmp_path: Path) -> None:
     backend._cancel_done("task", stale)
 
     assert backend._cancel_futures["task"] is current
+    assert events == [("task", "desktop.runtime_cancel_rejected")]
     current.set_result(True)
     backend.close()
 
