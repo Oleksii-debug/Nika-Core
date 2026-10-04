@@ -441,6 +441,7 @@ def test_malformed_wait_payload_fails_closed_without_secret_leak(tmp_path) -> No
     assert events[-1].event_type == "runtime.connectivity_wait_rejected"
     assert "НЕ_ЛОГУВАТИ" not in repr(events)
 
+
 @pytest.mark.parametrize("old_state", [TaskState.CANCELLED, TaskState.RETRYING])
 def test_stale_terminal_read_does_not_disable_reassigned_job(
     tmp_path, monkeypatch, old_state
@@ -492,8 +493,11 @@ def test_stale_terminal_read_does_not_disable_reassigned_job(
     assert jobs.get("shared-wake").enabled
     assert queue.get(new_task).state is TaskState.WAITING_TOOL
     events = audit.list_for(entity_type="scheduled_job", entity_id="shared-wake")
-    assert not any(event.event_type.endswith(("_blocked", "_cancelled", "_rejected"))
-                   for event in events)
+    assert not any(
+        event.event_type.endswith(("_blocked", "_cancelled", "_rejected"))
+        for event in events
+    )
+
 
 
 def test_malformed_old_snapshot_cannot_disable_new_valid_job(tmp_path, monkeypatch) -> None:
@@ -541,6 +545,7 @@ def test_malformed_old_snapshot_cannot_disable_new_valid_job(tmp_path, monkeypat
     )
 
 
+
 def test_defer_refuses_reused_job_id_without_abandoning_original_wait(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Unique Wake" / "nika core.db")
     store.initialize()
@@ -573,6 +578,7 @@ def test_defer_refuses_reused_job_id_without_abandoning_original_wait(tmp_path) 
     assert queue.get(new_task).state is TaskState.RUNNING
     events = audit.list_for(entity_type="scheduled_job", entity_id="occupied-job")
     assert [event.event_type for event in events] == ["runtime.connectivity_wait_deferred"]
+
 
 @pytest.mark.parametrize("swap_on_call", [1, 2])
 def test_probe_action_swap_does_not_grant_stale_wake(tmp_path, swap_on_call) -> None:
@@ -618,6 +624,7 @@ def test_probe_action_swap_does_not_grant_stale_wake(tmp_path, swap_on_call) -> 
     assert jobs.get("action-swap").action_id == "runtime.other_action"
     events = audit.list_for(entity_type="scheduled_job", entity_id="action-swap")
     assert not any(event.event_type == "runtime.connectivity_wait_ready" for event in events)
+
 
 def test_exact_defer_replay_recovers_failed_runtime_activation(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Deferred Resume" / "nika core.db")
