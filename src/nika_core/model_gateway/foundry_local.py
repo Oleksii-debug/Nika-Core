@@ -299,6 +299,9 @@ class FoundryLocalProvider:
                     provider_id=self.capabilities.provider_id,
                     retryable=False,
                 )
+            # Synchronous SDK catalog/manager work consumes the same deadline.
+            if deadline - loop.time() <= 0:
+                raise TimeoutError
             expected_model_id = authorization.expected_model_id or self._expected_model_id
             self._validate_model_identity(model, expected_model_id)
             if self._sdk_bool(model, "is_cached"):
@@ -314,6 +317,9 @@ class FoundryLocalProvider:
                         provider_id=self.capabilities.provider_id,
                         retryable=False,
                     )
+                # Cache/SDK evidence getters can also block synchronously.
+                if deadline - loop.time() <= 0:
+                    raise TimeoutError
                 return evidence
 
             remaining = deadline - loop.time()
@@ -393,6 +399,10 @@ class FoundryLocalProvider:
                     provider_id=self.capabilities.provider_id,
                     retryable=False,
                 )
+            # A download is not successful until synchronous SDK evidence
+            # has also been checked within its original deadline.
+            if deadline - loop.time() <= 0:
+                raise TimeoutError
             if not evidence.cached:
                 if effective_cancel_event.is_set():
                     raise ModelGatewayError(
