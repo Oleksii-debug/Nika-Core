@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from nika_core.packaging import attestation as attestation_module
 from nika_core.packaging.attestation import (
     build_release_attestation_evidence,
     write_release_attestation_evidence,
@@ -200,3 +201,48 @@ def test_m12_workflow_keeps_signing_privilege_on_trusted_main_only() -> None:
         "--deny-self-hosted-runners",
     ):
         assert expected in workflow
+
+
+def test_attestation_refuses_archive_swapped_after_prehuman_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact, prehuman, _ = _build(tmp_path)
+    changed_bytes = b"x" * artifact.stat().st_size
+    verification = _verification(
+        tmp_path,
+        artifact,
+        digest=hashlib.sha256(changed_bytes).hexdigest(),
+    )
+    original_sha256 = attestation_module._sha256
+
+    def swap_before_provenance_hash(path: Path) -> str:
+        path.write_bytes(changed_bytes)
+        return original_sha256(path)
+
+    monkeypatch.setattr(attestation_module, "_sha256", swap_before_provenance_hash)
+    with pytest.raises(ValueError, match="pre-human distributable evidence changed"):
+        build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
+
+
+def test_attestation_refuses_archive_changed_after_second_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    artifact, prehuman, verification = _build(tmp_path)
+    changed_bytes = b"x" * artifact.stat().st_size
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
+
+    def change_after_recheck(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 2 and not findings:
+            artifact.write_bytes(changed_bytes)
+        return findings
+
+    monkeypatch.setattr(
+        attestation_module, "verify_distributable_evidence", change_after_recheck
+    )
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
+    assert calls == 2

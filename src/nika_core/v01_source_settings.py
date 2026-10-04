@@ -91,6 +91,8 @@ class SourceSelection(BaseModel):
     @classmethod
     def from_stored(cls, value: str) -> SourceSelection:
         try:
+            if type(value) is not str:
+                raise ValueError("stored source selection must be text")
             selection = cls.model_validate_json(value)
             root = Path(selection.root)
             paths = (Path(selection.source_a), Path(selection.source_b))
@@ -128,10 +130,16 @@ class V01SourceSettings:
                 "CREATE TABLE IF NOT EXISTS v01_source_settings_schema ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            if conn.execute(
+                "SELECT 1 FROM v01_source_settings_schema WHERE version < 1 LIMIT 1"
+            ).fetchone() is not None:
+                raise SourceSetupError("Версія налаштувань джерел некоректна.")
             current = (
                 conn.execute("SELECT MAX(version) FROM v01_source_settings_schema").fetchone()[0]
                 or 0
             )
+            if type(current) is not int or current < 0:
+                raise SourceSetupError("Версія налаштувань джерел некоректна.")
             if current > _SCHEMA_VERSION:
                 raise SourceSetupError("Версія налаштувань джерел новіша за цю програму.")
             for version in range(current + 1, _SCHEMA_VERSION + 1):
@@ -180,7 +188,7 @@ class V01SourceSettings:
 
     @staticmethod
     def _selection_by_id(conn: sqlite3.Connection, selection_id: Any) -> SourceSelection:
-        if not isinstance(selection_id, str) or re.fullmatch(r"[0-9a-f]{64}", selection_id) is None:
+        if type(selection_id) is not str or re.fullmatch(r"[0-9a-f]{64}", selection_id) is None:
             raise SourceSetupError("Збережене посилання на джерела завдання некоректне.")
         row = conn.execute(
             "SELECT selection_json FROM v01_source_selections WHERE selection_id = ?",
@@ -188,6 +196,7 @@ class V01SourceSettings:
         ).fetchone()
         if (
             row is None
+            or type(row["selection_json"]) is not str
             or hashlib.sha256(row["selection_json"].encode("utf-8")).hexdigest() != selection_id
         ):
             raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
@@ -286,12 +295,17 @@ class V01SourceSettings:
     ) -> SourceSelection:
         if not isinstance(task_id, str) or not task_id.strip():
             raise SourceSetupError("Немає коректного ідентифікатора завдання.")
-        try:
-            payload = TaskQueue(self._store).get(task_id).payload
-        except KeyError:
-            payload = {}
         with self._store.connection() as conn:
+            # Task acquisition and binding must share one write transaction.
+            # Otherwise the task can be removed/replaced after the initial
+            # read but before the binding is durably recorded.
             conn.execute("BEGIN IMMEDIATE")
+            try:
+                payload = TaskQueue(self._store).get(task_id).payload
+                task_found = True
+            except KeyError:
+                payload = {}
+                task_found = False
             accepted = (
                 self._selection_by_id(conn, payload["v01_source_selection"])
                 if "v01_source_selection" in payload
@@ -307,6 +321,16 @@ class V01SourceSettings:
                         "Джерела не збігаються з початковою конфігурацією завдання."
                     )
                 return selected
+            # A pre-existing binding may belong to a legacy task; creating a NEW
+            # binding requires a live task. Recheck under the same write transaction
+            # so a deleted task cannot leave an orphaned, future-reusable identity.
+            if (
+                not task_found
+                or conn.execute(
+                    "SELECT 1 FROM tasks WHERE task_id = ? LIMIT 1", (task_id,)
+                ).fetchone() is None
+            ):
+                raise SourceSetupError("Завдання для прив’язки джерел не знайдено.")
             selection = accepted if accepted is not None else self._selected(conn)
             if legacy_sources is not None and legacy_sources != (
                 selection.source_a,

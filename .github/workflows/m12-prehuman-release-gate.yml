@@ -74,6 +74,8 @@ jobs:
         run: python -m playwright install --with-deps chromium
       - name: Re-prove browser semantic interaction on the exact candidate
         run: python scripts/m9_browser_adapter_proof.py
+      - name: Reverify source after integrated Ubuntu proofs
+        run: python scripts/qa_assert_checkout_identity.py
 
   integrated-windows:
     name: M12 integrated system proof (Windows)
@@ -111,6 +113,8 @@ jobs:
           tests/test_qa_workflow_lineage.py
       - name: Re-prove Windows semantic interaction on the exact candidate
         run: python scripts/m9_windows_uia_proof.py
+      - name: Reverify source after integrated Windows proofs
+        run: python scripts/qa_assert_checkout_identity.py
 
   packaged-windows:
     name: M12 packaged release proof (Windows)
@@ -129,7 +133,7 @@ jobs:
       - name: Verify exact candidate checkout identity
         run: python scripts/qa_assert_checkout_identity.py
       - name: Install GUI, packaging and QA dependencies
-        run: python -m pip install -e ".[gui,qa,dev]"
+        run: python -m pip install -e ".[gui,voice,qa,dev]"
       - name: Resolve canonical project version
         id: release
         shell: pwsh
@@ -146,9 +150,14 @@ jobs:
         run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
       - name: Run release-gate truth regressions
         run: python -m pytest tests/test_m11_m12_release.py tests/test_qa_workflow_lineage.py -q
-      - name: Create distributable ZIP
+      - name: Create and verify the complete distributable ZIP
         shell: pwsh
-        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
+        run: >-
+          python scripts/package_release_zip.py
+          --bundle './dist/NikaCore'
+          --artifact './dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip'
+          --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+          --product-version '${{ steps.release.outputs.version }}'
       - name: Hash exact distributable ZIP
         id: distributable
         shell: pwsh
@@ -238,6 +247,8 @@ jobs:
           --evidence ./dist/m12-prehuman-evidence.json
           --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
           --product-version '${{ steps.release.outputs.version }}'
+      - name: Reverify source after final ZIP and evidence checks
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Upload exact pre-human candidate evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
@@ -298,6 +309,8 @@ jobs:
             --evidence ./attestation-input/m12-prehuman-evidence.json `
             --source-sha '${{ github.sha }}' `
             --product-version '${{ steps.release.outputs.version }}'
+      - name: Reverify trusted-main source before signing
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Attest exact final distributable
         id: attest
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6
