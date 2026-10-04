@@ -53,6 +53,7 @@ def test_stored_selection_accepts_text_but_rejects_identical_json_blob(
 
 def test_blob_settings_fail_closed_without_replacing_selection(tmp_path: Path) -> None:
     store, settings = _configured(tmp_path)
+    original_selection = settings.snapshot()
     with store.connection() as conn:
         original = conn.execute(
             "SELECT selection_json FROM v01_source_settings WHERE singleton = 1"
@@ -63,7 +64,12 @@ def test_blob_settings_fail_closed_without_replacing_selection(tmp_path: Path) -
         )
     assert settings.snapshot() == {"status": "invalid"}
     assert settings.configure(
-        {"root": str(tmp_path), "source_a": "a", "source_b": "b", "revision": 1}
+        {
+            "root": original_selection["root"],
+            "source_a": original_selection["source_a"],
+            "source_b": original_selection["source_b"],
+            "revision": 1,
+        }
     ).status == "rejected"
     with pytest.raises(SourceSetupError, match="пошкоджені"):
         settings.prepare_task_payload({"command": "Порівняй"})
