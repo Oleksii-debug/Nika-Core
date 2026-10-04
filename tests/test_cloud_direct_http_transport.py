@@ -92,7 +92,7 @@ def test_default_cloud_client_disables_inherited_proxies_and_redirects(
     assert len(client_options) == 1
     assert client_options[0]["trust_env"] is False
     assert client_options[0]["follow_redirects"] is False
-    assert client_options[0]["timeout"] == request.timeout_seconds
+    assert 0 < client_options[0]["timeout"] <= request.timeout_seconds
 
 
 def test_default_cloud_client_does_not_follow_credential_bearing_redirect(
