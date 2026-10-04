@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from nika_core.security import ActionIntent
+from nika_core.security import ActionIntent, ExecutionBudget, ExecutionBudgetLedger, SandboxPolicy
 from nika_core.tools import ToolRisk
 
 
@@ -104,3 +106,72 @@ def test_depth_within_limit_preserves_normal_arguments() -> None:
     for _ in range(32):
         nested = [nested]
     assert _intent({"nested": nested}).normalized_arguments_json.startswith('{"nested":')
+
+
+@pytest.mark.parametrize("malformed", (123, True, b"artifacts/report.txt", ["report.txt"]))
+def test_non_text_intent_path_and_executable_fail_at_admission(malformed: object) -> None:
+    valid = _intent({})
+    with pytest.raises(ValueError, match="workspace-relative"):
+        replace(valid, write_path=malformed)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="process executable must be text"):
+        replace(valid, executable=malformed)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("malformed", (123, True, b"artifacts/report.txt", ["report.txt"]))
+def test_sandbox_denies_non_text_host_path_and_executable(
+    tmp_path: Path, malformed: object
+) -> None:
+    sandbox = SandboxPolicy(
+        workspace_root=tmp_path,
+        writable_roots=("artifacts",),
+        allowed_network_hosts=("example.test",),
+        allowed_executables=("python.exe",),
+    )
+    with pytest.raises(PermissionError, match="workspace-relative"):
+        sandbox.resolve_write(malformed)  # type: ignore[arg-type]
+    with pytest.raises(PermissionError, match="network host is not allowed"):
+        sandbox.authorize_network(malformed)  # type: ignore[arg-type]
+    with pytest.raises(PermissionError, match="process executable is not allowed"):
+        sandbox.authorize_executable(malformed)  # type: ignore[arg-type]
+
+
+def test_sandbox_config_denies_non_text_allowlist_carriers(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="allowed network host must be text"):
+        SandboxPolicy(
+            workspace_root=tmp_path,
+            allowed_network_hosts=(123,),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="process executable must be text"):
+        SandboxPolicy(
+            workspace_root=tmp_path,
+            allowed_executables=(123,),  # type: ignore[arg-type]
+        )
+
+
+def test_sandbox_direct_network_admission_denies_bad_unicode(tmp_path: Path) -> None:
+    sandbox = SandboxPolicy(workspace_root=tmp_path, allowed_network_hosts=("example.test",))
+    with pytest.raises(PermissionError, match="network host is not allowed"):
+        sandbox.authorize_network(chr(0xD800))
+
+
+@pytest.mark.parametrize("field", ("write_bytes", "network_calls", "process_launches"))
+@pytest.mark.parametrize("invalid", (True, -1, 1.5, float("nan"), float("inf"), "1"))
+def test_mutable_budget_counters_fail_closed_at_reservation(
+    field: str, invalid: object
+) -> None:
+    ledger = ExecutionBudgetLedger(
+        ExecutionBudget(max_write_bytes=5, max_network_calls=5, max_process_launches=5)
+    )
+    setattr(ledger, field, invalid)
+    with pytest.raises(ValueError, match="budget usage counters"):
+        ledger.reserve(_intent({}))
+    for other in ("write_bytes", "network_calls", "process_launches"):
+        if other != field:
+            assert getattr(ledger, other) == 0
+
+
+def test_budget_carrier_must_remain_canonical_at_reservation() -> None:
+    ledger = ExecutionBudgetLedger(ExecutionBudget())
+    ledger.budget = object()  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="canonical ExecutionBudget"):
+        ledger.reserve(_intent({}))

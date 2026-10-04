@@ -52,7 +52,7 @@ def _validate_windows_component(component: str, *, label: str) -> None:
 
 
 def _normalize_workspace_relative(value: str, *, label: str) -> PurePosixPath:
-    if not value or not value.strip():
+    if not isinstance(value, str) or not value or not value.strip():
         raise ValueError(f"{label} must stay inside a workspace-relative scope")
     _require_utf8(value, label=label)
     windows_path = PureWindowsPath(value)
@@ -120,6 +120,8 @@ def _executable_scope(value: str) -> tuple[str, str, str]:
 
 
 def _require_utf8(value: str, *, label: str) -> str:
+    if not isinstance(value, str):
+        raise ValueError(f"{label} must be text")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -275,6 +277,8 @@ class SandboxPolicy:
             for relative in self.writable_roots
         )
         object.__setattr__(self, "writable_roots", normalized_roots)
+        for host in self.allowed_network_hosts:
+            _require_utf8(host, label="allowed network host")
         for executable in self.allowed_executables:
             _executable_scope(executable)
 
@@ -295,6 +299,10 @@ class SandboxPolicy:
         return candidate
 
     def authorize_network(self, host: str) -> None:
+        try:
+            _require_utf8(host, label="network host")
+        except ValueError as exc:
+            raise PermissionError("network host is not allowed") from exc
         normalized = host.strip().lower().rstrip(".")
         allowed = {item.strip().lower().rstrip(".") for item in self.allowed_network_hosts}
         if not normalized or normalized not in allowed:
@@ -340,6 +348,13 @@ class ExecutionBudgetLedger:
     _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def _next_usage_unlocked(self, intent: ActionIntent) -> tuple[int, int, int]:
+        # The counters are intentionally mutable, so validate again under the
+        # reservation lock. NaN would otherwise bypass every maximum comparison.
+        if type(self.budget) is not ExecutionBudget:
+            raise ValueError("budget ledger requires a canonical ExecutionBudget")
+        counters = (self.write_bytes, self.network_calls, self.process_launches)
+        if any(type(value) is not int or value < 0 for value in counters):
+            raise ValueError("budget usage counters must be non-negative integers")
         next_write = self.write_bytes + intent.write_bytes
         next_network = self.network_calls + int(intent.network_host is not None)
         next_process = self.process_launches + int(intent.executable is not None)
