@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from nika_core.tools import ToolSpec
+from nika_core.tools import ToolRisk, ToolSpec
 
 
 @pytest.mark.parametrize(
@@ -43,3 +43,18 @@ def test_tool_spec_preserves_positive_finite_deadlines(timeout: float) -> None:
 
 def test_default_tool_deadline_remains_thirty_seconds() -> None:
     assert ToolSpec(tool_id="proof.tool", description="default").timeout_seconds == 30.0
+
+
+@pytest.mark.parametrize("risk", ["read_only", "external_side_effect", 1, None, True])
+def test_tool_spec_rejects_non_enum_risk_carriers(risk: object) -> None:
+    with pytest.raises(ValueError, match="risk must be a ToolRisk"):
+        ToolSpec(
+            tool_id="proof.tool",
+            description="risk admission",
+            risk=risk,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("risk", list(ToolRisk))
+def test_tool_spec_preserves_canonical_risk_enum(risk: ToolRisk) -> None:
+    assert ToolSpec(tool_id="proof.tool", description="risk", risk=risk).risk is risk
