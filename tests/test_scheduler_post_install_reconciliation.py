@@ -53,7 +53,8 @@ def test_replacement_during_install_is_reconciled_without_old_dispatch(
 
     monkeypatch.setattr(adapter, "_install", install_and_replace)
     try:
-        assert adapter._sync_runtime_job(old.job_id) == successor
+        # Exercise the actual connectivity producer-facing activation method.
+        adapter.activate_persisted(old)
         assert installed == [old, successor]
         assert jobs.get(old.job_id) == successor
         runtime = adapter._scheduler.get_job(old.job_id)
