@@ -171,6 +171,9 @@ class ToolEffectGuard:
     def reserve(self, *, spec: ToolSpec, call: ToolCall) -> ToolEffectReservation:
         task_id = _require_tool_identity(call.task_id, label="task_id")
         call_id = _require_tool_identity(call.call_id, label="call_id")
+        tool_id = _require_tool_identity(call.tool_id, label="tool_id")
+        if tool_id != spec.tool_id:
+            raise ValueError("tool_id does not match registered tool specification")
         try:
             # A direct guard caller gets the same bounded, detached argument boundary.
             admitted_call = replace(
@@ -309,7 +312,11 @@ class ToolExecutor:
         return tuple(spec for spec, _handler in self._tools.values())
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        registered = self._tools.get(call.tool_id)
+        try:
+            tool_id = _require_tool_identity(call.tool_id, label="tool_id")
+        except ValueError:
+            return ToolResult(call_id=call.call_id, tool_id="", error="invalid tool id")
+        registered = self._tools.get(tool_id)
         if registered is None:
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="unknown tool")
         spec, handler = registered
