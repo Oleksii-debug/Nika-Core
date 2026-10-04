@@ -90,6 +90,57 @@ def _forged_error() -> RuntimeResult:
     return result
 
 
+def _unserializable_nested_output() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        output={"nested": {"unsupported": object()}},
+    )
+
+
+def _nonfinite_output() -> RuntimeResult:
+    return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output={"value": float("nan")})
+
+
+def _invalid_output_key() -> RuntimeResult:
+    return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output={1: "non-string"})
+
+
+def _invalid_utf8_error() -> RuntimeResult:
+    return RuntimeResult(outcome=RuntimeOutcome.FAILED, error="\ud800")
+
+
+def _invalid_utf8_resume_token() -> RuntimeResult:
+    return RuntimeResult(outcome=RuntimeOutcome.PAUSED, resume_token="\ud800")
+
+
+def _invalid_utf8_event_type() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "\ud800"),),
+    )
+
+
+def _invalid_utf8_event_payload() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.test", {"text": "\ud800"}),),
+    )
+
+
+def _overridden_event_sequence() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.test", {"sequence": 100}),),
+    )
+
+
+def _forged_nika_control_event() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.cancel_accepted"),),
+    )
+
+
 _BAD_RESULTS = (
     lambda: None,
     object,
@@ -102,6 +153,15 @@ _BAD_RESULTS = (
     _forged_resume_token,
     _forged_error,
     lambda: _ResultSubclass(outcome=RuntimeOutcome.COMPLETED),
+    _unserializable_nested_output,
+    _nonfinite_output,
+    _invalid_output_key,
+    _invalid_utf8_error,
+    _invalid_utf8_resume_token,
+    _invalid_utf8_event_type,
+    _invalid_utf8_event_payload,
+    _overridden_event_sequence,
+    _forged_nika_control_event,
 )
 
 
@@ -237,6 +297,58 @@ def test_canonical_result_rejects_forgery_without_consulting_hostile_properties(
     for factory in _BAD_RESULTS:
         with pytest.raises((TypeError, ValueError)):
             canonical_runtime_result(factory())
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    (
+        "runtime.started",
+        "runtime.finished",
+        "runtime.cancel_accepted",
+        "runtime.recovery_claim_completed",
+        "runtime.recovery_auto_resume_failed",
+    ),
+)
+def test_adapter_cannot_impersonate_authoritative_audit_events(event_type):
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, event_type),),
+    )
+    with pytest.raises(ValueError, match="cannot impersonate"):
+        canonical_runtime_result(result)
+
+
+def test_legitimate_langgraph_approval_event_remains_supported():
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.WAITING_APPROVAL,
+        resume_token="token-1",
+        events=(RuntimeEvent(0, "runtime.approval_requested", {"value": "review"}),),
+    )
+    assert canonical_runtime_result(result) == result
+
+
+def test_result_snapshot_detaches_nested_event_payload_and_output():
+    nested_output = {"items": [{"count": 1}]}
+    nested_payload = {"items": [{"status": "ready"}]}
+    original = RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        output={"nested": nested_output, "текст": "перевірка"},
+        events=(RuntimeEvent(0, "runtime.proof", {"nested": nested_payload}),),
+    )
+
+    canonical = canonical_runtime_result(original)
+    nested_output["items"][0]["count"] = 999
+    nested_payload["items"][0]["status"] = "changed"
+
+    assert canonical.output == {
+        "nested": {"items": [{"count": 1}]},
+        "текст": "перевірка",
+    }
+    assert canonical.events[0].payload == {
+        "nested": {"items": [{"status": "ready"}]}
+    }
+    assert canonical.output is not original.output
+    assert canonical.events[0].payload is not original.events[0].payload
 
 
 @pytest.mark.parametrize("response", (None, 0, 1, "false", object(), _HostileBool()))
