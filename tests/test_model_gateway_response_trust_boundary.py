@@ -102,6 +102,8 @@ class _PoisonSuccessProvider:
             return replace(valid, text="Відповідь\u202e.exe")
         if self.mode == "text-bidi-isolate":
             return replace(valid, text="Відповідь\u2066підміна")
+        if self.mode == "text-valid-rtl-mixed":
+            return replace(valid, text="Привіт, مرحبا, שלום 👩\u200d💻\r\nНіка")
         if self.mode == "text-valid-emoji-joiner":
             return replace(valid, text=" Відповідь 👩\u200d💻\nДругий рядок ")
         if self.mode == "text-valid-crlf-tab":
@@ -380,7 +382,7 @@ def test_signed_64_bit_token_metadata_is_still_accepted(tmp_path: Path) -> None:
     "mode",
     (
         "valid", "text-valid-unicode", "text-valid-multiline",
-        "text-valid-emoji-joiner", "text-valid-crlf-tab",
+        "text-valid-emoji-joiner", "text-valid-crlf-tab", "text-valid-rtl-mixed",
     ),
 )
 def test_valid_success_response_still_reaches_completed_audit(
@@ -405,6 +407,7 @@ def test_valid_success_response_still_reaches_completed_audit(
         "text-valid-unicode": "Локальна відповідь 🧠",
         "text-valid-multiline": " Відповідь 🧠\nДругий рядок ",
         "text-valid-emoji-joiner": " Відповідь 👩\u200d💻\nДругий рядок ",
+        "text-valid-rtl-mixed": "Привіт, مرحبا, שלום 👩\u200d💻\r\nНіка",
         "text-valid-crlf-tab": "\tВідповідь\r\nДругий рядок",
     }
     assert response.text == expected_text[mode]
