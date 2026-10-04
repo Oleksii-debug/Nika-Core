@@ -11,7 +11,7 @@ from nika_core.intelligence.provenance import (
     IntelligenceResultStatus,
     resolve_model_intelligence_mode,
 )
-from nika_core.kernel.task_queue import _decode_task_payload
+from nika_core.kernel.task_queue import _decode_task_payload, _finite_json_float
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent.checker import V01CheckerAgent
 from nika_core.multi_agent.contracts import AgentHandoff, HandoffKind
@@ -115,6 +115,7 @@ class V01PackagedTeamStateProvider:
                     raw,
                     object_pairs_hook=_unique_handoff_object,
                     parse_constant=_reject_nonfinite_handoff_number,
+                    parse_float=_finite_json_float,
                 )
             except (ValueError, RecursionError):
                 invalid_handoff = True
