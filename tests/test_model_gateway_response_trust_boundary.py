@@ -96,6 +96,8 @@ class _PoisonSuccessProvider:
             return replace(valid, text="Привіт\x7fсвіт")
         if self.mode == "text-c1-control":
             return replace(valid, text="Привіт\x85світ")
+        if self.mode == "text-bidi-mark":
+            return replace(valid, text="Номер\u200f: 123")
         if self.mode == "text-bidi-override":
             return replace(valid, text="Відповідь\u202e.exe")
         if self.mode == "text-bidi-isolate":
@@ -208,6 +210,7 @@ def _request() -> ModelRequest:
         "text-nul-control",
         "text-delete-control",
         "text-c1-control",
+        "text-bidi-mark",
         "text-bidi-override",
         "text-bidi-isolate",
         "text-unpaired-high-surrogate",
