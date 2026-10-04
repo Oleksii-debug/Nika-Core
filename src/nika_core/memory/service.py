@@ -28,12 +28,16 @@ class MemoryService:
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
         key = _required("key", key)
+        if type(user_approved) is not bool:
+            raise ValueError("user_approved must be a boolean")
         if scope is MemoryScope.USER and not user_approved:
             raise PermissionError("user long-term memory requires explicit approval")
         if expires_at is not None:
             expires_at = _as_utc(expires_at)
         now = datetime.now(UTC)
-        body = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        body = json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
         with self._store.connection() as conn:
             existing = conn.execute(
                 "SELECT created_at FROM memory_records WHERE scope = ? AND owner_id = ? "
