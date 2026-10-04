@@ -138,7 +138,8 @@ class MemoryService:
                 "AND namespace = ? ORDER BY memory_key",
                 (scope.value, owner_id, namespace),
             ).fetchall()
-        return tuple(_record_from_row(row) for row in rows)
+            # Decode before commit, so corrupt rows roll back scoped expiry cleanup.
+            return tuple(_record_from_row(row) for row in rows)
 
     def delete(self, *, scope: MemoryScope, owner_id: str, namespace: str, key: str) -> bool:
         with self._store.connection() as conn:
@@ -184,14 +185,55 @@ def _parse_optional(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def _reject_memory_constant(value: str) -> None:
+    raise ValueError(f"invalid stored memory JSON constant: {value}")
+
+
+def _unique_memory_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate stored memory JSON object key")
+        result[key] = value
+    return result
+
+
+def _validate_scalar_unicode(value: Any) -> None:
+    # json.loads accepts lone escaped surrogates, which break UTF-8 consumers.
+    pending: list[Any] = [value]
+    while pending:
+        item = pending.pop()
+        if type(item) is str:
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in item):
+                raise ValueError("stored memory JSON contains invalid Unicode")
+        elif type(item) is list:
+            pending.extend(item)
+        elif type(item) is dict:
+            pending.extend(item)
+            pending.extend(item.values())
+
+
 def _record_from_row(row: Any) -> MemoryRecord:
+    scope = MemoryScope(row["scope"])
+    approval = row["user_approved"]
+    if type(approval) is not int or approval not in (0, 1):
+        raise ValueError("invalid stored memory approval flag")
+    if scope is MemoryScope.USER and approval != 1:
+        raise ValueError("user memory lacks durable explicit approval")
+    body = row["value_json"]
+    if type(body) is not str:
+        raise ValueError("stored memory JSON must be text")
+    value = json.loads(
+        body, parse_constant=_reject_memory_constant, object_pairs_hook=_unique_memory_pairs
+    )
+    _validate_scalar_unicode(value)
     return MemoryRecord(
-        scope=MemoryScope(row["scope"]),
+        scope=scope,
         owner_id=row["owner_id"],
         namespace=row["namespace"],
         key=row["memory_key"],
-        value=json.loads(row["value_json"]),
-        user_approved=bool(row["user_approved"]),
+        value=value,
+        user_approved=bool(approval),
         expires_at=_parse_optional(row["expires_at"]),
         created_at=datetime.fromisoformat(row["created_at"]),
         updated_at=datetime.fromisoformat(row["updated_at"]),
