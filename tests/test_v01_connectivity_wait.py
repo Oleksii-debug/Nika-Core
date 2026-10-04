@@ -618,3 +618,48 @@ def test_probe_action_swap_does_not_grant_stale_wake(tmp_path, swap_on_call) -> 
     assert jobs.get("action-swap").action_id == "runtime.other_action"
     events = audit.list_for(entity_type="scheduled_job", entity_id="action-swap")
     assert not any(event.event_type == "runtime.connectivity_wait_ready" for event in events)
+
+def test_exact_defer_replay_recovers_failed_runtime_activation(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Deferred Resume" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    policy = RetryPolicy(max_retries=1, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 9, 3, 11, 0, tzinfo=UTC)
+    task_id = _running_task(queue)
+    intent = _network_intent(policy, operation_id="durable-op", now=now)
+    args = {
+        "task_id": task_id,
+        "job_id": "durable-replay",
+        "action_id": "runtime.resume_after_connectivity",
+        "intent": intent,
+    }
+
+    failed = ConnectivityWaitService(
+        queue=queue,
+        jobs=jobs,
+        audit=audit,
+        probe=_ConnectivityProbe(available=False),
+        scheduler=_RecordingScheduler(fail=True),
+    )
+    with pytest.raises(RuntimeError, match="injected runtime scheduler failure"):
+        failed.defer(**args)
+    original_job = jobs.get("durable-replay")
+    assert original_job.enabled
+    assert queue.get(task_id).state is TaskState.WAITING_TOOL
+
+    healthy_scheduler = _RecordingScheduler()
+    recovered = ConnectivityWaitService(
+        queue=queue,
+        jobs=jobs,
+        audit=audit,
+        probe=_ConnectivityProbe(available=False),
+        scheduler=healthy_scheduler,
+    )
+    recovered.defer(**args)
+    assert jobs.get("durable-replay") == original_job
+    assert queue.get(task_id).state is TaskState.WAITING_TOOL
+    assert healthy_scheduler.jobs == [original_job]
+    events = audit.list_for(entity_type="scheduled_job", entity_id="durable-replay")
+    assert [event.event_type for event in events] == ["runtime.connectivity_wait_deferred"]
