@@ -112,3 +112,27 @@ def test_ordinary_finite_rank_retains_json_restart_roundtrip() -> None:
         output = json.loads(json.dumps(encode_source_result(assignment, candidate)))
         restored = decode_source_result(assignment, member_id=assignment.member_id, output=output)
         assert restored.items[0].rank == rank
+
+
+@pytest.mark.parametrize("invalid", ["short", "G" * 64, "A" * 64, "0" * 65])
+def test_invalid_digest_fails_before_worker_payload_serialization(invalid: str) -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    items = result_data["items"]
+    assert isinstance(items, list)
+    items[0]["snippet"] = {1, 2}
+    output["result_digest"] = invalid
+    with pytest.raises(SourceResultBindingError, match="invalid result_digest"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+def test_malformed_item_container_fails_before_digest_serialization() -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    result_data["items"] = {"forged": {1, 2}}
+    with pytest.raises(SourceResultBindingError, match="result_set items must be a list"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
