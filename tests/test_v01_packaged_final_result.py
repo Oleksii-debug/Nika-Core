@@ -523,7 +523,6 @@ def test_ambiguous_comparison_evidence_never_stays_validated(
     )
 
 
-
 def test_completed_comparison_rejects_oversubscribed_handoff_history(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
