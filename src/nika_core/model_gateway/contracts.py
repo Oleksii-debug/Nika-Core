@@ -51,10 +51,19 @@ def _has_readable_model_text(value: str) -> bool:
     return any(category(character)[0] in "LNPS" for character in value)
 
 
+# Directional marks, embeddings/overrides and isolates change how readable
+# text is presented to Windows UI and screen readers. Natural RTL letters,
+# newlines and the emoji zero-width joiner remain valid.
+_UNSAFE_BIDI_FORMAT_CONTROLS = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
+
+
 def _contains_unsafe_model_controls(value: str) -> bool:
-    """Preserve multiline prompts but reject NUL, DEL and other Cc controls."""
+    """Reject unsafe Cc and bidi format controls without losing normal Unicode."""
     return any(
-        category(character) == "Cc" and character not in "\t\n\r"
+        (category(character) == "Cc" and character not in "\t\n\r")
+        or character in _UNSAFE_BIDI_FORMAT_CONTROLS
         for character in value
     )
 
