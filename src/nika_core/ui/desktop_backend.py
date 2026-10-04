@@ -640,9 +640,14 @@ class DesktopBackend:
             # Report the old failure without changing the replacement task's state.
             self._record_background_failure(task_id, "desktop.runtime_host_failed")
             return
-        current = self._queue.get(task_id)
-        if current.state == TaskState.RUNNING:
-            self._queue.transition(task_id, TaskState.FAILED)
+        # Another run may be registered after we release the first lock and
+        # inspect the completed future. Serialize the final state transition
+        # with runtime registration so an old failure cannot fail a replacement.
+        with self._active_lock:
+            if task_id not in self._active_futures:
+                current = self._queue.get(task_id)
+                if current.state == TaskState.RUNNING:
+                    self._queue.transition(task_id, TaskState.FAILED)
         self._record_background_failure(task_id, "desktop.runtime_host_failed")
 
     def _record_background_failure(self, task_id: str, event_type: str) -> None:
