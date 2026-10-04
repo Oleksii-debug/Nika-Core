@@ -331,3 +331,133 @@ def test_projection_key_collision_is_rejected_before_overwrite(tmp_path) -> None
 
     with pytest.raises(ValueError, match="projection key collision"):
         provider()
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(
+            '{"shared_task_id":"forged-private-id",'
+            '"shared_task_id":"task-v01-71","stage":"worker"}',
+            id="duplicate-task-identity",
+        ),
+        pytest.param(
+            '{"shared_task_id":"task-v01-71","stage":"worker",'
+            '"metadata":{"role":"worker","role":"checker"}}',
+            id="nested-duplicate-key",
+        ),
+        pytest.param(
+            '{"shared_task_id":"task-v01-71","stage":"worker","score":NaN}',
+            id="nonfinite-number",
+        ),
+        pytest.param(
+            b'{"shared_task_id":"task-v01-71","stage":"worker"}',
+            id="sqlite-blob",
+        ),
+        pytest.param(
+            '{"shared_task_id":"task-v01-71","stage":"worker"',
+            id="truncated-json",
+        ),
+        pytest.param('[]', id="non-object-json"),
+    ],
+)
+def test_corrupt_handoff_never_exposes_partially_valid_team(tmp_path, raw) -> None:
+    store = SQLiteStore(tmp_path / "nika state з пробілом.db")
+    store.initialize()
+    _create_team(store)
+    with store.connection() as conn:
+        cursor = conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? "
+            "WHERE team_id = ? AND recipient_id = ? AND kind = 'task'",
+            (raw, "team-v01-71", "worker"),
+        )
+        assert cursor.rowcount == 1
+
+    projected = V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"),
+        store=store,
+    )()["v01_team_task"]
+    assert projected == {
+        "available": False,
+        "message": "Стан командного завдання недоступний.",
+    }
+    for secret in (*_SECRET_VALUES, "forged-private-id"):
+        assert secret not in json.dumps(projected, ensure_ascii=False)
+
+
+def test_malformed_unmarked_generic_team_is_not_claimed_as_v01(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    teams = MultiAgentStore(store)
+    teams.create_team(
+        team_id="generic-team",
+        root_member_id="root",
+        root_agent_id="agent",
+        root_agent_version=1,
+        root_thread_id="private-generic-thread",
+        root_grants=(),
+        quota=TeamQuota(),
+    )
+    teams.spawn_child(
+        team_id="generic-team",
+        parent_id="root",
+        child_id="child",
+        agent_id="agent",
+        agent_version=1,
+        thread_id="private-generic-child",
+        requested_grants=(),
+        task_handoff=AgentHandoff(
+            team_id="generic-team",
+            sender_id="root",
+            recipient_id="child",
+            kind=HandoffKind.TASK,
+            payload={"assignment": "generic task without V0.1 identity"},
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? WHERE team_id = ?",
+            (b'{"assignment":"generic task"}', "generic-team"),
+        )
+    assert V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("unrelated"),
+        store=store,
+    )()["v01_team_task"] is None
+
+
+def test_team_event_projection_reads_only_latest_twenty_in_chronological_order(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.initialize()
+    _create_team(store)
+    with store.connection() as conn:
+        for index in range(30):
+            created_at = f"2031-01-01T00:00:{index:02}+00:00"
+            conn.execute(
+                "INSERT INTO multi_agent_handoffs("
+                "handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"bounded-event-{index:02}",
+                    "team-v01-71",
+                    "worker",
+                    "supervisor",
+                    "result",
+                    "bounded-proof",
+                    "{}",
+                    created_at,
+                ),
+            )
+        events = V01PackagedTeamStateProvider._event_views(
+            conn,
+            team_id="team-v01-71",
+            roles={"supervisor": "supervisor", "worker": "worker"},
+        )
+
+    assert len(events) == 20
+    assert [event["time"] for event in events] == [
+        f"2031-01-01T00:00:{index:02}+00:00" for index in range(10, 30)
+    ]
+    assert all(event["code"] == "worker.result" for event in events)
