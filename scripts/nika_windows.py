@@ -77,7 +77,7 @@ class WindowsBridgeSession:
         ):
             try:
                 resource.close()
-            except BaseException as exc:
+            except BaseException as exc:  # noqa: BLE001 - partial-start teardown
                 if type(exc) is RuntimeError and (
                     (
                         name == "backend"
@@ -135,7 +135,7 @@ def _close_failed_startup_resources(
             continue
         try:
             resource.close()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - retain original failure
             # A teardown interrupt must not replace the original startup error.
             # Failure diagnostics may contain private paths or model details.
             logging.getLogger(__name__).error(
@@ -532,7 +532,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "та перезапустіть програму. Дані не змінено."
         )
         return 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - redact configuration failures
         # Unexpected configuration/source failures can also contain private values.
         logging.getLogger(__name__).error(
             "Packaged configuration failed: exception_type=%s", type(exc).__name__
@@ -556,7 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Запуск зупинено без автоматичного повторення дій."
         )
         return 1
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - redact startup failures
         # All session-construction failures must fail closed before a UI exists.
         # Exception messages can contain private paths, values or model details.
         logging.getLogger(__name__).error(
@@ -571,13 +571,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     close_error: BaseException | None = None
     try:
         launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - show safe shell failure
         launch_error = exc
     except BaseException:
         # Preserve KeyboardInterrupt/SystemExit even if teardown also fails.
         try:
             session.close()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - retain original interrupt
             # Cleanup failure must not replace the original shell interruption.
             logging.getLogger(__name__).error(
                 "Packaged shutdown failed: exception_type=%s", type(exc).__name__
