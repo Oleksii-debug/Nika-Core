@@ -7,11 +7,13 @@ from platformdirs import user_data_path
 from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+APP_CONFIG_SCHEMA_VERSION = 1
+
 
 class AppConfig(BaseSettings):
     """Versioned application settings loaded from explicit values or NIKA_* environment variables."""
 
-    schema_version: int = 1
+    schema_version: int = APP_CONFIG_SCHEMA_VERSION
     app_version: str = "0.0.2"
     database_path: Path = Field(
         default_factory=lambda: user_data_path("NikaCore", appauthor=False) / "nika_core.db",
@@ -26,17 +28,37 @@ class AppConfig(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="NIKA_",
         case_sensitive=False,
-        extra="ignore",
+        extra="forbid",
         validate_default=True,
         populate_by_name=True,
     )
 
-    @field_validator("schema_version")
+    def __init__(self, **values: object) -> None:
+        if "schema_version" in values and type(values["schema_version"]) is not int:
+            raise ValueError("explicit schema_version must be an exact integer")
+        super().__init__(**values)
+
+    @field_validator("schema_version", mode="before")
     @classmethod
-    def validate_schema_version(cls, value: int) -> int:
-        if value < 1:
-            raise ValueError("schema_version must be >= 1")
-        return value
+    def validate_schema_version(cls, value: object) -> int:
+        if type(value) is int:
+            version = value
+        elif type(value) is str:
+            if value == str(APP_CONFIG_SCHEMA_VERSION):
+                version = APP_CONFIG_SCHEMA_VERSION
+            elif value.isascii() and value.isdecimal() and not value.startswith("0"):
+                raise ValueError(
+                    f"unsupported schema_version: expected {APP_CONFIG_SCHEMA_VERSION}"
+                )
+            else:
+                raise ValueError("schema_version must be the canonical supported version")
+        else:
+            raise ValueError("schema_version must be the canonical supported version")
+        if version != APP_CONFIG_SCHEMA_VERSION:
+            raise ValueError(
+                f"unsupported schema_version: expected {APP_CONFIG_SCHEMA_VERSION}"
+            )
+        return version
 
     @field_validator("database_path")
     @classmethod
