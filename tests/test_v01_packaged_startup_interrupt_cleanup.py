@@ -138,3 +138,83 @@ def test_cleanup_interrupt_does_not_replace_original_or_skip_other_resources(
     assert closed == ["speech", "model_setup", "voice", "backend"]
     assert "component=voice exception_type=SystemExit" in caplog.text
     assert "PRIVATE_" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "error_type"),
+    [
+        ("config", OSError),
+        ("config", ValueError),
+        ("session", ValueError),
+        ("session", TypeError),
+    ],
+)
+def test_unexpected_packaged_startup_errors_have_private_safe_native_message(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    failure_stage: str,
+    error_type: type[Exception],
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Секретна папка" / "ніка.db")
+    calls: list[str] = []
+    messages: list[str] = []
+    failure = error_type("PRIVATE_STARTUP_VALUE_AND_PATH_CANARY")
+
+    def read_config(_cls: type[AppConfig]) -> AppConfig:
+        calls.append("config")
+        if failure_stage == "config":
+            raise failure
+        return config
+
+    def build_session(_config: AppConfig) -> None:
+        calls.append("session")
+        assert _config is config
+        raise failure
+
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(read_config))
+    monkeypatch.setattr(nika_windows, "build_windows_session", build_session)
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
+
+    with caplog.at_level(logging.ERROR):
+        result = nika_windows.main([])
+
+    assert result == 1
+    assert calls == (["config"] if failure_stage == "config" else ["config", "session"])
+    assert len(messages) == 1
+    assert "PRIVATE_" not in caplog.text
+    assert "PRIVATE_" not in messages[0]
+    assert "Секретна папка" not in messages[0]
+    assert f"exception_type={error_type.__name__}" in caplog.text
+    if failure_stage == "config":
+        assert "налаштування" in messages[0]
+    else:
+        assert "папки даних" in messages[0]
+
+
+@pytest.mark.parametrize("failure_stage", ["config", "session"])
+def test_packaged_entrypoint_does_not_transform_startup_interrupts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
+) -> None:
+    interruption = KeyboardInterrupt("PRIVATE_STARTUP_INTERRUPT_CANARY")
+    config = AppConfig(database_path=tmp_path / "ніка.db")
+    messages: list[str] = []
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
+
+    def from_environment(_cls: type[AppConfig]) -> AppConfig:
+        if failure_stage == "config":
+            raise interruption
+        return config
+
+    def build_session(_config: AppConfig) -> None:
+        raise interruption
+
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(from_environment))
+    monkeypatch.setattr(nika_windows, "build_windows_session", build_session)
+    with pytest.raises(KeyboardInterrupt) as captured:
+        nika_windows.main([])
+
+    assert captured.value is interruption
+    assert messages == []
