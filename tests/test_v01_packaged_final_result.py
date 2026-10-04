@@ -521,3 +521,56 @@ def test_ambiguous_comparison_evidence_never_stays_validated(
     assert _RAW_SOURCE_CANARY not in json.dumps(
         provider()["v01_team_task"], ensure_ascii=False, sort_keys=True
     )
+
+
+
+def test_completed_comparison_rejects_oversubscribed_handoff_history(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, queue, task_id, projection, provider = _complete_packaged_task(
+        tmp_path,
+        monkeypatch,
+        source_b_text=_RAW_SOURCE_CANARY,
+    )
+    assert projection["final_result"]["comparison"]["validated"] is True
+    team_id = projection["team"]["team_id"]
+    with store.connection() as conn:
+        original = conn.execute(
+            "SELECT handoff_id FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'result' "
+            "ORDER BY created_at, handoff_id LIMIT 1",
+            (team_id,),
+        ).fetchone()
+        assert original is not None
+        for index in range(64):
+            conn.execute(
+                "INSERT INTO multi_agent_handoffs("
+                "handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at) "
+                "SELECT ?, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at "
+                "FROM multi_agent_handoffs WHERE handoff_id = ?",
+                (f"surplus-replay-{index:03}", original["handoff_id"]),
+            )
+        assert conn.execute(
+            "SELECT COUNT(*) FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = 'checker' "
+            "AND kind IN ('result', 'error')",
+            (team_id,),
+        ).fetchone()[0] > 2
+
+    corrupted = provider()["v01_team_task"]
+    assert corrupted["final_result"]["comparison"] == {
+        "status": "evidence_invalid",
+        "validated": False,
+        "source_states": [],
+        "agreement_count": 0,
+        "difference_count": 0,
+    }
+    assert _RAW_SOURCE_CANARY not in json.dumps(corrupted, ensure_ascii=False)
+    restarted = V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state(queue, task_id),
+        store=SQLiteStore(store.path),
+    )()["v01_team_task"]
+    assert restarted == corrupted
