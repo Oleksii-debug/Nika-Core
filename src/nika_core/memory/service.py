@@ -198,6 +198,21 @@ def _unique_memory_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _validate_scalar_unicode(value: Any) -> None:
+    # json.loads accepts lone escaped surrogates, which break UTF-8 consumers.
+    pending: list[Any] = [value]
+    while pending:
+        item = pending.pop()
+        if type(item) is str:
+            if any(0xD800 <= ord(char) <= 0xDFFF for char in item):
+                raise ValueError("stored memory JSON contains invalid Unicode")
+        elif type(item) is list:
+            pending.extend(item)
+        elif type(item) is dict:
+            pending.extend(item)
+            pending.extend(item.values())
+
+
 def _record_from_row(row: Any) -> MemoryRecord:
     scope = MemoryScope(row["scope"])
     approval = row["user_approved"]
@@ -211,6 +226,7 @@ def _record_from_row(row: Any) -> MemoryRecord:
     value = json.loads(
         body, parse_constant=_reject_memory_constant, object_pairs_hook=_unique_memory_pairs
     )
+    _validate_scalar_unicode(value)
     return MemoryRecord(
         scope=scope,
         owner_id=row["owner_id"],
