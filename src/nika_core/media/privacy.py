@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 from typing import Any
+from urllib.parse import unquote_plus
 
 _SECRET_KEYS = frozenset(
     {
@@ -23,16 +24,15 @@ _SECRET_KEYS = frozenset(
 )
 _SENSITIVE_KEY_TOKENS = frozenset({"cookie", "password", "secret", "token"})
 _NON_SECRET_KEY_SUFFIXES = frozenset({"count"})
-_SENSITIVE_QUERY = re.compile(
-    r"(?i)([?&](?:token|access_token|refresh_token|api_key|auth|key|password|secret|signature|sig|expires)=[^&#\s]+)"
-)
+_SENSITIVE_QUERY = re.compile(r"([?&])([^=&#\s]+)=([^&#\s]*)")
 _BEARER = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 _COOKIE_HEADER = re.compile(r"(?im)\b((?:set-)?cookie)\s*:\s*[^\r\n]*")
 _AUTHORIZATION_HEADER = re.compile(r"(?im)\b((?:proxy-)?authorization)\s*:\s*[^\r\n]*")
 _SECRET_ASSIGNMENT = re.compile(
     r"(?i)(?<![A-Za-z0-9_])"
     r"((?:api[-_]?key|access[-_]?token|refresh[-_]?token|client[-_]?secret|"
-    r"authorization|password|token|secret|cookie|cookies|session[-_]?id)"
+    r"authorization|password|token|secret|cookie|cookies|session[-_]?id|"
+    r"subscription[-_]?key)"
     r"\s*[:=]\s*)"
     r"([^\s,;&#]+)"
 )
@@ -54,6 +54,12 @@ _SENSITIVE_ARGV_OPTIONS = frozenset(
         "--password",
         "--refresh-token",
         "--refresh_token",
+        "--subscription-key",
+        "--subscription_key",
+        "--subscriptionkey",
+        "--x-api-key",
+        "--x_api_key",
+        "--xapikey",
         "--secret",
         "--session-id",
         "--session_id",
@@ -72,15 +78,27 @@ def _normalized_key_tokens(key: str) -> tuple[str, ...]:
 
 
 def _is_secret_key(key: str) -> bool:
-    tokens = _normalized_key_tokens(key)
+    tokens = _normalized_key_tokens(unquote_plus(key))
     if not tokens:
         return False
     normalized = "_".join(tokens)
     if normalized in _SECRET_KEYS:
         return True
+    if tokens[-1] == "key" and (
+        len(tokens) == 1 or (len(tokens) >= 2 and tokens[-2] in {"api", "subscription"})
+    ):
+        return True
     if tokens[-1] in _NON_SECRET_KEY_SUFFIXES:
         return False
     return any(token in _SENSITIVE_KEY_TOKENS for token in tokens)
+
+
+def _redact_query_match(match: re.Match[str]) -> str:
+    key = match.group(2)
+    normalized = "_".join(_normalized_key_tokens(unquote_plus(key)))
+    if _is_secret_key(key) or normalized in {"auth", "sig", "signature", "expires"}:
+        return f"{match.group(1)}{key}=[REDACTED]"
+    return match.group(0)
 
 
 def redact_text(value: str) -> str:
@@ -94,10 +112,7 @@ def redact_text(value: str) -> str:
         lambda match: f"{match.group(1)}[REDACTED]",
         redacted,
     )
-    return _SENSITIVE_QUERY.sub(
-        lambda match: match.group(0).split("=", 1)[0] + "=[REDACTED]",
-        redacted,
-    )
+    return _SENSITIVE_QUERY.sub(_redact_query_match, redacted)
 
 
 def redact_argv(argv: tuple[str, ...]) -> tuple[str, ...]:
