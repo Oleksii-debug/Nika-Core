@@ -492,7 +492,7 @@ class DesktopBackend:
                         "Desktop runtime future failed before close; exception_type=%s",
                         type(exc).__name__,
                     )
-                except BaseException as exc:
+                except BaseException as exc:  # noqa: BLE001 - future may carry interrupts
                     # A completed future may carry KeyboardInterrupt or SystemExit.
                     # Still settle the remaining futures and release the desktop host.
                     _LOGGER.warning(
@@ -592,7 +592,7 @@ class DesktopBackend:
             return
         try:
             executions = future.result()
-        except BaseException:  # future may carry an interrupted runtime/provider failure
+        except BaseException:  # noqa: BLE001 - interrupted runtime/provider future
             self._set_startup_recovery_state(
                 {
                     **self.startup_recovery_snapshot(),
@@ -631,7 +631,7 @@ class DesktopBackend:
     def _discard_unsubmitted(coroutine: Coroutine[Any, Any, Any]) -> None:
         try:
             coroutine.close()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - retain original submit failure
             # Never replace the original submission failure with cleanup failure.
             _LOGGER.warning(
                 "Desktop coroutine cleanup failed; exception_type=%s",

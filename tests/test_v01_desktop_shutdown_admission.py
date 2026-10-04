@@ -268,7 +268,7 @@ def test_cancel_is_refused_during_close_but_admitted_after_refusal(
     def close_backend() -> None:
         try:
             backend.close()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - capture shutdown interrupt
             errors.append(exc)
 
     worker = threading.Thread(target=close_backend)
