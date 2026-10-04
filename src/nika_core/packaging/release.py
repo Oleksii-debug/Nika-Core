@@ -140,25 +140,34 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
     if not root.is_dir():
         raise ValueError("bundle_dir must be a directory")
     files: list[Path] = []
-    for candidate in root.rglob("*"):
-        # ZIP publication cannot materialize directory aliases. Fail closed.
-        if getattr(candidate, "is_junction", lambda: False)():
-            raise ValueError(f"bundle junction is unsupported: {candidate}")
-        if candidate.is_symlink():
-            resolved = candidate.resolve(strict=True)
-            try:
-                resolved.relative_to(root)
-            except ValueError as exc:
-                raise ValueError(f"bundle symlink escapes release root: {candidate}") from exc
-            if candidate.is_dir():
-                raise ValueError(f"bundle directory symlink is unsupported: {candidate}")
-        if candidate.is_file():
-            files.append(candidate)
-        elif not candidate.is_dir():
-            # Never certify an incomplete ZIP by silently omitting FIFOs,
-            # sockets, devices or symlinks to special files. Opening such an
-            # entry could also block a release worker indefinitely.
-            raise ValueError(f"unsupported release bundle entry: {candidate}")
+    directories = [root]
+    while directories:
+        # Path.rglob can suppress nested directory scanning errors. Explicit
+        # iteration must fail rather than certify a silently incomplete release.
+        for candidate in directories.pop().iterdir():
+            # ZIP publication cannot materialize directory aliases. Fail closed.
+            if getattr(candidate, "is_junction", lambda: False)():
+                raise ValueError(f"bundle junction is unsupported: {candidate}")
+            if candidate.is_symlink():
+                resolved = candidate.resolve(strict=True)
+                try:
+                    resolved.relative_to(root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"bundle symlink escapes release root: {candidate}"
+                    ) from exc
+                if candidate.is_dir():
+                    raise ValueError(
+                        f"bundle directory symlink is unsupported: {candidate}"
+                    )
+            if candidate.is_file():
+                files.append(candidate)
+            elif candidate.is_dir():
+                directories.append(candidate)
+            else:
+                # Never silently omit FIFO, socket, device or special-file links.
+                # Opening a FIFO could also block the release worker indefinitely.
+                raise ValueError(f"unsupported release bundle entry: {candidate}")
     return tuple(sorted(files, key=lambda item: item.relative_to(root).as_posix()))
 
 
