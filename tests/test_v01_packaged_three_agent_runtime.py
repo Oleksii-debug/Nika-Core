@@ -1097,3 +1097,108 @@ def test_worker_handoff_goal_is_bound_before_run_probe_and_resume(
             )
         ).outcome is RuntimeOutcome.FAILED
         assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        pytest.param("shared_task_id", "unrelated-task", id="other-task"),
+        pytest.param("shared_task_id", True, id="non-text-task"),
+        pytest.param("stage", "source_worker", id="wrong-stage"),
+        pytest.param("stage", None, id="missing-stage"),
+    ],
+)
+def test_packaged_checker_handoff_identity_cannot_authorize_other_task_or_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str, replacement: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id, thread_id=thread_id, payload={"command": command}
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    team_id = runtime._team_id(task_id)
+    previous_results = _result_count(store)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'task'",
+            (team_id,),
+        ).fetchone()
+        assert row is not None
+        handoff = json.loads(row["payload_json"])
+        if replacement is None:
+            handoff.pop(field)
+        else:
+            handoff[field] = replacement
+        changed = conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+            (json.dumps(handoff), row["handoff_id"]),
+        )
+        assert changed.rowcount == 1
+
+    async def forbidden_outer(*, task_id: str, command: str):
+        raise AssertionError(f"invalid checker identity reached outer effect: {task_id}")
+
+    async def forbidden_member(*, thread_id: str):
+        raise AssertionError(f"invalid checker identity reached member effect: {thread_id}")
+
+    for current in (
+        runtime,
+        V01PackagedThreeAgentRuntime(
+            store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
+        ),
+    ):
+        monkeypatch.setattr(current, "_run_outer", forbidden_outer)
+        monkeypatch.setattr(current, "_run_member_from_store", forbidden_member)
+        assert current._stored_outer_command(task_id) == ""
+        outer_token = current.initial_resume_token(task_id=task_id, thread_id=thread_id)
+        assert asyncio.run(
+            current.probe_resume(
+                task_id=task_id, thread_id=thread_id, resume_token=outer_token
+            )
+        ).status is RuntimeResumeProbeStatus.INVALID
+        assert asyncio.run(
+            current.run(
+                RuntimeRequest(
+                    task_id=task_id, thread_id=thread_id, payload={"command": command}
+                )
+            )
+        ).outcome is RuntimeOutcome.FAILED
+        assert asyncio.run(
+            current.resume(
+                RuntimeResumeRequest(
+                    task_id=task_id,
+                    thread_id=thread_id,
+                    resume_token=outer_token,
+                    mode=RuntimeResumeMode.CONTINUE,
+                )
+            )
+        ).outcome is RuntimeOutcome.FAILED
+        for member_id in ("worker-a", "checker"):
+            member_task = f"team:{team_id}:{member_id}"
+            member_thread = f"v01:{team_id}:{member_id}"
+            member_token = current.initial_resume_token(
+                task_id=member_task, thread_id=member_thread
+            )
+            assert asyncio.run(
+                current.probe_resume(
+                    task_id=member_task,
+                    thread_id=member_thread,
+                    resume_token=member_token,
+                )
+            ).status is RuntimeResumeProbeStatus.INVALID
+            assert asyncio.run(
+                current.run(
+                    RuntimeRequest(
+                        task_id=member_task, thread_id=member_thread, payload={}
+                    )
+                )
+            ).outcome is RuntimeOutcome.FAILED
+        assert _result_count(store) == previous_results
