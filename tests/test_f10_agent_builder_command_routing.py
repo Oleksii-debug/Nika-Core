@@ -243,3 +243,27 @@ def test_agent_builder_route_cannot_replace_current_product_selection(tmp_path: 
     assert router.active_project_id == project_id
     assert ordinary.calls == []
     assert len(agent_builder.calls) == 1
+
+
+class _HostileDirectRouteText(str):
+    def split(self, *args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        raise AssertionError("direct router must not call untrusted string methods")
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        None,
+        17,
+        False,
+        ["Create an agent"],
+        _HostileDirectRouteText("Create an agent"),
+        type("PlainRouteSubclass", (str,), {})("Create an agent"),
+    ),
+)
+def test_direct_route_boundary_requires_plain_str_before_invoking_methods(
+    command: object,
+) -> None:
+    with pytest.raises(TypeError, match="plain string"):
+        route_command(command)  # type: ignore[arg-type]

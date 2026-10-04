@@ -43,6 +43,8 @@ class PackagedProductJourneyError(ValueError):
 
 
 def product_project_identity(normalized_goal: str) -> str:
+    if type(normalized_goal) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     goal = " ".join(normalized_goal.split())
     if not goal:
         raise PackagedProductJourneyError("product goal must not be empty")
@@ -57,6 +59,8 @@ def packaged_product_reopen_target(command: str) -> str | None:
     existing command classifier authoritative unless the user explicitly asks to open/reopen a
     ProductProject. The accepted id is canonicalized to lowercase before durable lookup.
     """
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split())
     lowered = normalized.casefold()
     prefix = next((item for item in _REOPEN_PREFIXES if lowered.startswith(item)), None)
@@ -72,6 +76,8 @@ def packaged_product_reopen_target(command: str) -> str | None:
 
 def packaged_current_product_command(command: str) -> bool:
     """Recognize an exact keyboard command that reports the durable presentation selection."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :")
     return normalized in _CURRENT_PROJECT_COMMANDS
 
