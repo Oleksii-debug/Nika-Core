@@ -67,16 +67,27 @@ class WindowsBridgeSession:
         if self._closed:
             return
         self._closed = True
-        try:
-            self.speech.close()
-        finally:
+        first_error: BaseException | None = None
+        for name, resource in (
+            ("speech", self.speech),
+            ("voice_model_setup", self.voice_model_setup),
+            ("voice", self.voice),
+            ("backend", self.backend),
+        ):
             try:
-                self.voice_model_setup.close()
-            finally:
-                try:
-                    self.voice.close()
-                finally:
-                    self.backend.close()
+                resource.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                else:
+                    # Continue teardown; preserve its first error and log only safe metadata.
+                    logging.getLogger(__name__).error(
+                        "Packaged shutdown cleanup failed: component=%s exception_type=%s",
+                        name,
+                        type(exc).__name__,
+                    )
+        if first_error is not None:
+            raise first_error
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -539,7 +550,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     launch_error: Exception | None = None
-    close_error: Exception | None = None
+    close_error: BaseException | None = None
     try:
         launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
     except Exception as exc:
@@ -548,14 +559,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Preserve KeyboardInterrupt/SystemExit even if teardown also fails.
         try:
             session.close()
-        except Exception as exc:
+        except BaseException as exc:
+            # Cleanup failure must not replace the original shell interruption.
             logging.getLogger(__name__).error(
                 "Packaged shutdown failed: exception_type=%s", type(exc).__name__
             )
         raise
     try:
         session.close()
-    except Exception as exc:
+    except BaseException as exc:
+        if launch_error is None and not isinstance(exc, Exception):
+            # An actual shutdown interruption remains observable when the shell succeeded.
+            raise
+        # A cleanup interruption cannot hide an earlier shell failure.
         close_error = exc
 
     if launch_error is None and close_error is None:
