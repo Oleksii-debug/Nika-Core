@@ -450,3 +450,75 @@ def test_session_close_does_not_retry_unrelated_backend_failure() -> None:
     assert session._closed is True
     session.close()
     assert calls == ["resource", "resource", "resource", "backend"]
+
+
+def test_combined_speech_and_runtime_shutdown_retry_preserves_first_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Two unfinished authorities must both settle before the session is terminal."""
+    calls: list[str] = []
+    speech_failure = RuntimeError("packaged speech worker did not settle during shutdown")
+    runtime_failure = RuntimeError(
+        "cannot close desktop runtime loop while tasks are active"
+    )
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.closed = False
+
+        def close(self) -> None:
+            if not self.closed:
+                self.closed = True
+                calls.append(self.name)
+
+    class Speech:
+        def __init__(self) -> None:
+            self.settled = False
+
+        def close(self) -> None:
+            calls.append("speech")
+            if not self.settled:
+                raise speech_failure
+
+    class Backend:
+        def __init__(self) -> None:
+            self.settled = False
+
+        def close(self) -> None:
+            calls.append("backend")
+            if not self.settled:
+                raise runtime_failure
+
+    speech = Speech()
+    backend = Backend()
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=backend,
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=speech,
+    )
+
+    with caplog.at_level(logging.ERROR), pytest.raises(RuntimeError) as captured:
+        session.close()
+    assert captured.value is speech_failure
+    assert session._closed is False
+    assert calls == ["speech", "voice_model_setup", "voice", "backend"]
+    assert (
+        "Packaged shutdown cleanup failed: component=backend "
+        "exception_type=RuntimeError"
+    ) in caplog.text
+    assert "cannot close desktop runtime loop" not in caplog.text
+    assert "packaged speech worker did not settle" not in caplog.text
+
+    speech.settled = True
+    backend.settled = True
+    session.close()
+    session.close()
+    assert session._closed is True
+    assert calls == [
+        "speech", "voice_model_setup", "voice", "backend",
+        "speech", "backend",
+    ]
