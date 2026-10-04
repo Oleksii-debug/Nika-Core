@@ -363,7 +363,8 @@ def test_signed_64_bit_token_metadata_is_still_accepted(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "mode", ("valid", "text-valid-unicode", "text-valid-multiline", "text-valid-emoji-joiner")
+    "mode",
+    ("valid", "text-valid-unicode", "text-valid-multiline", "text-valid-emoji-joiner"),
 )
 def test_valid_success_response_still_reaches_completed_audit(
     tmp_path: Path, mode: str
