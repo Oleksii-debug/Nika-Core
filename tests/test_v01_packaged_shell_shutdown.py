@@ -215,3 +215,88 @@ def test_successful_shell_preserves_real_shutdown_interruption(
     assert captured.value is interruption
     assert calls == ["shell", "close"]
     assert messages == []
+
+
+@pytest.mark.parametrize(
+    ("first_failure", "second_failure"),
+    [
+        ("speech", "voice_model_setup"),
+        ("voice_model_setup", "backend"),
+        ("voice", "backend"),
+    ],
+)
+def test_session_teardown_preserves_first_error_and_logs_secondary_type_only(
+    caplog: pytest.LogCaptureFixture,
+    first_failure: str,
+    second_failure: str,
+) -> None:
+    closed: list[str] = []
+    first_error = OSError("PRIVATE_FIRST_SHUTDOWN_ERROR")
+    second_error = SystemExit("PRIVATE_SECOND_SHUTDOWN_ERROR")
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+            if self.name == first_failure:
+                raise first_error
+            if self.name == second_failure:
+                raise second_error
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=Resource("backend"),
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=Resource("speech"),
+    )
+    with caplog.at_level(logging.ERROR), pytest.raises(OSError) as captured:
+        session.close()
+
+    assert captured.value is first_error
+    assert closed == ["speech", "voice_model_setup", "voice", "backend"]
+    assert (
+        f"Packaged shutdown cleanup failed: component={second_failure} "
+        "exception_type=SystemExit"
+    ) in caplog.text
+    assert "PRIVATE_" not in caplog.text
+    session.close()
+    assert closed == ["speech", "voice_model_setup", "voice", "backend"]
+
+
+@pytest.mark.parametrize(
+    "failure_component", ["speech", "voice_model_setup", "voice", "backend"]
+)
+def test_session_teardown_preserves_single_interrupt_and_attempts_all_resources(
+    failure_component: str,
+) -> None:
+    closed: list[str] = []
+    interruption = KeyboardInterrupt("PRIVATE_SHUTDOWN_INTERRUPT")
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+            if self.name == failure_component:
+                raise interruption
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=Resource("backend"),
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=Resource("speech"),
+    )
+    with pytest.raises(KeyboardInterrupt) as captured:
+        session.close()
+
+    assert captured.value is interruption
+    assert closed == ["speech", "voice_model_setup", "voice", "backend"]
+    session.close()
+    assert closed == ["speech", "voice_model_setup", "voice", "backend"]
