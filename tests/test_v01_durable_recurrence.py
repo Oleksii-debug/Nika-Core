@@ -831,3 +831,45 @@ def test_noninteger_recurrence_version_blocks_recovery_and_dispatch(tmp_path: Pa
         restarted.action_handler({"recurrence_id": "bad-version"})
     assert jobs.get(job_id) == corrupted
     assert calls == []
+
+@pytest.mark.parametrize("field", ("recurrence_id", "task_id", "action_id"))
+def test_non_utf8_recurrence_creation_has_no_persisted_effect(
+    tmp_path: Path, field: str
+) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    options = {
+        "recurrence_id": "utf8-recurrence",
+        "task_id": TASK_ID,
+        "action_id": "monitor.check",
+        "interval_seconds": 60,
+        "start_at": clock.value,
+    }
+    options[field] = "\\ud800"
+    with pytest.raises(ValueError, match=field):
+        service.create(**options)
+    assert scheduler.upserts == []
+    assert service.get("utf8-recurrence") is None
+    assert calls == []
+
+
+def test_non_utf8_recurrence_lookup_and_callback_have_no_effect(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    clock = FakeClock(datetime(2030, 1, 1, 12, 0, tzinfo=UTC))
+    calls: list[RecurrenceInvocation] = []
+    service, scheduler = _service(store, clock, calls)
+    bad_id = "\\ud800"
+    for operation in (
+        service.get,
+        service.pause,
+        service.resume,
+        service.cancel,
+    ):
+        with pytest.raises(ValueError, match="recurrence_id"):
+            operation(bad_id)
+    with pytest.raises(ValueError, match="recurrence_id"):
+        service.action_handler({"recurrence_id": bad_id})
+    assert scheduler.upserts == []
+    assert calls == []
