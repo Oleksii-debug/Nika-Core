@@ -102,7 +102,7 @@ def test_decode_rejects_oversized_payload_before_comparing_digest() -> None:
 
 def test_invalid_unicode_is_a_bound_binding_error_on_both_paths() -> None:
     assignment, result = _case()
-    bad_item = replace(result.items[0], snippet="\\ud800")
+    bad_item = replace(result.items[0], snippet="\ud800")
     with pytest.raises(SourceResultBindingError, match="canonical JSON"):
         encode_source_result(assignment, replace(result, items=(bad_item,)))
 
@@ -111,7 +111,7 @@ def test_invalid_unicode_is_a_bound_binding_error_on_both_paths() -> None:
     assert isinstance(result_data, dict)
     items = result_data["items"]
     assert isinstance(items, list)
-    items[0]["snippet"] = "\\ud800"
+    items[0]["snippet"] = "\ud800"
     with pytest.raises(SourceResultBindingError, match="canonical JSON"):
         decode_source_result(assignment, member_id=assignment.member_id, output=output)
 
