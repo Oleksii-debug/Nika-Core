@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import RLock
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -33,39 +34,77 @@ class APSchedulerAdapter(SchedulerPort):
         self._audit = audit
         self._scheduler = BackgroundScheduler(timezone="UTC")
         self._started = False
+        self._starting = False
+        self._lifecycle_lock = RLock()
+        self._shutdown_requested = False
+        self._shutdown_wait = True
 
     def start(self) -> None:
-        if self._started:
-            return
-        for job in self._jobs.list_enabled():
-            if self._task_authority_allows(job):
-                self._install(job)
-        self._scheduler.start()
-        self._started = True
+        with self._lifecycle_lock:
+            if self._started or self._starting:
+                return
+            self._starting = True
+            self._shutdown_requested = False
+            self._shutdown_wait = True
+            try:
+                try:
+                    for job in self._jobs.list_enabled():
+                        self._sync_runtime_job(job.job_id)
+                except Exception:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    raise
+                if self._shutdown_requested:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    return
+                try:
+                    self._scheduler.start()
+                except Exception:
+                    self._scheduler = BackgroundScheduler(timezone="UTC")
+                    raise
+                if self._shutdown_requested:
+                    replacement = BackgroundScheduler(timezone="UTC")
+                    self._scheduler.shutdown(wait=self._shutdown_wait)
+                    self._scheduler = replacement
+                    return
+                self._started = True
+            finally:
+                self._starting = False
+                self._shutdown_requested = False
+                self._shutdown_wait = True
 
     def shutdown(self, *, wait: bool = True) -> None:
-        if not self._started:
-            return
-        self._scheduler.shutdown(wait=wait)
-        self._started = False
+        with self._lifecycle_lock:
+            if self._starting:
+                self._shutdown_requested = True
+                self._shutdown_wait = wait
+                return
+            if not self._started:
+                return
+            replacement = BackgroundScheduler(timezone="UTC")
+            self._scheduler.shutdown(wait=wait)
+            self._scheduler = replacement
+            self._started = False
 
     def upsert(self, job: ScheduledJob) -> None:
+        if type(job) is not ScheduledJob:
+            raise TypeError("job must be an exact ScheduledJob")
+        job_id = _require_job_id(job.job_id)
         self._jobs.upsert(job)
-        effective_job = job
-        if self._started:
-            allowed = job.enabled and self._task_authority_allows(job)
-            effective_job = self._required_job(job.job_id)
-            if allowed:
-                self._install(effective_job)
-            elif self._scheduler.get_job(job.job_id) is not None:
-                self._scheduler.remove_job(job.job_id)
+        effective_job = self._required_job(job_id)
+        if self._started or self._starting:
+            self._sync_runtime_job(job_id)
+            effective_job = self._required_job(job_id)
+        elif not self._task_authority_allows(effective_job):
+            effective_job = self._required_job(job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
 
     def remove(self, job_id: str) -> bool:
+        job_id = _require_job_id(job_id)
         removed = self._jobs.delete(job_id)
-        if self._started and self._scheduler.get_job(job_id) is not None:
-            self._scheduler.remove_job(job_id)
-        if removed and self._audit is not None:
+        if self._started or self._starting:
+            self._sync_runtime_job(job_id)
+        remaining = self._jobs.get(job_id)
+        if removed and remaining is None and self._audit is not None:
             self._audit.append(
                 event_type="scheduler.job_removed",
                 entity_type="scheduled_job",
@@ -74,57 +113,98 @@ class APSchedulerAdapter(SchedulerPort):
         return removed
 
     def pause(self, job_id: str) -> None:
-        job = self._required_job(job_id)
-        self._jobs.set_enabled(job_id, False)
-        if self._started and self._scheduler.get_job(job_id) is not None:
-            self._scheduler.remove_job(job_id)
-        self._audit_change("scheduler.job_paused", job)
+        job = self._required_job(_require_job_id(job_id))
+        self._jobs.set_enabled(job.job_id, False)
+        if self._started or self._starting:
+            self._sync_runtime_job(job.job_id)
+        paused_job = self._required_job(job.job_id)
+        if paused_job.enabled:
+            return
+        self._audit_change("scheduler.job_paused", paused_job)
 
     def resume(self, job_id: str) -> None:
-        job = self._required_job(job_id)
-        self._jobs.set_enabled(job_id, True)
-        enabled_job = ScheduledJob(
-            job_id=job.job_id,
-            action_id=job.action_id,
-            trigger_kind=job.trigger_kind,
-            trigger=job.trigger,
-            payload=job.payload,
-            enabled=True,
-            coalesce=job.coalesce,
-            max_instances=job.max_instances,
-            misfire_grace_seconds=job.misfire_grace_seconds,
-        )
-        allowed = self._task_authority_allows(enabled_job)
-        if not allowed:
+        job = self._required_job(_require_job_id(job_id))
+        self._jobs.set_enabled(job.job_id, True)
+        enabled_job = self._required_job(job.job_id)
+        if not enabled_job.enabled:
             return
-        if self._started:
-            self._install(enabled_job)
+        if self._started or self._starting:
+            installed_job = self._sync_runtime_job(enabled_job.job_id)
+            if installed_job is None:
+                return
+            enabled_job = installed_job
+        elif not self._task_authority_allows(enabled_job):
+            return
         self._audit_change("scheduler.job_resumed", enabled_job)
 
     def has_runtime_job(self, job_id: str) -> bool:
+        job_id = _require_job_id(job_id)
         return self._scheduler.get_job(job_id) is not None
+
+    def _sync_runtime_job(self, job_id: str) -> ScheduledJob | None:
+        job_id = _require_job_id(job_id)
+        job = self._jobs.get(job_id)
+        if job is None or not job.enabled or not self._task_authority_allows(job):
+            if self._scheduler.get_job(job_id) is not None:
+                self._scheduler.remove_job(job_id)
+            return None
+        current = self._jobs.get(job_id)
+        if current is None or not current.enabled or not self._task_authority_allows(current):
+            if self._scheduler.get_job(job_id) is not None:
+                self._scheduler.remove_job(job_id)
+            return None
+        try:
+            self._install(current)
+        except Exception:
+            if self._scheduler.get_job(job_id) is not None:
+                self._scheduler.remove_job(job_id)
+            raise
+        return current
 
     def _install(self, job: ScheduledJob) -> None:
         self._scheduler.add_job(
             self._dispatch,
             trigger=_make_trigger(job),
             id=job.job_id,
-            args=(job.job_id,),
+            args=(job.job_id, job),
             replace_existing=True,
             coalesce=job.coalesce,
             max_instances=job.max_instances,
             misfire_grace_time=job.misfire_grace_seconds,
         )
 
-    def _dispatch(self, job_id: str) -> None:
-        job = self._required_job(job_id)
-        if not job.enabled or not self._task_authority_allows(job):
+    def _dispatch(
+        self,
+        job_id: str,
+        installed_job: ScheduledJob | None = None,
+    ) -> None:
+        job_id = _require_job_id(job_id)
+        if installed_job is not None:
+            if type(installed_job) is not ScheduledJob:
+                raise TypeError("installed_job must be an exact ScheduledJob or None")
+            if _require_job_id(installed_job.job_id) != job_id:
+                return
+        job = self._jobs.get(job_id)
+        if job is None or not job.enabled:
             return
-        handler = self._handler_resolver(job.action_id)
-        # Authority can change after a due job is loaded/resolved. Re-read the
-        # canonical durable task state at the last scheduler-owned boundary
-        # before any handler (and therefore any external effect) is invoked.
+        if installed_job is not None and job != installed_job:
+            return
         if not self._task_authority_allows(job):
+            return
+        action_id = job.action_id
+        try:
+            handler = self._handler_resolver(action_id)
+        except Exception as exc:
+            self._audit_failure(job_id, action_id, exc)
+            raise
+        # Resolver work can race with pause/remove/upsert. Re-read the durable
+        # job at the last scheduler-owned boundary before any external effect.
+        job = self._jobs.get(job_id)
+        if job is None or not job.enabled:
+            return
+        if installed_job is not None and job != installed_job:
+            return
+        if job.action_id != action_id or not self._task_authority_allows(job):
             return
         if self._audit is not None:
             self._audit.append(
@@ -136,13 +216,7 @@ class APSchedulerAdapter(SchedulerPort):
         try:
             handler(dict(job.payload))
         except Exception as exc:
-            if self._audit is not None:
-                self._audit.append(
-                    event_type="scheduler.job_failed",
-                    entity_type="scheduled_job",
-                    entity_id=job_id,
-                    payload={"action_id": job.action_id, "error_type": type(exc).__name__},
-                )
+            self._audit_failure(job_id, job.action_id, exc)
             raise
         if self._audit is not None:
             self._audit.append(
@@ -196,7 +270,17 @@ class APSchedulerAdapter(SchedulerPort):
                 payload=payload,
             )
 
+    def _audit_failure(self, job_id: str, action_id: str, exc: Exception) -> None:
+        if self._audit is not None:
+            self._audit.append(
+                event_type="scheduler.job_failed",
+                entity_type="scheduled_job",
+                entity_id=job_id,
+                payload={"action_id": action_id, "error_type": type(exc).__name__},
+            )
+
     def _required_job(self, job_id: str) -> ScheduledJob:
+        job_id = _require_job_id(job_id)
         job = self._jobs.get(job_id)
         if job is None:
             raise KeyError(f"unknown scheduled job: {job_id}")
@@ -214,6 +298,14 @@ class APSchedulerAdapter(SchedulerPort):
                     "enabled": job.enabled,
                 },
             )
+
+
+def _require_job_id(value: object) -> str:
+    if type(value) is not str:
+        raise TypeError("job_id must be an exact string")
+    if not value or value != value.strip():
+        raise ValueError("job_id must be non-empty and whitespace-stable")
+    return value
 
 
 def _make_trigger(job: ScheduledJob) -> object:
