@@ -114,3 +114,34 @@ def test_regular_directories_remain_supported(tmp_path: Path) -> None:
     }
     write_release_manifest(bundle, manifest)
     assert verify_release_manifest(bundle, manifest) == ()
+
+
+def test_nested_directory_enumeration_failure_cannot_publish_incomplete_zip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle(tmp_path)
+    _manifest(bundle)
+    manifest = build_release_manifest(
+        bundle, product="NikaCore", version=VERSION, source_sha=SOURCE_SHA
+    )
+    artifact = tmp_path / "previous.zip"
+    artifact.write_bytes(b"previous approved artifact")
+    original_iterdir = Path.iterdir
+
+    def refuse_nested_directory(path: Path):
+        if path == bundle / "resources":
+            raise PermissionError("simulated inaccessible bundle directory")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", refuse_nested_directory)
+    with pytest.raises(PermissionError, match="inaccessible bundle directory"):
+        verify_release_manifest(bundle, manifest)
+    with pytest.raises(PermissionError, match="inaccessible bundle directory"):
+        build_release_archive(
+            bundle,
+            artifact,
+            source_sha=SOURCE_SHA,
+            expected_product_version=VERSION,
+        )
+    assert artifact.read_bytes() == b"previous approved artifact"
+    assert not list(tmp_path.glob(".nika-release-*"))
