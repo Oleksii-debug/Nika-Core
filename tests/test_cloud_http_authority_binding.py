@@ -63,6 +63,12 @@ def test_valid_host_spellings_preserve_exact_outbound_authority(
     )
 
 
-def test_invalid_httpx_port_is_rejected_at_route_configuration() -> None:
+@pytest.mark.parametrize(
+    "base_url",
+    ("https://approved.example:99999/v1", "https://approved.example:0/v1"),
+)
+def test_invalid_httpx_port_is_rejected_at_route_configuration(
+    base_url: str,
+) -> None:
     with pytest.raises(ValueError, match="invalid HTTP authority"):
-        _config("https://approved.example:99999/v1")
+        _config(base_url)
