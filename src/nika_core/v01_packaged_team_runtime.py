@@ -779,7 +779,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     @staticmethod
     def _member_identity(thread_id: str) -> tuple[str, str] | None:
-        parts = thread_id.split(":")
+        # Malformed untrusted threads may contain millions of separators.
+        # A fourth segment is already invalid, so never split the entire input.
+        parts = thread_id.split(":", 3)
         if len(parts) != 3 or parts[0] != "v01" or not parts[1] or not parts[2]:
             return None
         return parts[1], parts[2]
