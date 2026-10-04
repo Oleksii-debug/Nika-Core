@@ -176,3 +176,64 @@ def test_browser_session_is_ephemeral_by_contract(tmp_path: Path) -> None:
     assert session.registry is None
     assert session.page_ids() == ()
     assert session.downloads.approved_root == (tmp_path / "downloads").resolve()
+
+
+def test_download_broker_refuses_to_overwrite_prior_artifact(tmp_path: Path) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    broker.handle(_FakeDownload("result.txt", "first complete artifact"))
+    with pytest.raises(UnsupportedInteractionError, match="already exists"):
+        broker.handle(_FakeDownload("result.txt", "unapproved replacement"))
+    assert (broker.approved_root / "result.txt").read_text(encoding="utf-8") == (
+        "first complete artifact"
+    )
+    assert broker.saved == [broker.approved_root / "result.txt"]
+
+
+def test_download_broker_rejects_racing_destination_without_overwriting(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    destination = broker.approved_root / "race.txt"
+
+    class RacingDownload(_FakeDownload):
+        def save_as(self, staging: str) -> None:
+            destination.write_text("concurrent artifact", encoding="utf-8")
+            super().save_as(staging)
+
+    with pytest.raises(UnsupportedInteractionError, match="already exists"):
+        broker.handle(RacingDownload("race.txt", "new download"))
+    assert destination.read_text(encoding="utf-8") == "concurrent artifact"
+    assert broker.saved == []
+    assert list(broker.approved_root.glob(".nika-download-*.part")) == []
+
+
+def test_failed_download_removes_partial_staging_and_does_not_publish(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+
+    class PartialFailure(_FakeDownload):
+        def save_as(self, staging: str) -> None:
+            Path(staging).write_text("partial bytes", encoding="utf-8")
+            raise OSError("synthetic save failure")
+
+    with pytest.raises(OSError, match="synthetic save failure"):
+        broker.handle(PartialFailure("partial.txt"))
+    assert not (broker.approved_root / "partial.txt").exists()
+    assert list(broker.approved_root.glob(".nika-download-*.part")) == []
+    assert broker.saved == []
+
+
+def test_download_broker_does_not_follow_linked_destination(tmp_path: Path) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    victim = broker.approved_root / "victim.txt"
+    victim.write_text("protected", encoding="utf-8")
+    alias = broker.approved_root / "alias.txt"
+    try:
+        alias.symlink_to(victim)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not permitted by this test host")
+    with pytest.raises(UnsupportedInteractionError, match="already exists"):
+        broker.handle(_FakeDownload("alias.txt", "unapproved replacement"))
+    assert victim.read_text(encoding="utf-8") == "protected"
+    assert broker.saved == []
