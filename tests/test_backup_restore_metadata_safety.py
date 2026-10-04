@@ -189,3 +189,56 @@ def test_deeply_nested_restore_metadata_is_a_typed_failure(tmp_path: Path) -> No
         manager.recover_interrupted_restore()
     assert _digest(target) == original_sha
     assert marker_path.exists()
+
+
+@pytest.mark.parametrize(
+    "artifact_key",
+    [
+        "stage_file",
+        "quarantine_file",
+        "quarantine_wal_file",
+        "quarantine_shm_file",
+        "quarantine_manifest",
+    ],
+)
+def test_marker_rejects_indirect_recovery_artifacts_before_effects(
+    tmp_path: Path, artifact_key: str
+) -> None:
+    target = tmp_path / "live.db"
+    manager = _manager(target)
+    before_sha = _digest(target)
+    sentinel = tmp_path / "user-notes.txt"
+    sentinel.write_text("preserve", encoding="utf-8")
+    marker = _marker(manager, target)
+    name = (
+        manager._manifest_path(tmp_path / str(marker["quarantine_file"])).name
+        if artifact_key == "quarantine_manifest"
+        else str(marker[artifact_key])
+    )
+    try:
+        (tmp_path / name).symlink_to(sentinel)
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not allow creation of this symlink")
+    marker_path = manager._restore_marker_path(target)
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(RestoreSafetyError, match="indirect or not a regular file"):
+        manager.recover_interrupted_restore()
+    assert _digest(target) == before_sha
+    assert sentinel.read_text(encoding="utf-8") == "preserve"
+    assert marker_path.exists()
+
+
+def test_marker_rejects_nonregular_stage_before_effects(tmp_path: Path) -> None:
+    target = tmp_path / "live.db"
+    manager = _manager(target)
+    before_sha = _digest(target)
+    marker = _marker(manager, target)
+    (tmp_path / str(marker["stage_file"])).mkdir()
+    marker_path = manager._restore_marker_path(target)
+    marker_path.write_text(json.dumps(marker), encoding="utf-8")
+
+    with pytest.raises(RestoreSafetyError, match="indirect or not a regular file"):
+        manager.recover_interrupted_restore()
+    assert _digest(target) == before_sha
+    assert marker_path.exists()
