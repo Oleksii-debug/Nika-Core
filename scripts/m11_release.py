@@ -147,7 +147,9 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     if second["selection_before_command"] != "restored":
         raise RuntimeError("packaged PF11 restart did not restore pre-command selection")
     first_stable = {key: value for key, value in first.items() if key != "selection_before_command"}
-    second_stable = {key: value for key, value in second.items() if key != "selection_before_command"}
+    second_stable = {
+        key: value for key, value in second.items() if key != "selection_before_command"
+    }
     if _proof_identity(first_stable) != _proof_identity(second_stable):
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
     project_id = first.get("project_id")
