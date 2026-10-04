@@ -86,6 +86,20 @@ class _PoisonSuccessProvider:
             return replace(valid, text="")
         if self.mode == "text-whitespace":
             return replace(valid, text=" \t\n ")
+        if self.mode == "text-invisible-format":
+            return replace(valid, text="\u200b\u200d\ufeff")
+        if self.mode == "text-invisible-combining":
+            return replace(valid, text="\u0301\ufe0f")
+        if self.mode == "text-nul-control":
+            return replace(valid, text="Привіт\x00світ")
+        if self.mode == "text-delete-control":
+            return replace(valid, text="Привіт\x7fсвіт")
+        if self.mode == "text-c1-control":
+            return replace(valid, text="Привіт\x85світ")
+        if self.mode == "text-valid-emoji-joiner":
+            return replace(valid, text=" Відповідь 👩\u200d💻\nДругий рядок ")
+        if self.mode == "text-valid-crlf-tab":
+            return replace(valid, text="\tВідповідь\r\nДругий рядок")
         if self.mode == "text-valid-multiline":
             return replace(valid, text=" Відповідь 🧠\nДругий рядок ")
         if self.mode == "text-unpaired-high-surrogate":
@@ -185,6 +199,11 @@ def _request() -> ModelRequest:
         "text-not-string",
         "text-empty",
         "text-whitespace",
+        "text-invisible-format",
+        "text-invisible-combining",
+        "text-nul-control",
+        "text-delete-control",
+        "text-c1-control",
         "text-unpaired-high-surrogate",
         "text-unpaired-low-surrogate",
         "model-not-text",
@@ -348,7 +367,13 @@ def test_signed_64_bit_token_metadata_is_still_accepted(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("mode", ("valid", "text-valid-unicode", "text-valid-multiline"))
+@pytest.mark.parametrize(
+    "mode",
+    (
+        "valid", "text-valid-unicode", "text-valid-multiline",
+        "text-valid-emoji-joiner", "text-valid-crlf-tab",
+    ),
+)
 def test_valid_success_response_still_reaches_completed_audit(
     tmp_path: Path, mode: str
 ) -> None:
@@ -370,6 +395,8 @@ def test_valid_success_response_still_reaches_completed_audit(
         "valid": "provider output",
         "text-valid-unicode": "Локальна відповідь 🧠",
         "text-valid-multiline": " Відповідь 🧠\nДругий рядок ",
+        "text-valid-emoji-joiner": " Відповідь 👩\u200d💻\nДругий рядок ",
+        "text-valid-crlf-tab": "\tВідповідь\r\nДругий рядок",
     }
     assert response.text == expected_text[mode]
     assert primary.complete_calls == 1

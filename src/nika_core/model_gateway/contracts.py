@@ -6,6 +6,7 @@ from enum import StrEnum
 from math import isfinite
 from types import MappingProxyType
 from typing import Protocol
+from unicodedata import category
 
 
 class PrivacyClass(StrEnum):
@@ -45,6 +46,19 @@ class ModelFailureEffect(StrEnum):
 _MODEL_MESSAGE_ROLES = frozenset({"system", "user", "assistant", "tool"})
 
 
+def _has_readable_model_text(value: str) -> bool:
+    """Reject blank, zero-width-only and combining-mark-only model text."""
+    return any(category(character)[0] in "LNPS" for character in value)
+
+
+def _contains_unsafe_model_controls(value: str) -> bool:
+    """Preserve multiline prompts but reject NUL, DEL and other Cc controls."""
+    return any(
+        category(character) == "Cc" and character not in "\t\n\r"
+        for character in value
+    )
+
+
 def _require_canonical_identifier(
     name: str, value: object, *, optional: bool = False
 ) -> str | None:
@@ -76,8 +90,10 @@ class ModelMessage:
             raise ValueError(f"unsupported message role: {self.role}")
         if type(self.content) is not str:
             raise TypeError("message content must be text")
-        if not self.content.strip():
+        if not _has_readable_model_text(self.content):
             raise ValueError("message content must not be empty")
+        if _contains_unsafe_model_controls(self.content):
+            raise ValueError("message content contains unsafe control characters")
         if any(0xD800 <= ord(character) <= 0xDFFF for character in self.content):
             raise ValueError("message content must be valid Unicode text")
 
@@ -159,8 +175,10 @@ class ModelRequest:
             assert canonical_key is not None
             if type(value) is not str:
                 raise TypeError("metadata values must be text")
-            if not value.strip():
+            if not _has_readable_model_text(value):
                 raise ValueError("metadata values must not be empty")
+            if _contains_unsafe_model_controls(value):
+                raise ValueError("metadata values contain unsafe control characters")
             if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
                 raise ValueError("metadata values must be valid Unicode text")
             canonical_metadata[canonical_key] = value

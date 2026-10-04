@@ -71,7 +71,9 @@ def test_message_role_rejects_non_string_ambiguity() -> None:
         ModelMessage(role=True, content="content")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("content", ("", " ", "\t\n"))
+@pytest.mark.parametrize(
+    "content", ("", " ", "\t\n", "\u200b\ufeff", "\u0301\ufe0f")
+)
 def test_message_rejects_empty_or_whitespace_only_content(content: str) -> None:
     with pytest.raises(ValueError, match="message content must not be empty"):
         ModelMessage(role="user", content=content)
@@ -81,6 +83,23 @@ def test_message_preserves_meaningful_content_whitespace() -> None:
     message = ModelMessage(role="user", content="  preserve prompt spacing  ")
 
     assert message.content == "  preserve prompt spacing  "
+
+
+@pytest.mark.parametrize(
+    "content", ("Привіт\x00світ", "Привіт\x7fсвіт", "Привіт\x85світ")
+)
+def test_message_rejects_controls_before_provider_execution(content: str) -> None:
+    with pytest.raises(ValueError, match="unsafe control characters"):
+        ModelMessage(role="user", content=content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    ("  Відповідь 👩\u200d💻\n", "\tУкраїнський текст\r\nДругий рядок"),
+)
+def test_message_preserves_readable_unicode_and_line_endings(content: str) -> None:
+    message = ModelMessage(role="user", content=content)
+    assert message.content == content
 
 
 def test_message_content_rejects_non_string_values() -> None:
@@ -197,6 +216,10 @@ def test_metadata_is_provider_neutral_sorted_and_immutable() -> None:
         {"key": "   "},
         {"key": 1},
         {"options": {"temperature": 0.5}},
+        {"note": "\u200b\ufeff"},
+        {"note": "\u0301\ufe0f"},
+        {"note": "Привіт\x00світ"},
+        {"note": "Привіт\x85світ"},
     ),
 )
 def test_metadata_rejects_non_string_or_nested_provider_structures(metadata: object) -> None:
@@ -208,6 +231,13 @@ def test_metadata_preserves_meaningful_value_whitespace() -> None:
     request = _request(metadata={"note": "  meaningful text  "})
 
     assert request.metadata["note"] == "  meaningful text  "
+
+
+
+def test_metadata_preserves_readable_unicode_emoji_and_line_endings() -> None:
+    value = " Примітка 👩\u200d💻\r\n\t"
+    request = _request(metadata={"note": value})
+    assert request.metadata["note"] == value
 
 
 def test_provider_specific_request_parameters_are_not_domain_fields() -> None:

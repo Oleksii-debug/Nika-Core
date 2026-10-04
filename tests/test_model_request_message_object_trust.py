@@ -41,6 +41,8 @@ def test_model_request_rejects_message_subclass_before_polymorphic_access() -> N
     (
         ("developer", "safe", ValueError),
         ("user", "   ", ValueError),
+        ("user", "\u200b", ValueError),
+        ("user", "Привіт\x00світ", ValueError),
         (_HostileText("user"), "safe", TypeError),
         ("user", _HostileText("safe"), TypeError),
     ),
