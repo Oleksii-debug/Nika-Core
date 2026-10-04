@@ -63,13 +63,17 @@ class ResourceManager:
             ).fetchone()
         if row is None:
             return ResourceBudget(scope=scope, owner_id=owner_id)
-        return ResourceBudget(
+        if type(row["max_concurrent"]) is not int:
+            raise ValueError("invalid persisted resource budget")
+        budget = ResourceBudget(
             scope=row["scope"],
             owner_id=row["owner_id"],
             max_concurrent=int(row["max_concurrent"]),
             max_cpu_percent=row["max_cpu_percent"],
             max_memory_percent=row["max_memory_percent"],
         )
+        _validate_budget(budget)
+        return budget
 
     def status(self, *, scope: str, owner_id: str) -> ResourceCapacityStatus:
         """Return deterministic read-only capacity telemetry without changing admission state."""
@@ -194,4 +198,4 @@ def _validate_budget(budget: ResourceBudget) -> None:
 
 
 def _valid_percent(value: object) -> bool:
-    return type(value) in (int, float) and isfinite(value) and 0 <= value <= 100
+    return type(value) in (int, float) and 0 <= value <= 100 and isfinite(value)
