@@ -82,10 +82,16 @@ class APSchedulerAdapter(SchedulerPort):
                 return
             if not self._started:
                 return
-            replacement = BackgroundScheduler(timezone="UTC")
-            self._scheduler.shutdown(wait=wait)
-            self._scheduler = replacement
-            self._started = False
+            # Publish stopped state while holding the same lock as runtime
+            # reconciliation. A dispatch that observed _started before shutdown
+            # must not install a job into the new (stopped) scheduler afterward.
+            with self._runtime_sync_lock:
+                retiring_scheduler = self._scheduler
+                self._scheduler = BackgroundScheduler(timezone="UTC")
+                self._started = False
+            # Do not hold _runtime_sync_lock while waiting for running handlers:
+            # a handler may itself call upsert()/activate_persisted().
+            retiring_scheduler.shutdown(wait=wait)
 
     def upsert(self, job: ScheduledJob) -> None:
         if type(job) is not ScheduledJob:
@@ -164,6 +170,10 @@ class APSchedulerAdapter(SchedulerPort):
         # state. Serialize only live reconciliation so an older in-flight install
         # cannot overwrite the runtime state of a newer canonical adapter mutation.
         with self._runtime_sync_lock:
+            # Callers may have observed a running adapter before shutdown
+            # acquired this lock. Never populate the replacement scheduler.
+            if not self._started and not self._starting:
+                return None
             for _ in range(_SYNC_RETRY_LIMIT):
                 job = self._jobs.get(job_id)
                 if job is None or not job.enabled:
