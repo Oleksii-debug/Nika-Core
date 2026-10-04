@@ -117,13 +117,12 @@ class ApiModelRouteConfig:
             raise ValueError("API model route base_url has invalid HTTP authority") from exc
         expected_host = parsed.hostname.lower().rstrip(".")
         actual_host = transport_host.lower().rstrip(".") if transport_host else ""
-        if expected_host != actual_host:
-            try:
-                actual_idna_host = actual_host.encode("idna").decode("ascii")
-            except UnicodeError:
-                actual_idna_host = ""
-            if expected_host != actual_idna_host:
-                raise ValueError("API model route host differs from HTTP transport")
+        # HTTPX uses IDNA2008 for the wire name. Python's built-in IDNA
+        # codec is IDNA2003, so re-encoding decoded hosts can reject valid
+        # punycode labels (for example, the sharp-s or final-sigma cases).
+        actual_wire_host = transport_url.raw_host.decode("ascii").rstrip(".")
+        if expected_host != actual_host and expected_host != actual_wire_host:
+            raise ValueError("API model route host differs from HTTP transport")
 
 
 class CredentialRefOpenAICompatibleProvider:
