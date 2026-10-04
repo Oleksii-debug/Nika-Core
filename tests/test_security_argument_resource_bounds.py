@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from nika_core.security import ActionIntent
+from nika_core.security import ActionIntent, SandboxPolicy
 from nika_core.tools import ToolRisk
 
 
@@ -104,3 +106,49 @@ def test_depth_within_limit_preserves_normal_arguments() -> None:
     for _ in range(32):
         nested = [nested]
     assert _intent({"nested": nested}).normalized_arguments_json.startswith('{"nested":')
+
+
+@pytest.mark.parametrize("malformed", (123, True, b"artifacts/report.txt", ["report.txt"]))
+def test_non_text_intent_path_and_executable_fail_at_admission(malformed: object) -> None:
+    valid = _intent({})
+    with pytest.raises(ValueError, match="workspace-relative"):
+        replace(valid, write_path=malformed)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="process executable must be text"):
+        replace(valid, executable=malformed)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("malformed", (123, True, b"artifacts/report.txt", ["report.txt"]))
+def test_sandbox_denies_non_text_host_path_and_executable(
+    tmp_path: Path, malformed: object
+) -> None:
+    sandbox = SandboxPolicy(
+        workspace_root=tmp_path,
+        writable_roots=("artifacts",),
+        allowed_network_hosts=("example.test",),
+        allowed_executables=("python.exe",),
+    )
+    with pytest.raises(PermissionError, match="workspace-relative"):
+        sandbox.resolve_write(malformed)  # type: ignore[arg-type]
+    with pytest.raises(PermissionError, match="network host is not allowed"):
+        sandbox.authorize_network(malformed)  # type: ignore[arg-type]
+    with pytest.raises(PermissionError, match="process executable is not allowed"):
+        sandbox.authorize_executable(malformed)  # type: ignore[arg-type]
+
+
+def test_sandbox_config_denies_non_text_allowlist_carriers(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="allowed network host must be text"):
+        SandboxPolicy(
+            workspace_root=tmp_path,
+            allowed_network_hosts=(123,),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="process executable must be text"):
+        SandboxPolicy(
+            workspace_root=tmp_path,
+            allowed_executables=(123,),  # type: ignore[arg-type]
+        )
+
+
+def test_sandbox_direct_network_admission_denies_bad_unicode(tmp_path: Path) -> None:
+    sandbox = SandboxPolicy(workspace_root=tmp_path, allowed_network_hosts=("example.test",))
+    with pytest.raises(PermissionError, match="network host is not allowed"):
+        sandbox.authorize_network(chr(0xD800))
