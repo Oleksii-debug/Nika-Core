@@ -283,3 +283,41 @@ def test_default_packaged_startup_adopts_and_source_runtime_does_not(tmp_path, m
     monkeypatch.setattr(sys, "frozen", True)
     assert AppConfig.from_environment().database_path == target
     assert len(_rows(target, "tasks")) == 1
+
+
+def test_wal_backup_preserves_source_snapshot_during_open_writer(tmp_path):
+    """Separate source/snapshot drift from later restore failures under a live WAL writer."""
+    source = tmp_path / "old.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        before = adoption._inspect(source)
+        assert before is not None
+        backup = tmp_path / "snapshot.sqlite3"
+        SQLiteRecoveryManager(SQLiteStore(source)).create_backup(backup, record_audit=False)
+        copied = adoption._inspect(backup)
+        assert copied is not None
+        assert copied.digest == before.digest
+        assert adoption._inspect(source) == before
+        assert json.loads(_rows(backup, "tasks")[0][4]) == {"from_wal": True}
+
+
+def test_wal_adoption_internal_pipeline_exposes_original_failure(tmp_path):
+    """Exercise the existing guarded pipeline without the UI's privacy-safe error wrapper.
+
+    The public online-WAL acceptance remains in test_online_snapshot_includes_uncheckpointed_wal.
+    A failure here retains the real internal traceback needed to repair its root cause.
+    """
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        with adoption._startup_lock(target):
+            adoption._prepare_locked(target, [source])
+        assert json.loads(_rows(target, "tasks")[0][4]) == {"from_wal": True}
