@@ -152,3 +152,16 @@ def test_rejects_malformed_source_sha_before_publication(tmp_path: Path) -> None
             source_sha="invalid",
             expected_product_version=VERSION,
         )
+
+
+def test_rejects_oversized_manifest_before_reading_or_publishing(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(tmp_path)
+    (bundle / "release-manifest.json").write_bytes(b" " * (4 * 1024 * 1024 + 1))
+    artifact = tmp_path / "previous.zip"
+    artifact.write_bytes(b"existing")
+    with pytest.raises(ValueError, match="manifest exceeds the maximum size"):
+        _publish(bundle, artifact)
+    assert artifact.read_bytes() == b"existing"
+    assert not list(tmp_path.glob(".nika-release-*"))
