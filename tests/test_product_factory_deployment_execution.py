@@ -600,6 +600,7 @@ def test_prepare_releases_node_lease_when_broker_callback_raises(
     assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
     assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
 
+
 def test_health_probe_cannot_authorize_expired_credential(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -646,6 +647,7 @@ def test_health_probe_cannot_authorize_expired_credential(
         event.action == "use" for event in credentials.audit_events("project-a")
     ) == 1
 
+
 def test_prepare_refreshes_credential_clock_after_health_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -689,6 +691,7 @@ def test_prepare_refreshes_credential_clock_after_health_probe(
     assert coordinator.complete(spec.operation_id).state is OperationState.SUCCEEDED
     assert health.probes == 2
     assert provider.deploy_calls == [spec.intent.intent_id]
+
 
 def test_completion_health_callback_failure_releases_only_its_lease(
     monkeypatch: pytest.MonkeyPatch,
