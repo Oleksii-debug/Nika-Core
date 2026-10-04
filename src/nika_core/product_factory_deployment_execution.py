@@ -214,12 +214,15 @@ class DeploymentExecutionCoordinator:
                     updated_at=instant,
                 )
             )
+        # Health probes are external and can outlive a short credential lease.
+        # Authorize using the time after the probe, not complete() entry.
+        credential_instant = _aware(now or datetime.now(UTC))
         try:
             use = self.credentials.authorize_use(
                 lease_id=credential_lease_id,
                 project_id=record.spec.intent.project_id,
                 scope=record.spec.credential_scope,
-                now=instant,
+                now=credential_instant,
             )
         except CredentialBrokerError:
             self._release_ephemeral(operation_id)
@@ -228,7 +231,7 @@ class DeploymentExecutionCoordinator:
                     record,
                     state=OperationState.BLOCKED_CREDENTIAL,
                     node_id=None,
-                    updated_at=instant,
+                    updated_at=credential_instant,
                 )
             )
         # External health/credential callbacks may have changed node ownership.
@@ -251,7 +254,7 @@ class DeploymentExecutionCoordinator:
         finally:
             self._release_ephemeral(operation_id)
         evidence = record.evidence_refs + (f"credential-use:{use.event_id}",) + deployment.provider_evidence_refs
-        return self._save(self._from_deployment(record, deployment, evidence, instant))
+        return self._save(self._from_deployment(record, deployment, evidence, effect_instant))
 
     def reconcile(self, operation_id: str, *, now: datetime | None = None) -> DeploymentExecutionRecord:
         instant = _aware(now or datetime.now(UTC))
