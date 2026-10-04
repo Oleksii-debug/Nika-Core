@@ -316,6 +316,7 @@ def test_ollama_disables_environment_proxy_routing_for_private_local_calls() -> 
             json={
                 "model": "qwen3:8b",
                 "message": {"role": "assistant", "content": "ok"},
+                "done": True,
             },
         )
 
