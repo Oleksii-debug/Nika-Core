@@ -14,12 +14,21 @@ class PaginationPolicy:
     json_next_fields: tuple[str, ...] = ("next", "next_url", "nextPage")
 
     def __post_init__(self) -> None:
-        if self.max_pages < 1:
-            raise ValueError("max_pages must be positive")
-        if self.max_discovered_links_per_page < 1:
-            raise ValueError("max_discovered_links_per_page must be positive")
-        if not self.json_next_fields:
-            raise ValueError("json_next_fields must not be empty")
+        if type(self.max_pages) is not int or self.max_pages < 1:
+            raise ValueError("max_pages must be a positive integer")
+        if (
+            type(self.max_discovered_links_per_page) is not int
+            or self.max_discovered_links_per_page < 1
+        ):
+            raise ValueError("max_discovered_links_per_page must be a positive integer")
+        if type(self.same_origin_only) is not bool:
+            raise ValueError("same_origin_only must be a boolean")
+        if (
+            type(self.json_next_fields) is not tuple
+            or not self.json_next_fields
+            or any(type(field) is not str or not field for field in self.json_next_fields)
+        ):
+            raise ValueError("json_next_fields must be a nonempty tuple of nonempty strings")
 
 
 @dataclass(frozen=True, slots=True)

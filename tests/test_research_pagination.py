@@ -130,3 +130,39 @@ def test_json_discovery_skips_control_characters_in_url() -> None:
         '{"next": "/unsafe\\nurl", "next_url": "/safe-next"}',
     )
     assert discovery.next_urls == ("https://example.com/safe-next",)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected"),
+    [
+        ({"max_pages": True}, "max_pages"),
+        ({"max_pages": 2.5}, "max_pages"),
+        ({"max_discovered_links_per_page": "8"}, "max_discovered"),
+        ({"max_discovered_links_per_page": False}, "max_discovered"),
+        ({"same_origin_only": 0}, "same_origin_only"),
+        ({"same_origin_only": "false"}, "same_origin_only"),
+        ({"json_next_fields": ["next"]}, "json_next_fields"),
+        ({"json_next_fields": ("next", "")}, "json_next_fields"),
+        ({"json_next_fields": ("next", 1)}, "json_next_fields"),
+    ],
+)
+def test_pagination_policy_rejects_noncanonical_types(
+    overrides: dict[str, object], expected: str,
+) -> None:
+    with pytest.raises(ValueError, match=expected):
+        PaginationPolicy(**overrides)
+
+
+def test_explicit_cross_origin_pagination_policy_remains_supported() -> None:
+    policy = PaginationPolicy(
+        max_pages=2,
+        max_discovered_links_per_page=1,
+        same_origin_only=False,
+        json_next_fields=("next",),
+    )
+    discovery = discover_json_pagination(
+        "https://example.com/page",
+        '{"next": "https://other.example/next"}',
+        policy=policy,
+    )
+    assert discovery.next_urls == ("https://other.example/next",)
