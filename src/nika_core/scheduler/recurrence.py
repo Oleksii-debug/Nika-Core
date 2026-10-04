@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Any
 
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
 from nika_core.scheduler.store import IMMUTABLE_JOB_BINDING_KEY, ScheduledJobStore
 
@@ -131,7 +132,9 @@ class DurableRecurrenceService:
         job_id = _job_id(recurrence_key)
         existing = self._jobs.get(job_id)
         if existing is not None:
-            state, existing_payload = _decode_job(existing, expected_recurrence_id=recurrence_key)
+            state, existing_payload = self._decode_effective_job(
+                existing, expected_recurrence_id=recurrence_key
+            )
             expected = (
                 task_key,
                 target_action,
@@ -177,7 +180,7 @@ class DurableRecurrenceService:
         job = self._jobs.get(_job_id(recurrence_key))
         if job is None:
             return None
-        state, _ = _decode_job(job, expected_recurrence_id=recurrence_key)
+        state, _ = self._decode_effective_job(job, expected_recurrence_id=recurrence_key)
         return state
 
     def pause(self, recurrence_id: str) -> RecurrenceState:
@@ -361,7 +364,47 @@ class DurableRecurrenceService:
         job = self._jobs.get(_job_id(recurrence_key))
         if job is None:
             raise KeyError(f"unknown recurrence: {recurrence_key}")
-        return _decode_job(job, expected_recurrence_id=recurrence_key)
+        return self._decode_effective_job(job, expected_recurrence_id=recurrence_key)
+
+    def _decode_effective_job(
+        self,
+        job: ScheduledJob,
+        *,
+        expected_recurrence_id: str,
+    ) -> tuple[RecurrenceState, dict[str, Any]]:
+        try:
+            return _decode_job(job, expected_recurrence_id=expected_recurrence_id)
+        except ValueError as exc:
+            # The scheduler independently disables a recurrence after its parent
+            # task becomes terminal or disappears. Its embedded ACTIVE metadata
+            # cannot be rewritten by the scheduler, so project the safe terminal
+            # status without laundering arbitrary disabled/corrupt records.
+            if (
+                job.enabled
+                or str(exc) != "durable recurrence enabled state does not match lifecycle state"
+            ):
+                raise
+            state, payload = _decode_job(
+                replace(job, enabled=True),
+                expected_recurrence_id=expected_recurrence_id,
+            )
+            task_state = self._jobs.task_state(state.task_id)
+            if task_state not in {
+                None,
+                TaskState.CANCELLED,
+                TaskState.COMPLETED,
+                TaskState.ARCHIVED,
+            }:
+                raise exc
+            return (
+                replace(
+                    state,
+                    status=RecurrenceStatus.CANCELLED,
+                    next_due_at=None,
+                    next_occurrence_id=None,
+                ),
+                payload,
+            )
 
     def _persist(self, state: RecurrenceState, target_payload: dict[str, Any]) -> None:
         enabled = state.status is RecurrenceStatus.ACTIVE and state.next_due_at is not None
