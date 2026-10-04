@@ -451,3 +451,68 @@ def test_default_packaged_startup_adopts_and_source_runtime_does_not(tmp_path, m
     monkeypatch.setattr(sys, "frozen", True)
     assert AppConfig.from_environment().database_path == target
     assert len(_rows(target, "tasks")) == 1
+
+
+@pytest.mark.parametrize("writer_side", ["canonical", "alias"])
+@pytest.mark.parametrize("candidate_first", [False, True])
+def test_canonical_hardlink_alias_with_live_wal_never_silently_skips(
+    tmp_path, writer_side, candidate_first
+):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    writer = target if writer_side == "canonical" else alias
+    candidates = [target, alias] if candidate_first else [alias, target]
+    with closing(sqlite3.connect(writer)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        wal = writer.with_name(writer.name + "-wal")
+        assert wal.stat().st_size > 0
+        main_before, wal_before = target.read_bytes(), wal.read_bytes()
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption.prepare_default_database(target, candidates)
+        assert target.read_bytes() == main_before
+        assert wal.read_bytes() == wal_before
+        assert json.loads(_rows(writer, "tasks")[0][4]) == {"from_wal": True}
+        assert not (target.parent / "legacy-adoption-backups").exists()
+        assert not target.with_name(f".{target.name}.legacy-adoption.json").exists()
+
+def test_canonical_hardlink_without_sidecars_is_not_a_second_database(tmp_path):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    adoption.prepare_default_database(target, [alias, target])
+    assert len(_rows(target, "tasks")) == 1
+    assert not (target.parent / "legacy-adoption-backups").exists()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_canonical_hardlink_rejects_indirect_alias_sidecar(tmp_path, suffix):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    sidecar = alias.with_name(alias.name + suffix)
+    try:
+        sidecar.symlink_to(tmp_path / "nonexistent-sidecar")
+    except (OSError, NotImplementedError):
+        pytest.skip("File system does not support symlinks")
+    before = target.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [alias])
+    assert target.read_bytes() == before
+    assert sidecar.is_symlink()
+    assert not (target.parent / "legacy-adoption-backups").exists()
