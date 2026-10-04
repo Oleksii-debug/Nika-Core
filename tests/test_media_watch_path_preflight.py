@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from pathlib import Path
@@ -179,3 +180,62 @@ def test_uninspectable_watched_output_fails_closed_before_spawn(
         )
     assert caught.value.code == MediaErrorCode.PATH_ESCAPE
     assert not started.exists()
+
+
+def _require_hardlink_support(tmp_path: Path) -> None:
+    source = tmp_path / "hardlink-support-source"
+    alias = tmp_path / "hardlink-support-alias"
+    source.write_bytes(b"test")
+    try:
+        os.link(source, alias)
+    except (OSError, NotImplementedError):
+        pytest.skip("creating hard links is unavailable on this host")
+    finally:
+        alias.unlink(missing_ok=True)
+        source.unlink(missing_ok=True)
+
+
+def test_preexisting_hardlink_is_rejected_before_child_spawn(tmp_path: Path) -> None:
+    _require_hardlink_support(tmp_path)
+    original = tmp_path / "important-existing-file"
+    original.write_bytes(b"unchanged")
+    watched = tmp_path / "download.partial.part"
+    os.link(original, watched)
+
+    _assert_rejected_before_spawn(tmp_path, watched, MediaErrorCode.PATH_ESCAPE)
+    assert original.read_bytes() == b"unchanged"
+    assert watched.read_bytes() == b"unchanged"
+
+
+def test_child_created_hardlink_is_rejected_after_exit(tmp_path: Path) -> None:
+    _require_hardlink_support(tmp_path)
+    original = tmp_path / "important-existing-file"
+    original.write_bytes(b"unchanged")
+    watched = tmp_path / "download.partial.part"
+    code = "import os; os.link('important-existing-file', 'download.partial.part')"
+
+    with pytest.raises(MediaError) as caught:
+        SafeProcessRunner().run(
+            (sys.executable, "-c", code),
+            cwd=tmp_path,
+            timeout_seconds=5,
+            watched_paths=(watched,),
+            max_watched_file_bytes=16,
+        )
+    assert caught.value.code == MediaErrorCode.PATH_ESCAPE
+    assert original.read_bytes() == b"unchanged"
+    assert watched.read_bytes() == b"unchanged"
+
+
+def test_existing_single_link_regular_output_is_still_allowed(tmp_path: Path) -> None:
+    watched = tmp_path / "download.partial.part"
+    watched.write_bytes(b"ordinary")
+    result = SafeProcessRunner().run(
+        (sys.executable, "-c", "print('ok')"),
+        cwd=tmp_path,
+        timeout_seconds=5,
+        watched_paths=(watched,),
+        max_watched_file_bytes=16,
+    )
+    assert result.returncode == 0
+    assert watched.read_bytes() == b"ordinary"
