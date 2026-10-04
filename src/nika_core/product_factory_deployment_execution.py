@@ -202,7 +202,9 @@ class DeploymentExecutionCoordinator:
             return self._save(
                 replace(record, state=OperationState.RECOVERY_REQUIRED, updated_at=instant)
             )
-        if not self.node_health.is_available(node_lease.node_id):
+        if not self.nodes.is_active_for(
+            node_lease, record.spec.request, now=instant
+        ) or not self.node_health.is_available(node_lease.node_id):
             self._release_ephemeral(operation_id)
             return self._save(
                 replace(
