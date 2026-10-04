@@ -502,6 +502,20 @@ def _zip_member_is_symlink(member: zipfile.ZipInfo) -> bool:
     return member.create_system == 3 and stat.S_ISLNK(unix_mode)
 
 
+def _zip_member_has_invalid_type(member: zipfile.ZipInfo) -> bool:
+    # The DOS directory attribute and Unix type bits must agree with the ZIP
+    # path shape. Different extractors can otherwise materialize different trees.
+    if not member.is_dir() and member.external_attr & 0x10:
+        return True
+    if member.create_system != 3:
+        return False
+    unix_mode = (member.external_attr >> 16) & 0xFFFF
+    member_type = stat.S_IFMT(unix_mode)
+    expected_type = stat.S_IFDIR if member.is_dir() else stat.S_IFREG
+    # ZIP writers may omit the Unix type bits entirely; that is unambiguous.
+    return member_type not in (0, expected_type)
+
+
 def _zip_member_path(member: zipfile.ZipInfo) -> str:
     if member.is_dir() and member.filename.endswith("/"):
         return member.filename[:-1]
@@ -550,6 +564,12 @@ def verify_release_archive(
                     continue
                 if _zip_member_is_symlink(member):
                     findings.append(f"archive:symlink:{index}")
+                    continue
+                if _zip_member_has_invalid_type(member):
+                    findings.append(f"archive:member-type:{index}")
+                    continue
+                if member.is_dir() and member.file_size:
+                    findings.append(f"archive:directory-content:{index}")
                     continue
                 if member_path in seen_paths:
                     if member_path == _RELEASE_MANIFEST_NAME:
