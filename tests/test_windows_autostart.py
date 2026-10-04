@@ -36,7 +36,7 @@ def test_enable_disable_and_readback_are_idempotent() -> None:
 
     assert service.disable().state is AutostartState.DISABLED
     assert service.disable().state is AutostartState.DISABLED
-    assert backend.deletes == 2
+    assert backend.deletes == 1
 
 
 def test_unicode_and_space_path_is_quoted_as_one_executable() -> None:
@@ -152,3 +152,17 @@ def test_legacy_astral_unicode_registration_is_never_reported_enabled() -> None:
     with pytest.raises(ValueError, match="260-character limit"):
         service.enable()
     assert backend.writes == []
+
+
+def test_disabling_absent_registration_never_calls_mutating_backend() -> None:
+    class DeleteForbiddenBackend(FakeBackend):
+        def delete(self) -> None:
+            raise AssertionError("Missing registration must not trigger delete")
+
+    backend = DeleteForbiddenBackend()
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), backend)
+    observed = service.status()
+    assert observed.state is AutostartState.DISABLED
+    assert service.disable(observed=observed) == observed
+    assert service.disable() == observed
+    assert backend.value is None and backend.writes == []

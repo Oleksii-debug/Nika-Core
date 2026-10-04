@@ -387,3 +387,29 @@ def test_direct_service_rejects_same_text_different_registry_kind(enabled: bool)
             service.disable(observed=observed)
     assert registry.value == foreign_command
     assert registry.writes == 0 and registry.deletes == 0
+
+
+def test_repeated_ui_disable_of_absent_registration_never_opens_mutating_key(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "autostart.db")
+    store.initialize()
+    audit = AuditLog(store)
+    registry = _Registry("", _Registry.REG_SZ)
+    registry.value = None
+
+    def forbidden_delete(*_args):
+        pytest.fail("Absent Run value must not be deleted")
+
+    registry.DeleteValue = forbidden_delete
+    service = WindowsAutostartService(Path(r"C:\Nika\Nika.exe"), _Backend(registry))
+    settings = AutostartSettings(service, audit)
+    for _ in range(2):
+        assert settings.configure({"enabled": False}).status == "completed"
+    assert settings.snapshot()["state"] == "disabled"
+    assert registry.writes == 0 and registry.deletes == 0
+    assert [e.event_type for e in audit.list_for(
+        entity_type="application_setting", entity_id="windows.autostart"
+    )] == [
+        "settings.autostart.requested", "settings.autostart.confirmed",
+    ] * 2

@@ -187,7 +187,11 @@ class WindowsAutostartService:
         # Recheck the state observed before the audit: another Nika instance
         # or process must not silently replace the target during the audit gap.
         # Windows Run-key APIs offer no atomic compare-and-delete operation.
-        self._current_for_change(observed)
+        current = self._current_for_change(observed)
+        if current.state is AutostartState.DISABLED:
+            # No deletion is necessary when the value was absent. Avoid a
+            # needless mutating Run-key open or a stale-value delete race.
+            return current
         self._backend.delete()
         verified = self.status()
         if verified.state is not AutostartState.DISABLED:
