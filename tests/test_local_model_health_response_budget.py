@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Iterator
 
 import httpx
@@ -9,7 +8,6 @@ import pytest
 from nika_core.diagnostics import ModelHealthFact, OllamaModelHealthProbe
 
 
-BASE = "http://localhost:11434"
 LIMIT = 1024 * 1024
 
 
