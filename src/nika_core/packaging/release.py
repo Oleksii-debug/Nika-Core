@@ -595,6 +595,13 @@ def _zip_local_identity_finding(
             zip64_offset += 8
         if local_size != expected_size and not (deferred and local_size == 0):
             return "member-header-mismatch"
+    # The local ZIP64 field contains only the sizes whose ordinary header
+    # values are sentinels. Unused/trailing values create alternate size
+    # evidence that extractors may interpret differently.
+    if zip64_field is not None and (
+        zip64_offset == 0 or zip64_offset != len(zip64_field)
+    ):
+        return "member-header-mismatch"
     if not deferred:
         return None
 
