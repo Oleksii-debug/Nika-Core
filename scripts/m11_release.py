@@ -103,6 +103,13 @@ def _parse_finite_voice_float(text: str) -> float:
     return value
 
 
+def _parse_finite_pf11_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("non-finite packaged PF11 proof floating-point number")
+    return value
+
+
 def _proof_identity(payload: dict[str, object]) -> str:
     # JSON preserves bool/int distinctions that Python dict equality does not.
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -246,6 +253,7 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
                     encoded.decode("utf-8"),
                     object_pairs_hook=_unique_proof_fields,
                     parse_constant=_reject_nonfinite_proof_number,
+                    parse_float=_parse_finite_pf11_float,
                 )
             except (OSError, UnicodeError, ValueError, RecursionError) as exc:
                 raise RuntimeError("packaged PF11 proof did not emit valid JSON evidence") from exc

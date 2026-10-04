@@ -6,6 +6,15 @@ on:
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
+      - "src/nika_core/product_command/**"
+      - "src/nika_core/product_factory_packaged_journey.py"
+      - "src/nika_core/product_project*.py"
+      - "src/nika_core/sherpa_onnx_stt.py"
+      - "src/nika_core/speech_to_text.py"
+      - "src/nika_core/microphone_capture.py"
+      - "src/nika_core/windows_microphone_capture.py"
+      - "src/nika_core/voice_turn.py"
+      - "src/nika_core/speech/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
       - "scripts/package_release_zip.py"
@@ -20,6 +29,11 @@ on:
       - "tests/test_windows_packaging_ancestor_links.py"
       - "tests/test_m5_shell_required_assets.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "tests/test_product_factory_packaged_journey.py"
+      - "tests/test_product_factory_packaged_restart_selection.py"
+      - "tests/test_packaged_voice_entrypoint.py"
+      - "tests/test_packaged_speech_output.py"
+      - "tests/test_speech_to_text.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   push:
@@ -29,6 +43,15 @@ on:
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
+      - "src/nika_core/product_command/**"
+      - "src/nika_core/product_factory_packaged_journey.py"
+      - "src/nika_core/product_project*.py"
+      - "src/nika_core/sherpa_onnx_stt.py"
+      - "src/nika_core/speech_to_text.py"
+      - "src/nika_core/microphone_capture.py"
+      - "src/nika_core/windows_microphone_capture.py"
+      - "src/nika_core/voice_turn.py"
+      - "src/nika_core/speech/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
       - "scripts/package_release_zip.py"
@@ -43,6 +66,11 @@ on:
       - "tests/test_windows_packaging_ancestor_links.py"
       - "tests/test_m5_shell_required_assets.py"
       - "tests/test_qa_workflow_lineage.py"
+      - "tests/test_product_factory_packaged_journey.py"
+      - "tests/test_product_factory_packaged_restart_selection.py"
+      - "tests/test_packaged_voice_entrypoint.py"
+      - "tests/test_packaged_speech_output.py"
+      - "tests/test_speech_to_text.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   workflow_dispatch:
@@ -88,6 +116,8 @@ jobs:
           tests/test_m11_pf11_proof_integrity.py
           tests/test_m11_voice_proof_integrity.py
           tests/test_pf11_proof_precommand.py
+          tests/test_product_factory_packaged_journey.py::test_headless_pf11_composition_proof_survives_process_restart
+          tests/test_product_factory_packaged_journey.py::test_release_builder_records_packaged_pf11_restart_evidence
           tests/test_windows_packaging_input_safety.py
           tests/test_windows_packaging_ancestor_links.py
           tests/test_m5_shell_required_assets.py
