@@ -134,6 +134,17 @@ def classify_candidate_verification(
     if not canonical_evidence:
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, ())
 
+    # Evidence structure is invariant across SHA states. Do not classify a
+    # malformed batch as merely stale, mismatched or incomplete.
+    evidence_by_check = {item.check_id: item for item in canonical_evidence}
+    if len(evidence_by_check) != len(canonical_evidence):
+        raise VerificationError("verification check ids must be unique")
+    if any(
+        item.required and item.check_id not in required_check_ids
+        for item in canonical_evidence
+    ):
+        raise VerificationError("required verification check id is not authoritative")
+
     observed_shas = {item.candidate_sha for item in canonical_evidence}
     if candidate_sha not in observed_shas:
         state = VerificationState.STALE if len(observed_shas) == 1 else VerificationState.MISMATCH
@@ -141,21 +152,9 @@ def classify_candidate_verification(
     if observed_shas != {candidate_sha}:
         return CandidateVerification(candidate_sha, VerificationState.MISMATCH, refs)
 
-    evidence_by_check = {item.check_id: item for item in canonical_evidence}
-    if len(evidence_by_check) != len(canonical_evidence):
-        raise VerificationError("verification check ids must be unique")
-
     missing_required = set(required_check_ids) - evidence_by_check.keys()
     if missing_required:
         return CandidateVerification(candidate_sha, VerificationState.UNKNOWN, refs)
-
-    unexpected_required = tuple(
-        item.check_id
-        for item in canonical_evidence
-        if item.required and item.check_id not in required_check_ids
-    )
-    if unexpected_required:
-        raise VerificationError("required verification check id is not authoritative")
 
     required = tuple(evidence_by_check[check_id] for check_id in required_check_ids)
     if any(item.state is CheckState.FAIL for item in required):
