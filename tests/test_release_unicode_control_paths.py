@@ -16,7 +16,7 @@ from nika_core.packaging.release import (
 )
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
-INVALID_MARKS = ("\x85", "\u200e", "\u202e", "\u2028", "\u2029")
+INVALID_MARKS = ("\x7f", "\x85", "\u200e", "\u202e", "\u2028", "\u2029")
 
 
 def _manifest(path: str) -> ReleaseManifest:
