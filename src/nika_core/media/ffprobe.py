@@ -84,7 +84,7 @@ class FFprobeAdapter:
         )
         try:
             payload = json.loads(result.stdout.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (ValueError, RecursionError) as exc:
             raise MediaError(MediaErrorCode.PROBE_FAILED, "ffprobe returned invalid JSON") from exc
         if not isinstance(payload, dict):
             raise MediaError(MediaErrorCode.PROBE_FAILED, "ffprobe response must be an object")
@@ -99,6 +99,8 @@ class FFprobeAdapter:
         duration = _optional_nonnegative_float(format_info.get("duration"), "duration")
         bit_rate = _optional_nonnegative_int(format_info.get("bit_rate"), "bit_rate")
         format_name = format_info.get("format_name")
+        if format_name is not None and not isinstance(format_name, str):
+            raise MediaError(MediaErrorCode.PROBE_FAILED, "ffprobe format name must be text")
         normalized_streams = tuple(_normalize_stream(item) for item in streams)
         return Probe(
             asset_id=asset_id,
