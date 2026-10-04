@@ -202,26 +202,36 @@ def _publish_pending(path: Path, record: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _has_sqlite_sidecars(path: Path) -> bool:
+    return any(
+        sidecar.exists() or sidecar.is_symlink()
+        for sidecar in (
+            path.with_name(path.name + "-wal"),
+            path.with_name(path.name + "-shm"),
+        )
+    )
+
+
 def _known_sources(target: Path, candidates: Sequence[Path]) -> list[Path]:
     paths: list[Path] = []
     for candidate in candidates:
         if candidate.is_symlink():
             raise LegacyDatabaseConflict(_MESSAGE)
         path = candidate.resolve()
-        if not path.exists() or path == target or (target.exists() and path.samefile(target)):
+        if not path.exists() or path == target:
+            continue
+        if target.exists() and path.samefile(target):
+            # A canonical database and its hard-link alias share main bytes,
+            # but SQLite's live WAL/SHM belongs to each *path*, not the inode.
+            # Silently skipping the alias could discard committed user work.
+            if _has_sqlite_sidecars(path) or _has_sqlite_sidecars(target):
+                raise LegacyDatabaseConflict(_MESSAGE)
             continue
         duplicate = next((other for other in paths if path.samefile(other)), None)
         if duplicate is not None:
             # Hard links share SQLite's main file but not the path-named WAL/SHM.
-            # Treat two aliases with live sidecars as ambiguous rather than
-            # silently choosing whichever candidate happened to appear first.
-            if path != duplicate and any(
-                sidecar.exists() or sidecar.is_symlink()
-                for origin in (path, duplicate)
-                for sidecar in (
-                    origin.with_name(origin.name + "-wal"),
-                    origin.with_name(origin.name + "-shm"),
-                )
+            if path != duplicate and (
+                _has_sqlite_sidecars(path) or _has_sqlite_sidecars(duplicate)
             ):
                 raise LegacyDatabaseConflict(_MESSAGE)
             continue
