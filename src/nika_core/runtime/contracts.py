@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -287,6 +288,11 @@ def canonical_runtime_result(value: object) -> RuntimeResult:
         if type(event_type) is not str or not event_type.strip():
             raise ValueError("runtime event type must be an exact nonempty string")
         event_type.encode("utf-8")
+        if any(
+            unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in event_type
+        ):
+            raise ValueError("runtime event type contains control or formatting characters")
         if event_type in _NIKA_OWNED_RUNTIME_AUDIT_EVENTS:
             raise ValueError("runtime adapter cannot impersonate Nika-owned audit events")
         event_payload = _snapshot_json_mapping(
