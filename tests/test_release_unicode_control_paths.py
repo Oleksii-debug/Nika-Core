@@ -16,7 +16,7 @@ from nika_core.packaging.release import (
 )
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
-INVALID_MARKS = ("\x85", "\\u200e", "\\u202e", "\\u2028", "\\u2029")
+INVALID_MARKS = ("\x85", "\u200e", "\u202e", "\u2028", "\u2029")
 
 
 def _manifest(path: str) -> ReleaseManifest:
@@ -44,7 +44,7 @@ def test_manifest_rejects_invisible_path_components(
 
 
 def test_manifest_rejects_unpaired_unicode_surrogate(tmp_path: Path) -> None:
-    assert verify_release_manifest(tmp_path, _manifest("assets/\\ud800.txt")) == (
+    assert verify_release_manifest(tmp_path, _manifest("assets/\ud800.txt")) == (
         "manifest:path:0",
     )
 
@@ -71,7 +71,7 @@ def test_ordinary_ukrainian_unicode_paths_remain_supported(tmp_path: Path) -> No
     (bundle / "NikaCore.exe").write_bytes(b"binary")
     assets = bundle / "ресурси"
     assets.mkdir()
-    (assets / "сповіщення.txt").write_text("Привіт, Ніко!\\n", encoding="utf-8")
+    (assets / "сповіщення.txt").write_text("Привіт, Ніко!\n", encoding="utf-8")
     manifest = build_release_manifest(
         bundle, product="NikaCore", version="1.0.0", source_sha=SOURCE_SHA
     )
