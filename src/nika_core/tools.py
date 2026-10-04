@@ -33,8 +33,7 @@ class ToolSpec:
     input_schema: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.tool_id.strip():
-            raise ValueError("tool_id must not be empty")
+        _require_tool_identity(self.tool_id, label="tool_id")
         if type(self.risk) is not ToolRisk:
             raise ValueError("risk must be a ToolRisk value")
         # Tool calls must have a real deadline; NaN, infinity and bool bypass <= 0.
