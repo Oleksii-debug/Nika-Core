@@ -613,7 +613,7 @@ def test_resume_rejects_malformed_or_mismatched_persisted_command(
     assert _result_count(store) == prior_results
 
     reopened = V01PackagedThreeAgentRuntime(
-        store=SQLiteStore(store.path), config=runtime._config
+        store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
     )
     assert reopened._stored_outer_command(task_id) == ""
 
