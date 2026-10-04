@@ -153,6 +153,7 @@ class CredentialRefOpenAICompatibleProvider:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         material = self._resolve_material()
         provider: OpenAICompatibleProvider | None = None
+        safe_error: ModelGatewayError | None = None
         try:
             provider = OpenAICompatibleProvider(
                 provider_id=self._config.provider_id,
@@ -167,33 +168,43 @@ class CredentialRefOpenAICompatibleProvider:
             try:
                 return await provider.complete(request)
             except ModelGatewayError as error:
-                raise ModelGatewayError(
+                safe_error = ModelGatewayError(
                     error.code,
                     str(error),
                     provider_id=error.provider_id or self._config.provider_id,
                     retryable=error.retryable,
                     failure_effect=error.failure_effect,
-                ) from None
+                )
+            except Exception:  # noqa: BLE001 - transport and client factories are untrusted
+                safe_error = ModelGatewayError(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "model provider failed",
+                    provider_id=self._config.provider_id,
+                    retryable=False,
+                    failure_effect=ModelFailureEffect.UNKNOWN,
+                )
         finally:
             provider = None
             material = ""
+        # Raise outside the raw provider's exception handler: 'from None'
+        # suppresses display of __context__ but still retains its secret-bearing
+        # exception chain, including request headers on HTTP errors.
+        assert safe_error is not None
+        raise safe_error
 
     def _resolve_material(self) -> str:
+        material: str | None = None
+        resolution_failed = False
         try:
             material = self._credential_resolver.resolve(self._config.credential_ref)
         except Exception:  # noqa: BLE001 - untrusted resolvers can raise any exception
-            raise ModelGatewayError(
-                ModelErrorCode.AUTHENTICATION,
-                "model credential could not be resolved",
-                provider_id=self._config.provider_id,
-                retryable=False,
-                failure_effect=ModelFailureEffect.NO_EFFECT,
-            ) from None
+            resolution_failed = True
         # A bearer token is an HTTP header value. Fail before constructing
         # a client when a resolver returns a control, Unicode, oversized or
         # whitespace-bearing value that cannot be a safe bearer credential.
         if (
-            type(material) is not str
+            resolution_failed
+            or type(material) is not str
             or not material
             or len(material) > 8192
             or any(ord(char) < 33 or ord(char) > 126 for char in material)
