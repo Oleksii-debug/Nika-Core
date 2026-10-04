@@ -29,6 +29,25 @@ class _RejectingHost:
         self.closed = True
 
 
+class _CancelledHost(_RejectingHost):
+    def __init__(self, *, cancel_during_submit: bool) -> None:
+        super().__init__()
+        self.cancel_during_submit = cancel_during_submit
+        self.future: Future[object] = Future()
+
+    def submit(self, coroutine: object) -> Future[object]:
+        self.attempted.append(coroutine)
+
+        def discard(_done: Future[object]) -> None:
+            assert inspect.iscoroutine(coroutine)
+            coroutine.close()
+
+        self.future.add_done_callback(discard)
+        if self.cancel_during_submit:
+            self.future.cancel()
+        return self.future
+
+
 def _backend(tmp_path: Path, host: _RejectingHost) -> DesktopBackend:
     store = SQLiteStore(tmp_path / "Дані Nika" / "ніка.db")
     store.initialize()
@@ -344,4 +363,31 @@ def test_cancelled_future_does_not_override_explicit_pause(tmp_path: Path) -> No
 
     assert backend._queue.get(task.task_id).state is TaskState.PAUSED
     assert backend._audit.list_for(entity_type="task", entity_id=task.task_id) == ()
+    backend.close()
+
+
+@pytest.mark.parametrize("cancel_during_submit", [False, True])
+def test_real_create_task_callback_recovers_cancelled_host_future(
+    tmp_path: Path,
+    cancel_during_submit: bool,
+) -> None:
+    host = _CancelledHost(cancel_during_submit=cancel_during_submit)
+    backend = _backend(tmp_path, host)
+
+    response = backend.create_task({"command": "Preserve host-cancelled work"})
+    assert response.status == "accepted"
+    if not cancel_during_submit:
+        assert host.future.cancel()
+    task = backend._queue.list_recent(limit=10)[0]
+
+    assert backend._queue.get(task.task_id).state is TaskState.PAUSED
+    assert backend._never_started(task.task_id)
+    assert task.task_id not in backend._active_futures
+    assert task.task_id not in backend._active_threads
+    assert len(host.attempted) == 1
+    assert inspect.getcoroutinestate(host.attempted[0]) == inspect.CORO_CLOSED
+    events = backend._audit.list_for(entity_type="task", entity_id=task.task_id)
+    assert [event.event_type for event in events] == [
+        "desktop.runtime_host_cancelled_before_start"
+    ]
     backend.close()
