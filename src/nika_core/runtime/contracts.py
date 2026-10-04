@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -195,6 +197,59 @@ class RuntimeResult:
             raise TypeError("error_code must be a RuntimeErrorCode when provided")
         if self.outcome != RuntimeOutcome.FAILED and self.error_code is not None:
             raise ValueError("error_code is only valid for failed outcomes")
+
+
+def canonical_runtime_result(value: object) -> RuntimeResult:
+    """Snapshot untrusted adapter evidence before it changes Nika's durable state."""
+
+    if type(value) is not RuntimeResult:
+        raise TypeError("runtime adapter must return an exact RuntimeResult")
+    try:
+        outcome = object.__getattribute__(value, "outcome")
+        events = object.__getattribute__(value, "events")
+        output = object.__getattribute__(value, "output")
+        resume_token = object.__getattribute__(value, "resume_token")
+        error = object.__getattribute__(value, "error")
+        error_code = object.__getattribute__(value, "error_code")
+    except AttributeError:
+        raise ValueError("runtime adapter result is incomplete") from None
+
+    if type(events) is not tuple:
+        raise TypeError("runtime result events must be a tuple")
+    if not isinstance(output, Mapping):
+        raise TypeError("runtime result output must be a mapping")
+    if resume_token is not None and type(resume_token) is not str:
+        raise TypeError("runtime result resume token must be an exact string")
+    if error is not None and type(error) is not str:
+        raise TypeError("runtime result error must be an exact string")
+    if error_code is not None and type(error_code) is not RuntimeErrorCode:
+        raise TypeError("runtime result error code must be exact")
+
+    canonical_events = []
+    for event in events:
+        if type(event) is not RuntimeEvent:
+            raise TypeError("runtime result contains an invalid event")
+        sequence = object.__getattribute__(event, "sequence")
+        event_type = object.__getattribute__(event, "event_type")
+        if type(sequence) is not int or sequence < 0:
+            raise ValueError("runtime event sequence must be a non-negative integer")
+        if type(event_type) is not str or not event_type.strip():
+            raise ValueError("runtime event type must be an exact nonempty string")
+        event_payload = dict(object.__getattribute__(event, "payload"))
+        # Validate the same flattened payload shape the durable audit writer uses.
+        json.dumps({"sequence": sequence, **event_payload}, ensure_ascii=False)
+        canonical_events.append(
+            RuntimeEvent(sequence=sequence, event_type=event_type, payload=event_payload)
+        )
+
+    return RuntimeResult(
+        outcome=outcome,
+        events=tuple(canonical_events),
+        output=dict(output),
+        resume_token=resume_token,
+        error=error,
+        error_code=error_code,
+    )
 
 
 @runtime_checkable

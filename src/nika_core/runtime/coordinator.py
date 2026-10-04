@@ -20,6 +20,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbePort,
     RuntimeResumeRequest,
     canonical_resume_probe,
+    canonical_runtime_result,
 )
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
@@ -710,6 +711,8 @@ class TaskRuntimeCoordinator:
 
         try:
             accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
+            if type(accepted) is not bool:
+                raise TypeError("runtime cancellation acknowledgement must be boolean")
         except Exception as exc:
             with self._queue.store.connection() as conn:
                 self._idempotency.mark_uncertain_with_connection(conn, operation_key)
@@ -1108,7 +1111,7 @@ class TaskRuntimeCoordinator:
         request: RuntimeRequest,
     ) -> RuntimeResult:
         try:
-            return await runtime.run(request)
+            return canonical_runtime_result(await runtime.run(request))
         except Exception:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
@@ -1122,7 +1125,7 @@ class TaskRuntimeCoordinator:
         request: RuntimeResumeRequest,
     ) -> RuntimeResult:
         try:
-            return await runtime.resume(request)
+            return canonical_runtime_result(await runtime.resume(request))
         except Exception:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
