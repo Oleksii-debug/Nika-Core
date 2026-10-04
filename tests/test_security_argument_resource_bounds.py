@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from nika_core.security import ActionIntent, SandboxPolicy
+from nika_core.security import ActionIntent, ExecutionBudget, ExecutionBudgetLedger, SandboxPolicy
 from nika_core.tools import ToolRisk
 
 
@@ -152,3 +152,26 @@ def test_sandbox_direct_network_admission_denies_bad_unicode(tmp_path: Path) -> 
     sandbox = SandboxPolicy(workspace_root=tmp_path, allowed_network_hosts=("example.test",))
     with pytest.raises(PermissionError, match="network host is not allowed"):
         sandbox.authorize_network(chr(0xD800))
+
+
+@pytest.mark.parametrize("field", ("write_bytes", "network_calls", "process_launches"))
+@pytest.mark.parametrize("invalid", (True, -1, 1.5, float("nan"), float("inf"), "1"))
+def test_mutable_budget_counters_fail_closed_at_reservation(
+    field: str, invalid: object
+) -> None:
+    ledger = ExecutionBudgetLedger(
+        ExecutionBudget(max_write_bytes=5, max_network_calls=5, max_process_launches=5)
+    )
+    setattr(ledger, field, invalid)
+    with pytest.raises(ValueError, match="budget usage counters"):
+        ledger.reserve(_intent({}))
+    for other in ("write_bytes", "network_calls", "process_launches"):
+        if other != field:
+            assert getattr(ledger, other) == 0
+
+
+def test_budget_carrier_must_remain_canonical_at_reservation() -> None:
+    ledger = ExecutionBudgetLedger(ExecutionBudget())
+    ledger.budget = object()  # type: ignore[assignment]
+    with pytest.raises(ValueError, match="canonical ExecutionBudget"):
+        ledger.reserve(_intent({}))
