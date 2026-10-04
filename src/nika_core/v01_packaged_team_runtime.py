@@ -150,9 +150,12 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         if self._is_member_thread(request.thread_id):
-            if self._member_shared_task_id(
+            shared_task_id = self._member_shared_task_id(
                 task_id=request.task_id, thread_id=request.thread_id
-            ) is None:
+            )
+            # Direct member run must honor the same durable command fence
+            # as member probe/resume, before opening sources or invoking models.
+            if shared_task_id is None or not self._stored_outer_command(shared_task_id):
                 return self._failed()
             return await self._run_member_from_store(thread_id=request.thread_id)
         # A request may be stale or altered after its TaskQueue entry was saved.
