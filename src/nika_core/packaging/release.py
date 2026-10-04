@@ -141,12 +141,17 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
         raise ValueError("bundle_dir must be a directory")
     files: list[Path] = []
     for candidate in root.rglob("*"):
+        # ZIP publication cannot materialize directory aliases. Fail closed.
+        if getattr(candidate, "is_junction", lambda: False)():
+            raise ValueError(f"bundle junction is unsupported: {candidate}")
         if candidate.is_symlink():
             resolved = candidate.resolve(strict=True)
             try:
                 resolved.relative_to(root)
             except ValueError as exc:
                 raise ValueError(f"bundle symlink escapes release root: {candidate}") from exc
+            if candidate.is_dir():
+                raise ValueError(f"bundle directory symlink is unsupported: {candidate}")
         if candidate.is_file():
             files.append(candidate)
     return tuple(sorted(files, key=lambda item: item.relative_to(root).as_posix()))
@@ -549,6 +554,88 @@ def _zip_extra_field_finding(extra: bytes) -> str | None:
     return None
 
 
+def _zip_local_identity_finding(
+    archive: zipfile.ZipFile,
+    member: zipfile.ZipInfo,
+    header: bytes,
+    name_size: int,
+    extra_size: int,
+    extra: bytes,
+) -> str | None:
+    """Verify local CRC/sizes, ZIP64 values and deferred data descriptors."""
+    deferred = bool(member.flag_bits & 0x0008)
+    local_crc = int.from_bytes(header[14:18], "little")
+    if local_crc != member.CRC and not (deferred and local_crc == 0):
+        return "member-header-mismatch"
+    local_sizes = (
+        int.from_bytes(header[22:26], "little"),
+        int.from_bytes(header[18:22], "little"),
+    )
+    expected_sizes = (member.file_size, member.compress_size)
+    zip64_field: bytes | None = None
+    offset = 0
+    while offset < len(extra):
+        field_id = int.from_bytes(extra[offset : offset + 2], "little")
+        field_size = int.from_bytes(extra[offset + 2 : offset + 4], "little")
+        offset += 4
+        if field_id == 0x0001:
+            if zip64_field is not None:
+                return "member-header-mismatch"
+            zip64_field = extra[offset : offset + field_size]
+        offset += field_size
+
+    zip64_offset = 0
+    for local_size, expected_size in zip(local_sizes, expected_sizes):
+        if local_size == 0xFFFFFFFF:
+            if zip64_field is None or len(zip64_field) - zip64_offset < 8:
+                return "member-header-mismatch"
+            local_size = int.from_bytes(
+                zip64_field[zip64_offset : zip64_offset + 8], "little"
+            )
+            zip64_offset += 8
+        if local_size != expected_size and not (deferred and local_size == 0):
+            return "member-header-mismatch"
+    if not deferred:
+        return None
+
+    # Streaming ZIPs can defer these values, but their descriptor must agree.
+    handle = archive.fp
+    if handle is None:
+        return "member-header-mismatch"
+    descriptor_offset = (
+        member.header_offset + 30 + name_size + extra_size + member.compress_size
+    )
+    try:
+        handle.seek(descriptor_offset)
+        descriptor = handle.read(24)
+    except (OSError, ValueError):
+        return "member-header-mismatch"
+    zip64 = (
+        0xFFFFFFFF in local_sizes
+        or any(size >= 0xFFFFFFFF for size in expected_sizes)
+    )
+    width = 8 if zip64 else 4
+
+    def matches(start: int) -> bool:
+        end = start + 4 + 2 * width
+        return (
+            len(descriptor) >= end
+            and int.from_bytes(descriptor[start : start + 4], "little") == member.CRC
+            and int.from_bytes(
+                descriptor[start + 4 : start + 4 + width], "little"
+            ) == member.compress_size
+            and int.from_bytes(descriptor[start + 4 + width : end], "little")
+            == member.file_size
+        )
+
+    if not (
+        matches(0)
+        or (descriptor[:4] == b"PK\x07\x08" and matches(4))
+    ):
+        return "member-header-mismatch"
+    return None
+
+
 def _zip_member_extra_finding(
     archive: zipfile.ZipFile, member: zipfile.ZipInfo
 ) -> str | None:
@@ -584,7 +671,12 @@ def _zip_member_extra_finding(
             return "member-local-path"
     except UnicodeError:
         return "member-local-path"
-    return _zip_extra_field_finding(local_extra)
+    extra_finding = _zip_extra_field_finding(local_extra)
+    if extra_finding is not None:
+        return extra_finding
+    return _zip_local_identity_finding(
+        archive, member, header, filename_size, extra_size, local_extra
+    )
 
 
 def _zip_member_path(member: zipfile.ZipInfo) -> str:
