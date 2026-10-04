@@ -244,10 +244,14 @@ class ModelGateway:
         authorizer = self._cloud_effect_authorizer
         if authorizer is not None:
             try:
-                authorizer.authorize_cloud_effect(
+                result = authorizer.authorize_cloud_effect(
                     request=request,
                     provider=capabilities,
                 )
+                # This is a synchronous, exception-based authority contract.
+                # False, True or an unawaited async result cannot grant access.
+                if result is not None:
+                    raise PermissionError("cloud authorizer returned invalid authority")
                 return
             except Exception:  # noqa: BLE001, S110
                 pass
