@@ -1,0 +1,85 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from nika_core.packaging.windows import WindowsBuildPlan
+
+
+def _plan(tmp_path: Path) -> WindowsBuildPlan:
+    entrypoint = tmp_path / "nika_windows.py"
+    entrypoint.write_text("pass\n", encoding="utf-8")
+    assets = tmp_path / "web"
+    assets.mkdir()
+    (assets / "index.html").write_text("<main>Nika</main>", encoding="utf-8")
+    return WindowsBuildPlan(
+        entrypoint, assets, tmp_path / "dist", tmp_path / "work", tmp_path / "spec"
+    )
+
+
+def _link(path: Path, target: Path, *, directory: bool = False) -> None:
+    try:
+        path.symlink_to(target, target_is_directory=directory)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+
+def test_normal_website_is_accepted(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    assert "--onedir" in plan.pyinstaller_args()
+
+
+def test_missing_entrypoint_is_rejected(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    plan.entrypoint.unlink()
+    with pytest.raises(FileNotFoundError, match="entrypoint"):
+        plan.validate()
+
+
+def test_missing_or_empty_html_fails_before_packaging(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    index = plan.web_assets / "index.html"
+    index.unlink()
+    with pytest.raises(ValueError, match="non-empty index.html"):
+        plan.pyinstaller_args()
+    index.write_bytes(b"")
+    with pytest.raises(ValueError, match="non-empty index.html"):
+        plan.pyinstaller_args()
+
+
+def test_linked_entrypoint_is_rejected(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    alias = tmp_path / "entry-alias.py"
+    _link(alias, plan.entrypoint)
+    linked = WindowsBuildPlan(
+        alias, plan.web_assets, plan.dist_dir, plan.work_dir, plan.spec_dir
+    )
+    with pytest.raises(ValueError, match="symbolic link or junction"):
+        linked.pyinstaller_args()
+
+
+def test_linked_web_root_is_rejected(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    alias = tmp_path / "linked-web"
+    _link(alias, plan.web_assets, directory=True)
+    linked = WindowsBuildPlan(
+        plan.entrypoint, alias, plan.dist_dir, plan.work_dir, plan.spec_dir
+    )
+    with pytest.raises(ValueError, match="symbolic link or junction"):
+        linked.pyinstaller_args()
+
+
+@pytest.mark.parametrize("directory", (False, True))
+def test_nested_link_cannot_import_external_asset(tmp_path: Path, directory: bool) -> None:
+    plan = _plan(tmp_path)
+    external = tmp_path / ("external" if directory else "private.txt")
+    if directory:
+        external.mkdir()
+        (external / "secret.txt").write_text("private", encoding="utf-8")
+    else:
+        external.write_text("private", encoding="utf-8")
+    alias = plan.web_assets / "external"
+    _link(alias, external, directory=directory)
+    with pytest.raises(ValueError, match="web_assets contains a symbolic link or junction"):
+        plan.pyinstaller_args()
