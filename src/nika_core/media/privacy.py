@@ -84,21 +84,32 @@ def _is_secret_key(key: str) -> bool:
     normalized = "_".join(tokens)
     if normalized in _SECRET_KEYS:
         return True
-    if tokens[-1] == "key" and (
-        len(tokens) == 1 or (len(tokens) >= 2 and tokens[-2] in {"api", "subscription"})
-    ):
+    if len(tokens) >= 2 and tokens[-1] == "key" and tokens[-2] in {
+        "api",
+        "subscription",
+    }:
         return True
     if tokens[-1] in _NON_SECRET_KEY_SUFFIXES:
         return False
     return any(token in _SENSITIVE_KEY_TOKENS for token in tokens)
 
 
-def _redact_query_match(match: re.Match[str]) -> str:
+def _redact_query_match(match: re.Match[str], depth: int = 0) -> str:
     key = match.group(2)
     normalized = "_".join(_normalized_key_tokens(unquote_plus(key)))
-    if _is_secret_key(key) or normalized in {"auth", "sig", "signature", "expires"}:
+    if _is_secret_key(key) or normalized in {"auth", "key", "sig", "signature", "expires"}:
         return f"{match.group(1)}{key}=[REDACTED]"
-    return match.group(0)
+    value = match.group(3)
+    if "?" in value:
+        # A URL can itself be the value of another query parameter. The broad
+        # outer match consumes its nested query unless it is redacted here.
+        if depth >= 8:
+            value = "[REDACTED]"
+        else:
+            value = _SENSITIVE_QUERY.sub(
+                lambda child: _redact_query_match(child, depth + 1), value
+            )
+    return f"{match.group(1)}{key}={value}"
 
 
 def redact_text(value: str) -> str:
