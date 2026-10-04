@@ -83,6 +83,9 @@ def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
         return None
     if not path.is_file() or path.is_symlink():
         raise LegacyDatabaseConflict(_MESSAGE)
+    # Use the canonical restore-family guard before opening any WAL/SHM
+    # sidecar. Indirect or non-regular siblings must not redirect a snapshot.
+    SQLiteRecoveryManager._ensure_restore_family_coherent(path)
     # rw permits SQLite's own hot-journal recovery on the canonical database;
     # it does not create a missing file. Legacy inspection is strictly read-only.
     mode = "rw" if canonical else "ro"
