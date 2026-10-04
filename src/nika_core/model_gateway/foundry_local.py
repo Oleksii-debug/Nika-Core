@@ -344,9 +344,20 @@ class FoundryLocalProvider:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
-            # Metadata getters or lock waits must not retarget the approved artifact.
+            # Metadata getters may block, exhaust the budget or observe cancellation.
+            # Fence the native download effect only after those getters return.
             self._validate_model_alias(model, authorization.model)
             self._validate_model_identity(model, expected_model_id)
+            if effective_cancel_event.is_set():
+                raise ModelGatewayError(
+                    ModelErrorCode.CANCELLED,
+                    f"Foundry Local model '{authorization.model}' download was cancelled",
+                    provider_id=self.capabilities.provider_id,
+                    retryable=False,
+                )
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise TimeoutError
             worker = asyncio.create_task(
                 asyncio.to_thread(model.download, cancel_event=effective_cancel_event)
             )
@@ -708,9 +719,12 @@ class FoundryLocalProvider:
         if type(raw_text) is not str:
             raise TypeError("Foundry Local response content must be text")
         usage = self._usage(response)
-        resolved_model = self._sdk_text(model, "alias")
+        # Usage and final identity getters can mutate the SDK's model alias.
+        # Bind the result to the selected alias, not late mutable metadata.
+        self._validate_model_alias(model, model_alias)
         self._validate_model_identity(model, operation_model_id)
-        return raw_text, resolved_model, usage
+        self._validate_model_alias(model, model_alias)
+        return raw_text, model_alias, usage
 
     def _get_model(self, alias: str) -> Any:
         try:
