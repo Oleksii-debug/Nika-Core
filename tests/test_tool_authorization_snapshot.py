@@ -101,6 +101,27 @@ def test_valid_authorization_still_matches_after_snapshot() -> None:
     assert _authorization().matches(spec=SPEC, call=call)
 
 
+def test_mutation_during_fingerprint_check_cannot_rewrite_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    auth = _authorization()
+    object.__setattr__(auth, "arguments_fingerprint", "not-approved")
+    expected = tool_arguments_fingerprint({})
+
+    def mutate_during_check(_arguments: object) -> str:
+        object.__setattr__(auth, "arguments_fingerprint", expected)
+        return expected
+
+    monkeypatch.setattr(
+        "nika_core.tools.tool_arguments_fingerprint", mutate_during_check
+    )
+    call = ToolCall(
+        call_id="call-1", tool_id=SPEC.tool_id, task_id="task", arguments={}
+    )
+    assert not auth.matches(spec=SPEC, call=call)
+    assert auth.arguments_fingerprint == expected
+
+
 @pytest.mark.parametrize("field", ["tool_id", "task_id", "approval_fingerprint"])
 def test_authorization_constructor_rejects_invalid_text(field: str) -> None:
     arguments = {
