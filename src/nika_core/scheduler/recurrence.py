@@ -673,13 +673,22 @@ def _canonical_task_id(value: object, *, label: str = "task_id") -> str:
         raise ValueError(f"{label} is required")
     if value != value.strip():
         raise ValueError(f"{label} must be canonical")
+    _require_utf8(value, label)
     return value
 
 
 def _required_text(value: object, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} is required")
+    _require_utf8(value, label)
     return value.strip()
+
+
+def _require_utf8(value: str, label: str) -> None:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must be valid UTF-8 text") from exc
 
 
 def _utc_now() -> datetime:
