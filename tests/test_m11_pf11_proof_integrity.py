@@ -87,9 +87,16 @@ def test_bool_int_drift_between_restart_proofs_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first = _valid_proof()
-    second = {**first, "state": True, "selection_before_command": "restored"}
-    first["state"] = 1
-    assert first == second  # The original Python dict equality silently accepted the drift.
+    second = {
+        **first,
+        "bridge_state_status_count": True,
+        "selection_before_command": "restored",
+    }
+    first_stable = {key: value for key, value in first.items() if key != "selection_before_command"}
+    second_stable = {
+        key: value for key, value in second.items() if key != "selection_before_command"
+    }
+    assert first_stable == second_stable  # Python incorrectly treats True as 1.
     with pytest.raises(RuntimeError, match="restart replay changed"):
         _run_proofs(tmp_path, monkeypatch, json.dumps(first), json.dumps(second))
 
