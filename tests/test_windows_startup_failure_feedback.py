@@ -126,3 +126,52 @@ def test_proof_mode_keeps_failures_visible_to_ci(monkeypatch, tmp_path) -> None:
         nika_windows.main(["--pf11-proof"])
     proof.assert_called_once()
     assert messages == []
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("private-close"), sqlite3.DatabaseError("private-db"), RuntimeError("private-ui")],
+)
+def test_failed_session_close_is_reported_after_successful_shell(
+    monkeypatch, tmp_path, failure
+) -> None:
+    messages = _capture_messages(monkeypatch)
+    config = AppConfig(database_path=tmp_path / "nika.db")
+    monkeypatch.setattr(
+        nika_windows.AppConfig, "from_environment", staticmethod(lambda: config)
+    )
+    session = SimpleNamespace(bridge=object(), close=Mock(side_effect=failure))
+    monkeypatch.setattr(nika_windows, "build_windows_session", lambda _: session)
+    shell = Mock()
+    monkeypatch.setattr(nika_windows, "launch_windows_shell", shell)
+
+    assert nika_windows.main([]) == 1
+    shell.assert_called_once_with(session.bridge, title=f"Nika Core {config.app_version}")
+    session.close.assert_called_once_with()
+    assert len(messages) == 1
+    assert "вікно" in messages[0]
+    assert "private-" not in messages[0]
+
+
+def test_failed_cleanup_does_not_hide_safe_message_after_shell_failure(
+    monkeypatch, tmp_path
+) -> None:
+    messages = _capture_messages(monkeypatch)
+    config = AppConfig(database_path=tmp_path / "nika.db")
+    monkeypatch.setattr(
+        nika_windows.AppConfig, "from_environment", staticmethod(lambda: config)
+    )
+    session = SimpleNamespace(
+        bridge=object(), close=Mock(side_effect=sqlite3.DatabaseError("private-close"))
+    )
+    monkeypatch.setattr(nika_windows, "build_windows_session", lambda _: session)
+    monkeypatch.setattr(
+        nika_windows,
+        "launch_windows_shell",
+        Mock(side_effect=OSError("private-window")),
+    )
+
+    assert nika_windows.main([]) == 1
+    session.close.assert_called_once_with()
+    assert len(messages) == 1
+    assert "вікно" in messages[0]
+    assert "private-" not in messages[0]
