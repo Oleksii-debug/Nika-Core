@@ -117,7 +117,13 @@ class OpenAICompatibleProvider:
             ) from exc
 
         try:
-            raw_text = body["choices"][0]["message"]["content"]
+            choice = body["choices"][0]
+            # This adapter returns text, not partial generations or tool calls.
+            # Some compatible providers omit finish_reason; when supplied,
+            # a nonterminal reason must never become a successful result.
+            if "finish_reason" in choice and choice["finish_reason"] != "stop":
+                raise ValueError("model response is not a completed text answer")
+            raw_text = choice["message"]["content"]
             if not isinstance(raw_text, str):
                 raise TypeError("message content must be text")
             model = str(body.get("model") or request.model or self._default_model)
