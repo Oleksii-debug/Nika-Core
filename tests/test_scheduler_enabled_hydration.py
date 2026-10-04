@@ -187,3 +187,72 @@ def test_invalid_enabled_blob_rejected_without_materializing_payload(
     sqlite.record_rows = True
     assert jobs.list_enabled() == (_job("b-live", enabled=True),)
     assert sqlite.fetched_job_ids == ["b-live"]
+
+
+@pytest.mark.parametrize(
+    "column",
+    (
+        "job_id",
+        "action_id",
+        "trigger_kind",
+        "coalesce",
+        "max_instances",
+        "misfire_grace_seconds",
+    ),
+)
+def test_corrupt_active_scalar_never_crosses_hydration_boundary(
+    tmp_path: Path, column: str
+) -> None:
+    sqlite = RecordingSQLiteStore(tmp_path / "Папка з пробілом" / "nika.db")
+    sqlite.initialize()
+    jobs = ScheduledJobStore(sqlite)
+    jobs.upsert(_job("a-corrupt", enabled=True))
+    jobs.upsert(_job("b-live", enabled=True))
+    jobs.upsert(_job("c-disabled", enabled=False))
+    with sqlite.connection() as conn:
+        row_id = conn.execute(
+            "SELECT rowid FROM scheduled_jobs WHERE job_id = ?", ("a-corrupt",)
+        ).fetchone()[0]
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            f"UPDATE scheduled_jobs SET {column} = ? WHERE rowid = ?",
+            (sqlite3.Binary(b"x" * 2_000_000), row_id),
+        )
+        conn.execute(
+            "UPDATE scheduled_jobs SET action_id = ? WHERE job_id = ?",
+            (sqlite3.Binary(b"x" * 2_000_000), "c-disabled"),
+        )
+
+    for current in (sqlite, RecordingSQLiteStore(sqlite.path)):
+        current.record_rows = True
+        with pytest.raises(ValueError, match="persisted scheduled job scalar is corrupt"):
+            ScheduledJobStore(current).list_enabled()
+        assert current.fetched_job_ids == []
+
+    sqlite.record_rows = False
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET enabled = 0 WHERE rowid = ?", (row_id,)
+        )
+    sqlite.fetched_job_ids.clear()
+    sqlite.record_rows = True
+    assert jobs.list_enabled() == (_job("b-live", enabled=True),)
+    assert sqlite.fetched_job_ids == ["b-live"]
+
+
+def test_enabled_hydration_does_not_load_unused_timestamp_blobs(
+    tmp_path: Path,
+) -> None:
+    sqlite = RecordingSQLiteStore(tmp_path / "nika.db")
+    sqlite.initialize()
+    jobs = ScheduledJobStore(sqlite)
+    jobs.upsert(_job("live", enabled=True))
+    with sqlite.connection() as conn:
+        conn.execute(
+            "UPDATE scheduled_jobs SET created_at = ?, updated_at = ? "
+            "WHERE job_id = ?",
+            (sqlite3.Binary(b"x" * 2_000_000), sqlite3.Binary(b"y" * 2_000_000), "live"),
+        )
+    sqlite.record_rows = True
+    assert jobs.list_enabled() == (_job("live", enabled=True),)
+    assert sqlite.fetched_job_ids == ["live"]

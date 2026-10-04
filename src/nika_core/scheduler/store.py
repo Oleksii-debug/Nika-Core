@@ -108,6 +108,20 @@ class ScheduledJobStore:
             ).fetchone()
             if invalid_enabled is not None:
                 raise ValueError("persisted enabled is corrupt")
+            # Fail before SQLite/Python row hydration for corrupt scalar carriers.
+            # The semantic decoder still validates all ordinary text values.
+            invalid_scalar = conn.execute(
+                "SELECT 1 FROM scheduled_jobs WHERE enabled = 1 "
+                "AND (typeof(job_id) != 'text' OR typeof(action_id) != 'text' "
+                "OR typeof(trigger_kind) != 'text' "
+                "OR typeof(coalesce) != 'integer' OR coalesce NOT IN (0, 1) "
+                "OR typeof(max_instances) != 'integer' OR max_instances <= 0 "
+                "OR (misfire_grace_seconds IS NOT NULL AND "
+                "(typeof(misfire_grace_seconds) != 'integer' "
+                "OR misfire_grace_seconds <= 0))) LIMIT 1"
+            ).fetchone()
+            if invalid_scalar is not None:
+                raise ValueError("persisted scheduled job scalar is corrupt")
             for column, label in (("trigger_json", "trigger"), ("payload_json", "payload")):
                 invalid_json = conn.execute(
                     "SELECT 1 FROM scheduled_jobs "
@@ -120,7 +134,9 @@ class ScheduledJobStore:
                     raise ValueError(f"persisted {label} is corrupt or exceeds raw size limit")
             # Disabled rows never cross the SQLite/Python hydration boundary.
             rows = conn.execute(
-                "SELECT * FROM scheduled_jobs "
+                "SELECT job_id, action_id, trigger_kind, trigger_json, "
+                "payload_json, enabled, coalesce, max_instances, "
+                "misfire_grace_seconds FROM scheduled_jobs "
                 "WHERE enabled = 1 AND typeof(enabled) = 'integer' ORDER BY job_id"
             ).fetchall()
         enabled_jobs: list[ScheduledJob] = []
