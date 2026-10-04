@@ -122,6 +122,37 @@ def test_packaged_handler_rejects_invalid_text_without_persisting(
     assert count == 0
 
 
+class _HostileString(str):
+    def split(self, *args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        raise AssertionError("untrusted string method must not run")
+
+
+class _OrdinaryStringSubclass(str):
+    pass
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        _HostileString("Create an agent"),
+        _OrdinaryStringSubclass("Create an agent"),
+    ),
+)
+def test_packaged_handler_rejects_str_subclasses_before_methods_or_writes(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    handler, _repository, store = _handler(tmp_path / "untrusted-command.db")
+
+    with pytest.raises(TypeError, match="має бути текстом"):
+        handler({"command": command})
+
+    with store.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM agent_definitions").fetchone()[0]
+    assert count == 0
+
+
 @pytest.mark.parametrize("command", (None, 7, False, ["agent"]))
 def test_packaged_handler_rejects_nontext_command_without_persisting(
     tmp_path: Path,
