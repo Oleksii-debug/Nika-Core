@@ -82,6 +82,12 @@ class _PoisonSuccessProvider:
             return replace(valid, provider_kind=ProviderKind.CLOUD)
         if self.mode == "text-not-string":
             return replace(valid, text=[_CANARY])  # type: ignore[arg-type]
+        if self.mode == "text-empty":
+            return replace(valid, text="")
+        if self.mode == "text-whitespace":
+            return replace(valid, text=" \t\n ")
+        if self.mode == "text-valid-multiline":
+            return replace(valid, text=" Відповідь 🧠\nДругий рядок ")
         if self.mode == "text-unpaired-high-surrogate":
             return replace(valid, text="valid text \ud800")
         if self.mode == "text-unpaired-low-surrogate":
@@ -177,6 +183,8 @@ def _request() -> ModelRequest:
         "wrong-provider-id",
         "wrong-provider-kind",
         "text-not-string",
+        "text-empty",
+        "text-whitespace",
         "text-unpaired-high-surrogate",
         "text-unpaired-low-surrogate",
         "model-not-text",
@@ -340,7 +348,7 @@ def test_signed_64_bit_token_metadata_is_still_accepted(tmp_path: Path) -> None:
     ]
 
 
-@pytest.mark.parametrize("mode", ("valid", "text-valid-unicode"))
+@pytest.mark.parametrize("mode", ("valid", "text-valid-unicode", "text-valid-multiline"))
 def test_valid_success_response_still_reaches_completed_audit(
     tmp_path: Path, mode: str
 ) -> None:
@@ -358,9 +366,12 @@ def test_valid_success_response_still_reaches_completed_audit(
     assert response.provider_id == "trusted"
     assert response.provider_kind is ProviderKind.LOCAL
     assert response.model == "fixture-model"
-    assert response.text == (
-        "Локальна відповідь 🧠" if mode == "text-valid-unicode" else "provider output"
-    )
+    expected_text = {
+        "valid": "provider output",
+        "text-valid-unicode": "Локальна відповідь 🧠",
+        "text-valid-multiline": " Відповідь 🧠\nДругий рядок ",
+    }
+    assert response.text == expected_text[mode]
     assert primary.complete_calls == 1
     assert fallback.complete_calls == 0
     events = audit.list_for(
