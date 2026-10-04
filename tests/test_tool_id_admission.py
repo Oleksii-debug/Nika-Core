@@ -104,3 +104,89 @@ def test_tool_spec_accepts_exact_utf8_byte_boundary() -> None:
 
     executor.register(spec, handler)
     assert executor.specs() == (spec,)
+
+
+def test_registered_tool_cannot_be_downgraded_through_original_spec() -> None:
+    executed: list[str] = []
+
+    async def handler(_args: dict[str, object]) -> object:
+        executed.append("external_effect")
+        return {"published": True}
+
+    schema = {"properties": {"text": {"type": "string"}}}
+    spec = ToolSpec(
+        tool_id="external.publish",
+        description="Requires approval",
+        risk=ToolRisk.EXTERNAL_SIDE_EFFECT,
+        input_schema=schema,
+    )
+    executor = ToolExecutor()
+    executor.register(spec, handler)
+
+    # Frozen dataclasses do not make caller-owned references an authority boundary.
+    object.__setattr__(spec, "risk", ToolRisk.READ_ONLY)
+    object.__setattr__(spec, "timeout_seconds", 86_400)
+    object.__setattr__(spec, "tool_id", "changed.tool")
+    schema["properties"]["text"]["type"] = "integer"
+
+    admitted = executor.specs()[0]
+    assert admitted.tool_id == "external.publish"
+    assert admitted.risk is ToolRisk.EXTERNAL_SIDE_EFFECT
+    assert admitted.timeout_seconds == 30.0
+    assert admitted.input_schema["properties"]["text"]["type"] == "string"
+
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(call_id="call-1", tool_id="external.publish", arguments={})
+        )
+    )
+    assert result.error == "approval required"
+    assert executed == []
+
+
+def test_catalog_cannot_mutate_registered_tool_authority() -> None:
+    executed: list[str] = []
+
+    async def handler(_args: dict[str, object]) -> object:
+        executed.append("external_effect")
+        return {"published": True}
+
+    executor = ToolExecutor()
+    executor.register(
+        ToolSpec(
+            tool_id="external.publish",
+            description="Requires approval",
+            risk=ToolRisk.HIGH_IMPACT,
+            input_schema={"properties": {"text": {"type": "string"}}},
+        ),
+        handler,
+    )
+    published = executor.specs()[0]
+    object.__setattr__(published, "risk", ToolRisk.READ_ONLY)
+    object.__setattr__(published, "tool_id", "changed.tool")
+    published.input_schema["properties"]["text"]["type"] = "integer"
+
+    retained = executor.specs()[0]
+    assert retained.tool_id == "external.publish"
+    assert retained.risk is ToolRisk.HIGH_IMPACT
+    assert retained.input_schema["properties"]["text"]["type"] == "string"
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(call_id="call-2", tool_id="external.publish", arguments={})
+        )
+    )
+    assert result.error == "approval required"
+    assert executed == []
+
+
+def test_registration_revalidates_spec_mutated_after_construction() -> None:
+    spec = ToolSpec(tool_id="valid.tool", description="valid at construction")
+    object.__setattr__(spec, "tool_id", "x" * 513)
+    executor = ToolExecutor()
+
+    async def handler(_args: dict[str, object]) -> object:
+        return {"ok": True}
+
+    with pytest.raises(ValueError, match="tool_id"):
+        executor.register(spec, handler)
+    assert executor.specs() == ()
