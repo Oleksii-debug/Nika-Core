@@ -450,13 +450,14 @@ class V01ModelSettings:
 
         if not isinstance(task_id, str) or not task_id.strip():
             raise ModelSetupError("Немає коректного ідентифікатора завдання.")
-        try:
-            payload = TaskQueue(self._store).get(task_id).payload
-        except KeyError as exc:
-            raise ModelSetupError("Завдання для вибраної моделі не знайдено.") from exc
-        selection_id = payload.get(_TASK_SELECTION_FIELD)
         with self._store.connection() as conn:
+            # Capture the task inside the same write fence as its binding.
             conn.execute("BEGIN IMMEDIATE")
+            try:
+                payload = TaskQueue(self._store).get(task_id).payload
+            except KeyError as exc:
+                raise ModelSetupError("Завдання для вибраної моделі не знайдено.") from exc
+            selection_id = payload.get(_TASK_SELECTION_FIELD)
             accepted = self._selection_by_id(conn, selection_id)
             row = conn.execute(
                 "SELECT selection_id, selection_json FROM v01_task_model_bindings "
