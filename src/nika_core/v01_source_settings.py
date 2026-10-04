@@ -91,6 +91,8 @@ class SourceSelection(BaseModel):
     @classmethod
     def from_stored(cls, value: str) -> SourceSelection:
         try:
+            if type(value) is not str:
+                raise ValueError("stored source selection must be text")
             selection = cls.model_validate_json(value)
             root = Path(selection.root)
             paths = (Path(selection.source_a), Path(selection.source_b))
@@ -128,10 +130,16 @@ class V01SourceSettings:
                 "CREATE TABLE IF NOT EXISTS v01_source_settings_schema ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            if conn.execute(
+                "SELECT 1 FROM v01_source_settings_schema WHERE version < 1 LIMIT 1"
+            ).fetchone() is not None:
+                raise SourceSetupError("Версія налаштувань джерел некоректна.")
             current = (
                 conn.execute("SELECT MAX(version) FROM v01_source_settings_schema").fetchone()[0]
                 or 0
             )
+            if type(current) is not int or current < 0:
+                raise SourceSetupError("Версія налаштувань джерел некоректна.")
             if current > _SCHEMA_VERSION:
                 raise SourceSetupError("Версія налаштувань джерел новіша за цю програму.")
             for version in range(current + 1, _SCHEMA_VERSION + 1):
@@ -180,7 +188,7 @@ class V01SourceSettings:
 
     @staticmethod
     def _selection_by_id(conn: sqlite3.Connection, selection_id: Any) -> SourceSelection:
-        if not isinstance(selection_id, str) or re.fullmatch(r"[0-9a-f]{64}", selection_id) is None:
+        if type(selection_id) is not str or re.fullmatch(r"[0-9a-f]{64}", selection_id) is None:
             raise SourceSetupError("Збережене посилання на джерела завдання некоректне.")
         row = conn.execute(
             "SELECT selection_json FROM v01_source_selections WHERE selection_id = ?",
@@ -188,6 +196,7 @@ class V01SourceSettings:
         ).fetchone()
         if (
             row is None
+            or type(row["selection_json"]) is not str
             or hashlib.sha256(row["selection_json"].encode("utf-8")).hexdigest() != selection_id
         ):
             raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
