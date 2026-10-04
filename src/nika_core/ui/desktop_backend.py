@@ -109,9 +109,10 @@ class DesktopBackend:
         self._prepare_task_payload = prepare_task_payload
         self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
-        self._active_lock = threading.Lock()
+        self._active_lock = threading.RLock()
         self._accepting = True
         self._closing = False
+        self._shutdown_pending = False
         self._active_threads: dict[str, str] = {}
         self._active_futures: dict[str, Future[Any]] = {}
         self._cancel_futures: dict[str, Future[bool]] = {}
@@ -132,6 +133,12 @@ class DesktopBackend:
         self._ensure_defaults()
 
     def create_task(self, payload: Mapping[str, Any]) -> UIResult:
+        with self._active_lock:
+            if not self._accepting or self._shutdown_pending:
+                raise RuntimeError("desktop runtime is shutting down")
+            return self._create_task_open(payload)
+
+    def _create_task_open(self, payload: Mapping[str, Any]) -> UIResult:
         command = str(payload.get("command", "")).strip()
         if not command:
             raise ValueError("Введіть команду перед створенням завдання.")
@@ -155,6 +162,12 @@ class DesktopBackend:
         )
 
     def pause_task(self, _payload: Mapping[str, Any]) -> UIResult:
+        with self._active_lock:
+            if not self._accepting:
+                raise RuntimeError("desktop runtime is shutting down")
+            return self._pause_task_open(_payload)
+
+    def _pause_task_open(self, _payload: Mapping[str, Any]) -> UIResult:
         record = self._only_controllable(action="призупинення")
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
@@ -182,6 +195,12 @@ class DesktopBackend:
         )
 
     def resume_task(self, _payload: Mapping[str, Any]) -> UIResult:
+        with self._active_lock:
+            if not self._accepting or self._shutdown_pending:
+                raise RuntimeError("desktop runtime is shutting down")
+            return self._resume_task_open(_payload)
+
+    def _resume_task_open(self, _payload: Mapping[str, Any]) -> UIResult:
         record = self._only_with_state(TaskState.PAUSED, action="продовження")
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
@@ -224,6 +243,9 @@ class DesktopBackend:
         )
 
     def stop_agent(self, _payload: Mapping[str, Any]) -> UIResult:
+        with self._active_lock:
+            if not self._accepting:
+                raise RuntimeError("desktop runtime is shutting down")
         record = self._only_controllable(action="зупинки")
         if record is None:
             cancelled = self._only_with_state(
@@ -241,6 +263,8 @@ class DesktopBackend:
 
         cancel_future: Future[bool] | None = None
         with self._active_lock:
+            if not self._accepting:
+                raise RuntimeError("desktop runtime is shutting down")
             thread_id = self._active_threads.get(record.task_id)
             if thread_id is not None:
                 cancel_future = self._schedule_cancel_locked(record.task_id, thread_id)
@@ -296,6 +320,9 @@ class DesktopBackend:
 
         if startup_wait_seconds < 0:
             raise ValueError("startup_wait_seconds must be non-negative")
+        with self._active_lock:
+            if not self._accepting or self._shutdown_pending:
+                raise RuntimeError("desktop runtime is shutting down")
         with self._startup_recovery_lock:
             if self._startup_recovery_started:
                 return dict(self._startup_recovery_state)
@@ -338,7 +365,7 @@ class DesktopBackend:
         coroutine = recovery.resume_safe_crash_sessions()
         with self._active_lock:
             try:
-                if not self._accepting:
+                if not self._accepting or self._shutdown_pending:
                     raise RuntimeError("desktop runtime is shutting down")
                 future = self._host().submit(coroutine)
             except BaseException:
@@ -408,7 +435,7 @@ class DesktopBackend:
 
         with self._active_lock:
             try:
-                if not self._accepting:
+                if not self._accepting or self._shutdown_pending:
                     raise RuntimeError("desktop runtime is shutting down")
                 future = self._host().submit(coroutine)
             except BaseException:
@@ -427,6 +454,7 @@ class DesktopBackend:
                 return
             self._closing = True
             self._accepting = False
+            self._shutdown_pending = True
             futures = [
                 *self._active_futures.values(),
                 *self._cancel_futures.values(),
@@ -653,7 +681,7 @@ class DesktopBackend:
         coroutine: Coroutine[Any, Any, Any],
     ) -> None:
         with self._active_lock:
-            if not self._accepting:
+            if not self._accepting or self._shutdown_pending:
                 self._discard_unsubmitted(coroutine)
                 raise RuntimeError("desktop runtime is shutting down")
             existing = self._active_futures.get(task_id)
