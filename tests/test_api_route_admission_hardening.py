@@ -41,6 +41,8 @@ def _config(base_url: str = "https://api.example.test/v1") -> ApiModelRouteConfi
         "https://api.example.test:65536/v1",
         "https://api.example.test:abc/v1",
         "https://api.example.test:0/v1",
+        "https://api.example.test:/v1",
+        "https://[::1/v1",
         "https://api.example%2Etest/v1",
         "https://api.example.test/v1?",
         "https://api.example.test/v1#",
@@ -172,11 +174,14 @@ def test_environment_resolver_rejects_control_bearing_variable_name(
         resolver.resolve("env:NIKA_ROUTE_ADMISSION_TEST_TOKEN\nINJECTED")
 
 
-@pytest.mark.parametrize("overrides", [
-    {"provider_id": "approved\napi"},
-    {"default_model": "bad\ud800model"},
-    {"credential_ref": "env:NIKA\nKEY"},
-])
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"provider_id": "approved\napi"},
+        {"default_model": "bad\ud800model"},
+        {"credential_ref": "env:NIKA\nKEY"},
+    ],
+)
 def test_durable_route_identifiers_reject_invalid_unicode(
     overrides: dict[str, str],
 ) -> None:
