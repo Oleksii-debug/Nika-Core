@@ -145,7 +145,12 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         or not isinstance(project_id, str)
         or not project_id.strip()
         or first.get("command_center_state_proven") is not True
+        or first.get("current_command_proven") is not True
+        or first.get("current_command_focus_proven") is not True
+        or first.get("restart_selection_integrity_proven") is not True
         or first.get("bounded_projection_proven") is not True
+        or not isinstance(first.get("state"), str)
+        or not first["state"].strip()
         or first.get("bridge_state_project_id") != project_id
         or type(first.get("bridge_state_spec_version")) is not int
         or first["bridge_state_spec_version"] != 1
