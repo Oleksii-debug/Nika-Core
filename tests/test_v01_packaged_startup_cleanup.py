@@ -30,6 +30,7 @@ class _Resource:
         ("model_setup", ["voice", "backend"]),
         ("speech", ["model_setup", "voice", "backend"]),
         ("recovery", ["model_setup", "speech", "voice", "backend"]),
+        ("assembly", ["model_setup", "speech", "voice", "backend"]),
     ],
 )
 def test_partial_packaged_startup_closes_only_constructed_resources(
@@ -71,6 +72,11 @@ def test_partial_packaged_startup_closes_only_constructed_resources(
     monkeypatch.setattr(nika_windows, "build_packaged_voice", build_voice)
     monkeypatch.setattr(nika_windows, "PackagedVoiceModelSetup", build_setup)
     monkeypatch.setattr(nika_windows, "build_packaged_speech", build_speech)
+    if failure_point == "assembly":
+        def fail_assembly(_repository: object) -> None:
+            raise failure
+
+        monkeypatch.setattr(nika_windows, "ProductProjectCommandService", fail_assembly)
     config = AppConfig(database_path=tmp_path / "Приватні дані" / "ніка.db")
     expected_error = (
         nika_windows._StartupRecoveryInventoryError
