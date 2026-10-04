@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -95,6 +96,13 @@ def _reject_nonfinite_voice_number(value: str) -> object:
     raise ValueError(f"non-finite packaged voice proof number: {value}")
 
 
+def _parse_finite_voice_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("non-finite packaged voice proof floating-point number")
+    return value
+
+
 def _proof_identity(payload: dict[str, object]) -> str:
     # JSON preserves bool/int distinctions that Python dict equality does not.
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -135,6 +143,7 @@ def prove_packaged_voice_runtime(bundle_dir: Path, *, source_sha: str) -> Path:
                 encoded.decode("utf-8"),
                 object_pairs_hook=_unique_voice_proof_fields,
                 parse_constant=_reject_nonfinite_voice_number,
+                parse_float=_parse_finite_voice_float,
             )
         except (OSError, UnicodeError, ValueError, RecursionError) as exc:
             raise RuntimeError(
