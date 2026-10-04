@@ -85,6 +85,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     (?P<value>
         "(?:\\.|[^"\\\r\n]){1,4096}"|
         '(?:\\.|[^'\\\r\n]){1,4096}'|
+        # Unquoted env-variable references are placeholders only when complete.
+        \$\{[A-Za-z_][A-Za-z0-9_]*\}(?=[\s,;\#}\]\r\n]|$)|
         [^\s,\#;}{\]\r\n]{1,4096}
     )
     """,
