@@ -352,6 +352,10 @@ def test_projection_key_collision_is_rejected_before_overwrite(tmp_path) -> None
             id="nonfinite-number",
         ),
         pytest.param(
+            '{"shared_task_id":"task-v01-71","stage":"worker","score":1e999}',
+            id="overflowing-float",
+        ),
+        pytest.param(
             b'{"shared_task_id":"task-v01-71","stage":"worker"}',
             id="sqlite-blob",
         ),
