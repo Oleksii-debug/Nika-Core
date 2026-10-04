@@ -106,6 +106,21 @@ class V01PackagedTeamStateProvider:
         # A packaged team has at most three task assignments, including the
         # optional root task. Reject surplus history before decoding any payload.
         if len(task_rows) > 3:
+            # Generic multi-agent teams may legitimately have more than three
+            # tasks. Detect V0.1 markers across the entire candidate in SQL
+            # without materializing its history or decoding untrusted objects.
+            marker = conn.execute(
+                "SELECT 1 FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND kind = 'task' AND "
+                "CASE WHEN typeof(payload_json) != 'text' THEN 1 "
+                "WHEN NOT json_valid(payload_json) THEN 1 "
+                "WHEN json_type(payload_json, '$.shared_task_id') IS NOT NULL THEN 1 "
+                "WHEN json_type(payload_json, '$.stage') IS NOT NULL THEN 1 "
+                "ELSE 0 END = 1 LIMIT 1",
+                (team_id,),
+            ).fetchone()
+            if marker is None:
+                return None
             raise ValueError("excess V0.1 team task handoffs")
 
         stage_by_member: dict[str, str] = {}
