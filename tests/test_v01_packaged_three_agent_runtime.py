@@ -1206,7 +1206,7 @@ def test_packaged_checker_handoff_identity_cannot_authorize_other_task_or_stage(
 
 @pytest.mark.parametrize(
     "case",
-    ("valid", "foreign-task", "wrong-stage", "sqlite-blob", "wrong-member-task"),
+    ("valid", "foreign-task", "wrong-stage", "sqlite-blob", "surrogate-task", "wrong-member-task"),
 )
 def test_packaged_member_cancel_never_targets_unrelated_model(
     tmp_path: Path, case: str
@@ -1230,7 +1230,7 @@ def test_packaged_member_cancel_never_targets_unrelated_model(
     member_thread = f"v01:{team_id}:worker-a"
     previous_results = _result_count(store)
 
-    if case in {"foreign-task", "wrong-stage", "sqlite-blob"}:
+    if case in {"foreign-task", "wrong-stage", "sqlite-blob", "surrogate-task"}:
         with store.connection() as conn:
             row = conn.execute(
                 "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
@@ -1243,6 +1243,8 @@ def test_packaged_member_cancel_never_targets_unrelated_model(
                 handoff["shared_task_id"] = other_task
             elif case == "wrong-stage":
                 handoff["stage"] = "checker"
+            elif case == "surrogate-task":
+                handoff["shared_task_id"] = "\ud800"
             persisted = (
                 sqlite3.Binary(json.dumps(handoff).encode("utf-8"))
                 if case == "sqlite-blob"
@@ -1331,4 +1333,83 @@ def test_valid_member_cancel_survives_corrupt_queued_task(
             current.cancel(task_id=member_task, thread_id=member_thread)
         ) is True
         assert cancelled == [(task_id, member_thread)]
+        assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize("member_id", ("worker-a", "checker"))
+def test_corrupt_unicode_handoff_rejects_member_run_resume_and_cancel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, member_id: str
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    team_id = runtime._team_id(task_id)
+    member_task = f"team:{team_id}:{member_id}"
+    member_thread = f"v01:{team_id}:{member_id}"
+    previous_results = _result_count(store)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = ? AND kind = 'task'",
+            (team_id, member_id),
+        ).fetchone()
+        assert row is not None
+        handoff = json.loads(row["payload_json"])
+        handoff["shared_task_id"] = "\ud800"
+        conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+            (json.dumps(handoff, ensure_ascii=True), row["handoff_id"]),
+        )
+
+    async def forbidden_member_effect(*, thread_id: str):
+        raise AssertionError(f"corrupt identity reached member effects: {thread_id}")
+
+    for current in (
+        runtime,
+        V01PackagedThreeAgentRuntime(
+            store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
+        ),
+    ):
+        monkeypatch.setattr(current, "_run_member_from_store", forbidden_member_effect)
+        assert current._member_shared_task_id(
+            task_id=member_task, thread_id=member_thread
+        ) is None
+        token = current.initial_resume_token(
+            task_id=member_task, thread_id=member_thread
+        )
+        assert asyncio.run(
+            current.probe_resume(
+                task_id=member_task,
+                thread_id=member_thread,
+                resume_token=token,
+            )
+        ).status is RuntimeResumeProbeStatus.INVALID
+        assert asyncio.run(
+            current.run(
+                RuntimeRequest(task_id=member_task, thread_id=member_thread, payload={})
+            )
+        ).outcome is RuntimeOutcome.FAILED
+        assert asyncio.run(
+            current.resume(
+                RuntimeResumeRequest(
+                    task_id=member_task,
+                    thread_id=member_thread,
+                    resume_token=token,
+                    mode=RuntimeResumeMode.CONTINUE,
+                )
+            )
+        ).outcome is RuntimeOutcome.FAILED
+        assert asyncio.run(
+            current.cancel(task_id=member_task, thread_id=member_thread)
+        ) is False
         assert _result_count(store) == previous_results
