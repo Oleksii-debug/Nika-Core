@@ -253,8 +253,14 @@ class ToolEffectGuard:
                 ) from exc
             except sqlite3.Error as exc:
                 raise ToolEffectConflictError("tool effect reservation failed closed") from exc
+            except RuntimeError as exc:
+                # Strict ledger readers reject corrupt persisted evidence with
+                # RuntimeError. Do not leak it or let a handler run after it.
+                raise ToolEffectConflictError("tool effect evidence is invalid") from exc
         except sqlite3.Error as exc:
             raise ToolEffectConflictError("tool effect reservation failed closed") from exc
+        except RuntimeError as exc:
+            raise ToolEffectConflictError("tool effect evidence is invalid") from exc
 
         if created:
             return ToolEffectReservation(operation_key=operation_key)
