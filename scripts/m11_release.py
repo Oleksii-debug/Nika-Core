@@ -82,6 +82,19 @@ def _reject_nonfinite_proof_number(value: str) -> object:
     raise ValueError(f"non-finite packaged PF11 proof number: {value}")
 
 
+def _unique_voice_proof_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate packaged voice proof field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_voice_number(value: str) -> object:
+    raise ValueError(f"non-finite packaged voice proof number: {value}")
+
+
 def _proof_identity(payload: dict[str, object]) -> str:
     # JSON preserves bool/int distinctions that Python dict equality does not.
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
@@ -113,8 +126,17 @@ def prove_packaged_voice_runtime(bundle_dir: Path, *, source_sha: str) -> Path:
                 f"packaged voice runtime proof failed: exit {completed.returncode}"
             )
         try:
-            payload = json.loads(output.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            # Limit the actual read, rather than trusting a separate path stat.
+            with output.open("rb") as handle:
+                encoded = handle.read(1024 * 1024 + 1)
+            if len(encoded) > 1024 * 1024:
+                raise ValueError("packaged voice runtime proof exceeds 1 MiB")
+            payload = json.loads(
+                encoded.decode("utf-8"),
+                object_pairs_hook=_unique_voice_proof_fields,
+                parse_constant=_reject_nonfinite_voice_number,
+            )
+        except (OSError, UnicodeError, ValueError, RecursionError) as exc:
             raise RuntimeError(
                 "packaged voice runtime proof did not emit valid JSON evidence"
             ) from exc
@@ -151,11 +173,27 @@ def prove_packaged_voice_runtime(bundle_dir: Path, *, source_sha: str) -> Path:
         "nvda_verified": False,
         "production_release_ready": False,
     }
-    target.write_text(
-        json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    encoded = json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=bundle_dir,
+            prefix=".voice-proof-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return target
+
 
 def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path:
     """Run the packaged executable twice and persist restart-bound PF11 evidence."""
