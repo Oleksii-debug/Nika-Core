@@ -126,7 +126,8 @@ def _require_product_state(
         raise TypeError("PF11 packaged bridge did not expose ProductCommandCenter state")
     if (
         product_state.get("project_id") != project_id
-        or product_state.get("spec_version") != 1
+        or type(product_state.get("spec_version")) is not int
+        or product_state["spec_version"] != 1
         or not isinstance(product_state.get("status_count"), int)
         or isinstance(product_state.get("status_count"), bool)
         or not isinstance(product_state.get("decision_count"), int)
@@ -180,7 +181,10 @@ def _run_pf11_proof(
         raise RuntimeError("PF11 proof command did not produce a normalized ProductProject goal")
     project_id = product_project_identity(decision.normalized_goal)
     recovered_before_command = bridge.get_state()
-    if recovered_before_command.get("ok") is not True:
+    if (
+        not isinstance(recovered_before_command, Mapping)
+        or recovered_before_command.get("ok") is not True
+    ):
         raise RuntimeError("PF11 pre-command state could not be recovered")
     recovered_state = recovered_before_command.get("state")
     if not isinstance(recovered_state, Mapping) or "product_project" not in recovered_state:
