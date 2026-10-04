@@ -216,6 +216,10 @@ def test_metadata_is_provider_neutral_sorted_and_immutable() -> None:
         {"key": "   "},
         {"key": 1},
         {"options": {"temperature": 0.5}},
+        {"note": "\u200b\ufeff"},
+        {"note": "\u0301\ufe0f"},
+        {"note": "Привіт\x00світ"},
+        {"note": "Привіт\x85світ"},
     ),
 )
 def test_metadata_rejects_non_string_or_nested_provider_structures(metadata: object) -> None:
@@ -227,6 +231,13 @@ def test_metadata_preserves_meaningful_value_whitespace() -> None:
     request = _request(metadata={"note": "  meaningful text  "})
 
     assert request.metadata["note"] == "  meaningful text  "
+
+
+
+def test_metadata_preserves_readable_unicode_emoji_and_line_endings() -> None:
+    value = " Примітка 👩\u200d💻\r\n\t"
+    request = _request(metadata={"note": value})
+    assert request.metadata["note"] == value
 
 
 def test_provider_specific_request_parameters_are_not_domain_fields() -> None:
