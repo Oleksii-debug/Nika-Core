@@ -215,3 +215,70 @@ def test_inspect_fails_closed_on_corrupt_payload(tmp_path):
 
     with pytest.raises(AuditIntegrityError, match=f"audit event {event_id}"):
         log.inspect()
+
+@pytest.mark.parametrize(
+    ("url", "secret"),
+    [
+        ("https://s.example/file?X-Amz-Signature=aws-secret&mode=safe", "aws-secret"),
+        ("https://s.example/file?X-Amz-Credential=aws-cred", "aws-cred"),
+        ("https://s.example/file?X-Amz-Security-Token=aws-session", "aws-session"),
+        ("https://s.example/file?X-Goog-Signature=gcp-secret", "gcp-secret"),
+        ("https://s.example/file?X-Goog-Credential=gcp-cred", "gcp-cred"),
+        ("https://s.example/file?sig=azure-secret&mode=safe", "azure-secret"),
+        ("https://s.example/file?Signature=cdn-secret", "cdn-secret"),
+        ("https://s.example/file?X-Amz%2dSignature=encoded-key", "encoded-key"),
+    ],
+)
+def test_signed_storage_urls_are_minimized_in_inspection(tmp_path, url, secret):
+    _, log = _make_log(tmp_path)
+    log.append(
+        event_type="upload.failed",
+        entity_type="task",
+        entity_id="signed-url",
+        payload={"url": url},
+    )
+    safe = log.inspect()[0].payload["url"]
+    assert isinstance(safe, str)
+    assert secret not in safe
+    assert "REDACTED" in safe
+    if "mode=safe" in url:
+        assert "mode=safe" in safe
+
+
+@pytest.mark.parametrize("layers", [1, 2, 3])
+def test_percent_encoded_signed_url_fails_closed(tmp_path, layers):
+    from urllib.parse import quote
+
+    _, log = _make_log(tmp_path)
+    url = "https://s.example/file?X-Amz-Signature=encoded-secret"
+    for _ in range(layers):
+        url = quote(url, safe="")
+    log.append(
+        event_type="upload.failed",
+        entity_type="task",
+        entity_id="encoded-signed-url",
+        payload={"message": "source: " + url},
+    )
+    safe = log.inspect()[0].payload["message"]
+    assert isinstance(safe, str)
+    assert "encoded-secret" not in safe
+    assert "[REDACTED_URL]" in safe
+
+
+def test_nested_signed_url_is_hidden_but_safe_links_are_preserved(tmp_path):
+    from urllib.parse import quote
+
+    _, log = _make_log(tmp_path)
+    nested = "https://storage.example/file?X-Goog-Signature=nested-secret"
+    url = "https://service.example/redirect?next=" + quote(nested, safe="")
+    plain = "https://service.example/health?mode=safe"
+    log.append(
+        event_type="upload.failed",
+        entity_type="task",
+        entity_id="nested-url",
+        payload={"target": url, "health": plain},
+    )
+    result = log.inspect()[0].payload
+    assert "nested-secret" not in result["target"]
+    assert "REDACTED_URL" in result["target"]
+    assert result["health"] == plain

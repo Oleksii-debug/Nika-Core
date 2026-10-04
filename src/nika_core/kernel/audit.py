@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 from nika_core.data.sqlite import SQLiteStore
 
@@ -35,6 +35,13 @@ _SENSITIVE_KEYS: Final = frozenset(
         "set_cookie",
         "secret",
         "token",
+        "sig",
+        "x_amz_signature",
+        "x_amz_credential",
+        "x_amz_security_token",
+        "x_goog_signature",
+        "x_goog_credential",
+        "x_goog_security_token",
     }
 )
 _AUTH_HEADER_RE: Final = re.compile(
@@ -53,6 +60,9 @@ _PRIVATE_KEY_RE: Final = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _HTTP_URL_RE: Final = re.compile(r"(?i)https?://[^\s'\"<>]+")
+_ENCODED_HTTP_URL_RE: Final = re.compile(
+    r"(?i)https?(?:%3a|%253a|%25253a)(?:%2f|%252f|%25252f){2}[^\s'\"<>]+"
+)
 _SECRET_QUERY_NAMES: Final = frozenset(
     {
         "access_token",
@@ -68,6 +78,16 @@ _SECRET_QUERY_NAMES: Final = frozenset(
         "refresh_token",
         "session_token",
         "token",
+        "sig",
+        "signature",
+        "x_amz_signature",
+        "x_amz_credential",
+        "x_amz_security_token",
+        "x_goog_signature",
+        "x_goog_credential",
+        "x_goog_security_token",
+        "awsaccesskeyid",
+        "googleaccessid",
     }
 )
 
@@ -292,10 +312,27 @@ def _redact_text(value: str) -> str:
         lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
         sanitized,
     )
+    sanitized = _ENCODED_HTTP_URL_RE.sub(_redact_encoded_url, sanitized)
     return _HTTP_URL_RE.sub(lambda match: _redact_url(match.group(0)), sanitized)
 
 
-def _redact_url(value: str) -> str:
+def _redact_encoded_url(match: re.Match[str]) -> str:
+    encoded = match.group(0)
+    decoded = encoded
+    for _ in range(3):
+        decoded_next = unquote(decoded)
+        if decoded_next == decoded:
+            break
+        decoded = decoded_next
+    if decoded.casefold().startswith(("http://", "https://")):
+        if _redact_url(decoded) != decoded:
+            return _REDACTED_URL
+    return encoded
+
+
+def _redact_url(value: str, *, _depth: int = 0) -> str:
+    if _depth >= 3:
+        return _REDACTED_URL
     try:
         parts = urlsplit(value)
     except ValueError:
@@ -315,22 +352,33 @@ def _redact_url(value: str) -> str:
     else:
         netloc = parts.netloc
 
-    safe_query = _redact_url_parameters(parts.query)
-    safe_fragment = _redact_url_parameters(parts.fragment)
+    safe_query = _redact_url_parameters(parts.query, _depth=_depth)
+    safe_fragment = _redact_url_parameters(parts.fragment, _depth=_depth)
     return urlunsplit((parts.scheme, netloc, parts.path, safe_query, safe_fragment))
 
 
-def _redact_url_parameters(value: str) -> str:
+def _redact_url_parameters(value: str, *, _depth: int) -> str:
     pairs = parse_qsl(value, keep_blank_values=True)
-    sensitive = [
-        name.casefold().replace("-", "_") in _SECRET_QUERY_NAMES
-        for name, _item in pairs
-    ]
-    if not any(sensitive):
-        return value
-    return urlencode(
-        [
-            (name, _REDACTED if is_sensitive else item)
-            for (name, item), is_sensitive in zip(pairs, sensitive, strict=True)
-        ]
-    )
+    safe_pairs: list[tuple[str, str]] = []
+    changed = False
+    for name, item in pairs:
+        normalized = name.casefold().replace("-", "_")
+        if normalized in _SECRET_QUERY_NAMES:
+            safe_pairs.append((name, _REDACTED))
+            changed = True
+            continue
+        decoded = item
+        for _ in range(3):
+            if decoded.casefold().startswith(("http://", "https://")):
+                break
+            decoded_next = unquote(decoded)
+            if decoded_next == decoded:
+                break
+            decoded = decoded_next
+        if decoded.casefold().startswith(("http://", "https://")):
+            if _redact_url(decoded, _depth=_depth + 1) != decoded:
+                safe_pairs.append((name, _REDACTED_URL))
+                changed = True
+                continue
+        safe_pairs.append((name, item))
+    return urlencode(safe_pairs) if changed else value

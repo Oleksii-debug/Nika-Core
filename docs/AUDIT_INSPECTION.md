@@ -53,7 +53,9 @@ credential handles. It also minimizes common credential leakage embedded in stri
 - inline password/API-key/token/client-secret/private-key forms;
 - private-key PEM blocks;
 - embedded HTTP/HTTPS URL userinfo;
-- common secret or OAuth-code query/fragment parameters.
+- common secret or OAuth-code query/fragment parameters;
+- AWS, GCP, Azure SAS and CloudFront signed URL parameters, including nested or
+  up to three-layer percent-encoded links. Nested links may be hidden entirely.
 
 Malformed HTTP/HTTPS URLs that cannot be parsed safely are replaced with `[REDACTED_URL]` rather
 than returned unchanged.
