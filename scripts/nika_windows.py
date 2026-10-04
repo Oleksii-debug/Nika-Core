@@ -116,7 +116,6 @@ def _close_failed_startup_resources(
             )
 
 
-
 def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
     store = SQLiteStore(config.database_path)
     store.initialize()
@@ -174,107 +173,113 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             "packaged startup recovery inventory failed"
         ) from exc
 
-    products = ProductProjectCommandService(ProductProjectRepository(store))
-    agent_definitions = AgentDefinitionRepository(store)
+    try:
+        products = ProductProjectCommandService(ProductProjectRepository(store))
+        agent_definitions = AgentDefinitionRepository(store)
 
-    def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
-        try:
-            return backend.create_task(payload)
-        except ModelSetupError as exc:
-            return UIResult(
-                request_id="desktop-handler",
-                status="rejected",
-                message=str(exc),
-                focus_id="model-route-kind",
-            )
+        def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
+            try:
+                return backend.create_task(payload)
+            except ModelSetupError as exc:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="rejected",
+                    message=str(exc),
+                    focus_id="model-route-kind",
+                )
 
-    product_router = PackagedProductCommandRouter(
-        products=products,
-        ordinary_handler=create_ordinary_task,
-        agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
-        selection_store=PackagedProductSelectionStore(store),
-    )
-    agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
-    command_center = ProductCommandCenter(products)
-    product_state = PackagedProductStateProvider(
-        base_state=backend.snapshot,
-        router=product_router,
-        command_center=command_center,
-    )
-    packaged_state = V01PackagedTeamStateProvider(
-        base_state=product_state,
-        store=store,
-    )
-
-    def source_state() -> Mapping[str, Any]:
-        state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
-        state["v01_model_settings"] = model_settings.snapshot()
-        state["voice"] = voice.snapshot()
-        state["voice_model_setup"] = voice_model_setup.snapshot()
-        state["speech"] = speech.snapshot()
-        return agent_builder_state.decorate(state)
-
-    def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
-        if payload:
-            return UIResult(
-                request_id="model-settings",
-                status="rejected",
-                message="Перечитування моделі не приймає параметрів.",
-                focus_id="model-route-kind",
-            )
-        snapshot = model_settings.snapshot()
-        if snapshot.get("status") == "invalid":
-            return UIResult(
-                request_id="model-settings",
-                status="failed",
-                message="Не вдалося прочитати збережені налаштування моделі.",
-                focus_id="model-route-kind",
-            )
-        return UIResult(
-            request_id="model-settings",
-            status="completed",
-            message="Збережені налаштування моделі перечитано.",
-            focus_id="model-route-kind",
+        product_router = PackagedProductCommandRouter(
+            products=products,
+            ordinary_handler=create_ordinary_task,
+            agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
+            selection_store=PackagedProductSelectionStore(store),
+        )
+        agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
+        command_center = ProductCommandCenter(products)
+        product_state = PackagedProductStateProvider(
+            base_state=backend.snapshot,
+            router=product_router,
+            command_center=command_center,
+        )
+        packaged_state = V01PackagedTeamStateProvider(
+            base_state=product_state,
+            store=store,
         )
 
-    bridge = UIActionBridge(
-        actions,
-        keymap,
-        handlers={
-            "task.create": product_router.create,
-            "task.pause": backend.pause_task,
-            "task.resume": backend.resume_task,
-            "agent.stop": backend.stop_agent,
-            "voice.start": voice.start,
-            "voice.cancel": voice.cancel,
-            "voice.model.import": voice_model_setup.start,
-            "voice.model.cancel": voice_model_setup.cancel,
-            "speech.start": speech.speak,
-            "speech.cancel": speech.cancel,
-            "team.sources.configure": source_settings.configure,
-            "settings.autostart.configure": backend.autostart_settings.configure,
-            "settings.autostart.refresh": backend.autostart_settings.refresh,
-            "settings.model.configure": model_settings.configure,
-            "settings.model.refresh": refresh_model_settings,
-            "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
-            "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
-            "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
-            "nav.workspaces": lambda _payload: _focus(
-                "workspaces-heading", "Робочі простори відкрито."
-            ),
-            "command.focus": lambda _payload: _focus("command-input", "Командне поле активне."),
-        },
-        state_provider=source_state,
-    )
-    return WindowsBridgeSession(
-        bridge=bridge,
-        products=products,
-        backend=backend,
-        voice=voice,
-        voice_model_setup=voice_model_setup,
-        speech=speech,
-    )
+        def source_state() -> Mapping[str, Any]:
+            state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
+            state["v01_model_settings"] = model_settings.snapshot()
+            state["voice"] = voice.snapshot()
+            state["voice_model_setup"] = voice_model_setup.snapshot()
+            state["speech"] = speech.snapshot()
+            return agent_builder_state.decorate(state)
 
+        def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
+            if payload:
+                return UIResult(
+                    request_id="model-settings",
+                    status="rejected",
+                    message="Перечитування моделі не приймає параметрів.",
+                    focus_id="model-route-kind",
+                )
+            snapshot = model_settings.snapshot()
+            if snapshot.get("status") == "invalid":
+                return UIResult(
+                    request_id="model-settings",
+                    status="failed",
+                    message="Не вдалося прочитати збережені налаштування моделі.",
+                    focus_id="model-route-kind",
+                )
+            return UIResult(
+                request_id="model-settings",
+                status="completed",
+                message="Збережені налаштування моделі перечитано.",
+                focus_id="model-route-kind",
+            )
+
+        bridge = UIActionBridge(
+            actions,
+            keymap,
+            handlers={
+                "task.create": product_router.create,
+                "task.pause": backend.pause_task,
+                "task.resume": backend.resume_task,
+                "agent.stop": backend.stop_agent,
+                "voice.start": voice.start,
+                "voice.cancel": voice.cancel,
+                "voice.model.import": voice_model_setup.start,
+                "voice.model.cancel": voice_model_setup.cancel,
+                "speech.start": speech.speak,
+                "speech.cancel": speech.cancel,
+                "team.sources.configure": source_settings.configure,
+                "settings.autostart.configure": backend.autostart_settings.configure,
+                "settings.autostart.refresh": backend.autostart_settings.refresh,
+                "settings.model.configure": model_settings.configure,
+                "settings.model.refresh": refresh_model_settings,
+                "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
+                "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
+                "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
+                "nav.workspaces": lambda _payload: _focus(
+                    "workspaces-heading", "Робочі простори відкрито."
+                ),
+                "command.focus": lambda _payload: _focus("command-input", "Командне поле активне."),
+            },
+            state_provider=source_state,
+        )
+        return WindowsBridgeSession(
+            bridge=bridge,
+            products=products,
+            backend=backend,
+            voice=voice,
+            voice_model_setup=voice_model_setup,
+            speech=speech,
+        )
+
+    except Exception:
+        _close_failed_startup_resources(
+            backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
+        )
+        raise
 
 def build_windows_bridge(
     config: AppConfig,
