@@ -1202,3 +1202,83 @@ def test_packaged_checker_handoff_identity_cannot_authorize_other_task_or_stage(
                 )
             ).outcome is RuntimeOutcome.FAILED
         assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize(
+    "case",
+    ("valid", "foreign-task", "wrong-stage", "sqlite-blob", "wrong-member-task"),
+)
+def test_packaged_member_cancel_never_targets_unrelated_model(
+    tmp_path: Path, case: str
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    other_task = _created_task(store, "Unrelated model task.")
+    team_id = runtime._team_id(task_id)
+    member_task = f"team:{team_id}:worker-a"
+    member_thread = f"v01:{team_id}:worker-a"
+    previous_results = _result_count(store)
+
+    if case in {"foreign-task", "wrong-stage", "sqlite-blob"}:
+        with store.connection() as conn:
+            row = conn.execute(
+                "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND recipient_id = 'worker-a' AND kind = 'task'",
+                (team_id,),
+            ).fetchone()
+            assert row is not None
+            handoff = json.loads(row["payload_json"])
+            if case == "foreign-task":
+                handoff["shared_task_id"] = other_task
+            elif case == "wrong-stage":
+                handoff["stage"] = "checker"
+            persisted = (
+                sqlite3.Binary(json.dumps(handoff).encode("utf-8"))
+                if case == "sqlite-blob"
+                else json.dumps(handoff)
+            )
+            changed = conn.execute(
+                "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+                (persisted, row["handoff_id"]),
+            )
+            assert changed.rowcount == 1
+
+    for current in (
+        runtime,
+        V01PackagedThreeAgentRuntime(
+            store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
+        ),
+    ):
+        cancelled: list[tuple[str, str]] = []
+
+        class ModelCanceller:
+            async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+                cancelled.append((task_id, thread_id))
+                return True
+
+        current._model_runtimes[task_id] = ModelCanceller()
+        current._model_runtimes[other_task] = ModelCanceller()
+        requested_task = (
+            f"team:{team_id}:worker-b" if case == "wrong-member-task" else member_task
+        )
+        cancelled_ok = asyncio.run(
+            current.cancel(task_id=requested_task, thread_id=member_thread)
+        )
+        if case == "valid":
+            assert cancelled_ok is True
+            assert cancelled == [(task_id, member_thread)]
+        else:
+            assert cancelled_ok is False
+            assert cancelled == []
+        assert _result_count(store) == previous_results
