@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import threading
 from concurrent.futures import Future
 from pathlib import Path
 from types import SimpleNamespace
@@ -143,3 +144,76 @@ def test_failed_recovery_submit_reports_attention_not_perpetual_recovering(
     assert len(host.attempted) == 1
     assert inspect.getcoroutinestate(host.attempted[0]) == inspect.CORO_CLOSED
     backend.close()
+
+
+def test_shutdown_fence_rejects_new_work_before_and_after_host_stop(tmp_path: Path) -> None:
+    host = RejectingHost()
+    backend = _backend(tmp_path, host)
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Pending(Future[object]):
+        def result(self, timeout: float | None = None) -> object:
+            entered.set()
+            assert release.wait(timeout=5)
+            return super().result(timeout=timeout)
+
+    pending = Pending()
+    backend._packaged_futures.add(pending)
+    errors: list[BaseException] = []
+
+    def close_backend() -> None:
+        try:
+            backend.close()
+        except BaseException as exc:
+            errors.append(exc)
+
+    worker = threading.Thread(target=close_backend)
+    worker.start()
+    try:
+        assert entered.wait(timeout=2)
+        rejected = _never_run()
+        with pytest.raises(RuntimeError, match="shutting down"):
+            backend.submit_packaged_coroutine(rejected)
+        assert inspect.getcoroutinestate(rejected) == inspect.CORO_CLOSED
+        assert backend._packaged_futures == {pending}
+    finally:
+        pending.set_result(None)
+        release.set()
+        worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert errors == []
+    assert host.closed
+    assert backend._packaged_futures == set()
+    after_close = _never_run()
+    with pytest.raises(RuntimeError, match="shutting down"):
+        backend._submit_runtime("later-task", "later-thread", after_close)
+    assert inspect.getcoroutinestate(after_close) == inspect.CORO_CLOSED
+    backend.close()
+
+
+def test_pending_shutdown_restores_explicit_cancel_and_close_retry(tmp_path: Path) -> None:
+    host = RejectingHost()
+    backend = _backend(tmp_path, host)
+
+    class Pending(Future[object]):
+        def result(self, timeout: float | None = None) -> object:
+            if not self.done():
+                raise TimeoutError("PRIVATE_STILL_ACTIVE")
+            return super().result(timeout=timeout)
+
+    pending = Pending()
+    backend._active_futures["task"] = pending
+    backend._active_threads["task"] = "current-thread"
+    with pytest.raises(RuntimeError, match="tasks are active"):
+        backend.close()
+
+    assert backend._accepting
+    assert not backend._closing
+    assert not host.closed
+    assert backend._active_futures["task"] is pending
+    pending.set_result(None)
+    backend.close()
+    assert host.closed
+    assert not backend._accepting
