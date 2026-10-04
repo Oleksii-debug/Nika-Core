@@ -646,7 +646,8 @@ class DesktopBackend:
         """
         try:
             if (
-                task_id not in self._active_futures
+                (task_id not in self._active_futures
+                 or self._active_futures[task_id].done())
                 and self._queue.get(task_id).state is TaskState.READY
             ):
                 self._queue.transition(task_id, TaskState.PAUSED)
