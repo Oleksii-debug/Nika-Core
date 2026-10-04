@@ -20,8 +20,8 @@ class _Model:
         self.phase = phase
         self.id = "stable-artifact:1"
         self.alias = "approved-alias"
-        self._cached = phase != "download"
-        self.is_loaded = phase in ("client", "chat", "usage")
+        self._cached = phase not in ("download", "pre_download")
+        self._loaded = phase in ("client", "chat", "usage")
         self.context_length = None
         self.input_modalities = None
         self.output_modalities = None
@@ -34,9 +34,19 @@ class _Model:
 
     @property
     def is_cached(self) -> bool:
-        if self.phase == "evidence":
+        if self.phase in ("evidence", "cached", "pre_download"):
             self.id = "switched-artifact:2"
         return self._cached
+
+    @property
+    def is_loaded(self) -> bool:
+        if self.phase == "loaded_status":
+            self.id = "switched-artifact:2"
+        return self._loaded
+
+    @is_loaded.setter
+    def is_loaded(self, value: bool) -> None:
+        self._loaded = value
 
     def get_path(self) -> str:
         return "C:/Nika QA Models/approved-alias"
@@ -114,7 +124,14 @@ def _assert_identity_failure(error: ModelGatewayError) -> None:
 
 @pytest.mark.parametrize(
     ("phase", "chat_calls"),
-    (("load", 0), ("client", 0), ("chat", 1), ("usage", 1)),
+    (
+        ("cached", 0),
+        ("loaded_status", 0),
+        ("load", 0),
+        ("client", 0),
+        ("chat", 1),
+        ("usage", 1),
+    ),
 )
 def test_unpinned_inference_rejects_mid_attempt_variant_switch(
     phase: str, chat_calls: int
@@ -125,6 +142,8 @@ def test_unpinned_inference_rejects_mid_attempt_variant_switch(
         asyncio.run(provider.complete(_request()))
     _assert_identity_failure(caught.value)
     assert model.chat_calls == chat_calls
+    if phase in ("cached", "loaded_status"):
+        assert model.load_calls == 0
     if phase == "load":
         assert model.load_calls == 1
         assert model.unload_calls == 1
@@ -143,6 +162,20 @@ def test_unpinned_acquisition_rejects_variant_switch_after_download() -> None:
         asyncio.run(provider.download_model(authorization, timeout_seconds=2.0))
     _assert_identity_failure(caught.value)
     assert model.download_calls == 1
+
+
+def test_unpinned_acquisition_rejects_switch_before_native_download() -> None:
+    model = _Model("pre_download")
+    provider = _provider(model)
+    authorization = ModelDownloadAuthorization(
+        provider_id="foundry-local",
+        model="approved-alias",
+        license_reference="qa-reviewed-model-license",
+    )
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(provider.download_model(authorization, timeout_seconds=2.0))
+    _assert_identity_failure(caught.value)
+    assert model.download_calls == 0
 
 
 def test_unpinned_inspection_rejects_variant_switch_during_evidence() -> None:
