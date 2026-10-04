@@ -226,6 +226,9 @@ class OllamaProvider:
             ) as client:
                 response = await client.post(f"{self._base_url}/api/chat", json=payload)
                 response.raise_for_status()
+                media_type = response.headers.get("content-type", "").partition(";")[0]
+                if media_type.strip().casefold() != "application/json":
+                    raise ValueError("Ollama must return a JSON response")
                 body = response.json()
         except httpx.TimeoutException as exc:
             raise ModelGatewayError(
@@ -251,13 +254,21 @@ class OllamaProvider:
             ) from exc
 
         try:
+            if not isinstance(body, dict) or "error" in body:
+                raise ValueError("Ollama did not return a successful object")
+            if body.get("done") is not True:
+                raise ValueError("Ollama returned an incomplete response")
+            if "done_reason" in body and body["done_reason"] != "stop":
+                raise ValueError("Ollama response was not completed normally")
+            response_model = body["model"]
+            if not isinstance(response_model, str) or response_model != model:
+                raise ValueError("Ollama response model differs from requested model")
             raw_message = body["message"]
-            if not isinstance(raw_message, dict):
-                raise TypeError("message must be an object")
+            if not isinstance(raw_message, dict) or raw_message.get("role") != "assistant":
+                raise TypeError("message must be an assistant object")
             text = raw_message["content"]
             if not isinstance(text, str):
                 raise TypeError("message content must be text")
-            response_model = str(body.get("model") or model)
             prompt_tokens = _optional_int(body.get("prompt_eval_count"))
             output_tokens = _optional_int(body.get("eval_count"))
             usage = ModelUsage(
