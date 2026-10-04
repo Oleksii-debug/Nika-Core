@@ -83,3 +83,25 @@ def test_nested_link_cannot_import_external_asset(tmp_path: Path, directory: boo
     _link(alias, external, directory=directory)
     with pytest.raises(ValueError, match="web_assets contains a symbolic link or junction"):
         plan.pyinstaller_args()
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Windows junction-only regression")
+def test_nested_windows_junction_is_rejected_before_traversal(tmp_path: Path) -> None:
+    import subprocess
+
+    plan = _plan(tmp_path)
+    outside = tmp_path / "Зовнішні файли"
+    outside.mkdir()
+    (outside / "private.txt").write_text("not for release", encoding="utf-8")
+    link = plan.web_assets / "junction"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(outside)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode:
+        pytest.skip("Windows junction creation is not supported by this runner")
+    assert link.is_junction()
+    with pytest.raises(ValueError, match="web_assets contains a symbolic link or junction"):
+        plan.pyinstaller_args()
