@@ -563,7 +563,7 @@ def _zip_member_extra_finding(
     try:
         handle.seek(member.header_offset)
         header = handle.read(30)
-        if len(header) != 30 or header[:4] != b"PK\x5cx03\x5cx04":
+        if len(header) != 30 or header[:4] != b"PK\x03\x04":
             return "member-extra-format"
         filename_size = int.from_bytes(header[26:28], "little")
         extra_size = int.from_bytes(header[28:30], "little")
