@@ -310,3 +310,44 @@ def test_inline_signed_parameters_are_not_exposed(tmp_path, message, secret):
     assert "[REDACTED]" in event.payload["message"]
     assert event.payload["credential_id"] == "public-reference"
     assert event.payload["signature_status"] == "verified"
+
+@pytest.mark.parametrize("nonfinite", [float("nan"), float("inf"), -float("inf")])
+def test_append_rejects_noncanonical_json_number_before_persistence(tmp_path, nonfinite):
+    _, log = _make_log(tmp_path)
+    with pytest.raises(ValueError, match="Out of range float"):
+        log.append(
+            event_type="provider.failed",
+            entity_type="task",
+            entity_id="invalid-numeric",
+            payload={"nested": [{"duration": nonfinite}]},
+        )
+    assert log.inspect() == ()
+
+
+@pytest.mark.parametrize(
+    "corrupted",
+    [
+        '{"duration":NaN}',
+        '{"duration":Infinity}',
+        '{"duration":-Infinity}',
+        '{"mode":"denied","mode":"granted"}',
+        '{"nested":{"approved":false,"approved":false}}',
+    ],
+)
+def test_inspection_rejects_noncanonical_persisted_json(tmp_path, corrupted):
+    store, log = _make_log(tmp_path)
+    event_id = log.append(
+        event_type="task.created",
+        entity_type="task",
+        entity_id="corrupt-json",
+        payload={"ok": True},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
+            (corrupted, event_id),
+        )
+    with pytest.raises(AuditIntegrityError, match=f"audit event {event_id}"):
+        log.inspect()
+    with pytest.raises(AuditIntegrityError, match=f"audit event {event_id}"):
+        log.list_for(entity_type="task", entity_id="corrupt-json")

@@ -178,7 +178,10 @@ class AuditLog:
         """Append audit evidence inside a caller-owned SQLite transaction."""
         if not event_type.strip() or not entity_type.strip() or not entity_id.strip():
             raise ValueError("audit event identifiers must not be empty")
-        body = json.dumps(payload or {}, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        body = json.dumps(
+            payload or {}, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"), allow_nan=False,
+        )
         cursor = conn.execute(
             "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
@@ -238,8 +241,12 @@ class AuditLog:
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> AuditEvent:
         try:
-            payload = json.loads(row["payload_json"])
-        except (json.JSONDecodeError, TypeError) as exc:
+            payload = json.loads(
+                row["payload_json"],
+                object_pairs_hook=_reject_duplicate_json_keys,
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
             raise AuditIntegrityError(
                 f"audit event {int(row['event_id'])} contains invalid payload JSON"
             ) from exc
@@ -255,6 +262,19 @@ class AuditLog:
             payload=payload,
             created_at=str(row["created_at"]),
         )
+
+
+def _reject_nonfinite_json_constant(_value: str) -> None:
+    raise ValueError("noncanonical audit JSON numeric constant")
+
+
+def _reject_duplicate_json_keys(items: list[tuple[str, object]]) -> dict[str, object]:
+    values: dict[str, object] = {}
+    for key, value in items:
+        if key in values:
+            raise ValueError("duplicate audit JSON object key")
+        values[key] = value
+    return values
 
 
 def _redact_payload(payload: dict[str, object]) -> dict[str, object]:
