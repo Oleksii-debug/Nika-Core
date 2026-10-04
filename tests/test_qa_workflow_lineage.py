@@ -179,3 +179,40 @@ def test_zip_builder_changes_trigger_m11_release_qualification() -> None:
     assert m11.count('      - "scripts/package_release_zip.py"') == 2
     m12 = M12_WORKFLOW.read_text(encoding="utf-8")
     assert m12.count('      - "scripts/**"') == 2
+
+
+M11_PACKAGED_SOURCE_TRIGGERS = (
+    "src/nika_core/product_command/**",
+    "src/nika_core/product_factory_packaged_journey.py",
+    "src/nika_core/product_project*.py",
+    "src/nika_core/sherpa_onnx_stt.py",
+    "src/nika_core/speech_to_text.py",
+    "src/nika_core/microphone_capture.py",
+    "src/nika_core/windows_microphone_capture.py",
+    "src/nika_core/voice_turn.py",
+    "src/nika_core/speech/**",
+)
+M11_PACKAGED_TEST_TRIGGERS = (
+    "tests/test_product_factory_packaged_journey.py",
+    "tests/test_product_factory_packaged_restart_selection.py",
+    "tests/test_packaged_voice_entrypoint.py",
+    "tests/test_packaged_speech_output.py",
+    "tests/test_speech_to_text.py",
+)
+M11_FOCUSED_RESTART_TESTS = (
+    "tests/test_product_factory_packaged_journey.py::"
+    "test_headless_pf11_composition_proof_survives_process_restart",
+    "tests/test_product_factory_packaged_journey.py::"
+    "test_release_builder_records_packaged_pf11_restart_evidence",
+)
+
+
+def test_m11_requalifies_packaged_pf11_and_voice_source_changes() -> None:
+    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    for path in (*M11_PACKAGED_SOURCE_TRIGGERS, *M11_PACKAGED_TEST_TRIGGERS):
+        assert workflow.count(f'      - "{path}"') == 2, path
+
+    regressions = workflow.split("- name: Run M11 M12 source regressions", 1)[1]
+    regressions = regressions.split("- name: Build standalone", 1)[0]
+    for test in M11_FOCUSED_RESTART_TESTS:
+        assert test in regressions, test
