@@ -88,9 +88,8 @@ class ToolAuthorization:
             return False
 
 
-def tool_arguments_fingerprint(arguments: Mapping[str, object]) -> str:
-    # The security authority owns bounded NFC/JSON admission for both ActionIntent
-    # and direct tool calls. Import lazily to avoid the policy -> tools import cycle.
+def _canonical_tool_arguments(arguments: Mapping[str, object]) -> str:
+    # Reuse ActionIntent's bounded NFC authority; never retain caller-owned containers.
     from nika_core.security.policy import _canonical_arguments
 
     try:
@@ -99,7 +98,28 @@ def tool_arguments_fingerprint(arguments: Mapping[str, object]) -> str:
         raise
     except Exception as exc:  # noqa: BLE001 - contain hostile Mapping implementations.
         raise ValueError("tool arguments must be deterministic JSON-compatible data") from exc
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    return encoded
+
+
+def tool_arguments_fingerprint(arguments: Mapping[str, object]) -> str:
+    return hashlib.sha256(_canonical_tool_arguments(arguments).encode("utf-8")).hexdigest()
+
+
+def _snapshot_tool_arguments(arguments: Mapping[str, object]) -> dict[str, object]:
+    # The canonical encoder has already detached and normalized all nested caller data.
+    snapshot = json.loads(_canonical_tool_arguments(arguments))
+    assert type(snapshot) is dict
+    return snapshot
+
+
+def _require_tool_identity(value: object, *, label: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{label} must be nonempty text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must be valid UTF-8") from exc
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,14 +165,23 @@ class ToolEffectGuard:
         self._ledger = ledger
 
     def reserve(self, *, spec: ToolSpec, call: ToolCall) -> ToolEffectReservation:
-        task_id = call.task_id or ""
-        if not task_id.strip():
-            raise ValueError("external tool call requires task_id")
-        if not call.call_id.strip():
-            raise ValueError("call_id must not be empty")
+        task_id = _require_tool_identity(call.task_id, label="task_id")
+        call_id = _require_tool_identity(call.call_id, label="call_id")
+        try:
+            # A direct guard caller gets the same bounded, detached argument boundary.
+            admitted_call = replace(
+                call, arguments=_snapshot_tool_arguments(call.arguments)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("durable tool arguments must be JSON-compatible") from exc
+        if (
+            admitted_call.authorization is not None
+            and not admitted_call.authorization.matches(spec=spec, call=admitted_call)
+        ):
+            raise ValueError("durable tool arguments do not match host authorization")
 
-        operation_key = self._operation_key(task_id=task_id, call_id=call.call_id)
-        input_fingerprint = self._fingerprint(spec=spec, call=call)
+        operation_key = self._operation_key(task_id=task_id, call_id=call_id)
+        input_fingerprint = self._fingerprint(spec=spec, call=admitted_call)
         try:
             record, created = self._ledger.reserve_once(
                 operation_key=operation_key,
@@ -304,15 +333,30 @@ class ToolExecutor:
                         error="approval required",
                     )
                 if isinstance(decision, ToolAuthorization):
-                    if decision.matches(spec=spec, call=call):
-                        authorization = decision
-                    else:
+                    try:
+                        # Snapshot only once from caller-owned data after policy returns.
+                        # Both approval matching and later execution use this snapshot.
+                        approved_arguments = _snapshot_tool_arguments(call.arguments)
+                    except (TypeError, ValueError):
                         self._audit(
                             "tool.denied",
                             call,
                             spec,
-                            {"reason": "exact_authorization_mismatch"},
+                            {"reason": "invalid_arguments"},
                         )
+                    else:
+                        authorized_call = replace(
+                            call, arguments=approved_arguments, authorization=decision
+                        )
+                        if decision.matches(spec=spec, call=authorized_call):
+                            authorization = decision
+                        else:
+                            self._audit(
+                                "tool.denied",
+                                call,
+                                spec,
+                                {"reason": "exact_authorization_mismatch"},
+                            )
                 elif decision:
                     self._audit(
                         "tool.denied",
@@ -335,11 +379,14 @@ class ToolExecutor:
                     error="durable effect guard required",
                 )
             try:
-                authorized_call = replace(call, authorization=authorization)
-                reservation = self._effect_guard.reserve(
-                    spec=spec,
-                    call=authorized_call,
+                # The guard receives a separate detached copy: even an instrumented
+                # reservation cannot replace the handler's approved arguments.
+                guard_call = replace(
+                    authorized_call,
+                    arguments=_snapshot_tool_arguments(authorized_call.arguments),
                 )
+                reservation = self._effect_guard.reserve(spec=spec, call=guard_call)
+                call = authorized_call
             except (ToolEffectConflictError, ValueError) as exc:
                 self._audit("tool.denied", call, spec, {"reason": type(exc).__name__})
                 return ToolResult(
