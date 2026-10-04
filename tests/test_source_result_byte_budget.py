@@ -123,3 +123,34 @@ def test_large_valid_multibyte_result_survives_json_restart() -> None:
     output = json.loads(json.dumps(encode_source_result(assignment, candidate)))
     restored = decode_source_result(assignment, member_id=assignment.member_id, output=output)
     assert restored.items[0].snippet == snippet
+
+
+def test_encode_limits_provenance_before_visiting_invalid_tail() -> None:
+    assignment, result = _case()
+    oversized = replace(
+        result.items[0], evidence=result.items[0].evidence * 129 + (object(),)
+    )
+    with pytest.raises(SourceResultBindingError, match="evidence exceeds maximum count"):
+        encode_source_result(assignment, replace(result, items=(oversized,)))
+
+
+def test_decode_limits_provenance_before_serializing_invalid_tail() -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    items = result_data["items"]
+    assert isinstance(items, list)
+    items[0]["evidence"] = items[0]["evidence"] * 129 + [{"invalid": {1, 2}}]
+    with pytest.raises(SourceResultBindingError, match="evidence exceeds maximum count"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+def test_maximum_supported_provenance_cardinality_roundtrips() -> None:
+    assignment, result = _case()
+    item = replace(result.items[0], evidence=result.items[0].evidence * 128)
+    candidate = replace(result, items=(item,))
+    output = encode_source_result(assignment, candidate)
+    assert decode_source_result(
+        assignment, member_id=assignment.member_id, output=output
+    ) == candidate
