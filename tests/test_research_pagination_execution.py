@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 from collections.abc import Callable
 from pathlib import Path
 
@@ -603,3 +605,58 @@ def test_persisted_pagination_policy_rejects_lossy_scalar_coercion(
     payload[field] = invalid
     with pytest.raises(TypeError, match="policy scalar fields"):
         _policy_from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    ("patch", "remove", "expected"),
+    [
+        ({"max_pages": True}, None, "scalar fields"),
+        ({"max_pages": 2.5}, None, "scalar fields"),
+        ({"max_pages": "2"}, None, "scalar fields"),
+        ({"max_discovered_links_per_page": False}, None, "scalar fields"),
+        ({"max_discovered_links_per_page": "8"}, None, "scalar fields"),
+        ({"same_origin_only": []}, None, "scalar fields"),
+        ({"same_origin_only": "false"}, None, "scalar fields"),
+        ({"same_origin_only": 0}, None, "scalar fields"),
+        ({"json_next_fields": "next"}, None, "json_next_fields"),
+        ({"json_next_fields": [""]}, None, "json_next_fields"),
+        ({"json_next_fields": ["next", 3]}, None, "json_next_fields"),
+        ({}, "max_pages", "fields"),
+        ({}, "same_origin_only", "fields"),
+        ({"unexpected": True}, None, "fields"),
+        ({"max_pages": 0}, None, "max_pages"),
+    ],
+)
+def test_corrupt_persisted_policy_rejects_before_state_transition_or_http(
+    tmp_path: Path,
+    patch: dict[str, object],
+    remove: str | None,
+    expected: str,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected HTTP request")
+
+    store, _, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id=?", (task_id,)
+        ).fetchone()
+        task_payload = json.loads(row["payload_json"])
+        policy = task_payload["pagination_policy"]
+        policy.update(patch)
+        if remove is not None:
+            policy.pop(remove)
+        conn.execute(
+            "UPDATE tasks SET payload_json=? WHERE task_id=?",
+            (json.dumps(task_payload), task_id),
+        )
+
+    with pytest.raises((TypeError, ValueError), match=expected):
+        paginated.run(task_id)
+    assert TaskQueue(store).get(task_id).state.value.casefold() == "ready"
+    assert requested == []

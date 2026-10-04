@@ -45,14 +45,26 @@ def _policy_to_payload(policy: PaginationPolicy) -> dict[str, object]:
 
 
 def _policy_from_payload(payload: object) -> PaginationPolicy:
-    if not isinstance(payload, dict):
+    if type(payload) is not dict:
         raise TypeError("pagination policy payload is invalid")
-    fields = payload.get("json_next_fields")
-    if not isinstance(fields, list) or not all(isinstance(item, str) for item in fields):
+    required = {
+        "max_pages",
+        "max_discovered_links_per_page",
+        "same_origin_only",
+        "json_next_fields",
+    }
+    if set(payload) != required:
+        raise TypeError("pagination policy fields are invalid")
+    fields = payload["json_next_fields"]
+    if (
+        type(fields) is not list
+        or not fields
+        or any(type(item) is not str or not item for item in fields)
+    ):
         raise TypeError("pagination json_next_fields payload is invalid")
-    max_pages = payload.get("max_pages", 50)
-    max_links = payload.get("max_discovered_links_per_page", 8)
-    same_origin_only = payload.get("same_origin_only", True)
+    max_pages = payload["max_pages"]
+    max_links = payload["max_discovered_links_per_page"]
+    same_origin_only = payload["same_origin_only"]
     if (
         type(max_pages) is not int
         or type(max_links) is not int
