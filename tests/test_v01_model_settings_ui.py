@@ -176,7 +176,7 @@ def test_packaged_bridge_reuses_integrated_model_settings_and_freezes_task_choic
         "products = ProductProjectCommandService"
     )
     assert script.index("backend.start_startup_recovery()") < script.index(
-        "launch_windows_shell(bridge"
+        "launch_windows_shell(session.bridge"
     )
 
 

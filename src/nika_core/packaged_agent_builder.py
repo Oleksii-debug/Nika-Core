@@ -99,7 +99,7 @@ class PackagedAgentBuilderDraftHandler:
             if previous is not None and _same_draft(previous, candidate):
                 return _result(
                     previous.definition,
-                    "Чернетка Agent Builder уже збережена без змін",
+                    "Чернетка Agent Builder вже збережена без змін",
                 )
 
         compilation = self._compiler.compile(candidate)
@@ -119,7 +119,7 @@ class PackagedAgentBuilderDraftHandler:
             if latest is not None and _same_draft(latest, candidate):
                 return _result(
                     latest.definition,
-                    "Чернетка Agent Builder уже збережена без змін",
+                    "Чернетка Agent Builder вже збережена без змін",
                 )
             raise
         return _result(candidate, "Чернетку Agent Builder збережено для окремого перегляду")

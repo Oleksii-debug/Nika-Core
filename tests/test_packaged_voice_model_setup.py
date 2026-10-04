@@ -494,7 +494,7 @@ def test_packaged_bridge_exposes_voice_model_setup_state_and_action(
                 "message": "setup ready",
             }
 
-        def install(self, payload: dict[str, object]) -> UIResult:
+        def start(self, payload: dict[str, object]) -> UIResult:
             self.payloads.append(payload)
             return UIResult(
                 request_id="desktop-handler",
@@ -503,10 +503,22 @@ def test_packaged_bridge_exposes_voice_model_setup_state_and_action(
                 focus_id="voice-heading",
             )
 
+        def cancel(self, payload: dict[str, object]) -> UIResult:
+            assert payload == {}
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="no model import active",
+            )
+
+        def close(self) -> None:
+            return None
+
     fake_voice = _FakeVoice()
     setups: list[_FakeSetup] = []
 
-    def build_setup(root: Path) -> _FakeSetup:
+    def build_setup(root: Path, *, submit: object) -> _FakeSetup:
+        assert callable(submit)
         setup = _FakeSetup(root)
         setups.append(setup)
         return setup
