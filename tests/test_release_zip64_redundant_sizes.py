@@ -59,9 +59,11 @@ def test_rejects_trailing_values_in_required_local_zip64_field(
     tmp_path: Path,
 ) -> None:
     artifact = tmp_path / "trailing.zip"
-    with zipfile.ZipFile(artifact, "w") as output:
-        with output.open("NikaCore.exe", "w", force_zip64=True) as handle:
-            handle.write(b"portable fixture")
+    with (
+        zipfile.ZipFile(artifact, "w") as output,
+        output.open("NikaCore.exe", "w", force_zip64=True) as handle,
+    ):
+        handle.write(b"portable fixture")
     assert verify_release_archive(
         artifact, source_sha=SOURCE_SHA
     ) == ("archive:missing-manifest",)
