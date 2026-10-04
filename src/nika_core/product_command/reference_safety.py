@@ -36,6 +36,20 @@ _SENSITIVE_REFERENCE_MARKERS = (
     "x-api-key=",
     "proxy-authorization:",
     "authorization=",
+    # Cloud storage presigned URLs and provider API-key query material are
+    # bearer capabilities even when no field is literally named "token".
+    "sig=",
+    "signature=",
+    "sharedaccesssignature=",
+    "x-amz-signature=",
+    "x-goog-signature=",
+    "x-ms-signature=",
+    "x-amz-credential=",
+    "x-goog-credential=",
+    "awsaccesskeyid=",
+    "?key=",
+    "&key=",
+    "#key=",
 )
 
 
