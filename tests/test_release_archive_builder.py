@@ -165,3 +165,40 @@ def test_rejects_oversized_manifest_before_reading_or_publishing(
         _publish(bundle, artifact)
     assert artifact.read_bytes() == b"existing"
     assert not list(tmp_path.glob(".nika-release-*"))
+
+
+def test_directory_symlink_cannot_silently_omit_bundle_assets(tmp_path: Path) -> None:
+    bundle = _bundle(tmp_path)
+    alias = bundle / "alias"
+    try:
+        alias.symlink_to(bundle / "ресурси", target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"directory symlinks unavailable: {type(exc).__name__}")
+    artifact = tmp_path / "release.zip"
+    artifact.write_bytes(b"existing approved artifact")
+    with pytest.raises(ValueError, match="directory symlink"):
+        _publish(bundle, artifact)
+    assert artifact.read_bytes() == b"existing approved artifact"
+    assert not list(tmp_path.glob(".nika-release-*"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction requires Windows")
+def test_windows_junction_cannot_hide_release_tree(tmp_path: Path) -> None:
+    import subprocess
+
+    bundle = _bundle(tmp_path)
+    target = bundle / "ресурси"
+    junction = bundle / "junction"
+    result = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip("Windows junction creation is unavailable")
+    artifact = tmp_path / "release.zip"
+    artifact.write_bytes(b"existing approved artifact")
+    with pytest.raises(ValueError, match="junction"):
+        _publish(bundle, artifact)
+    assert artifact.read_bytes() == b"existing approved artifact"
+    assert not list(tmp_path.glob(".nika-release-*"))
