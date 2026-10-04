@@ -460,9 +460,14 @@ class ToolExecutor:
             return
         payload: dict[str, object] = {"tool_id": spec.tool_id, "risk": spec.risk.value}
         payload.update(extra)
+        try:
+            entity_id = _require_tool_identity(call.call_id, label="call_id")
+        except ValueError:
+            # Rejection itself must remain auditable even for invalid UTF-8 carriers.
+            entity_id = "invalid-tool-call-id"
         self._audit_log.append(
             event_type=event_type,
             entity_type="tool_call",
-            entity_id=call.call_id,
+            entity_id=entity_id,
             payload=payload,
         )
