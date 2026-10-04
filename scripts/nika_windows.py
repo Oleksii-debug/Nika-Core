@@ -8,6 +8,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError
+from pydantic_settings import SettingsError
+
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
@@ -452,6 +455,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         config = AppConfig.from_environment()
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
+        return 1
+    except (ValidationError, SettingsError):
+        # The validation exception can embed paths, endpoint details or env values.
+        # Do not expose it in the windowless packaged entrypoint or start the runtime.
+        show_recovery_error(
+            "Некоректні налаштування Nika (NIKA_*). Перевірте конфігурацію "
+            "та перезапустіть програму. Дані не змінено."
+        )
         return 1
     if args.pf11_proof:
         return _run_pf11_proof(
