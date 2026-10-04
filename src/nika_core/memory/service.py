@@ -131,20 +131,26 @@ class MemoryService:
     ) -> tuple[MemoryRecord, ...]:
         current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
-            # A namespace read must not delete another owner's or scope's memory.
-            # Keep expiry cleanup and the returned snapshot in one transaction.
-            conn.execute(
-                "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
-                "AND namespace = ? AND expires_at IS NOT NULL AND expires_at <= ?",
-                (scope.value, owner_id, namespace, current.isoformat()),
-            )
+            # Compare actual instants, not offset-sensitive ISO strings. Older
+            # databases may contain non-UTC timestamps even though put() writes UTC.
             rows = conn.execute(
                 "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
                 "AND namespace = ? ORDER BY memory_key",
                 (scope.value, owner_id, namespace),
             ).fetchall()
-            # Decode before commit, so corrupt rows roll back scoped expiry cleanup.
-            return tuple(_record_from_row(row) for row in rows)
+            records: list[MemoryRecord] = []
+            for row in rows:
+                expiry = _parse_optional(row["expires_at"])
+                if expiry is not None and _as_utc(expiry) <= current:
+                    conn.execute(
+                        "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                        "AND namespace = ? AND memory_key = ?",
+                        (scope.value, owner_id, namespace, row["memory_key"]),
+                    )
+                else:
+                    records.append(_record_from_row(row))
+            # Failure to parse a later row rolls back all scoped deletions.
+            return tuple(records)
 
     def delete(self, *, scope: MemoryScope, owner_id: str, namespace: str, key: str) -> bool:
         with self._store.connection() as conn:
@@ -166,11 +172,23 @@ class MemoryService:
     def purge_expired(self, *, now: datetime | None = None) -> int:
         current = _as_utc(now) if now else datetime.now(UTC)
         with self._store.connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM memory_records WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                (current.isoformat(),),
-            )
-        return int(cursor.rowcount)
+            # An explicit global purge must obey the same offset-aware expiry
+            # semantics as get() and scoped reads; invalid dates roll back.
+            rows = conn.execute(
+                "SELECT scope, owner_id, namespace, memory_key, expires_at "
+                "FROM memory_records WHERE expires_at IS NOT NULL"
+            ).fetchall()
+            deleted = 0
+            for row in rows:
+                expiry = _parse_optional(row["expires_at"])
+                if expiry is not None and _as_utc(expiry) <= current:
+                    cursor = conn.execute(
+                        "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                        "AND namespace = ? AND memory_key = ?",
+                        (row["scope"], row["owner_id"], row["namespace"], row["memory_key"]),
+                    )
+                    deleted += cursor.rowcount
+        return deleted
 
 
 def _required(name: str, value: str) -> str:

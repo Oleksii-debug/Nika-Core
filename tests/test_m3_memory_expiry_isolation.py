@@ -184,3 +184,106 @@ def test_invalid_json_numbers_cannot_overwrite_memory(tmp_path: Path, invalid: o
         memory.put(**params, value=invalid)
     record = memory.get(**params)
     assert record is not None and record.value == {"safe": True}
+
+
+def test_offset_expiry_in_namespace_preserves_live_and_removes_expired(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    memory = MemoryService(store)
+    current = datetime(2038, 1, 1, tzinfo=UTC)
+    for key in ("expired", "live"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key=key,
+            value=key,
+            expires_at=current + timedelta(days=1),
+        )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ? WHERE memory_key = 'expired'",
+            ("2038-01-01T01:30:00+02:00",),
+        )
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ? WHERE memory_key = 'live'",
+            ("2037-12-31T23:30:00-01:00",),
+        )
+    records = memory.list_namespace(
+        scope=MemoryScope.TASK, owner_id="owner", namespace="scratch", now=current
+    )
+    assert [record.key for record in records] == ["live"]
+    with store.connection() as conn:
+        keys = [row[0] for row in conn.execute(
+            "SELECT memory_key FROM memory_records ORDER BY memory_key"
+        )]
+    assert keys == ["live"]
+
+
+def test_global_purge_respects_non_utc_expiry_offsets(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    memory = MemoryService(store)
+    current = datetime(2038, 1, 1, tzinfo=UTC)
+    for key in ("expired", "live"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key=key,
+            value=key,
+            expires_at=current + timedelta(days=1),
+        )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ? WHERE memory_key = 'expired'",
+            ("2038-01-01T01:30:00+02:00",),
+        )
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ? WHERE memory_key = 'live'",
+            ("2037-12-31T23:30:00-01:00",),
+        )
+    assert memory.purge_expired(now=current) == 1
+    with store.connection() as conn:
+        keys = [row[0] for row in conn.execute(
+            "SELECT memory_key FROM memory_records ORDER BY memory_key"
+        )]
+    assert keys == ["live"]
+
+
+@pytest.mark.parametrize("operation", ["list", "purge"])
+def test_invalid_expiry_rolls_back_cleanup(tmp_path: Path, operation: str) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    memory = MemoryService(store)
+    current = datetime(2038, 1, 1, tzinfo=UTC)
+    for key in ("a_expired", "z_invalid"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key=key,
+            value=key,
+            expires_at=current + timedelta(days=1),
+        )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ? WHERE memory_key = 'a_expired'",
+            ("2038-01-01T01:30:00+02:00",),
+        )
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ? WHERE memory_key = 'z_invalid'",
+            ("not-a-datetime",),
+        )
+    with pytest.raises(ValueError):
+        if operation == "list":
+            memory.list_namespace(
+                scope=MemoryScope.TASK, owner_id="owner", namespace="scratch", now=current
+            )
+        else:
+            memory.purge_expired(now=current)
+    with store.connection() as conn:
+        keys = [row[0] for row in conn.execute(
+            "SELECT memory_key FROM memory_records ORDER BY memory_key"
+        )]
+    assert keys == ["a_expired", "z_invalid"]
