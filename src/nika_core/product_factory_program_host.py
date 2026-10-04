@@ -21,6 +21,7 @@ from nika_core.product_factory_coordinator import (
     WorkState,
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
+from nika_core.product_factory_review_authority import ProductFactoryReviewAuthorityPort
 from nika_core.runtime.idempotency import (
     IdempotencyLedger,
     IdempotencyRecord,
@@ -85,6 +86,10 @@ class ProductFactoryProgramHost:
     store: SQLiteStore
     worker: ProductFactoryProgramWorkerPort
     idempotency: IdempotencyLedger | None = field(default=None, repr=False)
+    review_evidence_authority: ProductFactoryReviewAuthorityPort | None = field(
+        default=None,
+        repr=False,
+    )
     _checkpoints: ProductFactoryCheckpointHost = field(init=False, repr=False)
     _ledger: IdempotencyLedger = field(init=False, repr=False)
 
@@ -98,6 +103,7 @@ class ProductFactoryProgramHost:
         host_task_id: str,
         binding: ProductProjectCoordinatorBinding,
     ) -> ProductFactoryCoordinator:
+        self._require_host_owned_review_authority(binding)
         candidate = self._checkpoints.inspect_latest(
             host_task_id=host_task_id,
             binding=binding,
@@ -127,6 +133,7 @@ class ProductFactoryProgramHost:
     ) -> tuple[ProgramWorkOutcome, ...]:
         if max_parallel <= 0 or max_count <= 0:
             raise ValueError("max_parallel and max_count must be positive")
+        self._require_host_owned_review_authority(binding)
 
         ready = coordinator.ready_requests()[:max_count]
         if not ready:
@@ -165,6 +172,7 @@ class ProductFactoryProgramHost:
     ) -> tuple[ProgramWorkOutcome, ...]:
         if max_parallel <= 0:
             raise ValueError("max_parallel must be positive")
+        self._require_host_owned_review_authority(binding)
 
         self.reconcile_durable_results(host_task_id=host_task_id, coordinator=coordinator)
         running = tuple(
@@ -230,6 +238,7 @@ class ProductFactoryProgramHost:
         component_id: str,
         decision: ReviewDecision,
     ) -> WorkRecord:
+        self._require_host_owned_review_authority(binding)
         before = coordinator.snapshot()
         updated = coordinator.review(component_id, decision)
         try:
@@ -249,6 +258,7 @@ class ProductFactoryProgramHost:
         base_sha: str,
         reason: str,
     ) -> ComponentWorkRequest:
+        self._require_host_owned_review_authority(binding)
         before = coordinator.snapshot()
         request = coordinator.prepare_repair(component_id, base_sha=base_sha, reason=reason)
         try:
@@ -267,6 +277,7 @@ class ProductFactoryProgramHost:
         component_id: str,
         reason: str,
     ) -> WorkRecord:
+        self._require_host_owned_review_authority(binding)
         before = coordinator.snapshot()
         updated = coordinator.block(component_id, reason)
         try:
@@ -384,23 +395,16 @@ class ProductFactoryProgramHost:
                 )
             if state is None:
                 self._mark_uncertain(operation_key)
-                before = coordinator.snapshot()
-                blocked = coordinator.block(
-                    request.component_id,
-                    "worker recovery state is unavailable; explicit reconciliation required",
-                )
-                try:
-                    self._save(host_task_id, binding, coordinator)
-                except Exception:
-                    coordinator.restore(before)
-                    raise
                 return ProgramWorkOutcome(
                     component_id=request.component_id,
                     work_id=request.work_id,
                     disposition=ProgramWorkDisposition.BLOCKED_MISSING_WORKER_STATE,
-                    state=blocked.state,
+                    state=record.state,
                     operation_status=IdempotencyStatus.UNCERTAIN,
-                    detail="worker state is missing; duplicate execution is forbidden",
+                    detail=(
+                        "worker state is missing; RUNNING authority is retained "
+                        "and duplicate execution is forbidden"
+                    ),
                 )
             try:
                 envelope = await self.worker.recover(request, state)
@@ -492,10 +496,30 @@ class ProductFactoryProgramHost:
         binding: ProductProjectCoordinatorBinding,
         coordinator: ProductFactoryCoordinator,
     ) -> None:
+        self._require_host_owned_review_authority(binding)
         self._checkpoints.save(
             host_task_id=host_task_id,
             checkpoint=binding.checkpoint(coordinator),
         )
+
+    def _require_host_owned_review_authority(
+        self,
+        binding: ProductProjectCoordinatorBinding,
+    ) -> None:
+        if binding.team_plan is None:
+            if binding.review_evidence_authority is not None:
+                raise ProductFactoryProgramError(
+                    "review evidence authority requires persisted TeamPlan composition"
+                )
+            return
+        if self.review_evidence_authority is None:
+            raise ProductFactoryProgramError(
+                "trusted TeamPlan requires ProgramHost-owned review evidence authority"
+            )
+        if binding.review_evidence_authority is not self.review_evidence_authority:
+            raise ProductFactoryProgramError(
+                "binding review evidence authority is not the ProgramHost-owned authority"
+            )
 
     def _mark_uncertain(self, operation_key: str) -> None:
         operation = self._ledger.require(operation_key)

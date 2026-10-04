@@ -62,14 +62,12 @@ class ProductFactoryWorkerRecovery:
 
         state = await self.worker.inspect(record.request.work_id)
         if state is None:
-            blocked = coordinator.block(
-                component_id,
-                "worker recovery state is unavailable after restart; host reconciliation required",
-            )
+            # Missing recovery evidence cannot prove the external work stopped.
+            # Preserve RUNNING authority so callers cannot redispatch it implicitly.
             return WorkerRecoveryOutcome(
                 component_id=component_id,
                 disposition=WorkerRecoveryDisposition.BLOCKED_MISSING_STATE,
-                record=blocked,
+                record=record,
                 recovery_state=None,
             )
 
