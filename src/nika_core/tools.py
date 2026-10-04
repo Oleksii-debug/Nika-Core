@@ -35,8 +35,12 @@ class ToolSpec:
     def __post_init__(self) -> None:
         if not self.tool_id.strip():
             raise ValueError("tool_id must not be empty")
-        if self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
+        # Tool calls must have a real deadline; NaN, infinity and bool bypass <= 0.
+        if (
+            type(self.timeout_seconds) not in (int, float)
+            or not 0 < self.timeout_seconds <= 86_400
+        ):
+            raise ValueError("timeout_seconds must be finite and between 0 and 86400")
 
 
 @dataclass(frozen=True, slots=True)
