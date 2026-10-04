@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.ui.autostart_settings import AutostartSettings
 from nika_core.windows_autostart import WindowsAutostartService, WindowsRunKeyBackend
+from scripts import nika_windows
 
 
 class _Key:
@@ -193,3 +196,46 @@ def test_expandable_registration_remains_explicitly_removable(tmp_path: Path) ->
         "settings.autostart.requested",
         "settings.autostart.confirmed",
     ]
+
+
+def test_packaged_bridge_rejects_forged_disable_on_unreadable_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    registry = _Registry("PRIVATE_REGISTRY_CANARY", 255)
+    executable = r"C:\Users\Олексій\Nika Core\Nika.exe"
+    monkeypatch.setattr(
+        nika_windows,
+        "sys",
+        SimpleNamespace(platform="win32", frozen=True, executable=executable),
+    )
+
+    def registered_service(path: Path) -> WindowsAutostartService:
+        assert str(path) == executable
+        return WindowsAutostartService(path, _Backend(registry))
+
+    monkeypatch.setattr(nika_windows, "WindowsAutostartService", registered_service)
+    config = AppConfig(database_path=tmp_path / "bridge.db")
+    bridge, _ = nika_windows.build_windows_bridge(config)
+
+    snapshot = bridge.get_state()["state"]["autostart"]
+    assert snapshot["state"] == "error"
+    assert snapshot["can_change"] is False
+
+    for enabled in (False, True):
+        result = bridge.dispatch(
+            {
+                "request_id": "forged-autostart",
+                "action_id": "settings.autostart.configure",
+                "payload": {"enabled": enabled},
+            }
+        )
+        assert result["status"] == "failed"
+        assert result["request_id"] == "forged-autostart"
+        assert "PRIVATE_REGISTRY_CANARY" not in json.dumps(result)
+
+    assert registry.value == "PRIVATE_REGISTRY_CANARY"
+    assert registry.value_type == 255
+    assert registry.deletes == 0 and registry.writes == 0
+    assert AuditLog(SQLiteStore(config.database_path)).list_for(
+        entity_type="application_setting", entity_id="windows.autostart"
+    ) == ()
