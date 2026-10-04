@@ -1470,3 +1470,17 @@ def test_direct_probe_and_cancel_reject_nontext_runtime_ids(
     assert probe.status is RuntimeResumeProbeStatus.INVALID
     assert asyncio.run(runtime.cancel(task_id=task_id, thread_id=thread_id)) is False
     assert _result_count(store) == 0
+
+
+def test_member_identity_parser_bounds_untrusted_separator_count() -> None:
+    class MonitoredThread(str):
+        def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+            assert sep == ":" and maxsplit == 3
+            return super().split(sep, maxsplit)
+
+    assert V01PackagedThreeAgentRuntime._member_identity(
+        MonitoredThread("v01:" + "unexpected:" * 4000 + "worker-a")
+    ) is None
+    assert V01PackagedThreeAgentRuntime._member_identity(
+        "v01:valid-team:worker-a"
+    ) == ("valid-team", "worker-a")
