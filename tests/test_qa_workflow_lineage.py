@@ -110,3 +110,16 @@ def test_m12_runs_when_upstream_release_workflows_change() -> None:
 
     for workflow_path in M12_UPSTREAM_WORKFLOW_PATHS:
         assert m12.count(workflow_path) == 2, workflow_path
+
+
+def test_m11_runs_for_packaged_team_projection_source_and_regressions() -> None:
+    m11 = (ROOT / ".github" / "workflows" / "m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    event_configuration, separator, _ = m11.partition("\njobs:\n")
+    assert separator, "M11 jobs configuration is missing"
+    for path in (
+        '      - "src/nika_core/v01_packaged_team_state.py"',
+        '      - "tests/test_v01_packaged_team_state.py"',
+    ):
+        assert event_configuration.count(path) == 2, path
