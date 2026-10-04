@@ -304,7 +304,10 @@ class ModelGateway:
             try:
                 result = authorizer.authorize_cloud_effect(
                     request=request,
-                    provider=capabilities,
+                    # Authorizers are host code, but accidental in-place
+                    # mutation must not rewrite the registered provider's
+                    # privacy, host or audit authority for later attempts.
+                    provider=replace(capabilities),
                 )
                 # This is a synchronous, exception-based authority contract.
                 # False, True or an unawaited async result cannot grant access.
