@@ -359,6 +359,20 @@ def test_packaged_cached_legacy_goal_survives_missing_task_row(tmp_path: Path) -
         "user_goal"
     ] == command
     assert runtime._stored_outer_command(task_id) == command
+    # A real pre-queue legacy team may resume, but a new run must not borrow
+    # its checker goal when the durable TaskQueue record has been removed.
+    previous_results = _result_count(store)
+    rejected = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                payload={"command": command},
+            )
+        )
+    )
+    assert rejected.outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == previous_results
     outer_token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
     assert asyncio.run(
         runtime.probe_resume(
