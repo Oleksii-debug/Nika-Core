@@ -170,6 +170,26 @@ class ExecutionNodeRegistry:
         if self._leases.pop(lease_id, None) is None:
             raise DeploymentFabricError("unknown work lease")
 
+    def is_active_for(
+        self,
+        lease: WorkLease,
+        request: ExecutionRequest,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Check the actual lease owner and live node before an external effect."""
+
+        instant = _aware(now or datetime.now(UTC))
+        node = self._nodes.get(lease.node_id)
+        return (
+            self._leases.get(lease.lease_id) == lease
+            and lease.issued_at <= instant < lease.expires_at
+            and lease.project_id == request.project_id
+            and lease.work_id == request.work_id
+            and node is not None
+            and self._matches(node, request)
+        )
+
     def snapshot(self) -> ExecutionRegistrySnapshot:
         return ExecutionRegistrySnapshot(
             tuple(self._nodes[key] for key in sorted(self._nodes)),
