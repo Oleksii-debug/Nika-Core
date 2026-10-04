@@ -139,3 +139,37 @@ def test_preserves_safe_extra_and_ukrainian_asset_path(tmp_path: Path) -> None:
         entry.extra = struct.pack("<HHB", 0x5455, 1, 0)
         archive.writestr(entry, PAYLOAD)
     assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == ()
+
+
+def test_rejects_mismatched_local_directory_name(tmp_path: Path) -> None:
+    artifact = tmp_path / "directory-name-confusion.zip"
+    _zip_with_extra(artifact, member="assets/", extra=b"", extra_directory=True)
+    with zipfile.ZipFile(artifact) as archive:
+        offset = archive.getinfo("assets/").header_offset
+    raw = bytearray(artifact.read_bytes())
+    filename_start = offset + 30
+    assert raw[filename_start : filename_start + 7] == b"assets/"
+    raw[filename_start : filename_start + 7] = b"../out/"
+    artifact.write_bytes(raw)
+
+    # Directory members are not read when matching manifest file hashes.
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == (
+        "archive:member-local-path:1",
+    )
+
+
+@pytest.mark.parametrize("field_offset", (6, 8))
+def test_rejects_mismatched_local_header_flags_or_compression(
+    tmp_path: Path, field_offset: int
+) -> None:
+    artifact = tmp_path / "header-confusion.zip"
+    _zip_with_extra(artifact, member="NikaCore.exe", extra=b"")
+    with zipfile.ZipFile(artifact) as archive:
+        offset = archive.getinfo("NikaCore.exe").header_offset
+    raw = bytearray(artifact.read_bytes())
+    value = struct.unpack_from("<H", raw, offset + field_offset)[0]
+    struct.pack_into("<H", raw, offset + field_offset, value ^ 8)
+    artifact.write_bytes(raw)
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == (
+        "archive:member-header-mismatch:1",
+    )
