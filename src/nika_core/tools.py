@@ -5,7 +5,6 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Awaitable, Callable, Mapping
-from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from typing import Protocol
@@ -298,7 +297,9 @@ class ToolEffectGuard:
 
 def _snapshot_tool_spec(spec: ToolSpec) -> ToolSpec:
     """Detach authority metadata and schema from a boundary's caller."""
-    return replace(spec, input_schema=deepcopy(spec.input_schema))
+    # Reuse the bounded, UTF-8-safe JSON authority already applied to tool effects.
+    # deepcopy alone accepts cycles, hostile objects and unbounded schemas.
+    return replace(spec, input_schema=_snapshot_tool_arguments(spec.input_schema))
 
 
 class ToolExecutor:

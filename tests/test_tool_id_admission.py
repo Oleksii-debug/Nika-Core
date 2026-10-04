@@ -307,3 +307,73 @@ def test_effect_guard_cannot_downgrade_registered_risk_for_next_call() -> None:
     assert retained.input_schema["properties"]["body"]["type"] == "string"
     assert policy_calls == 2
     assert executed == []
+
+@pytest.mark.parametrize(
+    ("schema", "error"),
+    [
+        ({"properties": {"name": {"default": object()}}}, (TypeError, ValueError)),
+        ({"title": "\ud800"}, (TypeError, ValueError)),
+        ({"limit": float("nan")}, (TypeError, ValueError)),
+        (["non-object", "schema"], (TypeError, ValueError)),
+    ],
+    ids=["non-json-object", "invalid-utf8", "nonfinite", "non-object-root"],
+)
+def test_registration_rejects_invalid_schema_before_catalog(
+    schema: object, error: tuple[type[Exception], ...]
+) -> None:
+    executor = ToolExecutor()
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        pytest.fail("invalid schema must never execute")
+
+    spec = ToolSpec(
+        tool_id="schema.test",
+        description="schema admission boundary",
+        input_schema=schema,  # type: ignore[arg-type] - hostile discovery carrier
+    )
+    with pytest.raises(error):
+        executor.register(spec, handler)
+    assert executor.specs() == ()
+
+
+@pytest.mark.parametrize("failure", ["cyclic", "too_deep", "too_large"])
+def test_registration_bounds_recursive_and_oversized_schemas(failure: str) -> None:
+    schema: dict[str, object] = {}
+    if failure == "cyclic":
+        schema["nested"] = schema
+    elif failure == "too_deep":
+        for _ in range(70):
+            schema = {"nested": schema}
+    else:
+        schema = {"description": "x" * (8 * 1024 * 1024 + 1)}
+    executor = ToolExecutor()
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        pytest.fail("unbounded schema must never execute")
+
+    with pytest.raises(ValueError, match="maximum argument"):
+        executor.register(
+            ToolSpec(tool_id="schema.test", description="bounded schema", input_schema=schema),
+            handler,
+        )
+    assert executor.specs() == ()
+
+
+def test_registered_schema_has_detached_canonical_unicode_identity() -> None:
+    schema = {"properties": {"cafe\u0301": {"title": "cafe\u0301"}}}
+    executor = ToolExecutor()
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        return {"ok": True}
+
+    executor.register(
+        ToolSpec(tool_id="schema.test", description="canonical schema", input_schema=schema),
+        handler,
+    )
+    schema["properties"]["cafe\u0301"]["title"] = "changed"
+    registered = executor.specs()[0]
+    assert registered.input_schema == {"properties": {"café": {"title": "café"}}}
+    registered.input_schema["properties"]["café"]["title"] = "catalog mutation"
+    assert executor.specs()[0].input_schema == {
+        "properties": {"café": {"title": "café"}}
+    }
