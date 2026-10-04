@@ -634,3 +634,52 @@ def test_surplus_task_history_rejects_before_decoding_and_after_restart(
         base_state=lambda: _base_state("task-v01-71"),
         store=SQLiteStore(store.path),
     )()["v01_team_task"] == expected
+
+
+def test_generic_task_history_does_not_hide_earlier_v01_team(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "звичайна команда.db")
+    store.initialize()
+    _create_team(store)
+    teams = MultiAgentStore(store)
+    teams.create_team(
+        team_id="generic-team",
+        root_member_id="generic-root",
+        root_agent_id="generic-agent",
+        root_agent_version=1,
+        root_thread_id="generic-root-thread",
+        root_grants=(),
+        quota=TeamQuota(
+            max_depth=1,
+            max_children_per_parent=4,
+            max_total_agents=5,
+            max_parallel=4,
+        ),
+    )
+    for index in range(4):
+        child_id = f"generic-worker-{index}"
+        teams.spawn_child(
+            team_id="generic-team",
+            parent_id="generic-root",
+            child_id=child_id,
+            agent_id="generic-agent",
+            agent_version=1,
+            thread_id=f"generic-thread-{index}",
+            requested_grants=(),
+            task_handoff=AgentHandoff(
+                team_id="generic-team",
+                sender_id="generic-root",
+                recipient_id=child_id,
+                kind=HandoffKind.TASK,
+                payload={"note": "unrelated generic work"},
+            ),
+        )
+    provider = V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"), store=store
+    )
+    projected = provider()["v01_team_task"]
+    assert projected["available"] is True
+    assert projected["team"]["team_id"] == "team-v01-71"
+    assert V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"),
+        store=SQLiteStore(store.path),
+    )()["v01_team_task"] == projected
