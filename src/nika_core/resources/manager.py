@@ -26,6 +26,10 @@ class ResourceDecision:
     queue_position: int | None = None
 
 
+class ResourceTelemetryError(RuntimeError):
+    """The host observer cannot supply trustworthy capacity telemetry."""
+
+
 class ResourceManager:
     def __init__(
         self,
@@ -91,21 +95,17 @@ class ResourceManager:
             ).fetchone()
         if row is None:
             return ResourceBudget(scope=scope, owner_id=owner_id)
-        return ResourceBudget(
-            scope=row["scope"],
-            owner_id=row["owner_id"],
-            max_concurrent=int(row["max_concurrent"]),
-            max_cpu_percent=row["max_cpu_percent"],
-            max_memory_percent=row["max_memory_percent"],
-            max_disk_percent=row["max_disk_percent"],
-            max_gpu_percent=row["max_gpu_percent"],
-            max_process_memory_bytes=row["max_process_memory_bytes"],
-        )
+        return _validated_persisted_budget(row)
 
     def status(self, *, scope: str, owner_id: str) -> ResourceCapacityStatus:
         """Return deterministic read-only capacity telemetry without changing admission state."""
         budget = self.get_budget(scope=scope, owner_id=owner_id)
-        snapshot = self._observer.snapshot()
+        try:
+            snapshot = self._observer.snapshot()
+        except Exception:
+            raise ResourceTelemetryError("resource telemetry unavailable") from None
+        if not _valid_snapshot(snapshot):
+            raise ResourceTelemetryError("resource telemetry invalid")
         active_count = self.active_count(scope=scope, owner_id=owner_id)
         queued_count = len(self.queued(scope=scope, owner_id=owner_id))
         pressure_reasons: list[str] = []
@@ -234,7 +234,10 @@ class ResourceManager:
             if int(active["count"]) >= budget.max_concurrent:
                 return ResourceDecision(False, "concurrency_limit", position)
 
-            snapshot = self._observer.snapshot()
+            try:
+                snapshot = self._observer.snapshot()
+            except Exception:
+                return ResourceDecision(False, "invalid_observation", position)
             reason = _resource_pressure_reason(budget, snapshot)
             if reason is not None:
                 return ResourceDecision(False, reason, position)
@@ -437,16 +440,24 @@ def _get_budget_with_connection(conn: Any, scope: str, owner_id: str) -> Resourc
     ).fetchone()
     if row is None:
         return ResourceBudget(scope=scope, owner_id=owner_id)
-    return ResourceBudget(
+    return _validated_persisted_budget(row)
+
+
+def _validated_persisted_budget(row: Any) -> ResourceBudget:
+    if type(row["max_concurrent"]) is not int:
+        raise ValueError("invalid persisted resource budget")
+    budget = ResourceBudget(
         scope=row["scope"],
         owner_id=row["owner_id"],
-        max_concurrent=int(row["max_concurrent"]),
+        max_concurrent=row["max_concurrent"],
         max_cpu_percent=row["max_cpu_percent"],
         max_memory_percent=row["max_memory_percent"],
         max_disk_percent=row["max_disk_percent"],
         max_gpu_percent=row["max_gpu_percent"],
         max_process_memory_bytes=row["max_process_memory_bytes"],
     )
+    _validate_budget(budget)
+    return budget
 
 
 def _validate_persisted_identity(row: Any, identity: ResourceRequestIdentity) -> None:
@@ -486,25 +497,36 @@ def _resource_pressure_reason(
 
 
 def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
+    if type(snapshot) is not ResourceSnapshot:
+        return False
     percent_values = (
         snapshot.cpu_percent,
         snapshot.memory_percent,
         snapshot.disk_percent,
         snapshot.gpu_percent,
+        snapshot.battery_percent,
     )
+    if snapshot.cpu_percent is None or snapshot.memory_percent is None:
+        return False
     for value in percent_values:
-        if value is not None and (not math.isfinite(value) or not 0 <= value <= 100):
+        if value is not None and (
+            type(value) not in (int, float) or not 0 <= value <= 100 or not math.isfinite(value)
+        ):
             return False
+    if type(snapshot.available_memory_bytes) is not int or snapshot.available_memory_bytes < 0:
+        return False
     byte_values = (
-        snapshot.available_memory_bytes,
         snapshot.available_disk_bytes,
         snapshot.process_rss_bytes,
+        snapshot.total_memory_bytes,
     )
-    return all(
-        value is None
-        or (isinstance(value, int) and not isinstance(value, bool) and value >= 0)
-        for value in byte_values
-    )
+    if any(value is not None and (type(value) is not int or value < 0) for value in byte_values):
+        return False
+    if snapshot.logical_cpu_count is not None and (
+        type(snapshot.logical_cpu_count) is not int or snapshot.logical_cpu_count <= 0
+    ):
+        return False
+    return snapshot.power_plugged is None or type(snapshot.power_plugged) is bool
 
 
 def _validate_budget(budget: ResourceBudget) -> None:
@@ -523,10 +545,9 @@ def _validate_budget(budget: ResourceBudget) -> None:
         ("max_gpu_percent", budget.max_gpu_percent),
     ):
         if value is not None and (
-            isinstance(value, bool)
-            or not isinstance(value, (int, float))
-            or not math.isfinite(float(value))
-            or not 0 < float(value) <= 100
+            type(value) not in (int, float)
+            or not 0 < value <= 100
+            or not math.isfinite(value)
         ):
             raise ValueError(f"{name} must be a finite number in the range (0, 100]")
     memory_bytes = budget.max_process_memory_bytes
