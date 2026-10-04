@@ -22,6 +22,7 @@ from nika_core.model_gateway.providers import (
     OpenAICompatibleProvider,
     _direct_httpx_client,
     _pretransport_timeout,
+    _raise_if_model_task_cancelled,
 )
 
 
@@ -218,10 +219,12 @@ class CredentialRefOpenAICompatibleProvider:
         return self._credential_ref
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        _raise_if_model_task_cancelled()
         started = time.perf_counter()
         material = self._resolve_material()
         provider: OpenAICompatibleProvider | None = None
         try:
+            _raise_if_model_task_cancelled()
             remaining = request.timeout_seconds - (time.perf_counter() - started)
             if remaining <= 0:
                 raise _pretransport_timeout(self._provider_id)
@@ -235,6 +238,7 @@ class CredentialRefOpenAICompatibleProvider:
                 supports_hard_cancellation=self._supports_hard_cancellation,
                 client_factory=self._client_factory,
             )
+            _raise_if_model_task_cancelled()
             try:
                 # Never reset the end-to-end budget after credential lookup or
                 # synchronous construction of the authorized provider.

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from collections.abc import Callable
 from typing import Any
@@ -89,7 +90,9 @@ class OpenAICompatibleProvider:
         return self._capabilities
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        # Include synchronous payload/client construction in the provider budget.
+        # Cancellation requested during synchronous setup cannot be delivered
+        # by asyncio until the task suspends; fence network effects explicitly.
+        _raise_if_model_task_cancelled()
         started = time.perf_counter()
         deadline = started + request.timeout_seconds
         headers = {"Content-Type": "application/json"}
@@ -110,8 +113,9 @@ class OpenAICompatibleProvider:
             if remaining <= 0:
                 raise _pretransport_timeout(self.capabilities.provider_id)
             async with self._client_factory(timeout=remaining) as client:
-                # A synchronous factory or slow __aenter__ cannot start a late
-                # credential-bearing network effect after the caller's deadline.
+                # Client setup may synchronously request cancellation without
+                # suspending the task. Never start a network effect afterward.
+                _raise_if_model_task_cancelled()
                 if time.perf_counter() >= deadline:
                     raise _pretransport_timeout(self.capabilities.provider_id)
                 response = await client.post(
@@ -119,6 +123,7 @@ class OpenAICompatibleProvider:
                 )
                 response.raise_for_status()
                 body = response.json()
+                _raise_if_model_task_cancelled()
         except httpx.TimeoutException as exc:
             raise ModelGatewayError(
                 ModelErrorCode.TIMEOUT,
@@ -183,6 +188,7 @@ class OpenAICompatibleProvider:
                 provider_id=self.capabilities.provider_id,
             ) from exc
 
+        _raise_if_model_task_cancelled()
         return ModelResponse(
             request_id=request.request_id,
             text=raw_text,
@@ -337,6 +343,13 @@ class OllamaProvider:
             usage=usage,
             latency_ms=(time.perf_counter() - started) * 1000,
         )
+
+
+def _raise_if_model_task_cancelled() -> None:
+    """Fence provider effects after cancellation during synchronous host setup."""
+    task = asyncio.current_task()
+    if task is not None and task.cancelling():
+        raise asyncio.CancelledError()
 
 
 def _pretransport_timeout(provider_id: str) -> ModelGatewayError:
