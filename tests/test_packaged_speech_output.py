@@ -5,7 +5,6 @@ from threading import Event
 
 import pytest
 
-from nika_core.ui import packaged_speech
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.speech import (
     SpeechError,
@@ -13,6 +12,7 @@ from nika_core.speech import (
     SpeechReceipt,
     SpeechRequest,
 )
+from nika_core.ui import packaged_speech
 from nika_core.ui.packaged_speech import PackagedSpeechFeature
 
 
