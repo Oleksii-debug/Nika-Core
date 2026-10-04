@@ -208,6 +208,10 @@ class OllamaModelHealthProbe:
             or self._model_id != self._model_id.strip()
             or type(self._base_url) is not str
             or not self._base_url.strip()
+            or self._base_url != self._base_url.strip()
+            or "?" in self._base_url
+            or "#" in self._base_url
+            or any(ord(char) < 32 or ord(char) == 127 for char in self._base_url)
             or type(self._provider_id) is not str
             or self._provider_id != "ollama"
             or not self._valid_timeout(self._timeout_seconds)
@@ -227,6 +231,7 @@ class OllamaModelHealthProbe:
             or parsed.fragment
             or parsed.path not in {"", "/"}
             or port is None
+            or port == 0
         ):
             return ModelHealthFact.NO
         return ModelHealthFact.YES
