@@ -5,6 +5,7 @@ import json
 import re
 import stat
 import tempfile
+import unicodedata
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -158,7 +159,11 @@ def _canonical_relative_path(value: object) -> bool:
     for part in path.parts:
         if part in {".", ".."} or part.endswith((" ", ".")):
             return False
-        if any(ord(character) < 32 or character in _WINDOWS_FORBIDDEN_CHARS for character in part):
+        if any(
+            character in _WINDOWS_FORBIDDEN_CHARS
+            or unicodedata.category(character) in {"Cc", "Cf", "Cs", "Zl", "Zp"}
+            for character in part
+        ):
             return False
         if PureWindowsPath(part).is_reserved():
             return False
