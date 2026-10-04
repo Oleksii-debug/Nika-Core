@@ -14,8 +14,11 @@ from nika_core.interaction import (
     InteractionTarget,
     PermissionBlockedError,
     SemanticSnapshot,
+    TargetNotFoundError,
+    AmbiguousTargetError,
     StaleSnapshotError,
 )
+from nika_core.interaction.resolver import resolve_strict
 from nika_core.interaction.orchestration import (
     InteractionReplayBlockedError,
     InteractionRequest,
@@ -247,3 +250,70 @@ def test_fingerprint_changes_with_semantic_target() -> None:
         risk=first.risk,
     )
     assert first.fingerprint != second.fingerprint
+
+
+@pytest.mark.parametrize("enabled,visible", [(False, True), (True, False), (False, False)])
+@pytest.mark.parametrize("changed_at_second_observation", [False, True])
+def test_non_actionable_control_never_reaches_authorization_or_adapter(
+    tmp_path: Path, enabled: bool, visible: bool, changed_at_second_observation: bool
+) -> None:
+    actionable = ControlNode("save", "button", "Save")
+    blocked = ControlNode("save", "button", "Save", enabled=enabled, visible=visible)
+    snapshots = (
+        [_snapshot(actionable), _snapshot(blocked)]
+        if changed_at_second_observation
+        else [_snapshot(blocked), _snapshot(blocked)]
+    )
+    adapter = FakeAdapter(snapshots)
+    ledger = FakeLedger()
+    with pytest.raises(StaleSnapshotError, match="disabled or hidden"):
+        _coordinator(tmp_path, adapter, ledger).execute(
+            _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+        )
+    assert adapter.act_calls == 0
+    assert ledger.reserved is False
+
+
+@pytest.mark.parametrize(
+    "original,changed",
+    [
+        (ControlNode("save", "button", "Save"), ControlNode("replacement", "button", "Save")),
+        (ControlNode("save", "button", "Save", value="old"),
+         ControlNode("save", "button", "Save", value="new")),
+        (ControlNode("save", "button", "Save", attributes=(("label", "Save"),)),
+         ControlNode("save", "button", "Save", attributes=(("label", "Publish"),))),
+    ],
+)
+def test_semantic_drift_at_unchanged_revision_blocks_before_effect(
+    tmp_path: Path, original: ControlNode, changed: ControlNode
+) -> None:
+    adapter = FakeAdapter([_snapshot(original), _snapshot(changed)])
+    ledger = FakeLedger()
+    with pytest.raises(StaleSnapshotError, match="target changed"):
+        _coordinator(tmp_path, adapter, ledger).execute(
+            _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+        )
+    assert adapter.act_calls == 0
+    assert ledger.reserved is False
+
+
+def test_focus_and_geometry_changes_do_not_replace_semantic_target(tmp_path: Path) -> None:
+    original = ControlNode("save", "button", "Save", bounds=(0, 0, 10, 10))
+    focused = ControlNode(
+        "save", "button", "Save", focused=True, bounds=(10, 10, 20, 20)
+    )
+    adapter = FakeAdapter([_snapshot(original), _snapshot(focused), _snapshot(focused)])
+    assert _coordinator(tmp_path, adapter, FakeLedger()).execute(_request()).succeeded
+    assert adapter.act_calls == 1
+
+
+def test_resolution_errors_never_echo_sensitive_locator_contents() -> None:
+    sensitive = "NIKA_PRIVATE_LOCATOR_CANARY"
+    with pytest.raises(TargetNotFoundError) as missing:
+        resolve_strict(_snapshot(), ControlLocator(name=sensitive))
+    assert sensitive not in str(missing.value)
+
+    duplicate = ControlNode("save", "button", sensitive)
+    with pytest.raises(AmbiguousTargetError) as ambiguous:
+        resolve_strict(_snapshot(duplicate, duplicate), ControlLocator(name=sensitive))
+    assert sensitive not in str(ambiguous.value)
