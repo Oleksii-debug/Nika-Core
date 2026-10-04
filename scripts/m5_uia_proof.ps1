@@ -167,13 +167,21 @@ try {
     $autostartCommand = if ($ExePath -match '[ \t]') { '"' + $ExePath + '"' } else { $ExePath }
     if ($AutostartPhase -ne 'None') {
         $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
-        try { $existingAutostart = if ($null -eq $runKey) { $null } else { $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } }
-        finally { if ($null -ne $runKey) { $runKey.Dispose() } }
-        if ($AutostartPhase -eq 'Enable' -and $null -ne $existingAutostart) {
+        try {
+            $existingPresent = $null -ne $runKey -and $runKey.GetValueNames() -ccontains 'NikaCore'
+            $existingAutostart = if ($existingPresent) {
+                $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            } else { $null }
+            $existingKind = if ($existingPresent) { $runKey.GetValueKind('NikaCore') } else { $null }
+        } finally { if ($null -ne $runKey) { $runKey.Dispose() } }
+        if ($AutostartPhase -eq 'Enable' -and $existingPresent) {
             throw 'Autostart enable proof refuses an existing NikaCore registration.'
         }
-        if ($AutostartPhase -ne 'Enable' -and $existingAutostart -cne $autostartCommand) {
-            throw 'Autostart continuation requires the exact proof-owned executable registration.'
+        if ($AutostartPhase -ne 'Enable' -and (
+            $existingAutostart -cne $autostartCommand -or
+            $existingKind -ne [Microsoft.Win32.RegistryValueKind]::String
+        )) {
+            throw 'Autostart continuation requires the exact proof-owned REG_SZ registration.'
         }
     }
     $expectedExecutablePath = $ExePath
@@ -817,10 +825,23 @@ try {
             throw 'Packaged autostart checkbox acknowledgement is inconsistent.'
         }
         $runKey = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey('Software\Microsoft\Windows\CurrentVersion\Run')
-        try { $actualAutostart = if ($null -eq $runKey) { $null } else { $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames) } }
-        finally { if ($null -ne $runKey) { $runKey.Dispose() } }
+        try {
+            $actualPresent = $null -ne $runKey -and $runKey.GetValueNames() -ccontains 'NikaCore'
+            $actualAutostart = if ($actualPresent) {
+                $runKey.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            } else { $null }
+            $actualKind = if ($actualPresent) { $runKey.GetValueKind('NikaCore') } else { $null }
+        } finally { if ($null -ne $runKey) { $runKey.Dispose() } }
         $expectedAutostart = if ($AutostartPhase -eq 'Disable') { $null } else { $autostartCommand }
-        if ($actualAutostart -cne $expectedAutostart) { throw 'Actual per-user autostart registration does not match the UI acknowledgement.' }
+        if ($actualAutostart -cne $expectedAutostart) {
+            throw 'Actual per-user autostart registration does not match the UI acknowledgement.'
+        }
+        if ($AutostartPhase -eq 'Disable' -and $actualPresent) {
+            throw 'Autostart disable proof found an unexpected NikaCore registry value.'
+        }
+        if ($AutostartPhase -ne 'Disable' -and $actualKind -ne [Microsoft.Win32.RegistryValueKind]::String) {
+            throw 'Autostart enable/observe proof requires exact REG_SZ registry authority.'
+        }
         Write-Host "Packaged autostart phase $AutostartPhase verified through exact semantic controls and OS readback."
     }
 
