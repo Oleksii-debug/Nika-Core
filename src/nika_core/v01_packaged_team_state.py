@@ -6,6 +6,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import _decode_task_payload
 from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
@@ -23,6 +24,7 @@ _ALLOWED_STAGES = frozenset({"worker", "checker", "source_worker"})
 _TERMINAL_TEAM_STATES = frozenset({"completed", "failed", "cancelled"})
 _TERMINAL_MEMBER_STATES = frozenset({"completed", "failed", "cancelled"})
 
+
 def _unique_handoff_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -34,6 +36,7 @@ def _unique_handoff_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _reject_nonfinite_handoff_number(value: str) -> Any:
     raise ValueError(f"non-finite handoff JSON number: {value}")
+
 
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _MAX_MODEL_ANALYSIS_CHARS = 2000
@@ -422,9 +425,9 @@ class V01PackagedTeamStateProvider:
             if binding is not None or model_bound_audits:
                 raise ValueError("model authority exists without durable task")
             return None
-        task_payload = json.loads(task_row["payload_json"])
-        if not isinstance(task_payload, Mapping):
-            raise TypeError("invalid durable task payload")
+        # Reuse TaskQueue's canonical decoder on this snapshot's exact row.
+        # A second TaskQueue.get() would open a new connection and lose snapshot identity.
+        task_payload = _decode_task_payload(task_row["payload_json"])
 
         has_selection = _TASK_SELECTION_FIELD in task_payload
         selection_id = task_payload.get(_TASK_SELECTION_FIELD)
