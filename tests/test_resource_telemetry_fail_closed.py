@@ -44,6 +44,7 @@ def _manager(tmp_path: Path) -> tuple[ResourceManager, Observer]:
         ("cpu_percent", 101.0),
         ("cpu_percent", True),
         ("cpu_percent", "20"),
+        ("cpu_percent", 10**1000),
         ("memory_percent", nan),
         ("memory_percent", -inf),
         ("memory_percent", -1.0),
@@ -98,6 +99,7 @@ def test_observer_exception_does_not_leak_and_recovery_preserves_fifo(tmp_path: 
         ("max_cpu_percent", 0),
         ("max_cpu_percent", -1),
         ("max_cpu_percent", 101),
+        ("max_cpu_percent", 10**1000),
         ("max_memory_percent", nan),
         ("max_memory_percent", -inf),
         ("max_memory_percent", False),
@@ -138,3 +140,30 @@ def test_valid_boundary_telemetry_and_limits_are_preserved(tmp_path: Path) -> No
     assert manager.request(scope="agent", owner_id="a", request_id="two").reason == (
         "concurrency_limit"
     )
+
+
+@pytest.mark.parametrize(
+    ("max_concurrent", "max_cpu_percent", "max_memory_percent"),
+    [
+        (1.5, None, None),
+        (1, inf, None),
+        (1, None, "not-a-percent"),
+    ],
+)
+def test_malformed_persisted_budget_cannot_authorize_work(
+    tmp_path: Path,
+    max_concurrent: object,
+    max_cpu_percent: object,
+    max_memory_percent: object,
+) -> None:
+    manager, _ = _manager(tmp_path)
+    with SQLiteStore(tmp_path / "state.db").connection() as conn:
+        conn.execute(
+            "INSERT INTO resource_budgets("
+            "scope, owner_id, max_concurrent, max_cpu_percent, max_memory_percent, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            ("agent", "a", max_concurrent, max_cpu_percent, max_memory_percent, "now"),
+        )
+    with pytest.raises(ValueError):
+        manager.request(scope="agent", owner_id="a", request_id="blocked")
+    assert manager.active_count(scope="agent", owner_id="a") == 0
