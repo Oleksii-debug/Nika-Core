@@ -732,6 +732,73 @@ def verify_release_archive(
         return ("archive:invalid-zip",)
 
 
+
+def build_release_archive(
+    bundle_dir: Path,
+    artifact_path: Path,
+    *,
+    source_sha: str,
+    expected_product_version: str,
+) -> Path:
+    """Publish an exact, verified ZIP including Windows-hidden bundle files.
+
+    Assemble into a sibling temporary file and publish only after verifying
+    every manifest-bound entry. Keep a previous artifact intact on failure.
+    """
+    if not isinstance(source_sha, str) or not _SOURCE_SHA_RE.fullmatch(source_sha):
+        raise ValueError("release archive requires an exact source SHA")
+    if not _valid_product_version(expected_product_version):
+        raise ValueError("release archive requires an exact product version")
+
+    root = bundle_dir.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("release bundle must be a directory")
+    if artifact_path.resolve(strict=False).is_relative_to(root):
+        raise ValueError("release ZIP output must be outside its input bundle")
+    files = _safe_files(root)
+    manifest_path = root / _RELEASE_MANIFEST_NAME
+    if manifest_path not in files:
+        raise ValueError("release bundle is missing its regular manifest")
+    manifest = _decode_release_manifest(manifest_path.read_bytes())
+    if manifest is None:
+        raise ValueError("release bundle has an invalid manifest")
+    if manifest.source_sha != source_sha or manifest.version != expected_product_version:
+        raise ValueError("release bundle manifest does not match the requested identity")
+    findings = verify_release_manifest(root, manifest)
+    if findings:
+        raise ValueError(f"release bundle verification failed: {findings}")
+
+    destination = artifact_path.parent.resolve(strict=True) / artifact_path.name
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent,
+            prefix=".nika-release-",
+            suffix=".zip",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+        with zipfile.ZipFile(
+            temporary_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+        ) as archive:
+            # Direct enumeration includes hidden assets that Compress-Archive
+            # omits, and supports ZIP64 rather than its 2-GB file limit.
+            for path in files:
+                archive.write(path, path.relative_to(root).as_posix())
+        archive_findings = verify_release_archive(
+            temporary_path,
+            source_sha=source_sha,
+            expected_product_version=expected_product_version,
+        )
+        if archive_findings:
+            raise ValueError(f"release ZIP verification failed: {archive_findings}")
+        temporary_path.replace(destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return destination
+
+
 def verify_distributable_evidence(
     artifact_path: Path,
     evidence_path: Path,
