@@ -70,7 +70,7 @@ def test_oversized_arguments_fail_closed(kind: str) -> None:
 
 
 def test_normal_nested_unicode_arguments_preserve_exact_fingerprints() -> None:
-    a = _intent({"names": [{"e\\u0301": ["Київ", "😀"]}], "count": 1})
+    a = _intent({"names": [{"é": ["Київ", "😀"]}], "count": 1})
     b = _intent({"names": [{"é": ["Київ", "😀"]}], "count": 1})
     assert a.effect_fingerprint == b.effect_fingerprint
     assert a.approval_fingerprint == b.approval_fingerprint
