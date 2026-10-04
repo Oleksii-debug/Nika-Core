@@ -7,6 +7,7 @@ on:
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "src/nika_core/reliability/legacy_database.py"
+      - "src/nika_core/reliability/backup.py"
       - "src/nika_core/product_command/**"
       - "src/nika_core/product_factory_packaged_journey.py"
       - "src/nika_core/product_project*.py"
@@ -24,6 +25,11 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_v01_legacy_database_adoption.py"
+      - "tests/test_backup_restore_wal_stale_preview.py"
+      - "tests/test_backup_restore_recovery_process_loss.py"
+      - "tests/test_backup_restore_recovery_lease.py"
+      - "tests/test_backup_restore_guardrails.py"
+      - "tests/test_backup_restore_recovery.py"
       - "tests/test_m11_pf11_proof_integrity.py"
       - "tests/test_m11_voice_proof_integrity.py"
       - "tests/test_pf11_proof_precommand.py"
@@ -46,6 +52,7 @@ on:
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "src/nika_core/reliability/legacy_database.py"
+      - "src/nika_core/reliability/backup.py"
       - "src/nika_core/product_command/**"
       - "src/nika_core/product_factory_packaged_journey.py"
       - "src/nika_core/product_project*.py"
@@ -63,6 +70,11 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_v01_legacy_database_adoption.py"
+      - "tests/test_backup_restore_wal_stale_preview.py"
+      - "tests/test_backup_restore_recovery_process_loss.py"
+      - "tests/test_backup_restore_recovery_lease.py"
+      - "tests/test_backup_restore_guardrails.py"
+      - "tests/test_backup_restore_recovery.py"
       - "tests/test_m11_pf11_proof_integrity.py"
       - "tests/test_m11_voice_proof_integrity.py"
       - "tests/test_pf11_proof_precommand.py"
@@ -118,6 +130,11 @@ jobs:
           python -m pytest
           tests/test_m11_m12_release.py
           tests/test_v01_legacy_database_adoption.py
+          tests/test_backup_restore_wal_stale_preview.py
+          tests/test_backup_restore_recovery_process_loss.py
+          tests/test_backup_restore_recovery_lease.py
+          tests/test_backup_restore_guardrails.py
+          tests/test_backup_restore_recovery.py
           tests/test_m11_pf11_proof_integrity.py
           tests/test_m11_voice_proof_integrity.py
           tests/test_pf11_proof_precommand.py
