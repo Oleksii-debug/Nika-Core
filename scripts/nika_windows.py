@@ -107,7 +107,8 @@ def _close_failed_startup_resources(
             continue
         try:
             resource.close()
-        except Exception as exc:
+        except BaseException as exc:
+            # A teardown interrupt must not replace the original startup error.
             # Failure diagnostics may contain private paths or model details.
             logging.getLogger(__name__).error(
                 "Packaged startup cleanup failed: component=%s exception_type=%s",
@@ -158,17 +159,19 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             submit=backend.submit_packaged_coroutine,
         )
         speech = build_packaged_speech()
-    except Exception:
+    except BaseException:
         _close_failed_startup_resources(
             backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
         )
         raise
     try:
         backend.start_startup_recovery()
-    except Exception as exc:
+    except BaseException as exc:
         _close_failed_startup_resources(
             backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
         )
+        if not isinstance(exc, Exception):
+            raise
         raise _StartupRecoveryInventoryError(
             "packaged startup recovery inventory failed"
         ) from exc
@@ -275,7 +278,7 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             speech=speech,
         )
 
-    except Exception:
+    except BaseException:
         _close_failed_startup_resources(
             backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
         )
