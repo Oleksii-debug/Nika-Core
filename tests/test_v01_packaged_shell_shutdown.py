@@ -91,3 +91,43 @@ def test_packaged_keyboard_interrupt_still_closes_session(
         nika_windows.main([])
 
     assert closed == [True]
+
+
+@pytest.mark.parametrize(
+    "interruption",
+    [KeyboardInterrupt("PRIVATE_INTERRUPT_CANARY"), SystemExit("PRIVATE_EXIT_CANARY")],
+)
+def test_packaged_interrupt_is_not_masked_by_shutdown_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    interruption: BaseException,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "ніка.db")
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+    closed: list[str] = []
+    messages: list[str] = []
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
+
+    class Session:
+        bridge = object()
+
+        def close(self) -> None:
+            closed.append("close")
+            raise OSError("PRIVATE_CLOSE_CANARY")
+
+    monkeypatch.setattr(nika_windows, "build_windows_session", lambda _config: Session())
+
+    def interrupt(_bridge: object, *, title: str) -> None:
+        del title
+        raise interruption
+
+    monkeypatch.setattr(nika_windows, "launch_windows_shell", interrupt)
+    with caplog.at_level(logging.ERROR), pytest.raises(type(interruption)) as captured:
+        nika_windows.main([])
+
+    assert captured.value is interruption
+    assert closed == ["close"]
+    assert messages == []
+    assert "Packaged shutdown failed: exception_type=OSError" in caplog.text
+    assert "PRIVATE_" not in caplog.text

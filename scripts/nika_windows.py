@@ -532,11 +532,19 @@ def main(argv: Sequence[str] | None = None) -> int:
         launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
     except Exception as exc:
         launch_error = exc
-    finally:
+    except BaseException:
+        # Preserve KeyboardInterrupt/SystemExit even if teardown also fails.
         try:
             session.close()
         except Exception as exc:
-            close_error = exc
+            logging.getLogger(__name__).error(
+                "Packaged shutdown failed: exception_type=%s", type(exc).__name__
+            )
+        raise
+    try:
+        session.close()
+    except Exception as exc:
+        close_error = exc
 
     if launch_error is None and close_error is None:
         return 0
