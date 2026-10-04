@@ -114,8 +114,8 @@ def test_preserves_valid_metadata_and_optional_absent_fields(tmp_path: Path) -> 
     "raw_json",
     (
         b'{"format":{"bit_rate":' + (b"9" * 5000) + b'},"streams":[]}',
-        b'{"format":{"duration":' + (b"[" * 1500) + b"0"
-        + (b"]" * 1500) + b'},"streams":[]}',
+        b'{"format":{"duration":' + (b"[" * 16000) + b"0"
+        + (b"]" * 16000) + b'},"streams":[]}',
     ),
 )
 def test_invalid_json_resource_limits_return_typed_probe_failure(
