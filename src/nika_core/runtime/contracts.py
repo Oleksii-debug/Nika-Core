@@ -198,6 +198,39 @@ class RuntimeResult:
             raise ValueError("error_code is only valid for failed outcomes")
 
 
+# Control/audit events are emitted only by Nika, never by an adapter result.
+# Update this set when the coordinator/recovery service adds an authoritative event.
+_NIKA_OWNED_RUNTIME_AUDIT_EVENTS = frozenset(
+    {
+        "runtime.started",
+        "runtime.session_bound",
+        "runtime.retry_blocked_unsafe_fresh_replay",
+        "runtime.retry_blocked_timeout_budget",
+        "runtime.retry_scheduled",
+        "runtime.retry_blocked_cancelled",
+        "runtime.retry_started",
+        "runtime.approval_resumed",
+        "runtime.saved_resume_started",
+        "runtime.saved_approval_resumed",
+        "runtime.cancel_requested",
+        "runtime.cancel_accepted",
+        "runtime.cancel_uncertain",
+        "runtime.cancel_not_active",
+        "runtime.crash_recovery_started",
+        "runtime.recovery_claim_acquired",
+        "runtime.recovery_claim_reclaimed",
+        "runtime.recovery_effect_started",
+        "runtime.finished_after_cancel",
+        "runtime.recovery_claim_completed",
+        "runtime.finished",
+        "runtime.recovery_inventory",
+        "runtime.recovery_checkpoint_blocked",
+        "runtime.recovery_auto_resume_requested",
+        "runtime.recovery_auto_resume_failed",
+    }
+)
+
+
 def _snapshot_json_mapping(value: Mapping[str, Any], *, field_name: str) -> dict[str, Any]:
     """Copy adapter output into JSON-safe, detached Nika-owned values."""
 
@@ -254,6 +287,8 @@ def canonical_runtime_result(value: object) -> RuntimeResult:
         if type(event_type) is not str or not event_type.strip():
             raise ValueError("runtime event type must be an exact nonempty string")
         event_type.encode("utf-8")
+        if event_type in _NIKA_OWNED_RUNTIME_AUDIT_EVENTS:
+            raise ValueError("runtime adapter cannot impersonate Nika-owned audit events")
         event_payload = _snapshot_json_mapping(
             object.__getattribute__(event, "payload"), field_name="runtime event payload"
         )
