@@ -83,3 +83,24 @@ def test_well_formed_unknown_tool_remains_a_controlled_unknown_tool() -> None:
     )
     assert result.error == "unknown tool"
     assert result.tool_id == "other.tool"
+
+
+@pytest.mark.parametrize("invalid", INVALID_IDENTITIES)
+def test_tool_spec_rejects_invalid_ids_before_registration(invalid: object) -> None:
+    with pytest.raises(ValueError, match="tool_id"):
+        ToolSpec(
+            tool_id=invalid,  # type: ignore[arg-type] - untrusted spec carrier
+            description="untrusted discovery",
+        )
+
+
+def test_tool_spec_accepts_exact_utf8_byte_boundary() -> None:
+    boundary = "😀" * 128  # exactly 512 UTF-8 bytes
+    spec = ToolSpec(tool_id=boundary, description="valid boundary")
+    executor = ToolExecutor()
+
+    async def handler(_args: dict[str, object]) -> object:
+        return {"ok": True}
+
+    executor.register(spec, handler)
+    assert executor.specs() == (spec,)
