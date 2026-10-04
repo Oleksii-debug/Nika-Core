@@ -245,6 +245,12 @@ class ModelGateway:
                 raise asyncio.CancelledError()
             if terminal_error is not None:
                 raise terminal_error
+            # An async timeout cannot interrupt a provider that blocks the
+            # event loop synchronously. A late successful return is not a
+            # timely completion, regardless of its response envelope.
+            self._enforce_completion_deadline(
+                request, capabilities.provider_id, deadline, loop
+            )
             if response is None:
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
@@ -270,6 +276,12 @@ class ModelGateway:
                 raise response_error
             if canonical_response is None:
                 raise AssertionError("validated model response snapshot is unavailable")
+            # Untrusted synchronous response getters may consume the remaining
+            # budget after provider.complete has returned. Never publish their
+            # late result as a successful durable completion.
+            self._enforce_completion_deadline(
+                request, capabilities.provider_id, deadline, loop
+            )
 
             self._audit(
                 event_type="model.completed",
@@ -291,6 +303,27 @@ class ModelGateway:
             "model fallback route was exhausted",
             retryable=True,
         )
+
+    def _enforce_completion_deadline(
+        self,
+        request: ModelRequest,
+        provider_id: str,
+        deadline: float,
+        loop: asyncio.AbstractEventLoop,
+    ) -> None:
+        if loop.time() < deadline:
+            return
+        error = ModelGatewayError(
+            ModelErrorCode.TIMEOUT,
+            "model request exceeded its deadline after provider execution",
+            provider_id=provider_id,
+            retryable=False,
+            # A provider was invoked; a late response does not prove that its
+            # underlying model effect was cancelled or safe to replay.
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+        self._audit_failure(request, provider_id, error)
+        raise error
 
     def _authorize_cloud_effect(
         self,
