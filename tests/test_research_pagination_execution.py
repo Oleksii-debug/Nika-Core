@@ -26,6 +26,7 @@ from nika_core.research import (
     SourceSpec,
     discover_html_pagination,
 )
+from nika_core.research.pagination_jobs import _policy_from_payload
 
 PUBLIC_IP = "93.184.216.34"
 
@@ -581,16 +582,42 @@ def test_processed_checkpoint_rejects_other_task_or_failed_redirect_evidence(
 
 
 @pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("max_pages", "2"),
+        ("max_pages", True),
+        ("max_discovered_links_per_page", "8"),
+        ("max_discovered_links_per_page", 1.5),
+        ("same_origin_only", "false"),
+        ("same_origin_only", 0),
+    ],
+)
+def test_persisted_pagination_policy_rejects_lossy_scalar_coercion(
+    field: str, invalid: object,
+) -> None:
+    payload: dict[str, object] = {
+        "max_pages": 2,
+        "max_discovered_links_per_page": 8,
+        "same_origin_only": False,
+        "json_next_fields": ["next"],
+    }
+    assert _policy_from_payload(payload).same_origin_only is False
+    payload[field] = invalid
+    with pytest.raises(TypeError, match="policy scalar fields"):
+        _policy_from_payload(payload)
+
+
+@pytest.mark.parametrize(
     ("patch", "remove", "expected"),
     [
-        ({"max_pages": True}, None, "page limits"),
-        ({"max_pages": 2.5}, None, "page limits"),
-        ({"max_pages": "2"}, None, "page limits"),
-        ({"max_discovered_links_per_page": False}, None, "page limits"),
-        ({"max_discovered_links_per_page": "8"}, None, "page limits"),
-        ({"same_origin_only": []}, None, "same_origin_only"),
-        ({"same_origin_only": "false"}, None, "same_origin_only"),
-        ({"same_origin_only": 0}, None, "same_origin_only"),
+        ({"max_pages": True}, None, "scalar fields"),
+        ({"max_pages": 2.5}, None, "scalar fields"),
+        ({"max_pages": "2"}, None, "scalar fields"),
+        ({"max_discovered_links_per_page": False}, None, "scalar fields"),
+        ({"max_discovered_links_per_page": "8"}, None, "scalar fields"),
+        ({"same_origin_only": []}, None, "scalar fields"),
+        ({"same_origin_only": "false"}, None, "scalar fields"),
+        ({"same_origin_only": 0}, None, "scalar fields"),
         ({"json_next_fields": "next"}, None, "json_next_fields"),
         ({"json_next_fields": [""]}, None, "json_next_fields"),
         ({"json_next_fields": ["next", 3]}, None, "json_next_fields"),
