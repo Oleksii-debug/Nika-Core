@@ -310,7 +310,8 @@ class OllamaModelHealthProbe:
     def _models(response: httpx.Response) -> set[str] | None:
         try:
             body = response.json()
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, RecursionError):
+            # Deep but syntactically valid provider JSON is untrusted health evidence.
             return None
         if type(body) is not dict:
             return None
