@@ -67,16 +67,27 @@ class WindowsBridgeSession:
         if self._closed:
             return
         self._closed = True
-        try:
-            self.speech.close()
-        finally:
+        first_error: BaseException | None = None
+        for name, resource in (
+            ("speech", self.speech),
+            ("voice_model_setup", self.voice_model_setup),
+            ("voice", self.voice),
+            ("backend", self.backend),
+        ):
             try:
-                self.voice_model_setup.close()
-            finally:
-                try:
-                    self.voice.close()
-                finally:
-                    self.backend.close()
+                resource.close()
+            except BaseException as exc:
+                if first_error is None:
+                    first_error = exc
+                else:
+                    # Continue teardown; preserve its first error and log only safe metadata.
+                    logging.getLogger(__name__).error(
+                        "Packaged shutdown cleanup failed: component=%s exception_type=%s",
+                        name,
+                        type(exc).__name__,
+                    )
+        if first_error is not None:
+            raise first_error
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
