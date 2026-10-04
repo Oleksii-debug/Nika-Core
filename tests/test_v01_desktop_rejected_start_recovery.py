@@ -161,3 +161,30 @@ def test_stale_async_failure_does_not_pause_new_ready_runtime(tmp_path: Path) ->
     assert backend._active_threads[task.task_id] == "replacement-thread"
     replacement.set_result(None)
     backend.close()
+
+def test_failed_submission_with_stale_completed_slot_still_pauses(
+    tmp_path: Path,
+) -> None:
+    host = _RejectingHost()
+    backend = _backend(tmp_path, host)
+    task = backend._queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "Old callback has not cleared its finished future"},
+    )
+    backend._queue.transition(task.task_id, TaskState.READY)
+    backend._queue.transition(task.task_id, TaskState.PAUSED)
+    previous: Future[object] = Future()
+    previous.set_result(None)
+    backend._active_futures[task.task_id] = previous
+    backend._active_threads[task.task_id] = "old-finished-thread"
+
+    with pytest.raises(OSError) as failure:
+        backend.resume_task({})
+    assert failure.value is host.failure
+    assert backend._queue.get(task.task_id).state is TaskState.PAUSED
+    assert backend._active_futures[task.task_id] is previous
+
+    backend._runtime_done(task.task_id, previous)
+    _assert_failed_submission(backend, host, task.task_id)
+    backend.close()
