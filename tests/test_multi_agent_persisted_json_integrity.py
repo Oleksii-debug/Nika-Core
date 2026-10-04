@@ -184,7 +184,7 @@ def test_surplus_inbound_handoffs_reject_before_decoding_after_reopen(
             (_TEAM_ID,),
         ).fetchone()
         assert original is not None
-        for index in range(64):
+        for index in range(300):
             conn.execute(
                 "INSERT INTO multi_agent_handoffs("
                 "handoff_id, team_id, sender_id, recipient_id, kind, "
