@@ -112,6 +112,7 @@ def test_failed_reconciliation_does_not_hide_original_host_failure(
     assert inspect.getcoroutinestate(host.attempted[0]) == inspect.CORO_CLOSED
     backend.close()
 
+
 def test_early_async_host_failure_preserves_ready_task_for_manual_resume(
     tmp_path: Path,
 ) -> None:
@@ -162,6 +163,7 @@ def test_stale_async_failure_does_not_pause_new_ready_runtime(tmp_path: Path) ->
     replacement.set_result(None)
     backend.close()
 
+
 def test_failed_submission_with_stale_completed_slot_still_pauses(
     tmp_path: Path,
 ) -> None:
@@ -187,4 +189,50 @@ def test_failed_submission_with_stale_completed_slot_still_pauses(
 
     backend._runtime_done(task.task_id, previous)
     _assert_failed_submission(backend, host, task.task_id)
+    backend.close()
+
+
+def test_rejected_new_task_survives_restart_without_automatic_replay(
+    tmp_path: Path,
+) -> None:
+    first = _backend(tmp_path, _RejectingHost())
+    with pytest.raises(OSError):
+        first.create_task({"command": "Keep my instruction across restart"})
+    task_id = first._queue.list_recent(limit=10)[0].task_id
+    first.close()
+
+    next_host = _RejectingHost()
+    restarted = _backend(tmp_path, next_host)
+    recovered = restarted._queue.get(task_id)
+    assert recovered.state is TaskState.PAUSED
+    assert recovered.payload["command"] == "Keep my instruction across restart"
+    assert restarted._never_started(task_id)
+    snapshot = restarted.start_startup_recovery(startup_wait_seconds=0)
+    assert snapshot["auto_resume_count"] == 0
+    assert next_host.attempted == []
+    assert restarted._queue.get(task_id).state is TaskState.PAUSED
+    restarted.close()
+
+
+def test_running_task_failure_still_uses_failed_not_paused(tmp_path: Path) -> None:
+    host = _RejectingHost()
+    backend = _backend(tmp_path, host)
+    task = backend._queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "A genuinely running task"},
+    )
+    backend._queue.transition(task.task_id, TaskState.READY)
+    backend._queue.transition(task.task_id, TaskState.RUNNING)
+    failed: Future[object] = Future()
+    failed.set_exception(RuntimeError("PRIVATE_EXECUTION_FAILURE"))
+    backend._active_futures[task.task_id] = failed
+    backend._active_threads[task.task_id] = "running-thread"
+
+    backend._runtime_done(task.task_id, failed)
+
+    assert backend._queue.get(task.task_id).state is TaskState.FAILED
+    events = backend._audit.list_for(entity_type="task", entity_id=task.task_id)
+    assert [event.event_type for event in events] == ["desktop.runtime_host_failed"]
+    assert "PRIVATE_EXECUTION_FAILURE" not in str(events)
     backend.close()
