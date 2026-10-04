@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -25,12 +26,15 @@ def _all_green() -> ReleaseGateEvidence:
     return ReleaseGateEvidence(**{field: True for field in _FIELDS})
 
 
-@pytest.mark.parametrize("carrier", [
-    pytest.param(SimpleNamespace(**{field: True for field in _FIELDS}), id="namespace"),
-    pytest.param({field: True for field in _FIELDS}, id="mapping"),
-    pytest.param(object(), id="plain-object"),
-    pytest.param(None, id="none"),
-])
+@pytest.mark.parametrize(
+    "carrier",
+    [
+        pytest.param(SimpleNamespace(**{field: True for field in _FIELDS}), id="namespace"),
+        pytest.param({field: True for field in _FIELDS}, id="mapping"),
+        pytest.param(object(), id="plain-object"),
+        pytest.param(None, id="none"),
+    ],
+)
 def test_noncanonical_carrier_cannot_certify_release(carrier: object) -> None:
     result = evaluate_release_gate(carrier)  # type: ignore[arg-type]
     assert result.stage == "IMPLEMENTED"
@@ -66,10 +70,7 @@ def test_genuine_evidence_preserves_pre_human_and_production_decisions() -> None
     assert result.production_release_ready is True
     assert result.blockers == ()
 
-    prehuman = ReleaseGateEvidence(
-        **{field: getattr(genuine, field) if field not in ("human_tested", "nvda_verified")
-           else False for field in _FIELDS}
-    )
+    prehuman = replace(genuine, human_tested=False, nvda_verified=False)
     prehuman_result = evaluate_release_gate(prehuman)
     assert prehuman_result.release_candidate_ready is True
     assert prehuman_result.production_release_ready is False
