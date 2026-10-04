@@ -133,6 +133,38 @@ def test_public_evidence_redacts_all_common_credential_query_keys(key: str) -> N
     assert "raw-credential" not in presented.reference
 
 
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "https://blob.invalid/download?sv=2026&sig=raw-azure-sas-signature",
+        "https://s3.invalid/object?X-Amz-Signature=raw-aws-signature",
+        "https://s3.invalid/object?X-Amz-Credential=raw-aws-credential",
+        "https://storage.invalid/object?X-Goog-Signature=raw-gcp-signature",
+        "https://storage.invalid/object?X-Goog-Credential=raw-gcp-credential",
+        "https://cdn.invalid/path?Signature=raw-cloudfront-signature",
+        "https://s3.invalid/object?AWSAccessKeyId=raw-aws-key-id",
+        "https://maps.invalid/route?key=raw-provider-api-key",
+        "https://blob.invalid/download?%2573ig=raw-encoded-signature",
+    ),
+)
+def test_public_evidence_hashes_presigned_capability_urls(reference: str) -> None:
+    presented = EvidenceReference(kind="test", reference=reference, label="Evidence")
+    assert presented.reference.startswith("evidence-sha256:")
+    assert "raw-" not in presented.reference
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "https://service.invalid/report?signature_version=4",
+        "https://service.invalid/report?monkey=banana",
+        "https://service.invalid/report?status=healthy",
+    ),
+)
+def test_public_evidence_keeps_unrelated_query_parameters(reference: str) -> None:
+    assert safe_evidence_reference(reference) == reference
+
+
 def test_execution_projection_never_surfaces_raw_credential_use_event_id() -> None:
     intent = DeploymentIntent(
         "intent-1",
@@ -204,6 +236,7 @@ def test_low_level_deployment_adapter_hashes_sensitive_provider_evidence() -> No
         (
             "credential://provider/project-1/raw-provider-evidence",
             "https://operator:raw-deployment-password@provider.invalid/evidence",
+            "https://s3.invalid/object?X-Amz-Signature=raw-storage-signature",
         ),
         health=HealthEvidence(
             "stage",
@@ -224,6 +257,7 @@ def test_low_level_deployment_adapter_hashes_sensitive_provider_evidence() -> No
     assert "credential://" not in serialized
     assert "raw-provider-evidence" not in serialized
     assert "raw-deployment-password" not in serialized
+    assert "raw-storage-signature" not in serialized
     assert "evidence-sha256:" in serialized
     assert "health://project-1/stage" in serialized
 
