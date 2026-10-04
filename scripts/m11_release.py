@@ -212,6 +212,16 @@ def prove_packaged_voice_runtime(bundle_dir: Path, *, source_sha: str) -> Path:
 
 
 
+def _valid_pf11_text(value: object) -> bool:
+    if type(value) is not str or not value.strip():
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _validate_first_pf11_payload(first: dict[str, object]) -> tuple[int, int]:
     """Reject an invalid first proof before a second EXE can mutate the proof database."""
     selection = first.get("selection_before_command")
@@ -224,15 +234,13 @@ def _validate_first_pf11_payload(first: dict[str, object]) -> tuple[int, int]:
         first.get("route") != "product_project"
         or type(first.get("spec_version")) is not int
         or first["spec_version"] != 1
-        or not isinstance(project_id, str)
-        or not project_id.strip()
+        or not _valid_pf11_text(project_id)
         or first.get("command_center_state_proven") is not True
         or first.get("current_command_proven") is not True
         or first.get("current_command_focus_proven") is not True
         or first.get("restart_selection_integrity_proven") is not True
         or first.get("bounded_projection_proven") is not True
-        or not isinstance(first.get("state"), str)
-        or not first["state"].strip()
+        or not _valid_pf11_text(first.get("state"))
         or first.get("bridge_state_project_id") != project_id
         or type(first.get("bridge_state_spec_version")) is not int
         or first["bridge_state_spec_version"] != 1
@@ -318,7 +326,7 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         "schema_version": 2,
         "source_sha": source_sha,
         "route": first["route"],
-        "product_project_id": project_id,
+        "product_project_id": first["project_id"],
         "product_project_spec_version": first["spec_version"],
         "product_project_state": first.get("state"),
         "product_command_center_proven": True,
