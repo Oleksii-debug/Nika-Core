@@ -88,7 +88,13 @@ class CandidateVerification:
         carrier as independent authorization: recheck trusted exact-SHA CI evidence.
         """
 
-        if type(self) is not CandidateVerification or self.state is not VerificationState.PASS:
+        if (
+            type(self) is not CandidateVerification
+            or type(getattr(self, "candidate_sha", None)) is not str
+            or getattr(self, "state", None) is not VerificationState.PASS
+            or type(getattr(self, "evidence_refs", None)) is not tuple
+            or any(type(ref) is not str for ref in self.evidence_refs)
+        ):
             return False
         return getattr(self, "_classified_identity", None) == (
             self.candidate_sha,
