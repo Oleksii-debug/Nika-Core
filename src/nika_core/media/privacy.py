@@ -77,8 +77,19 @@ def _normalized_key_tokens(key: str) -> tuple[str, ...]:
     return tuple(token.casefold() for token in _KEY_SEPARATOR.split(expanded) if token)
 
 
+def _unquote_key_bounded(key: str) -> str:
+    """Recognize credential aliases even when a query name is multiply escaped."""
+
+    for _ in range(3):
+        decoded = unquote_plus(key)
+        if decoded == key:
+            break
+        key = decoded
+    return key
+
+
 def _is_secret_key(key: str) -> bool:
-    tokens = _normalized_key_tokens(unquote_plus(key))
+    tokens = _normalized_key_tokens(_unquote_key_bounded(key))
     if not tokens:
         return False
     normalized = "_".join(tokens)
@@ -94,12 +105,41 @@ def _is_secret_key(key: str) -> bool:
     return any(token in _SENSITIVE_KEY_TOKENS for token in tokens)
 
 
+def _is_sensitive_query_key(key: str) -> bool:
+    normalized = "_".join(_normalized_key_tokens(_unquote_key_bounded(key)))
+    return _is_secret_key(key) or normalized in {
+        "auth", "key", "sig", "signature", "expires",
+    }
+
+
+def _contains_encoded_sensitive_query(value: str) -> bool:
+    """Detect escaped nested credentials without decoding the public evidence."""
+
+    decoded = value
+    for _ in range(3):
+        if "%" not in decoded:
+            break
+        updated = unquote_plus(decoded)
+        if updated == decoded:
+            break
+        decoded = updated
+        if any(
+            _is_sensitive_query_key(match.group(2))
+            for match in _SENSITIVE_QUERY.finditer(decoded)
+        ):
+            return True
+    return False
+
+
 def _redact_query_match(match: re.Match[str], depth: int = 0) -> str:
     key = match.group(2)
-    normalized = "_".join(_normalized_key_tokens(unquote_plus(key)))
-    if _is_secret_key(key) or normalized in {"auth", "key", "sig", "signature", "expires"}:
+    if _is_sensitive_query_key(key):
         return f"{match.group(1)}{key}=[REDACTED]"
     value = match.group(3)
+    if _contains_encoded_sensitive_query(value):
+        # Redact the outer value: publishing the encoded form leaks the
+        # recoverable credential even if the inner URL is never opened.
+        return f"{match.group(1)}{key}=[REDACTED]"
     if "?" in value:
         # A URL can itself be the value of another query parameter. The broad
         # outer match consumes its nested query unless it is redacted here.
