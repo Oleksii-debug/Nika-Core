@@ -141,12 +141,22 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
         raise ValueError("bundle_dir must be a directory")
     files: list[Path] = []
     for candidate in root.rglob("*"):
+        # A junction is a directory reparse point on Windows. A regular rglob
+        # does not attest the contents behind it, so accepting it can publish
+        # an apparently complete ZIP with silently missing runtime resources.
+        if candidate.is_junction():
+            raise ValueError(f"bundle junction is not supported: {candidate}")
         if candidate.is_symlink():
             resolved = candidate.resolve(strict=True)
             try:
                 resolved.relative_to(root)
             except ValueError as exc:
                 raise ValueError(f"bundle symlink escapes release root: {candidate}") from exc
+            # A contained file link is materialized as a regular ZIP member.
+            # Directory links are not traversed by rglob; reject rather than
+            # silently omit all files reachable only through the linked path.
+            if candidate.is_dir():
+                raise ValueError(f"bundle directory symlink is not supported: {candidate}")
         if candidate.is_file():
             files.append(candidate)
     return tuple(sorted(files, key=lambda item: item.relative_to(root).as_posix()))
