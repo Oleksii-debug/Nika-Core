@@ -119,6 +119,8 @@ class PaginatedResearchRefreshService:
         if not root_source_id:
             raise ValueError("paginated Research task has no root source")
         root = self._network.get_source(root_source_id)
+        if root.workspace_id != task.workspace_id:
+            raise ValueError("paginated Research root source changed workspace")
         checkpoint = self._checkpoints.latest(task_id)
         if checkpoint is None:
             return [_FrontierItem(root.source_id, root.url)], 0, 0, 0, 0
@@ -283,13 +285,14 @@ class PaginatedResearchRefreshService:
         task = self._tasks.get(task_id)
         if task.agent_id != self.AGENT_ID:
             raise ValueError("task is not a paginated Research refresh job")
-        if task.state is TaskState.READY:
-            self._tasks.transition(task_id, TaskState.RUNNING)
-        elif task.state is not TaskState.RUNNING:
+        if task.state not in {TaskState.READY, TaskState.RUNNING}:
             return self.summary(task_id)
 
+        # Validate the durable task and checkpoint before declaring the job running.
         policy = self._task_policy(task_id)
         frontier, next_index, changed, unchanged, failed = self._initial_frontier(task_id)
+        if task.state is TaskState.READY:
+            self._tasks.transition(task_id, TaskState.RUNNING)
         root_source_id = str(task.payload["root_source_id"])
         workspace_id = task.workspace_id
 
