@@ -526,11 +526,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Перевірте доступність папки даних; наявну базу не видаляйте."
         )
         return 1
+    launch_error: Exception | None = None
+    close_error: Exception | None = None
     try:
         launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
+    except Exception as exc:
+        launch_error = exc
     finally:
-        session.close()
-    return 0
+        try:
+            session.close()
+        except Exception as exc:
+            close_error = exc
+
+    if launch_error is None and close_error is None:
+        return 0
+    logger = logging.getLogger(__name__)
+    if launch_error is not None:
+        logger.error("Packaged shell failed: exception_type=%s", type(launch_error).__name__)
+    if close_error is not None:
+        logger.error("Packaged shutdown failed: exception_type=%s", type(close_error).__name__)
+    show_recovery_error(
+        "Під час роботи вікна або завершення Nika сталася помилка. "
+        "Збережіть папку даних і перевірте журнал перед повторним запуском."
+    )
+    return 1
 
 
 if __name__ == "__main__":
