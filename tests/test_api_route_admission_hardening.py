@@ -7,6 +7,7 @@ import pytest
 from nika_core.model_gateway.api_route import (
     ApiModelRouteConfig,
     CredentialRefOpenAICompatibleProvider,
+    CredentialResolutionError,
     EnvironmentCredentialResolver,
 )
 from nika_core.model_gateway.contracts import (
@@ -161,5 +162,25 @@ def test_environment_resolver_rejects_control_bearing_variable_name(
     resolver = EnvironmentCredentialResolver()
     monkeypatch.setenv("NIKA_ROUTE_ADMISSION_TEST_TOKEN", "safe")
     assert resolver.resolve(_REF) == "safe"
-    with pytest.raises(Exception):
+    monkeypatch.setenv("NIKA_ROUTE_ADMISSION_TEST_TOKEN\nINJECTED", "safe")
+    with pytest.raises(CredentialResolutionError, match="invalid"):
         resolver.resolve("env:NIKA_ROUTE_ADMISSION_TEST_TOKEN\nINJECTED")
+
+
+@pytest.mark.parametrize("overrides", [
+    {"provider_id": "approved\napi"},
+    {"default_model": "bad\ud800model"},
+    {"credential_ref": "env:NIKA\nKEY"},
+])
+def test_durable_route_identifiers_reject_invalid_unicode(
+    overrides: dict[str, str],
+) -> None:
+    values = {
+        "provider_id": "approved-api",
+        "base_url": "https://api.example.test/v1",
+        "default_model": "model-a",
+        "credential_ref": _REF,
+    }
+    values.update(overrides)
+    with pytest.raises(ValueError, match="control characters"):
+        ApiModelRouteConfig(**values)
