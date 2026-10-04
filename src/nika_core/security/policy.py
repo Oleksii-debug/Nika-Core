@@ -54,6 +54,7 @@ def _validate_windows_component(component: str, *, label: str) -> None:
 def _normalize_workspace_relative(value: str, *, label: str) -> PurePosixPath:
     if not value or not value.strip():
         raise ValueError(f"{label} must stay inside a workspace-relative scope")
+    _require_utf8(value, label=label)
     windows_path = PureWindowsPath(value)
     normalized = PurePosixPath(value.replace("\\", "/"))
     if (
@@ -73,6 +74,7 @@ def _normalize_workspace_relative(value: str, *, label: str) -> PurePosixPath:
 
 def _executable_scope(value: str) -> tuple[str, str, str]:
     """Return (scope kind, normalized identity, case-folded basename)."""
+    _require_utf8(value, label="process executable")
     stripped = value.strip()
     if not stripped:
         raise ValueError("process executable must not be empty")
@@ -117,12 +119,20 @@ def _executable_scope(value: str) -> tuple[str, str, str]:
     return ("posix-path", posix_path.as_posix(), basename.casefold())
 
 
+def _require_utf8(value: str, *, label: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must be valid UTF-8 text") from exc
+    return value
+
+
 def _normalize_text(value: str, *, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must not be empty")
     if value != value.strip():
         raise ValueError(f"{label} must not contain surrounding whitespace")
-    return unicodedata.normalize("NFC", value)
+    return _require_utf8(unicodedata.normalize("NFC", value), label=label)
 
 
 def _normalize_optional_text(value: str | None, *, label: str) -> str | None:
@@ -148,7 +158,7 @@ def _normalize_json_value(value: object, *, path: str = "arguments") -> object:
             raise ValueError(f"{path} must not contain NaN or infinity")
         return value
     if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
+        return _require_utf8(unicodedata.normalize("NFC", value), label=path)
     if isinstance(value, (list, tuple)):
         return [
             _normalize_json_value(item, path=f"{path}[{index}]")
@@ -159,7 +169,7 @@ def _normalize_json_value(value: object, *, path: str = "arguments") -> object:
         for raw_key, raw_value in value.items():
             if not isinstance(raw_key, str):
                 raise TypeError(f"{path} keys must be strings")
-            key = unicodedata.normalize("NFC", raw_key)
+            key = _require_utf8(unicodedata.normalize("NFC", raw_key), label=f"{path} key")
             if key in normalized:
                 raise ValueError(f"{path} contains duplicate normalized key {key!r}")
             normalized[key] = _normalize_json_value(raw_value, path=f"{path}.{key}")
@@ -261,8 +271,9 @@ class ExecutionBudget:
     max_process_launches: int = 0
 
     def __post_init__(self) -> None:
-        if min(self.max_write_bytes, self.max_network_calls, self.max_process_launches) < 0:
-            raise ValueError("execution budgets must be non-negative")
+        values = (self.max_write_bytes, self.max_network_calls, self.max_process_launches)
+        if any(type(value) is not int or value < 0 for value in values):
+            raise ValueError("execution budgets must be non-negative integers")
 
 
 @dataclass(slots=True)
@@ -345,8 +356,8 @@ class ActionIntent:
             "authority_version",
             _normalize_text(self.authority_version, label="authority_version"),
         )
-        if self.write_bytes < 0:
-            raise ValueError("write_bytes must be non-negative")
+        if type(self.write_bytes) is not int or self.write_bytes < 0:
+            raise ValueError("write_bytes must be a non-negative integer")
         if self.write_bytes and self.write_path is None:
             raise ValueError("write_bytes require write_path")
         if self.write_path is not None:
