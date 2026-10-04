@@ -19,6 +19,7 @@ from nika_core.product_command.product_project_adapter import (
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductJourneyError,
+    PackagedProductSelectionStore,
     PackagedProductStateProvider,
     packaged_current_product_command,
     packaged_product_reopen_target,
@@ -188,6 +189,26 @@ def test_packaged_router_rejects_noncanonical_commands_without_side_effects(
     assert ordinary.calls == []
     assert router.active_project_id == project_id
     assert repository.get(project_id).spec_version == 1
+
+
+@pytest.mark.parametrize(
+    "project_id",
+    (None, 7, False, ["product-id"], _HostileCommand("product-" + "b" * 64)),
+)
+def test_direct_selection_store_rejects_noncanonical_id_without_mutation(
+    tmp_path: Path,
+    project_id: object,
+) -> None:
+    store = SQLiteStore(tmp_path / "selection type boundary українська.db")
+    store.initialize()
+    selection = PackagedProductSelectionStore(store)
+    selected = "product-" + "a" * 64
+    selection.select(selected)
+
+    with pytest.raises(PackagedProductJourneyError, match="звичайним текстом"):
+        selection.select(project_id)
+
+    assert selection.load() == selected
 
 
 def test_ambiguous_product_and_toolsmith_command_fails_closed(tmp_path: Path) -> None:

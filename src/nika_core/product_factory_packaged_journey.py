@@ -109,6 +109,8 @@ class PackagedProductSelectionStore:
         return project_id or None
 
     def select(self, project_id: str) -> None:
+        if type(project_id) is not str:
+            raise PackagedProductJourneyError("ProductProject ID має бути звичайним текстом.")
         normalized = project_id.strip()
         if not normalized:
             raise PackagedProductJourneyError("selected ProductProject id must not be empty")
