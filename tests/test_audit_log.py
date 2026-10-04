@@ -282,3 +282,31 @@ def test_nested_signed_url_is_hidden_but_safe_links_are_preserved(tmp_path):
     assert "nested-secret" not in result["target"]
     assert "REDACTED_URL" in result["target"]
     assert result["health"] == plain
+
+@pytest.mark.parametrize(
+    ("message", "secret"),
+    [
+        ("Signature=cloudfront-secret", "cloudfront-secret"),
+        ("sig=azure-secret", "azure-secret"),
+        ("X-Amz-Credential=aws-secret", "aws-secret"),
+        ("X-Goog-Signature=gcp-secret", "gcp-secret"),
+        ("X-Amz-Security-Token=aws-session", "aws-session"),
+    ],
+)
+def test_inline_signed_parameters_are_not_exposed(tmp_path, message, secret):
+    _, log = _make_log(tmp_path)
+    log.append(
+        event_type="provider.failed",
+        entity_type="task",
+        entity_id="inline-signed",
+        payload={
+            "message": "failed with " + message,
+            "credential_id": "public-reference",
+            "signature_status": "verified",
+        },
+    )
+    event = log.inspect()[0]
+    assert secret not in event.payload["message"]
+    assert "[REDACTED]" in event.payload["message"]
+    assert event.payload["credential_id"] == "public-reference"
+    assert event.payload["signature_status"] == "verified"

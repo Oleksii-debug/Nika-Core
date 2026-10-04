@@ -52,7 +52,7 @@ _INLINE_SECRET_RE: Final = re.compile(
     r"(?i)\b(authorization|proxy[_-]?authorization|authorization[_-]?code|oauth[_-]?code|"
     r"api[_-]?key|api[_-]?hash|access[_-]?token|refresh[_-]?token|id[_-]?token|"
     r"session[_-]?token|token|password|passphrase|client[_-]?secret|private[_-]?key|"
-    r"cookie|set[_-]?cookie|secret)\b(\s*[:=]\s*)([^\s,;&]+)"
+    r"cookie|set[_-]?cookie|secret|sig|signature|credential)\b(\s*[:=]\s*)([^\s,;&]+)"
 )
 _BEARER_RE: Final = re.compile(r"(?i)\bBearer\s+[^\s,;]+")
 _PRIVATE_KEY_RE: Final = re.compile(

@@ -101,3 +101,7 @@ visual layout. This change does not itself constitute a human NVDA test.
 
 No new dependency, generic logging framework, database, workflow permission or release authority is
 introduced.
+
+Signed-storage authority is also removed from inline error text (such as
+`Signature=...`, `sig=...` or `X-Amz-Credential=...`) when no parseable URL is
+present. Ordinary non-secret `credential_id` and signature status remain visible.
