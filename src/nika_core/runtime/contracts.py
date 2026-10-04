@@ -122,6 +122,10 @@ class RuntimeResumeProbe:
             raise ValueError("resume probe reason must not be empty")
         if len(self.reason) > _MAX_RESUME_PROBE_REASON_CHARS:
             raise ValueError("resume probe reason is too long")
+        try:
+            self.reason.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("resume probe reason must be valid UTF-8") from None
         if self.checkpoint_id is not None:
             if type(self.checkpoint_id) is not str:
                 raise TypeError("checkpoint_id must be an exact string when provided")
@@ -131,8 +135,15 @@ class RuntimeResumeProbe:
                 raise ValueError("checkpoint_id must not have surrounding whitespace")
             if len(self.checkpoint_id) > _MAX_RESUME_CHECKPOINT_ID_CHARS:
                 raise ValueError("checkpoint_id is too long")
-            if any(ord(char) < 32 or ord(char) == 127 for char in self.checkpoint_id):
-                raise ValueError("checkpoint_id must not contain control characters")
+            try:
+                self.checkpoint_id.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("checkpoint_id must be valid UTF-8") from None
+            if any(
+                unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+                for char in self.checkpoint_id
+            ):
+                raise ValueError("checkpoint_id must not contain control or format characters")
         if self.status is RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
             raise ValueError("ready resume probe requires checkpoint_id")
 
