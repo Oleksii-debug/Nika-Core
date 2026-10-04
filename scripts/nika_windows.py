@@ -492,7 +492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, RuntimeError, sqlite3.Error):
         # Cleanup failures must not override the safe windowless error presentation.
         show_recovery_error(
-            "Помилка відкриття вікна або завершення роботи Ніки. "
+            "Не вдалося відкрити вікно Ніки або завершити роботу застосунку. "
             "Перевірте компоненти Windows і локальні дані перед наступним запуском."
         )
         return 1
