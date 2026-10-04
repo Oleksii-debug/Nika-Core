@@ -269,8 +269,18 @@ def _stream_contains_secret_assignment(handle: Any) -> bool:
         overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
 
 
+def _release_content_requires_secret_scan(relative_path: str) -> bool:
+    path = PurePosixPath(relative_path)
+    # .env.example is permitted by the path policy, but can still contain
+    # accidental live credentials; its .example suffix is not in the generic set.
+    return (
+        path.suffix.casefold() in _SECRET_CONTENT_SUFFIXES
+        or path.name.casefold() == ".env.example"
+    )
+
+
 def _release_file_contains_secret_assignment(relative_path: str, path: Path) -> bool:
-    if PurePosixPath(relative_path).suffix.casefold() not in _SECRET_CONTENT_SUFFIXES:
+    if not _release_content_requires_secret_scan(relative_path):
         return False
     try:
         with path.open("rb") as handle:
@@ -283,7 +293,7 @@ def _archive_member_contains_secret_assignment(
     archive: zipfile.ZipFile,
     member: zipfile.ZipInfo,
 ) -> bool:
-    if PurePosixPath(_zip_member_path(member)).suffix.casefold() not in _SECRET_CONTENT_SUFFIXES:
+    if not _release_content_requires_secret_scan(_zip_member_path(member)):
         return False
     with archive.open(member, "r") as handle:
         return _stream_contains_secret_assignment(handle)
