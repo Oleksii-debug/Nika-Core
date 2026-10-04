@@ -505,3 +505,80 @@ def test_frozen_model_projection_uses_canonical_task_decoder(
             V01PackagedTeamStateProvider._frozen_model_identity(
                 conn, shared_task_id=task.task_id
             )
+
+
+def test_surplus_foreign_errors_do_not_expand_packaged_projection(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "помилки з пробілами.db")
+    store.initialize()
+    _create_team(store)
+    with store.connection() as conn:
+        source = conn.execute(
+            "SELECT handoff_id FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND sender_id = 'worker' AND kind = 'result' LIMIT 1",
+            ("team-v01-71",),
+        ).fetchone()
+        assert source is not None
+        for index in range(64):
+            conn.execute(
+                "INSERT INTO multi_agent_handoffs("
+                "handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at) "
+                "SELECT ?, team_id, ?, recipient_id, 'error', correlation_id, ?, created_at "
+                "FROM multi_agent_handoffs WHERE handoff_id = ?",
+                (
+                    f"foreign-error-{index:03}",
+                    f"foreign-member-{index:03}",
+                    '{"raw":"UNRELATED_ERROR_CANARY"}',
+                    source["handoff_id"],
+                ),
+            )
+        conn.execute(
+            "INSERT INTO multi_agent_handoffs("
+            "handoff_id, team_id, sender_id, recipient_id, kind, "
+            "correlation_id, payload_json, created_at) "
+            "SELECT ?, team_id, sender_id, recipient_id, 'error', "
+            "correlation_id, payload_json, created_at "
+            "FROM multi_agent_handoffs WHERE handoff_id = ?",
+            ("real-worker-error", source["handoff_id"]),
+        )
+    provider = V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"), store=store
+    )
+    projected = provider()["v01_team_task"]
+    assert projected["available"] is True
+    members = {member["member_id"]: member for member in projected["members"]}
+    assert members["worker"]["safe_error"]["code"] == "member_failed"
+    assert "safe_error" not in members["checker"]
+    assert "UNRELATED_ERROR_CANARY" not in json.dumps(projected, ensure_ascii=False)
+    reopened = V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"), store=SQLiteStore(store.path)
+    )()["v01_team_task"]
+    assert reopened == projected
+
+
+def test_oversized_member_roster_fails_closed_after_restart(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "зайві учасники.db")
+    store.initialize()
+    _create_team(store)
+    with store.connection() as conn:
+        for index in range(64):
+            conn.execute(
+                "INSERT INTO multi_agent_members("
+                "team_id, member_id, parent_id, depth, agent_id, agent_version, "
+                "thread_id, tool_grants_json, state, resume_token, created_at, updated_at) "
+                "SELECT team_id, ?, parent_id, depth, agent_id, agent_version, ?, "
+                "tool_grants_json, state, resume_token, created_at, updated_at "
+                "FROM multi_agent_members WHERE team_id = ? AND member_id = 'worker'",
+                (f"extra-{index:03}", f"extra-thread-{index:03}", "team-v01-71"),
+            )
+    provider = V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"), store=store
+    )
+    expected = {
+        "available": False,
+        "message": "Стан командного завдання недоступний.",
+    }
+    assert provider()["v01_team_task"] == expected
+    assert V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"), store=SQLiteStore(store.path)
+    )()["v01_team_task"] == expected
