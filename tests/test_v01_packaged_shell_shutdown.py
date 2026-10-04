@@ -300,3 +300,105 @@ def test_session_teardown_preserves_single_interrupt_and_attempts_all_resources(
     assert closed == ["speech", "voice_model_setup", "voice", "backend"]
     session.close()
     assert closed == ["speech", "voice_model_setup", "voice", "backend"]
+
+
+def test_session_close_retries_only_pending_backend_after_work_settles() -> None:
+    calls: list[str] = []
+    resources_closed: set[str] = set()
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            if self.name not in resources_closed:
+                calls.append(self.name)
+                resources_closed.add(self.name)
+
+    class Backend:
+        def close(self) -> None:
+            calls.append("backend")
+            if calls.count("backend") == 1:
+                raise RuntimeError("cannot close desktop runtime loop while tasks are active")
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=Backend(),
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=Resource("speech"),
+    )
+
+    with pytest.raises(RuntimeError, match="cannot close desktop runtime loop"):
+        session.close()
+    assert session._closed is False
+    assert calls == ["speech", "voice_model_setup", "voice", "backend"]
+
+    session.close()
+    assert session._closed is True
+    session.close()
+    assert calls == ["speech", "voice_model_setup", "voice", "backend", "backend"]
+
+
+def test_session_close_preserves_first_failure_while_backend_requires_retry() -> None:
+    first_error = OSError("PRIVATE_SPEECH_FAILURE")
+    calls: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            calls.append(self.name)
+            if self.name == "speech" and calls.count("speech") == 1:
+                raise first_error
+
+    class Backend:
+        def close(self) -> None:
+            calls.append("backend")
+            if calls.count("backend") == 1:
+                raise RuntimeError("cannot close desktop runtime loop while tasks are active")
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=Backend(),
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=Resource("speech"),
+    )
+    with pytest.raises(OSError) as captured:
+        session.close()
+    assert captured.value is first_error
+    assert session._closed is False
+    session.close()
+    assert session._closed is True
+    assert calls.count("backend") == 2
+
+
+def test_session_close_does_not_retry_unrelated_backend_failure() -> None:
+    calls: list[str] = []
+
+    class Resource:
+        def close(self) -> None:
+            calls.append("resource")
+
+    class Backend:
+        def close(self) -> None:
+            calls.append("backend")
+            raise RuntimeError("different failure, not a pending task")
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=Backend(),
+        voice=Resource(),
+        voice_model_setup=Resource(),
+        speech=Resource(),
+    )
+    with pytest.raises(RuntimeError, match="different failure"):
+        session.close()
+    assert session._closed is True
+    session.close()
+    assert calls == ["resource", "resource", "resource", "backend"]
