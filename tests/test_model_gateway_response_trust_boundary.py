@@ -82,6 +82,12 @@ class _PoisonSuccessProvider:
             return replace(valid, provider_kind=ProviderKind.CLOUD)
         if self.mode == "text-not-string":
             return replace(valid, text=[_CANARY])  # type: ignore[arg-type]
+        if self.mode == "text-unpaired-high-surrogate":
+            return replace(valid, text="valid text \ud800")
+        if self.mode == "text-unpaired-low-surrogate":
+            return replace(valid, text="\udfff valid text")
+        if self.mode == "text-valid-unicode":
+            return replace(valid, text="Локальна відповідь 🧠")
         if self.mode == "model-not-text":
             return replace(valid, model=123)  # type: ignore[arg-type]
         if self.mode == "wrong-model":
@@ -171,6 +177,8 @@ def _request() -> ModelRequest:
         "wrong-provider-id",
         "wrong-provider-kind",
         "text-not-string",
+        "text-unpaired-high-surrogate",
+        "text-unpaired-low-surrogate",
         "model-not-text",
         "wrong-model",
         "usage-not-dto",
@@ -332,11 +340,14 @@ def test_signed_64_bit_token_metadata_is_still_accepted(tmp_path: Path) -> None:
     ]
 
 
-def test_valid_success_response_still_reaches_completed_audit(tmp_path: Path) -> None:
+@pytest.mark.parametrize("mode", ("valid", "text-valid-unicode"))
+def test_valid_success_response_still_reaches_completed_audit(
+    tmp_path: Path, mode: str
+) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     audit = AuditLog(store)
-    primary = _PoisonSuccessProvider("valid")
+    primary = _PoisonSuccessProvider(mode)
     fallback = _FallbackProvider()
     gateway = ModelGateway(audit_log=audit)
     gateway.register(primary)
@@ -347,6 +358,9 @@ def test_valid_success_response_still_reaches_completed_audit(tmp_path: Path) ->
     assert response.provider_id == "trusted"
     assert response.provider_kind is ProviderKind.LOCAL
     assert response.model == "fixture-model"
+    assert response.text == (
+        "Локальна відповідь 🧠" if mode == "text-valid-unicode" else "provider output"
+    )
     assert primary.complete_calls == 1
     assert fallback.complete_calls == 0
     events = audit.list_for(
