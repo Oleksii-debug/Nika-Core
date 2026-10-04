@@ -108,7 +108,11 @@ class ApiModelRouteConfig:
         # Never authorize one displayed hostname and send a credential to
         # another. Accept ordinary Unicode domains and their punycode spelling.
         try:
-            transport_host = httpx.URL(self.base_url).host
+            transport_url = httpx.URL(self.base_url)
+            transport_host = transport_url.host
+            outbound_port = transport_url.port
+            if outbound_port is not None and not 1 <= outbound_port <= 65535:
+                raise ValueError("invalid outbound HTTPS port")
         except (httpx.InvalidURL, ValueError) as exc:
             raise ValueError("API model route base_url has invalid HTTP authority") from exc
         expected_host = parsed.hostname.lower().rstrip(".")
