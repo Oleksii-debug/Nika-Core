@@ -160,6 +160,12 @@ class SemanticInteractionCoordinator:
         Adapter failure after an external action starts becomes UNCERTAIN and is never retried
         blindly.
         """
+        # Frozen dataclasses are still externally mutable via object.__setattr__.
+        # Detach the request and nested locator before observing or authorizing.
+        request = replace(
+            request,
+            locator=replace(request.locator, attributes=tuple(request.locator.attributes)),
+        )
         observed = self.adapter.observe()
         node = resolve_strict(observed, request.locator)
         # An adapter may reuse a mutable control carrier across observations.
