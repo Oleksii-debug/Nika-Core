@@ -555,3 +555,46 @@ def test_prepare_rechecks_lease_after_credential_authorization_callback(
     assert coordinator.nodes.is_active_for(foreign, other.request, now=NOW)
     assert coordinator._node_leases == {}
     assert coordinator._credential_leases == {}
+
+
+def test_prepare_releases_node_lease_when_health_callback_raises() -> None:
+    class FailingHealth:
+        def is_available(self, node_id: str) -> bool:
+            raise RuntimeError("simulated health transport outage")
+
+    coordinator, _, provider, _ = _coordinator()
+    spec = _spec("project-a", "messages")
+    coordinator.submit(spec, now=NOW)
+    coordinator.node_health = FailingHealth()
+    with pytest.raises(RuntimeError, match="simulated health transport outage"):
+        coordinator.prepare(spec.operation_id, now=NOW)
+    assert coordinator.nodes.snapshot().leases == ()
+    assert coordinator.get(spec.operation_id).state is OperationState.PENDING
+    assert provider.deploy_calls == []
+
+    coordinator.node_health = FakeNodeHealth()
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
+
+
+def test_prepare_releases_node_lease_when_broker_callback_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, credentials, provider, _ = _coordinator()
+    spec = _spec("project-a", "messages")
+    coordinator.submit(spec, now=NOW)
+    original = type(credentials).issue_lease
+
+    def failing_issue(self: CredentialBroker, **kwargs: object):
+        raise RuntimeError("simulated credential broker outage")
+
+    monkeypatch.setattr(type(credentials), "issue_lease", failing_issue)
+    with pytest.raises(RuntimeError, match="simulated credential broker outage"):
+        coordinator.prepare(spec.operation_id, now=NOW)
+    assert coordinator.nodes.snapshot().leases == ()
+    assert coordinator.get(spec.operation_id).state is OperationState.PENDING
+    assert provider.deploy_calls == []
+
+    monkeypatch.setattr(type(credentials), "issue_lease", original)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
