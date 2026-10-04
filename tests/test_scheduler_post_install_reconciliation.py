@@ -169,3 +169,51 @@ def test_terminal_task_during_install_suppresses_obsolete_runtime(
         resolver.assert_not_called()
     finally:
         adapter.shutdown()
+
+
+def test_obsolete_install_failure_recovers_durable_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    old = _job()
+    successor = replace(old, payload={"generation": "replacement"})
+    jobs.upsert(old)
+    original_install = adapter._install
+    installed: list[ScheduledJob] = []
+
+    def replace_and_fail_once(job: ScheduledJob) -> None:
+        original_install(job)
+        installed.append(job)
+        if job == old:
+            jobs.upsert(successor)
+            raise ValueError("obsolete trigger failed after replacement")
+
+    monkeypatch.setattr(adapter, "_install", replace_and_fail_once)
+    try:
+        assert adapter._sync_runtime_job(old.job_id) == successor
+        assert installed == [old, successor]
+        assert jobs.get(old.job_id) == successor
+        runtime = adapter._scheduler.get_job(old.job_id)
+        assert runtime is not None and runtime.args == (old.job_id, successor)
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
+
+
+def test_current_install_failure_remains_visible_without_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    current = _job()
+    jobs.upsert(current)
+    installer = Mock(side_effect=ValueError("invalid current trigger"))
+    monkeypatch.setattr(adapter, "_install", installer)
+    try:
+        with pytest.raises(ValueError, match="invalid current trigger"):
+            adapter._sync_runtime_job(current.job_id)
+        installer.assert_called_once_with(current)
+        assert jobs.get(current.job_id) == current
+        assert adapter._scheduler.get_job(current.job_id) is None
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
