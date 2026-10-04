@@ -412,3 +412,26 @@ def test_canonical_finite_json_number_round_trips(tmp_path):
         payload={"score": 1e308},
     )
     assert log.inspect()[0].payload == {"score": 1e308}
+
+@pytest.mark.parametrize(
+    ("url", "secret"),
+    [
+        ("https://s.example/file?X-Amz%252dSignature=double-secret", "double-secret"),
+        ("https://s.example/file?X-Amz%25252dSignature=triple-secret", "triple-secret"),
+        ("https://user%3Apass%40s.example/path", "pass"),
+        ("https://user%253Apass%2540s.example/path", "pass"),
+        ("https://s.example/?mode=safe%26sig%3Dseparator-secret", "separator-secret"),
+        ("https://s.example/?mode=safe%253Bsig%253Dnested-separator", "nested-separator"),
+    ],
+)
+def test_encoded_signed_url_authority_never_reaches_inspection(tmp_path, url, secret):
+    _, log = _make_log(tmp_path)
+    log.append(
+        event_type="provider.failed",
+        entity_type="task",
+        entity_id="encoded-authority",
+        payload={"url": url},
+    )
+    safe = log.inspect()[0].payload["url"]
+    assert secret not in safe
+    assert "REDACTED" in safe

@@ -372,6 +372,15 @@ def _redact_url(value: str, *, _depth: int = 0) -> str:
     if parts.scheme not in {"http", "https"} or not parts.netloc:
         return _REDACTED_URL
 
+    encoded_netloc = parts.netloc
+    for _ in range(3):
+        decoded_netloc = unquote(encoded_netloc)
+        if decoded_netloc == encoded_netloc:
+            break
+        encoded_netloc = decoded_netloc
+        if "@" in encoded_netloc and "@" not in parts.netloc:
+            return _REDACTED_URL
+
     hostname = parts.hostname or ""
     try:
         parsed_port = parts.port
@@ -389,13 +398,22 @@ def _redact_url(value: str, *, _depth: int = 0) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, safe_query, safe_fragment))
 
 
+def _normalized_query_name(name: str) -> str:
+    normalized = name.casefold().replace("-", "_")
+    for _ in range(3):
+        decoded = unquote(normalized).replace("-", "_")
+        if decoded == normalized:
+            break
+        normalized = decoded
+    return normalized
+
+
 def _redact_url_parameters(value: str, *, _depth: int) -> str:
     pairs = parse_qsl(value, keep_blank_values=True)
     safe_pairs: list[tuple[str, str]] = []
     changed = False
     for name, item in pairs:
-        normalized = name.casefold().replace("-", "_")
-        if normalized in _SECRET_QUERY_NAMES:
+        if _normalized_query_name(name) in _SECRET_QUERY_NAMES:
             safe_pairs.append((name, _REDACTED))
             changed = True
             continue
@@ -407,6 +425,17 @@ def _redact_url_parameters(value: str, *, _depth: int) -> str:
             if decoded_next == decoded:
                 break
             decoded = decoded_next
+        nested_secret = any(
+            _normalized_query_name(key) in _SECRET_QUERY_NAMES
+            for separator in ("&", ";")
+            for key, _ in parse_qsl(
+                decoded, keep_blank_values=True, separator=separator
+            )
+        )
+        if nested_secret:
+            safe_pairs.append((name, _REDACTED))
+            changed = True
+            continue
         if decoded.casefold().startswith(("http://", "https://")):
             if _redact_url(decoded, _depth=_depth + 1) != decoded:
                 safe_pairs.append((name, _REDACTED_URL))
