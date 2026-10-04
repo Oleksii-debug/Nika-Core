@@ -231,6 +231,21 @@ class DeploymentExecutionCoordinator:
                     updated_at=instant,
                 )
             )
+        # External health/credential callbacks may have changed node ownership.
+        # Recheck immediately before invoking the deployment provider.
+        effect_instant = _aware(now or datetime.now(UTC))
+        if not self.nodes.is_active_for(
+            node_lease, record.spec.request, now=effect_instant
+        ):
+            self._release_ephemeral(operation_id)
+            return self._save(
+                replace(
+                    record,
+                    state=OperationState.WAITING_FOR_NODE,
+                    node_id=None,
+                    updated_at=effect_instant,
+                )
+            )
         try:
             deployment = self.deployments.deploy(record.spec.intent)
         finally:
