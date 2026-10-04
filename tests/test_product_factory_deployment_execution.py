@@ -423,3 +423,38 @@ def test_disabled_node_blocks_prepared_deployment_before_provider() -> None:
     assert coordinator.retry(spec.operation_id, now=NOW).state is OperationState.PREPARED
     assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
     assert provider.deploy_calls == [spec.intent.intent_id]
+
+
+def test_node_reassignment_during_health_probe_is_fenced_before_provider() -> None:
+    @dataclass
+    class ReassigningHealth(FakeNodeHealth):
+        coordinator: DeploymentExecutionCoordinator | None = None
+        foreign_request: ExecutionRequest | None = None
+        probes: int = 0
+
+        def is_available(self, node_id: str) -> bool:
+            assert node_id
+            self.probes += 1
+            if self.probes == 2:
+                assert self.coordinator is not None
+                assert self.foreign_request is not None
+                original = self.coordinator.nodes.snapshot().leases[0]
+                self.coordinator.nodes.release(original.lease_id)
+                self.coordinator.nodes.acquire(self.foreign_request, now=NOW)
+            return True
+
+    health = ReassigningHealth()
+    coordinator, _, provider, _ = _coordinator(health=health)
+    first = _spec("project-a", "messages")
+    second = _spec("project-a", "profiles", SHA2)
+    health.coordinator = coordinator
+    health.foreign_request = second.request
+    coordinator.submit(first, now=NOW)
+    assert coordinator.prepare(first.operation_id, now=NOW).state is OperationState.PREPARED
+
+    waiting = coordinator.complete(first.operation_id, now=NOW)
+    assert health.probes == 2
+    assert waiting.state is OperationState.WAITING_FOR_NODE
+    assert provider.deploy_calls == []
+    (foreign_lease,) = coordinator.nodes.snapshot().leases
+    assert coordinator.nodes.is_active_for(foreign_lease, second.request, now=NOW)
