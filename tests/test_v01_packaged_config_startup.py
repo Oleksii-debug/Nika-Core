@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 import pytest
 from pydantic_settings import SettingsError
@@ -62,3 +63,62 @@ def test_settings_source_failure_does_not_expose_private_values_or_start_runtime
     assert len(messages) == 1
     assert "PRIVATE_SETTINGS_SOURCE_CANARY" not in messages[0]
     assert "Некоректні налаштування" in messages[0]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        sqlite3.DatabaseError("PRIVATE_DATABASE_CANARY"),
+        OSError("PRIVATE_STORAGE_PATH_CANARY"),
+        RuntimeError("PRIVATE_NEWER_SCHEMA_CANARY"),
+    ],
+)
+def test_storage_startup_failure_is_accessible_private_and_does_not_launch_shell(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+    messages: list[str] = []
+
+    def fail_open(_config: AppConfig) -> None:
+        raise failure
+
+    monkeypatch.setattr(nika_windows, "build_windows_session", fail_open)
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
+    monkeypatch.setattr(
+        nika_windows,
+        "launch_windows_shell",
+        lambda *_args, **_kwargs: pytest.fail("shell must not open on storage error"),
+    )
+
+    assert nika_windows.main([]) == 1
+    assert len(messages) == 1
+    assert "Не вдалося відкрити дані" in messages[0]
+    assert "PRIVATE_" not in messages[0]
+    assert not config.database_path.exists()
+
+
+def test_actual_corrupt_database_is_not_overwritten_during_failed_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database = tmp_path / "База даних" / "ніка.db"
+    database.parent.mkdir()
+    original_bytes = b"PRIVATE_CORRUPT_SQLITE_CANARY"
+    database.write_bytes(original_bytes)
+    config = AppConfig(database_path=database)
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+    messages: list[str] = []
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
+    monkeypatch.setattr(
+        nika_windows,
+        "launch_windows_shell",
+        lambda *_args, **_kwargs: pytest.fail("corrupt database must not open shell"),
+    )
+
+    assert nika_windows.main([]) == 1
+    assert len(messages) == 1
+    assert "PRIVATE_" not in messages[0]
+    assert database.read_bytes() == original_bytes
