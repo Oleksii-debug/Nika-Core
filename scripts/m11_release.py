@@ -211,6 +211,44 @@ def prove_packaged_voice_runtime(bundle_dir: Path, *, source_sha: str) -> Path:
     return target
 
 
+
+def _validate_first_pf11_payload(first: dict[str, object]) -> tuple[int, int]:
+    """Reject an invalid first proof before a second EXE can mutate the proof database."""
+    selection = first.get("selection_before_command")
+    if selection not in ("absent", "restored"):
+        raise RuntimeError("packaged PF11 proof lacks pre-command selection for attempt 1")
+    if selection != "absent":
+        raise RuntimeError("packaged PF11 first run did not start without a selection")
+    project_id = first.get("project_id")
+    if (
+        first.get("route") != "product_project"
+        or type(first.get("spec_version")) is not int
+        or first["spec_version"] != 1
+        or not isinstance(project_id, str)
+        or not project_id.strip()
+        or first.get("command_center_state_proven") is not True
+        or first.get("current_command_proven") is not True
+        or first.get("current_command_focus_proven") is not True
+        or first.get("restart_selection_integrity_proven") is not True
+        or first.get("bounded_projection_proven") is not True
+        or not isinstance(first.get("state"), str)
+        or not first["state"].strip()
+        or first.get("bridge_state_project_id") != project_id
+        or type(first.get("bridge_state_spec_version")) is not int
+        or first["bridge_state_spec_version"] != 1
+    ):
+        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
+    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
+    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
+    for forbidden_true in (
+        "human_tested",
+        "nvda_verified",
+        "production_release_ready",
+    ):
+        if first.get(forbidden_true) is not False:
+            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
+    return status_count, decision_count
+
 def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path:
     """Run the packaged executable twice and persist restart-bound PF11 evidence."""
     executable = bundle_dir / "NikaCore.exe"
@@ -259,18 +297,14 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
                 raise RuntimeError("packaged PF11 proof did not emit valid JSON evidence") from exc
             if not isinstance(payload, dict):
                 raise TypeError("packaged PF11 proof evidence must be a JSON object")
+            if attempt == 1:
+                status_count, decision_count = _validate_first_pf11_payload(payload)
             outputs.append(payload)
 
     first, second = outputs
-    # The first run starts with a fresh isolated DB; the second must actually
-    # observe its persisted selection before dispatch, not re-create it.
-    for attempt, payload in enumerate(outputs, start=1):
-        if payload.get("selection_before_command") not in ("absent", "restored"):
-            raise RuntimeError(
-                f"packaged PF11 proof lacks pre-command selection for attempt {attempt}"
-            )
-    if first["selection_before_command"] != "absent":
-        raise RuntimeError("packaged PF11 first run did not start without a selection")
+    # The first run is validated before executing the second process.
+    if second.get("selection_before_command") not in ("absent", "restored"):
+        raise RuntimeError("packaged PF11 proof lacks pre-command selection for attempt 2")
     if second["selection_before_command"] != "restored":
         raise RuntimeError("packaged PF11 restart did not restore pre-command selection")
     first_stable = {key: value for key, value in first.items() if key != "selection_before_command"}
@@ -279,35 +313,6 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     }
     if _proof_identity(first_stable) != _proof_identity(second_stable):
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
-    project_id = first.get("project_id")
-    if (
-        first.get("route") != "product_project"
-        or type(first.get("spec_version")) is not int
-        or first["spec_version"] != 1
-        or not isinstance(project_id, str)
-        or not project_id.strip()
-        or first.get("command_center_state_proven") is not True
-        or first.get("current_command_proven") is not True
-        or first.get("current_command_focus_proven") is not True
-        or first.get("restart_selection_integrity_proven") is not True
-        or first.get("bounded_projection_proven") is not True
-        or not isinstance(first.get("state"), str)
-        or not first["state"].strip()
-        or first.get("bridge_state_project_id") != project_id
-        or type(first.get("bridge_state_spec_version")) is not int
-        or first["bridge_state_spec_version"] != 1
-    ):
-        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
-    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
-    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
-    for forbidden_true in (
-        "human_tested",
-        "nvda_verified",
-        "production_release_ready",
-    ):
-        if first.get(forbidden_true) is not False:
-            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
-
     target = bundle_dir / _PF11_EVIDENCE_NAME
     evidence = {
         "schema_version": 2,
