@@ -388,3 +388,25 @@ def test_checkpoint_cannot_expand_beyond_persisted_page_limit(tmp_path: Path) ->
     with pytest.raises(ValueError, match="exceeds its policy"):
         paginated.run(task_id)
     assert requested == []
+
+
+def test_source_reassigned_to_another_workspace_cannot_run_old_task(
+    tmp_path: Path,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, _, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    ResearchRepository(store).upsert_workspace(ResearchWorkspace("foreign", "Foreign"))
+    web.register_source(
+        SourceSpec("root", "foreign", SourceKind.HTTP, "https://example.com/page")
+    )
+    with pytest.raises(ValueError, match="root source changed workspace"):
+        paginated.run(task_id)
+    assert requested == []
+    assert TaskQueue(store).get(task_id).state.value.casefold() == "ready"
