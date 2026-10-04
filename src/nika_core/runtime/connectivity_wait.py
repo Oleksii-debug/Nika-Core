@@ -94,6 +94,8 @@ class ConnectivityWaitService:
         )
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if self._jobs.get_with_connection(conn, job_id) is not None:
+                raise ValueError("connectivity wait job_id already exists")
             self._queue.transition_with_connection(conn, task_id, TaskState.WAITING_TOOL)
             self._jobs.upsert_with_connection(conn, job)
             self._audit.append_with_connection(
@@ -123,7 +125,7 @@ class ConnectivityWaitService:
         try:
             outer_binding = _decode_binding(outer_job)
         except (TypeError, ValueError):
-            self._reject_malformed(job_id)
+            self._reject_malformed(job_id, expected_job=outer_job)
             return ConnectivityWaitDecision(ScriptRetryDisposition.NOT_RETRYABLE, False)
         if not outer_job.enabled:
             return ConnectivityWaitDecision(
@@ -134,17 +136,18 @@ class ConnectivityWaitService:
 
         task_state = _read_task_state(self._queue.store, outer_binding.task_id)
         if task_state is None:
-            self._reject_malformed(job_id, reason="missing_task")
+            self._reject_malformed(job_id, expected_job=outer_job, reason="missing_task")
             return ConnectivityWaitDecision(ScriptRetryDisposition.NOT_RETRYABLE, False)
         if task_state is TaskState.CANCELLED:
             return self._disable_terminal(
                 job_id=job_id,
+                expected_job=outer_job,
                 binding=outer_binding,
                 disposition=ScriptRetryDisposition.CANCELLED,
                 reason="task_cancelled",
             )
         if task_state is not TaskState.WAITING_TOOL:
-            self._reject_malformed(job_id, reason="task_state_mismatch")
+            self._reject_malformed(job_id, expected_job=outer_job, reason="task_state_mismatch")
             return ConnectivityWaitDecision(
                 ScriptRetryDisposition.NOT_RETRYABLE,
                 False,
@@ -166,6 +169,7 @@ class ConnectivityWaitService:
         if initial.disposition in _TERMINAL_RETRY_DISPOSITIONS:
             return self._disable_terminal(
                 job_id=job_id,
+                expected_job=outer_job,
                 binding=outer_binding,
                 disposition=initial.disposition,
                 reason="retry_authority_terminal",
@@ -174,6 +178,7 @@ class ConnectivityWaitService:
         if initial.disposition is not ScriptRetryDisposition.READY:
             return self._disable_terminal(
                 job_id=job_id,
+                expected_job=outer_job,
                 binding=outer_binding,
                 disposition=initial.disposition,
                 reason="retry_authority_not_ready",
@@ -349,6 +354,7 @@ class ConnectivityWaitService:
         self,
         *,
         job_id: str,
+        expected_job: ScheduledJob,
         binding: _WaitBinding,
         disposition: ScriptRetryDisposition,
         reason: str,
@@ -359,6 +365,13 @@ class ConnectivityWaitService:
             job = self._jobs.get_with_connection(conn, job_id)
             if job is None:
                 return ConnectivityWaitDecision(disposition, False, binding.intent)
+            # Another wake/defer may have replaced this job since the outer read.
+            # Do not disable its schedule or block a task belonging to a stale binding.
+            if job != expected_job:
+                return ConnectivityWaitDecision(
+                    ScriptRetryDisposition.WAITING if job.enabled else ScriptRetryDisposition.PAUSED,
+                    False,
+                )
             state = _task_state_with_connection(conn, binding.task_id)
             if block_waiting_task and state is TaskState.WAITING_TOOL:
                 self._queue.transition_with_connection(conn, binding.task_id, TaskState.BLOCKED)
@@ -376,9 +389,17 @@ class ConnectivityWaitService:
             )
         return ConnectivityWaitDecision(disposition, False, binding.intent)
 
-    def _reject_malformed(self, job_id: str, *, reason: str = "invalid_payload") -> None:
+    def _reject_malformed(
+        self,
+        job_id: str,
+        *,
+        expected_job: ScheduledJob,
+        reason: str = "invalid_payload",
+    ) -> None:
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if self._jobs.get_with_connection(conn, job_id) != expected_job:
+                return
             self._jobs.set_enabled_with_connection(conn, job_id, False)
             self._audit_rejected_with_connection(conn, job_id, reason=reason)
 
