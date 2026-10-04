@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -504,6 +503,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             "та перезапустіть програму. Дані не змінено."
         )
         return 1
+    except Exception as exc:
+        # Unexpected configuration/source failures can also contain private values.
+        logging.getLogger(__name__).error(
+            "Packaged configuration failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося прочитати налаштування Nika. Збережіть наявні дані, "
+            "перевірте конфігурацію та повторіть запуск."
+        )
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
@@ -518,9 +527,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Запуск зупинено без автоматичного повторення дій."
         )
         return 1
-    except (sqlite3.Error, OSError, RuntimeError) as exc:
-        # A corrupt/newer database or inaccessible storage must not show traceback
-        # or its private path in a windowless Windows build.
+    except Exception as exc:
+        # All session-construction failures must fail closed before a UI exists.
+        # Exception messages can contain private paths, values or model details.
         logging.getLogger(__name__).error(
             "Packaged startup failed: exception_type=%s", type(exc).__name__
         )
