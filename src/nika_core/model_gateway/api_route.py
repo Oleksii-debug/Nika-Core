@@ -49,7 +49,7 @@ class EnvironmentCredentialResolver:
         if (
             not variable
             or variable != variable.strip()
-            or "\x00" in variable
+            or any(not char.isprintable() for char in variable)
             or "=" in variable
         ):
             raise CredentialResolutionError("credential reference is invalid")
@@ -83,8 +83,8 @@ class ApiModelRouteConfig:
                 raise ValueError(f"{name} must not be empty")
             if value != value.strip():
                 raise ValueError(f"{name} must not contain surrounding whitespace")
-            if "\x00" in value:
-                raise ValueError(f"{name} must not contain NUL")
+            if any(not char.isprintable() for char in value):
+                raise ValueError(f"{name} must not contain control characters")
         if not isinstance(self.supports_private_data, bool):
             raise TypeError("supports_private_data must be a boolean")
         if not isinstance(self.supports_hard_cancellation, bool):
