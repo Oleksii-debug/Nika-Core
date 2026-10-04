@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
 from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
@@ -167,3 +171,34 @@ def test_packaged_runtime_rejects_source_outside_declared_root_without_team(
         row = conn.execute("SELECT COUNT(*) AS count FROM multi_agent_teams").fetchone()
     assert row is not None
     assert int(row["count"]) == 0
+
+
+@pytest.mark.parametrize(
+    "persisted",
+    [
+        pytest.param("[]", id="array"),
+        pytest.param('{"v01_model_selection":"a","v01_model_selection":"b"}',
+                     id="ambiguous-model-selection"),
+        pytest.param('{"command":"Порівняй","score":NaN}', id="nonfinite"),
+        pytest.param(sqlite3.Binary(b'{"command":"valid"}'), id="blob"),
+    ],
+)
+def test_packaged_runtime_uses_canonical_task_payload_for_model_and_resume(
+    tmp_path: Path, persisted: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "Порівняй"},
+    )
+    assert runtime._task_has_model_selection(task.task_id) is False
+    assert runtime._stored_outer_command(task.task_id) == "Порівняй"
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (persisted, task.task_id),
+        )
+    with pytest.raises(TaskPayloadCorruptionError, match="пошкоджені"):
+        runtime._task_has_model_selection(task.task_id)
+    assert runtime._stored_outer_command(task.task_id) == ""

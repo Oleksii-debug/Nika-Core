@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -16,6 +15,7 @@ from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
 )
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent import (
     MultiAgentStore,
@@ -449,16 +449,12 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         return runtime
 
     def _task_has_model_selection(self, task_id: str) -> bool:
-        with self._sqlite.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        if row is None:
+        try:
+            payload = TaskQueue(self._sqlite).get(task_id).payload
+        except KeyError:
             return False
-        payload = json.loads(row["payload_json"])
-        if not isinstance(payload, dict):
-            raise TypeError("task payload must be an object")
+        # Use the kernel's unique-key, TEXT-only, finite-number decoder.
+        # Corruption must not downgrade a pinned model to deterministic mode.
         return _MODEL_SELECTION_FIELD in payload
 
     @staticmethod
@@ -594,18 +590,11 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             goal = str(handoff.get("user_goal", "")).strip()
             if goal:
                 return goal
-        with self._sqlite.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        if row is None:
-            return ""
         try:
-            payload = json.loads(row["payload_json"])
-        except (TypeError, ValueError):
-            return ""
-        if not isinstance(payload, dict):
+            payload = TaskQueue(self._sqlite).get(task_id).payload
+        except (KeyError, TaskPayloadCorruptionError):
+            # Resume must fail through its RuntimeResult contract, never
+            # reconstruct a command from ambiguous or corrupt stored data.
             return ""
         return str(payload.get("command", "")).strip()
 
