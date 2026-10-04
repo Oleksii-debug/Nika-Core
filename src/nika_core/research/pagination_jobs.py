@@ -161,12 +161,28 @@ class PaginatedResearchRefreshService:
                 raise ValueError("paginated Research checkpoint source belongs to another workspace")
             if position > 0 and item.source_id != _page_source_id(root_source_id, source.url):
                 raise ValueError("paginated Research checkpoint page source identity is invalid")
-            # A completed page may use its registered URL or its recorded redirect,
-            # but arbitrary checkpoint URLs must not poison the visited frontier.
-            if position < next_index:
-                if item.url not in {source.url, source.final_url}:
+            # A completed page may use its registered URL or a recorded redirect.
+            # An older redirect can remain valid after another refresh changes the
+            # source's current final URL. Bind historical evidence to this task.
+            if position < next_index and item.url not in {source.url, source.final_url}:
+                with self._network._store.connection() as conn:
+                    recorded = conn.execute(
+                        """SELECT 1 FROM research_http_attempts
+                        WHERE task_id=? AND source_id=? AND final_url=?
+                        AND disposition IN (?, ?, ?)
+                        LIMIT 1""",
+                        (
+                            task_id,
+                            item.source_id,
+                            item.url,
+                            RefreshDisposition.CHANGED.value,
+                            RefreshDisposition.UNCHANGED.value,
+                            RefreshDisposition.NOT_MODIFIED.value,
+                        ),
+                    ).fetchone()
+                if recorded is None:
                     raise ValueError("paginated Research checkpoint processed URL changed")
-            elif item.url != source.url:
+            elif position >= next_index and item.url != source.url:
                 raise ValueError("paginated Research checkpoint pending URL changed")
         return frontier, next_index, *counts
 
