@@ -244,10 +244,14 @@ class ModelGateway:
         authorizer = self._cloud_effect_authorizer
         if authorizer is not None:
             try:
-                authorizer.authorize_cloud_effect(
+                result = authorizer.authorize_cloud_effect(
                     request=request,
                     provider=capabilities,
                 )
+                # This is a synchronous, exception-based authority contract.
+                # False, True or an unawaited async result cannot grant access.
+                if result is not None:
+                    raise PermissionError("cloud authorizer returned invalid authority")
                 return
             except Exception:  # noqa: BLE001, S110
                 pass
@@ -384,6 +388,9 @@ class ModelGateway:
             or provider_id != trusted_provider_id
             or provider_kind is not trusted_provider_kind
             or type(text) is not str
+            # Model text reaches UTF-8 persistence and the Windows UI. Never
+            # publish a success DTO containing an unpaired UTF-16 surrogate.
+            or any(0xD800 <= ord(character) <= 0xDFFF for character in text)
             or type(model) is not str
             or not model
             or (request.model is None and not _is_canonical_identity(model))

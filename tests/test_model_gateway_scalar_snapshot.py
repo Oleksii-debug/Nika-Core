@@ -158,3 +158,21 @@ def test_provider_owned_scalar_subclasses_fail_before_completed_audit(mode: str)
         "model.requested",
         "model.failed",
     ]
+
+
+@pytest.mark.parametrize("content", ("приклад\ud800", "\udfff invalid"))
+def test_model_message_rejects_non_utf8_text(content: str) -> None:
+    with pytest.raises(ValueError, match="valid Unicode text"):
+        ModelMessage(role="user", content=content)
+
+
+def test_request_resnapshots_message_text_and_keeps_valid_unicode() -> None:
+    message = ModelMessage(role="user", content="Українська 🧠\nДругий рядок")
+    request = ModelRequest(request_id="valid-unicode", messages=(message,))
+    assert request.messages[0].content == "Українська 🧠\nДругий рядок"
+
+    # A frozen caller-owned DTO can still be mutated via object.__setattr__.
+    # Revalidation in ModelRequest must reject the poisoned message before IO.
+    object.__setattr__(message, "content", "приклад\ud800")
+    with pytest.raises(ValueError, match="valid Unicode text"):
+        ModelRequest(request_id="poisoned-message", messages=(message,))

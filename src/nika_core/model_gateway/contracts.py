@@ -78,6 +78,8 @@ class ModelMessage:
             raise TypeError("message content must be text")
         if not self.content.strip():
             raise ValueError("message content must not be empty")
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in self.content):
+            raise ValueError("message content must be valid Unicode text")
 
 
 @dataclass(frozen=True, slots=True)
