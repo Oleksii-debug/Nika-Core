@@ -431,6 +431,12 @@ class ConnectivityWaitService:
     def _activate_runtime(self, job: ScheduledJob) -> None:
         if self._scheduler is None:
             return
+        # A persisted-only activation never rewrites a durable replacement.
+        # Use the canonical adapter's latest-state reconciliation where supported.
+        activate_persisted = getattr(self._scheduler, "activate_persisted", None)
+        if callable(activate_persisted):
+            activate_persisted(job)
+            return
         # Durable state may have changed after defer/reschedule committed.
         # In particular APSchedulerAdapter.upsert() persists its argument, so
         # activating an obsolete snapshot would overwrite a successor job.
