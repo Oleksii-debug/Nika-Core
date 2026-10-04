@@ -19,6 +19,9 @@ from nika_core.resources.contracts import (
 )
 
 
+_SQLITE_MAX_INT64 = (1 << 63) - 1
+
+
 @dataclass(frozen=True, slots=True)
 class ResourceDecision:
     granted: bool
@@ -550,8 +553,9 @@ def _validate_budget(budget: ResourceBudget) -> None:
         isinstance(budget.max_concurrent, bool)
         or not isinstance(budget.max_concurrent, int)
         or budget.max_concurrent <= 0
+        or budget.max_concurrent > _SQLITE_MAX_INT64
     ):
-        raise ValueError("max_concurrent must be a positive integer")
+        raise ValueError("max_concurrent must be a positive SQLite-sized integer")
     for name, value in (
         ("max_cpu_percent", budget.max_cpu_percent),
         ("max_memory_percent", budget.max_memory_percent),
@@ -566,6 +570,9 @@ def _validate_budget(budget: ResourceBudget) -> None:
             raise ValueError(f"{name} must be a finite number in the range (0, 100]")
     memory_bytes = budget.max_process_memory_bytes
     if memory_bytes is not None and (
-        isinstance(memory_bytes, bool) or not isinstance(memory_bytes, int) or memory_bytes <= 0
+        isinstance(memory_bytes, bool)
+        or not isinstance(memory_bytes, int)
+        or memory_bytes <= 0
+        or memory_bytes > _SQLITE_MAX_INT64
     ):
-        raise ValueError("max_process_memory_bytes must be a positive integer or None")
+        raise ValueError("max_process_memory_bytes must be a positive SQLite-sized integer or None")
