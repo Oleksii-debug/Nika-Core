@@ -255,3 +255,33 @@ def test_paginated_refresh_resumes_from_checkpoint_without_refetching_completed_
     assert completed.processed == 2
     assert completed.total == 2
     assert requested == ["/page", "/page2"]
+
+
+def test_bad_next_url_does_not_stop_paginated_refresh(tmp_path: Path) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        if request.url.path == "/page":
+            body = (
+                b'<link rel="next" href="https://example.com:invalid/skip">'
+                b'<link rel="next" href="https://u:p@example.com/skip">'
+                b'<link rel="next" href="/page2">'
+            )
+        else:
+            body = b"<html><body>Page two</body></html>"
+        return httpx.Response(200, headers={"Content-Type": "text/html"}, content=body)
+
+    _, network, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    summary = paginated.run(paginated.create_job(root_source_id="root"))
+
+    assert summary.state == "completed"
+    assert summary.processed == 2
+    assert summary.total == 2
+    assert summary.failed == 0
+    assert requested == ["/page", "/page2"]
+    assert {source.url for source in network.list_sources("ws")} == {
+        "https://example.com/page",
+        "https://example.com/page2",
+    }
