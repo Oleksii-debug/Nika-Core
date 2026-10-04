@@ -12,6 +12,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.ui.desktop_backend import DesktopBackend
+from scripts import nika_windows
 
 
 class _Host:
@@ -147,3 +148,83 @@ def test_recovery_callback_contains_completed_interrupt(
     assert snapshot["status"] == "attention"
     assert snapshot["resume_failed_count"] == 1
     backend.close()
+
+
+@pytest.mark.parametrize("interrupt_type", [KeyboardInterrupt, SystemExit])
+def test_packaged_session_releases_all_resources_after_host_future_interrupt(
+    tmp_path: Path,
+    interrupt_type: type[BaseException],
+) -> None:
+    backend = _backend(tmp_path)
+    host = _Host()
+    backend._runtime_loop = host
+    interrupted = interrupt_type("PRIVATE_HOST_INTERRUPT")
+    future: Future[object] = Future()
+    future.set_exception(interrupted)
+    backend._packaged_futures.add(future)
+    closed: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=backend,
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=Resource("speech"),
+    )
+    with pytest.raises(interrupt_type) as caught:
+        session.close()
+
+    assert caught.value is interrupted
+    assert closed == ["speech", "voice_model_setup", "voice"]
+    assert host.closed
+    assert backend._runtime_loop is None
+    session.close()
+    assert closed == ["speech", "voice_model_setup", "voice"]
+
+
+def test_packaged_session_preserves_first_error_over_host_interrupt(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = _backend(tmp_path)
+    host = _Host()
+    backend._runtime_loop = host
+    interrupted: Future[object] = Future()
+    interrupted.set_exception(SystemExit("PRIVATE_HOST_INTERRUPT"))
+    backend._packaged_futures.add(interrupted)
+    closed: list[str] = []
+    speech_error = OSError("PRIVATE_SPEECH_CLOSE")
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            closed.append(self.name)
+            if self.name == "speech":
+                raise speech_error
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=backend,
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=Resource("speech"),
+    )
+    with caplog.at_level(logging.WARNING), pytest.raises(OSError) as caught:
+        session.close()
+
+    assert caught.value is speech_error
+    assert closed == ["speech", "voice_model_setup", "voice"]
+    assert host.closed
+    assert "component=backend exception_type=SystemExit" in caplog.text
+    assert "PRIVATE_" not in caplog.text
