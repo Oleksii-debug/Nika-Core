@@ -559,6 +559,12 @@ def test_completed_comparison_rejects_oversubscribed_handoff_history(
             (team_id,),
         ).fetchone()[0] > 2
 
+    def unexpected_decode(_raw: object) -> dict[str, object]:
+        raise AssertionError("surplus handoffs must reject before payload decoding")
+
+    monkeypatch.setattr(
+        "nika_core.v01_packaged_team_state._decode_task_payload", unexpected_decode
+    )
     corrupted = provider()["v01_team_task"]
     assert corrupted["final_result"]["comparison"] == {
         "status": "evidence_invalid",
