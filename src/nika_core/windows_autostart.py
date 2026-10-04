@@ -169,6 +169,9 @@ class WindowsAutostartService:
         return verified
 
     def disable(self) -> AutostartStatus:
+        # An invalid registry value is an error, not a removable STALE value.
+        # Callers must not erase it by bypassing the UI's disabled control.
+        self.status()
         self._backend.delete()
         verified = self.status()
         if verified.state is not AutostartState.DISABLED:
