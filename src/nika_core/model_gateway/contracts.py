@@ -51,11 +51,11 @@ def _has_readable_model_text(value: str) -> bool:
     return any(category(character)[0] in "LNPS" for character in value)
 
 
-# Directional embeddings/overrides and isolates change how otherwise readable
+# Directional marks, embeddings/overrides and isolates change how readable
 # text is presented to Windows UI and screen readers. Natural RTL letters,
 # newlines and the emoji zero-width joiner remain valid.
 _UNSAFE_BIDI_FORMAT_CONTROLS = frozenset(
-    "\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
 )
 
 
