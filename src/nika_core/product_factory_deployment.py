@@ -218,8 +218,22 @@ class ExecutionNodeRegistry:
             expires_at = _aware(lease.expires_at)
             if expires_at <= issued_at:
                 raise DeploymentFabricError("snapshot lease expiry must be after issue time")
-        if snapshot.next_lease < 1:
+        if type(snapshot.next_lease) is not int or snapshot.next_lease < 1:
             raise DeploymentFabricError("snapshot next lease counter is invalid")
+        for lease in snapshot.leases:
+            suffix = lease.lease_id.removeprefix("lease-")
+            if (
+                not lease.lease_id.startswith("lease-")
+                or not suffix.isascii()
+                or not suffix.isdecimal()
+                or len(suffix) > 32
+            ):
+                raise DeploymentFabricError("snapshot lease id is not canonical")
+            sequence = int(suffix)
+            if sequence < 1 or lease.lease_id != f"lease-{sequence:08d}":
+                raise DeploymentFabricError("snapshot lease id is not canonical")
+            if sequence >= snapshot.next_lease:
+                raise DeploymentFabricError("snapshot next lease counter collides with active lease")
         self._nodes = {node.identity.node_id: node for node in snapshot.nodes}
         self._leases = {lease.lease_id: lease for lease in snapshot.leases}
         self._next_lease = snapshot.next_lease
