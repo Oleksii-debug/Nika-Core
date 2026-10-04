@@ -35,6 +35,9 @@ class IdempotencyConflictError(RuntimeError):
 
 # Replayed external-effect evidence must not exhaust the Windows runtime stack.
 _MAX_RESULT_DEPTH = 128
+# Durable results have separate nesting, cardinality and byte budgets.
+_MAX_RESULT_NODES = 250_000
+_MAX_RESULT_BYTES = 8 * 1024 * 1024
 
 
 def _require_exact_text(value: object, *, field_name: str) -> str:
@@ -97,9 +100,15 @@ def _snapshot_json_value(
     *,
     active_containers: set[int] | None = None,
     depth: int = 0,
+    node_count: list[int] | None = None,
 ) -> Any:
     if depth > _MAX_RESULT_DEPTH:
         raise ValueError("idempotency result exceeds maximum nesting depth")
+    if node_count is None:
+        node_count = [0]
+    node_count[0] += 1
+    if node_count[0] > _MAX_RESULT_NODES:
+        raise ValueError("idempotency result exceeds maximum node count")
     value_type = type(value)
     if value_type not in {dict, list, tuple}:
         if isinstance(value, (dict, list, tuple)):
@@ -129,15 +138,26 @@ def _snapshot_json_value(
                     item,
                     active_containers=active_containers,
                     depth=depth + 1,
+                    node_count=node_count,
                 )
             return copied
         if value_type is list:
             return [
-                _snapshot_json_value(item, active_containers=active_containers, depth=depth + 1)
+                _snapshot_json_value(
+                    item,
+                    active_containers=active_containers,
+                    depth=depth + 1,
+                    node_count=node_count,
+                )
                 for item in value
             ]
         return tuple(
-            _snapshot_json_value(item, active_containers=active_containers, depth=depth + 1)
+            _snapshot_json_value(
+                    item,
+                    active_containers=active_containers,
+                    depth=depth + 1,
+                    node_count=node_count,
+                )
             for item in value
         )
     finally:
@@ -157,7 +177,9 @@ def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
             sort_keys=True,
             allow_nan=False,
         )
-        serialized.encode("utf-8", errors="strict")
+        encoded = serialized.encode("utf-8", errors="strict")
+        if len(encoded) > _MAX_RESULT_BYTES:
+            raise ValueError("idempotency result exceeds maximum UTF-8 byte length")
         return serialized
     except (TypeError, ValueError, UnicodeEncodeError, RecursionError) as exc:
         raise ValueError(
@@ -173,6 +195,10 @@ def _stored_result(row: sqlite3.Row) -> Mapping[str, Any] | None:
         raise RuntimeError(
             "persisted idempotency field result_json has invalid SQLite storage class"
         )
+    # A character-count precheck avoids parsing arbitrarily large persisted JSON;
+    # the canonical serializer also enforces the actual UTF-8 byte budget.
+    if len(raw) > _MAX_RESULT_BYTES:
+        raise RuntimeError("persisted idempotency result_json exceeds maximum byte length")
     try:
         decoded = json.loads(raw)
     except (TypeError, ValueError, RecursionError) as exc:
