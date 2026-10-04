@@ -662,10 +662,12 @@ class ModelGateway:
 
 def _is_canonical_identity(value: object) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and bool(value)
         and value == value.strip()
-        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+        # Keep provider/model identifiers valid for ordinary UTF-8 persistence
+        # and the Windows UI, including unpinned provider-returned model names.
+        and all(char.isprintable() for char in value)
     )
 
 
@@ -677,7 +679,7 @@ def _is_canonical_network_host(value: object) -> bool:
         and value == value.lower().rstrip(".")
         and "://" not in value
         and not any(char in value for char in "/\\?#@")
-        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+        and all(char.isprintable() and not char.isspace() for char in value)
     )
 
 
