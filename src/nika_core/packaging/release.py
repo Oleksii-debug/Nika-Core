@@ -565,14 +565,25 @@ def _zip_member_extra_finding(
         header = handle.read(30)
         if len(header) != 30 or header[:4] != b"PK\x03\x04":
             return "member-extra-format"
+        if (
+            int.from_bytes(header[6:8], "little") != member.flag_bits
+            or int.from_bytes(header[8:10], "little") != member.compress_type
+        ):
+            return "member-header-mismatch"
         filename_size = int.from_bytes(header[26:28], "little")
         extra_size = int.from_bytes(header[28:30], "little")
-        handle.seek(filename_size, 1)
+        local_name = handle.read(filename_size)
         local_extra = handle.read(extra_size)
     except (OSError, ValueError):
         return "member-extra-format"
-    if len(local_extra) != extra_size:
+    if len(local_name) != filename_size or len(local_extra) != extra_size:
         return "member-extra-format"
+    try:
+        encoding = "utf-8" if member.flag_bits & 0x800 else "cp437"
+        if local_name.decode(encoding) != member.filename:
+            return "member-local-path"
+    except UnicodeError:
+        return "member-local-path"
     return _zip_extra_field_finding(local_extra)
 
 
