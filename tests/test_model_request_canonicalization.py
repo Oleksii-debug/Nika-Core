@@ -71,7 +71,9 @@ def test_message_role_rejects_non_string_ambiguity() -> None:
         ModelMessage(role=True, content="content")  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize("content", ("", " ", "\t\n"))
+@pytest.mark.parametrize(
+    "content", ("", " ", "\t\n", "\u200b\ufeff", "\u0301\ufe0f")
+)
 def test_message_rejects_empty_or_whitespace_only_content(content: str) -> None:
     with pytest.raises(ValueError, match="message content must not be empty"):
         ModelMessage(role="user", content=content)
@@ -81,6 +83,23 @@ def test_message_preserves_meaningful_content_whitespace() -> None:
     message = ModelMessage(role="user", content="  preserve prompt spacing  ")
 
     assert message.content == "  preserve prompt spacing  "
+
+
+@pytest.mark.parametrize(
+    "content", ("Привіт\x00світ", "Привіт\x7fсвіт", "Привіт\x85світ")
+)
+def test_message_rejects_controls_before_provider_execution(content: str) -> None:
+    with pytest.raises(ValueError, match="unsafe control characters"):
+        ModelMessage(role="user", content=content)
+
+
+@pytest.mark.parametrize(
+    "content",
+    ("  Відповідь 👩\u200d💻\n", "\tУкраїнський текст\r\nДругий рядок"),
+)
+def test_message_preserves_readable_unicode_and_line_endings(content: str) -> None:
+    message = ModelMessage(role="user", content=content)
+    assert message.content == content
 
 
 def test_message_content_rejects_non_string_values() -> None:
