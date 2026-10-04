@@ -645,9 +645,9 @@ class DesktopBackend:
         implicit retry or hide the original submission exception.
         """
         try:
+            tracked = self._active_futures.get(task_id)
             if (
-                (task_id not in self._active_futures
-                 or self._active_futures[task_id].done())
+                (tracked is None or tracked.done())
                 and self._queue.get(task_id).state is TaskState.READY
             ):
                 self._queue.transition(task_id, TaskState.PAUSED)
