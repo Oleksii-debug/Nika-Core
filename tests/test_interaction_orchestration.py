@@ -391,3 +391,47 @@ def test_focus_navigation_rejects_stale_target_before_effect(tmp_path: Path) -> 
     with pytest.raises(StaleSnapshotError, match="changed after focus"):
         _coordinator(tmp_path, adapter, FakeLedger()).execute(_request())
     assert adapter.act_calls == 0
+
+
+def test_request_mutation_during_observation_cannot_swap_authorized_action(
+    tmp_path: Path
+) -> None:
+    request = _request()
+    save = ControlNode("save", "button", "Save")
+    seen: list[tuple[str, InteractionAction]] = []
+
+    class SwappingAdapter(FakeAdapter):
+        def observe(self) -> SemanticSnapshot:
+            if self.index == 1:
+                object.__setattr__(request, "action", InteractionAction.SET_VALUE)
+                object.__setattr__(request.locator, "name", "Delete")
+                object.__setattr__(request, "value", "unapproved replacement")
+            return super().observe()
+
+        def act(self, node: ControlNode, action: InteractionAction, value: str | None) -> None:
+            seen.append((node.name, action))
+            super().act(node, action, value)
+
+    adapter = SwappingAdapter([_snapshot(save), _snapshot(save), _snapshot(save)])
+    assert _coordinator(tmp_path, adapter, FakeLedger()).execute(request).succeeded
+    assert seen == [("Save", InteractionAction.INVOKE)]
+
+
+def test_request_risk_mutation_during_observation_cannot_bypass_approval(
+    tmp_path: Path
+) -> None:
+    request = _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+    save = ControlNode("save", "button", "Save")
+
+    class DowngradingAdapter(FakeAdapter):
+        def observe(self) -> SemanticSnapshot:
+            object.__setattr__(request, "risk", InteractionRisk.R0_OBSERVE)
+            return super().observe()
+
+    adapter = DowngradingAdapter([_snapshot(save), _snapshot(save)])
+    ledger = FakeLedger()
+    with pytest.raises(PermissionBlockedError):
+        _coordinator(tmp_path, adapter, ledger).execute(request)
+    assert adapter.act_calls == 0
+    assert ledger.reserved is True
+    assert ledger.released is True
