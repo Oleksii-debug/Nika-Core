@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -76,60 +75,26 @@ class ToolAuthorization:
             raise ValueError("tool authorization fingerprints must not be empty")
 
     def matches(self, *, spec: ToolSpec, call: ToolCall) -> bool:
-        return (
+        if not (
             self.tool_id == spec.tool_id == call.tool_id
             and self.task_id == call.task_id
             and self.risk is spec.risk
-            and self.arguments_fingerprint == tool_arguments_fingerprint(call.arguments)
-        )
-
-
-def _normalize_tool_json(value: object, *, path: str = "arguments") -> object:
-    if value is None or isinstance(value, (bool, int)):
-        return value
-    if isinstance(value, float):
-        if not (float("-inf") < value < float("inf")):
-            raise ValueError(f"{path} must not contain NaN or infinity")
-        return value
-    if isinstance(value, str):
-        normalized = unicodedata.normalize("NFC", value)
+        ):
+            return False
         try:
-            normalized.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise ValueError(f"{path} must be valid UTF-8 text") from exc
-        return normalized
-    if isinstance(value, (list, tuple)):
-        return [
-            _normalize_tool_json(item, path=f"{path}[{index}]")
-            for index, item in enumerate(value)
-        ]
-    if isinstance(value, Mapping):
-        normalized: dict[str, object] = {}
-        for raw_key, raw_value in value.items():
-            if not isinstance(raw_key, str):
-                raise TypeError(f"{path} keys must be strings")
-            key = unicodedata.normalize("NFC", raw_key)
-            try:
-                key.encode("utf-8")
-            except UnicodeEncodeError as exc:
-                raise ValueError(f"{path} key must be valid UTF-8 text") from exc
-            if key in normalized:
-                raise ValueError(f"{path} contains duplicate normalized key {key!r}")
-            normalized[key] = _normalize_tool_json(raw_value, path=f"{path}.{key}")
-        return normalized
-    raise ValueError(f"{path} contains unsupported value type {type(value).__name__}")
+            return self.arguments_fingerprint == tool_arguments_fingerprint(call.arguments)
+        except (TypeError, ValueError):
+            # Malformed model/tool arguments are never affirmative authorization.
+            return False
 
 
 def tool_arguments_fingerprint(arguments: Mapping[str, object]) -> str:
-    normalized = _normalize_tool_json(arguments)
-    encoded = json.dumps(
-        normalized,
-        allow_nan=False,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    # The security authority owns bounded NFC/JSON admission for both ActionIntent
+    # and direct tool calls. Import lazily to avoid the policy -> tools import cycle.
+    from nika_core.security.policy import _canonical_arguments
+
+    encoded, _frozen = _canonical_arguments(arguments)
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +234,9 @@ class ToolEffectGuard:
             "tool_id": spec.tool_id,
         }
         try:
+            # Direct ToolEffectGuard.reserve is also a public admission path:
+            # bound the arguments before assembling the durable payload.
+            tool_arguments_fingerprint(call.arguments)
             encoded = json.dumps(
                 payload,
                 allow_nan=False,
