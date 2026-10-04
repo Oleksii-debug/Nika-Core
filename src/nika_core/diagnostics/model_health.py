@@ -301,25 +301,29 @@ class OllamaModelHealthProbe:
         stream = getattr(client, "stream", None)
         if not callable(stream):
             return client.get(url)
-        with stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
-            if not OllamaModelHealthProbe._successful_response(response):
-                return httpx.Response(status_code=response.status_code)
-            if response.headers.get("content-encoding", "identity").lower() != "identity":
-                return None
-            declared = response.headers.get("content-length")
-            if declared is not None and (
-                not declared.isascii()
-                or not declared.isdecimal()
-                or len(declared) > 7
-                or int(declared) > _MAX_CATALOG_BYTES
-            ):
-                return None
-            payload = bytearray()
-            for chunk in response.iter_raw(chunk_size=16384):
-                if len(chunk) > _MAX_CATALOG_BYTES - len(payload):
+        try:
+            with stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
+                if not OllamaModelHealthProbe._successful_response(response):
+                    return httpx.Response(status_code=response.status_code)
+                if response.headers.get("content-encoding", "identity").lower() != "identity":
                     return None
-                payload.extend(chunk)
-            return httpx.Response(status_code=response.status_code, content=bytes(payload))
+                declared = response.headers.get("content-length")
+                if declared is not None and (
+                    not declared.isascii()
+                    or not declared.isdecimal()
+                    or len(declared) > 7
+                    or int(declared) > _MAX_CATALOG_BYTES
+                ):
+                    return None
+                payload = bytearray()
+                for chunk in response.iter_raw(chunk_size=16384):
+                    if len(chunk) > _MAX_CATALOG_BYTES - len(payload):
+                        return None
+                    payload.extend(chunk)
+                return httpx.Response(status_code=response.status_code, content=bytes(payload))
+        except httpx.StreamError:
+            # A consumed/invalid injected stream is not reliable health evidence.
+            return None
 
     def _presence_from_response(self, response: httpx.Response) -> ModelHealthFact:
         if not self._successful_response(response):
