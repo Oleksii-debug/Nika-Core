@@ -128,6 +128,17 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 status=RuntimeResumeProbeStatus.INVALID,
                 reason="Persisted V0.1 runtime cursor does not match task identity.",
             )
+        if self._is_member_thread(thread_id):
+            shared_task_id = self._member_shared_task_id(
+                task_id=task_id, thread_id=thread_id
+            )
+        else:
+            shared_task_id = task_id
+        if shared_task_id is None or not self._stored_outer_command(shared_task_id):
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.INVALID,
+                reason="Persisted V0.1 task cannot be safely reconstructed.",
+            )
         checkpoint = hashlib.sha256(
             f"v01-packaged-checkpoint\0{expected}".encode()
         ).hexdigest()
@@ -139,6 +150,10 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         if self._is_member_thread(request.thread_id):
+            if self._member_shared_task_id(
+                task_id=request.task_id, thread_id=request.thread_id
+            ) is None:
+                return self._failed()
             return await self._run_member_from_store(thread_id=request.thread_id)
         command = str(request.payload.get("command", "")).strip()
         if not command:
@@ -156,6 +171,11 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 error_code=RuntimeErrorCode.INVALID_RESUME,
             )
         if self._is_member_thread(request.thread_id):
+            shared_task_id = self._member_shared_task_id(
+                task_id=request.task_id, thread_id=request.thread_id
+            )
+            if shared_task_id is None or not self._stored_outer_command(shared_task_id):
+                return self._failed()
             return await self._run_member_from_store(thread_id=request.thread_id)
         command = self._stored_outer_command(request.task_id)
         if not command:
@@ -594,11 +614,42 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             handoff = self._multi_store.task_payload(team_id, "checker")
         except KeyError:
             handoff = None
+        except (TypeError, ValueError, RuntimeError):
+            # A corrupt durable checker handoff must not fall back to a new goal.
+            return ""
         if isinstance(handoff, Mapping):
             goal = str(handoff.get("user_goal", "")).strip()
             if goal:
                 return goal
         return str(task.payload.get("command", "")).strip() if task is not None else ""
+
+    def _member_shared_task_id(self, *, task_id: str, thread_id: str) -> str | None:
+        identity = self._member_identity(thread_id)
+        if identity is None:
+            return None
+        team_id, member_id = identity
+        if task_id != f"team:{team_id}:{member_id}":
+            return None
+        try:
+            handoff = self._multi_store.task_payload(team_id, member_id)
+        except (KeyError, TypeError, ValueError, RuntimeError):
+            return None
+        stage = handoff.get("stage")
+        if (
+            (member_id == "checker" and stage != "checker")
+            or (member_id in {"worker-a", "worker-b"} and stage != "source_worker")
+            or member_id not in {"checker", "worker-a", "worker-b"}
+        ):
+            return None
+        shared_task_id = handoff.get("shared_task_id")
+        if (
+            type(shared_task_id) is not str
+            or not shared_task_id
+            or shared_task_id != shared_task_id.strip()
+            or self._team_id(shared_task_id) != team_id
+        ):
+            return None
+        return shared_task_id
 
     @staticmethod
     def _failed() -> RuntimeResult:
