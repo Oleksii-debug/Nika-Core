@@ -94,15 +94,25 @@ class ConnectivityWaitService:
         )
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._queue.transition_with_connection(conn, task_id, TaskState.WAITING_TOOL)
-            self._jobs.upsert_with_connection(conn, job)
-            self._audit.append_with_connection(
-                conn,
-                event_type="runtime.connectivity_wait_deferred",
-                entity_type="scheduled_job",
-                entity_id=job_id,
-                payload=_audit_payload(task_id=task_id, intent=intent),
-            )
+            existing = self._jobs.get_with_connection(conn, job_id)
+            if existing is not None:
+                # Replaying the exact persisted defer after a scheduler failure
+                # may retry runtime activation, but may never rewrite task authority.
+                if (
+                    existing != job
+                    or _task_state_with_connection(conn, task_id) is not TaskState.WAITING_TOOL
+                ):
+                    raise ValueError("connectivity wait job_id already exists")
+            else:
+                self._queue.transition_with_connection(conn, task_id, TaskState.WAITING_TOOL)
+                self._jobs.upsert_with_connection(conn, job)
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="runtime.connectivity_wait_deferred",
+                    entity_type="scheduled_job",
+                    entity_id=job_id,
+                    payload=_audit_payload(task_id=task_id, intent=intent),
+                )
 
         # Durable DB state is already authoritative. If runtime installation fails, expose
         # that failure to the caller; scheduler startup can rehydrate the enabled DATE job.
@@ -123,7 +133,7 @@ class ConnectivityWaitService:
         try:
             outer_binding = _decode_binding(outer_job)
         except (TypeError, ValueError):
-            self._reject_malformed(job_id)
+            self._reject_malformed(job_id, expected_job=outer_job)
             return ConnectivityWaitDecision(ScriptRetryDisposition.NOT_RETRYABLE, False)
         if not outer_job.enabled:
             return ConnectivityWaitDecision(
@@ -134,17 +144,18 @@ class ConnectivityWaitService:
 
         task_state = _read_task_state(self._queue.store, outer_binding.task_id)
         if task_state is None:
-            self._reject_malformed(job_id, reason="missing_task")
+            self._reject_malformed(job_id, expected_job=outer_job, reason="missing_task")
             return ConnectivityWaitDecision(ScriptRetryDisposition.NOT_RETRYABLE, False)
         if task_state is TaskState.CANCELLED:
             return self._disable_terminal(
                 job_id=job_id,
+                expected_job=outer_job,
                 binding=outer_binding,
                 disposition=ScriptRetryDisposition.CANCELLED,
                 reason="task_cancelled",
             )
         if task_state is not TaskState.WAITING_TOOL:
-            self._reject_malformed(job_id, reason="task_state_mismatch")
+            self._reject_malformed(job_id, expected_job=outer_job, reason="task_state_mismatch")
             return ConnectivityWaitDecision(
                 ScriptRetryDisposition.NOT_RETRYABLE,
                 False,
@@ -166,6 +177,7 @@ class ConnectivityWaitService:
         if initial.disposition in _TERMINAL_RETRY_DISPOSITIONS:
             return self._disable_terminal(
                 job_id=job_id,
+                expected_job=outer_job,
                 binding=outer_binding,
                 disposition=initial.disposition,
                 reason="retry_authority_terminal",
@@ -174,6 +186,7 @@ class ConnectivityWaitService:
         if initial.disposition is not ScriptRetryDisposition.READY:
             return self._disable_terminal(
                 job_id=job_id,
+                expected_job=outer_job,
                 binding=outer_binding,
                 disposition=initial.disposition,
                 reason="retry_authority_not_ready",
@@ -182,12 +195,22 @@ class ConnectivityWaitService:
         # Observe before the SQLite write claim so simultaneous wake callers contend on
         # canonical durable authority rather than an in-process ownership flag.
         initially_available = self._probe.is_available()
+        # Never call host callbacks while holding SQLite's cross-process writer lock.
+        # The full scheduled-job snapshot is rechecked under that lock below.
+        available_now = initially_available and self._probe.is_available()
         runtime_job: ScheduledJob | None = None
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             job = self._jobs.get_with_connection(conn, job_id)
             if job is None:
                 return ConnectivityWaitDecision(ScriptRetryDisposition.NOT_RETRYABLE, False)
+            # The pre-probe snapshot is the only job this wake may consume.
+            # Guard the complete schedule/action identity before touching a successor.
+            if job != outer_job:
+                return ConnectivityWaitDecision(
+                    ScriptRetryDisposition.WAITING if job.enabled else ScriptRetryDisposition.PAUSED,
+                    False,
+                )
             try:
                 binding = _decode_binding(job)
             except (TypeError, ValueError):
@@ -200,13 +223,6 @@ class ConnectivityWaitService:
                     False,
                     binding.intent,
                 )
-            if not _same_binding(binding, outer_binding):
-                return ConnectivityWaitDecision(
-                    ScriptRetryDisposition.WAITING,
-                    False,
-                    binding.intent,
-                )
-
             state = _task_state_with_connection(conn, binding.task_id)
             if state is None:
                 self._jobs.set_enabled_with_connection(conn, job_id, False)
@@ -266,7 +282,6 @@ class ConnectivityWaitService:
                 self._audit_rejected_with_connection(conn, job_id, reason="retry_not_ready")
                 return ConnectivityWaitDecision(fresh.disposition, False, binding.intent)
 
-            available_now = initially_available and self._probe.is_available()
             if available_now:
                 self._queue.transition_with_connection(conn, binding.task_id, TaskState.RETRYING)
                 self._jobs.set_enabled_with_connection(conn, job_id, False)
@@ -349,6 +364,7 @@ class ConnectivityWaitService:
         self,
         *,
         job_id: str,
+        expected_job: ScheduledJob,
         binding: _WaitBinding,
         disposition: ScriptRetryDisposition,
         reason: str,
@@ -359,6 +375,13 @@ class ConnectivityWaitService:
             job = self._jobs.get_with_connection(conn, job_id)
             if job is None:
                 return ConnectivityWaitDecision(disposition, False, binding.intent)
+            # Another wake/defer may have replaced this job since the outer read.
+            # Do not disable its schedule or block a task belonging to a stale binding.
+            if job != expected_job:
+                return ConnectivityWaitDecision(
+                    ScriptRetryDisposition.WAITING if job.enabled else ScriptRetryDisposition.PAUSED,
+                    False,
+                )
             state = _task_state_with_connection(conn, binding.task_id)
             if block_waiting_task and state is TaskState.WAITING_TOOL:
                 self._queue.transition_with_connection(conn, binding.task_id, TaskState.BLOCKED)
@@ -376,9 +399,17 @@ class ConnectivityWaitService:
             )
         return ConnectivityWaitDecision(disposition, False, binding.intent)
 
-    def _reject_malformed(self, job_id: str, *, reason: str = "invalid_payload") -> None:
+    def _reject_malformed(
+        self,
+        job_id: str,
+        *,
+        expected_job: ScheduledJob,
+        reason: str = "invalid_payload",
+    ) -> None:
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if self._jobs.get_with_connection(conn, job_id) != expected_job:
+                return
             self._jobs.set_enabled_with_connection(conn, job_id, False)
             self._audit_rejected_with_connection(conn, job_id, reason=reason)
 
@@ -398,8 +429,21 @@ class ConnectivityWaitService:
         )
 
     def _activate_runtime(self, job: ScheduledJob) -> None:
-        if self._scheduler is not None:
-            self._scheduler.upsert(job)
+        if self._scheduler is None:
+            return
+        # A persisted-only activation never rewrites a durable replacement.
+        # Use the canonical adapter's latest-state reconciliation where supported.
+        activate_persisted = getattr(self._scheduler, "activate_persisted", None)
+        if callable(activate_persisted):
+            activate_persisted(job)
+            return
+        # Durable state may have changed after defer/reschedule committed.
+        # In particular APSchedulerAdapter.upsert() persists its argument, so
+        # activating an obsolete snapshot would overwrite a successor job.
+        current = self._jobs.get(job.job_id)
+        if current != job or not current.enabled:
+            return
+        self._scheduler.upsert(current)
 
 
 def _job_from_intent(
@@ -461,14 +505,6 @@ def _decode_binding(job: ScheduledJob) -> _WaitBinding:
     if job.trigger != expected_trigger:
         raise ValueError("retry wake time does not match durable retry intent")
     return _WaitBinding(task_id=task_id, operation_id=operation_id, intent=intent)
-
-
-def _same_binding(left: _WaitBinding, right: _WaitBinding) -> bool:
-    return (
-        left.task_id == right.task_id
-        and left.operation_id == right.operation_id
-        and left.intent.to_payload() == right.intent.to_payload()
-    )
 
 
 def _as_utc(value: datetime) -> datetime:

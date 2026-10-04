@@ -82,10 +82,16 @@ class APSchedulerAdapter(SchedulerPort):
                 return
             if not self._started:
                 return
-            replacement = BackgroundScheduler(timezone="UTC")
-            self._scheduler.shutdown(wait=wait)
-            self._scheduler = replacement
-            self._started = False
+            # Publish stopped state while holding the same lock as runtime
+            # reconciliation. A dispatch that observed _started before shutdown
+            # must not install a job into the new (stopped) scheduler afterward.
+            with self._runtime_sync_lock:
+                retiring_scheduler = self._scheduler
+                self._scheduler = BackgroundScheduler(timezone="UTC")
+                self._started = False
+            # Do not hold _runtime_sync_lock while waiting for running handlers:
+            # a handler may itself call upsert()/activate_persisted().
+            retiring_scheduler.shutdown(wait=wait)
 
     def upsert(self, job: ScheduledJob) -> None:
         if type(job) is not ScheduledJob:
@@ -99,6 +105,21 @@ class APSchedulerAdapter(SchedulerPort):
         elif not self._task_authority_allows(effective_job):
             effective_job = self._required_job(job_id)
         self._audit_change("scheduler.job_upserted", effective_job)
+
+    def activate_persisted(self, job: ScheduledJob) -> None:
+        """Reconcile an already-durable job without overwriting newer SQLite state.
+
+        ConnectivityWaitService atomically commits its task, job and audit before
+        runtime installation. Calling upsert() here would write a stale snapshot
+        if another process replaced the job between commit and activation.
+        The existing runtime synchronizer reads the latest durable authority
+        and installs only that snapshot; start() rehydrates when not running.
+        """
+        if type(job) is not ScheduledJob:
+            raise TypeError("job must be an exact ScheduledJob")
+        job_id = _require_job_id(job.job_id)
+        if self._started or self._starting:
+            self._sync_runtime_job(job_id)
 
     def remove(self, job_id: str) -> bool:
         job_id = _require_job_id(job_id)
@@ -149,6 +170,10 @@ class APSchedulerAdapter(SchedulerPort):
         # state. Serialize only live reconciliation so an older in-flight install
         # cannot overwrite the runtime state of a newer canonical adapter mutation.
         with self._runtime_sync_lock:
+            # Callers may have observed a running adapter before shutdown
+            # acquired this lock. Never populate the replacement scheduler.
+            if not self._started and not self._starting:
+                return None
             for _ in range(_SYNC_RETRY_LIMIT):
                 job = self._jobs.get(job_id)
                 if job is None or not job.enabled:
@@ -178,8 +203,27 @@ class APSchedulerAdapter(SchedulerPort):
                     self._install(current)
                 except Exception:
                     self._remove_runtime_job(job_id)
+                    # Failure of an obsolete trigger must not strand a valid
+                    # successor committed concurrently by another process.
+                    # Preserve the original failure if identity is unchanged.
+                    if self._jobs.get(job_id) != current:
+                        continue
                     raise
-                return current
+                # Another process may replace or disable the durable snapshot
+                # while APScheduler is installing it. Reconcile the successor
+                # instead of leaving a stale runtime job until its old trigger
+                # fires (whose dispatch authority would correctly reject it).
+                after_install = self._jobs.get(job_id)
+                if after_install != current:
+                    continue
+                if not self._task_authority_allows(after_install):
+                    if self._jobs.get(job_id) != after_install:
+                        continue
+                    self._remove_runtime_job(job_id)
+                    return None
+                if self._jobs.get(job_id) != after_install:
+                    continue
+                return after_install
             self._remove_runtime_job(job_id)
             return None
 
@@ -212,8 +256,22 @@ class APSchedulerAdapter(SchedulerPort):
                 return
         job = self._jobs.get(job_id)
         if job is None or not job.enabled:
+            # Cross-process disable/delete may leave an obsolete live trigger.
+            if self._started or self._starting:
+                self._sync_runtime_job(job_id)
             return
         if installed_job is not None and job != installed_job:
+            # A stale occurrence may be the successor's only wakeup. Avoid
+            # reinstalling an already-correct interval/cron trigger, because
+            # doing so can shift its next scheduled execution.
+            if self._started or self._starting:
+                runtime = self._scheduler.get_job(job_id)
+                if (
+                    runtime is None
+                    or runtime.args != (job_id, job)
+                    or self._jobs.get(job_id) != job
+                ):
+                    self._sync_runtime_job(job_id)
             return
         if not self._task_authority_allows(job):
             if self._started or self._starting:
