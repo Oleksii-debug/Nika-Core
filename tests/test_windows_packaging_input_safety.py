@@ -13,6 +13,8 @@ def _plan(tmp_path: Path) -> WindowsBuildPlan:
     assets = tmp_path / "web"
     assets.mkdir()
     (assets / "index.html").write_text("<main>Nika</main>", encoding="utf-8")
+    (assets / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (assets / "styles.css").write_text("body {}", encoding="utf-8")
     return WindowsBuildPlan(
         entrypoint, assets, tmp_path / "dist", tmp_path / "work", tmp_path / "spec"
     )
@@ -37,14 +39,17 @@ def test_missing_entrypoint_is_rejected(tmp_path: Path) -> None:
         plan.validate()
 
 
-def test_missing_or_empty_html_fails_before_packaging(tmp_path: Path) -> None:
+@pytest.mark.parametrize("required", ("index.html", "app.js", "styles.css"))
+def test_missing_or_empty_ui_file_fails_before_packaging(
+    tmp_path: Path, required: str
+) -> None:
     plan = _plan(tmp_path)
-    index = plan.web_assets / "index.html"
-    index.unlink()
-    with pytest.raises(ValueError, match="non-empty index.html"):
+    asset = plan.web_assets / required
+    asset.unlink()
+    with pytest.raises(ValueError, match=f"non-empty {required}"):
         plan.pyinstaller_args()
-    index.write_bytes(b"")
-    with pytest.raises(ValueError, match="non-empty index.html"):
+    asset.write_bytes(b"")
+    with pytest.raises(ValueError, match=f"non-empty {required}"):
         plan.pyinstaller_args()
 
 
