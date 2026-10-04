@@ -22,6 +22,9 @@ def _valid_proof() -> dict[str, object]:
         "spec_version": 1,
         "project_id": "project-1",
         "command_center_state_proven": True,
+        "current_command_proven": True,
+        "current_command_focus_proven": True,
+        "restart_selection_integrity_proven": True,
         "bounded_projection_proven": True,
         "bridge_state_project_id": "project-1",
         "bridge_state_spec_version": 1,
@@ -160,3 +163,34 @@ def test_failed_fsync_preserves_previous_pf11_evidence(
     bundle = tmp_path / "NikaCore"
     assert (bundle / "pf11-packaged-product-journey.json").read_bytes() == previous
     assert not tuple(bundle.glob(".pf11-proof-*.tmp"))
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "current_command_proven",
+        "current_command_focus_proven",
+        "restart_selection_integrity_proven",
+    ],
+)
+@pytest.mark.parametrize("value", [False, None])
+def test_missing_packaged_command_or_restart_evidence_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: bool | None,
+) -> None:
+    invalid = {**_valid_proof(), field: value}
+    payload = json.dumps(invalid)
+    with pytest.raises(RuntimeError, match="invalid route evidence"):
+        _run_proofs(tmp_path, monkeypatch, payload, payload)
+
+
+@pytest.mark.parametrize("state", [None, False, 1, "", "   "])
+def test_nontext_or_blank_product_state_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: object
+) -> None:
+    invalid = {**_valid_proof(), "state": state}
+    payload = json.dumps(invalid)
+    with pytest.raises(RuntimeError, match="invalid route evidence"):
+        _run_proofs(tmp_path, monkeypatch, payload, payload)
