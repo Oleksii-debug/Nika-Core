@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
