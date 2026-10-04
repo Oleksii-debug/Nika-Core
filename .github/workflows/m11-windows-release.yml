@@ -8,6 +8,7 @@ on:
       - "src/nika_core/ui/**"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
+      - "src/nika_core/reliability/recovery_lease.py"
       - "src/nika_core/product_command/**"
       - "src/nika_core/product_factory_packaged_journey.py"
       - "src/nika_core/product_project*.py"
@@ -28,6 +29,7 @@ on:
       - "tests/test_backup_restore_wal_stale_preview.py"
       - "tests/test_backup_restore_recovery_process_loss.py"
       - "tests/test_backup_restore_recovery_lease.py"
+      - "tests/test_backup_restore_recovery_lease_adversarial.py"
       - "tests/test_backup_restore_guardrails.py"
       - "tests/test_backup_restore_recovery.py"
       - "tests/test_m11_pf11_proof_integrity.py"
@@ -53,6 +55,7 @@ on:
       - "src/nika_core/ui/**"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
+      - "src/nika_core/reliability/recovery_lease.py"
       - "src/nika_core/product_command/**"
       - "src/nika_core/product_factory_packaged_journey.py"
       - "src/nika_core/product_project*.py"
@@ -73,6 +76,7 @@ on:
       - "tests/test_backup_restore_wal_stale_preview.py"
       - "tests/test_backup_restore_recovery_process_loss.py"
       - "tests/test_backup_restore_recovery_lease.py"
+      - "tests/test_backup_restore_recovery_lease_adversarial.py"
       - "tests/test_backup_restore_guardrails.py"
       - "tests/test_backup_restore_recovery.py"
       - "tests/test_m11_pf11_proof_integrity.py"
@@ -133,6 +137,7 @@ jobs:
           tests/test_backup_restore_wal_stale_preview.py
           tests/test_backup_restore_recovery_process_loss.py
           tests/test_backup_restore_recovery_lease.py
+          tests/test_backup_restore_recovery_lease_adversarial.py
           tests/test_backup_restore_guardrails.py
           tests/test_backup_restore_recovery.py
           tests/test_m11_pf11_proof_integrity.py
