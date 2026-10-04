@@ -121,17 +121,18 @@ def _invalid_utf8_event_type() -> RuntimeResult:
 
 
 
+
 def _invalid_control_event_type() -> RuntimeResult:
     return RuntimeResult(
         outcome=RuntimeOutcome.COMPLETED,
-        events=(RuntimeEvent(0, "runtime.proof\\x00forged"),),
+        events=(RuntimeEvent(0, "runtime.proof\x00forged"),),
     )
 
 
 def _invalid_bidi_event_type() -> RuntimeResult:
     return RuntimeResult(
         outcome=RuntimeOutcome.COMPLETED,
-        events=(RuntimeEvent(0, "runtime.proof\\u202eforged"),),
+        events=(RuntimeEvent(0, "runtime.proof\u202eforged"),),
     )
 
 
@@ -403,9 +404,10 @@ def test_malformed_cancel_acknowledgement_keeps_external_effect_uncertain(
         asyncio.run(coordinator.cancel(runtime, task_id=task_id, thread_id="thread-1"))
     assert runtime.cancel_calls == 1
 
+
 @pytest.mark.parametrize(
-    "character", ("\\x00", "\\n", "\\u007f", "\\u0085", "\\u2028", "\\u2029",
-                  "\\u202e", "\\u2066")
+    "character", ("\x00", "\n", "\u007f", "\u0085", "\u2028", "\u2029",
+                  "\u202e", "\u2066")
 )
 def test_runtime_event_type_control_characters_are_rejected(character):
     result = RuntimeResult(
