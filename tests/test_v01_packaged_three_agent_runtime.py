@@ -1413,3 +1413,60 @@ def test_corrupt_unicode_handoff_rejects_member_run_resume_and_cancel(
             current.cancel(task_id=member_task, thread_id=member_thread)
         ) is False
         assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize("corrupt_field", ("task_id", "thread_id"))
+def test_invalid_unicode_public_runtime_identity_fails_without_effects(
+    tmp_path: Path, corrupt_field: str
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    task_id = _created_task(store, "Compare the two declared local sources.")
+    values = {"task_id": task_id, "thread_id": f"desktop-{task_id}"}
+    values[corrupt_field] = "\ud800"
+    previous_results = _result_count(store)
+
+    with pytest.raises(ValueError, match="valid UTF-8 text"):
+        runtime.initial_resume_token(**values)
+    probe = asyncio.run(
+        runtime.probe_resume(**values, resume_token="v01:invalid")
+    )
+    assert probe.status is RuntimeResumeProbeStatus.INVALID
+    result = asyncio.run(
+        runtime.run(
+            RuntimeRequest(**values, payload={"command": "Compare the two declared local sources."})
+        )
+    )
+    assert result.outcome is RuntimeOutcome.FAILED
+    resumed = asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                **values,
+                resume_token="v01:invalid",
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    )
+    assert resumed.outcome is RuntimeOutcome.FAILED
+    assert asyncio.run(runtime.cancel(**values)) is False
+    assert _result_count(store) == previous_results
+    with store.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM multi_agent_teams").fetchone()[0]
+    assert count == 0
+
+
+@pytest.mark.parametrize(
+    ("task_id", "thread_id"),
+    ((None, "desktop"), ("task", None), (False, "desktop"), ("task", False)),
+)
+def test_direct_probe_and_cancel_reject_nontext_runtime_ids(
+    tmp_path: Path, task_id: object, thread_id: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token="v01:invalid"
+        )
+    )
+    assert probe.status is RuntimeResumeProbeStatus.INVALID
+    assert asyncio.run(runtime.cancel(task_id=task_id, thread_id=thread_id)) is False
+    assert _result_count(store) == 0
