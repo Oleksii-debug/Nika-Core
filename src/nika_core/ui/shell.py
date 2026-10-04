@@ -27,11 +27,16 @@ def launch_windows_shell(bridge: UIActionBridge, *, title: str = "Nika Core") ->
     packaged WebView2 host.
     """
 
+    # index.html can exist even when the JavaScript bridge or stylesheet was
+    # lost after packaging. Fail before opening a blank/unusable NVDA window.
+    for required in ("index.html", "app.js", "styles.css"):
+        path = web_asset_root() / required
+        if not path.is_file() or path.stat().st_size == 0:
+            raise FileNotFoundError(f"Відсутній або порожній ресурс інтерфейсу: {path}")
+
     import webview
 
     asset = index_path().resolve()
-    if not asset.is_file():
-        raise FileNotFoundError(f"UI entry point is missing: {asset}")
     window = webview.create_window(
         title,
         str(asset),

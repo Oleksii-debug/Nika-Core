@@ -125,6 +125,8 @@ def test_windows_plan_is_onedir_windowed_and_bundles_web_assets(tmp_path: Path) 
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
     plan = default_windows_plan(tmp_path)
     args = plan.pyinstaller_args()
     assert "--onedir" in args
