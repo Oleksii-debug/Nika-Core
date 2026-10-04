@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -38,6 +39,10 @@ class MemoryService:
         body = json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
         )
+        try:
+            body.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("memory JSON contains invalid Unicode") from exc
         with self._store.connection() as conn:
             existing = conn.execute(
                 "SELECT created_at FROM memory_records WHERE scope = ? AND owner_id = ? "
@@ -189,6 +194,14 @@ def _reject_memory_constant(value: str) -> None:
     raise ValueError(f"invalid stored memory JSON constant: {value}")
 
 
+def _finite_memory_float(number: str) -> float:
+    # JSON's finite-looking exponent can overflow the binary float decoder.
+    value = float(number)
+    if not math.isfinite(value):
+        raise ValueError("invalid stored memory JSON number")
+    return value
+
+
 def _unique_memory_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -224,7 +237,8 @@ def _record_from_row(row: Any) -> MemoryRecord:
     if type(body) is not str:
         raise ValueError("stored memory JSON must be text")
     value = json.loads(
-        body, parse_constant=_reject_memory_constant, object_pairs_hook=_unique_memory_pairs
+        body, parse_constant=_reject_memory_constant, parse_float=_finite_memory_float,
+        object_pairs_hook=_unique_memory_pairs
     )
     _validate_scalar_unicode(value)
     return MemoryRecord(

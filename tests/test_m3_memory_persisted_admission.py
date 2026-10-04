@@ -38,6 +38,9 @@ def _put(
         ("NaN", "invalid stored memory JSON constant"),
         ("Infinity", "invalid stored memory JSON constant"),
         ("-Infinity", "invalid stored memory JSON constant"),
+        ("1e400", "invalid stored memory JSON number"),
+        ("-1e400", "invalid stored memory JSON number"),
+        ('{"nested": [1e400]}', "invalid stored memory JSON number"),
         ('{"nested": [NaN]}', "invalid stored memory JSON constant"),
         ('{"key": 1, "key": 2}', "duplicate stored memory JSON object key"),
         ('{"nested": {"key": 1, "key": 2}}', "duplicate stored memory JSON object key"),
@@ -161,3 +164,46 @@ def test_valid_user_and_task_records_survive_restart(tmp_path: Path) -> None:
         assert record is not None
         assert record.value == {"safe": True}
         assert record.user_approved is approved
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "\ud800",
+        {"nested": ["\udfff"]},
+        {"\ud800": "invalid key"},
+    ],
+)
+def test_invalid_unicode_write_preserves_existing_record(tmp_path: Path, value: object) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with pytest.raises(ValueError, match="memory JSON contains invalid Unicode"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+            value=value,
+        )
+    record = memory.get(
+        scope=MemoryScope.TASK, owner_id="owner", namespace="scratch", key="entry"
+    )
+    assert record is not None and record.value == {"safe": True}
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 1
+
+
+def test_finite_exponent_still_rehydrates_after_restart(tmp_path: Path) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET value_json = ? WHERE memory_key = 'entry'",
+            ('{"range": [1e308, -1e308, 0.125]}',),
+        )
+    restarted = MemoryService(store)
+    record = restarted.get(
+        scope=MemoryScope.TASK, owner_id="owner", namespace="scratch", key="entry"
+    )
+    assert record is not None
+    assert record.value == {"range": [1e308, -1e308, 0.125]}
