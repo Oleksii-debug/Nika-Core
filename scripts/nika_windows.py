@@ -81,7 +81,9 @@ class WindowsBridgeSession:
                 if type(exc) is RuntimeError and (
                     (
                         name == "backend"
-                        and exc.args == ("cannot close desktop runtime loop while tasks are active",)
+                        and exc.args == (
+                            "cannot close desktop runtime loop while tasks are active",
+                        )
                     )
                     or (
                         name == "speech"
