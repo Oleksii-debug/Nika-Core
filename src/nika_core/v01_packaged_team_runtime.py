@@ -146,7 +146,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 reason="V0.1 task or thread identity is invalid.",
             )
         expected = self.initial_resume_token(task_id=task_id, thread_id=thread_id)
-        if resume_token != expected:
+        if type(resume_token) is not str or resume_token != expected:
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.INVALID,
                 reason="Persisted V0.1 runtime cursor does not match task identity.",
@@ -201,7 +201,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         if not self._valid_request_ids(request.task_id, request.thread_id):
             return self._failed()
         expected = self.initial_resume_token(task_id=request.task_id, thread_id=request.thread_id)
-        if request.resume_token != expected:
+        if type(request.resume_token) is not str or request.resume_token != expected:
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error="V0.1 durable resume cursor is invalid.",
