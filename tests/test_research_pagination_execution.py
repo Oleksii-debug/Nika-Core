@@ -477,3 +477,52 @@ def test_processed_checkpoint_accepts_recorded_final_redirect(
     assert summary.state == "completed"
     assert summary.processed == 1
     assert requested == []
+
+
+def test_processed_checkpoint_accepts_historical_task_redirect_after_new_refresh(
+    tmp_path: Path,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, network, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    historical_url = "https://example.com/previous-final"
+    network.record_attempt(
+        source_id="root",
+        attempt_number=1,
+        disposition=RefreshDisposition.CHANGED,
+        requested_url="https://example.com/page",
+        final_url=historical_url,
+        status_code=200,
+        error_code=None,
+        error_message="",
+        retryable=False,
+        task_id=task_id,
+    )
+    network.finalize_source(
+        "root",
+        disposition=RefreshDisposition.CHANGED,
+        final_url="https://example.com/new-final",
+        status_code=200,
+    )
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [{"source_id": "root", "url": historical_url}],
+            "next_index": 1,
+            "changed": 1,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+
+    summary = paginated.run(task_id)
+    assert summary.state == "completed"
+    assert summary.processed == 1
+    assert requested == []
