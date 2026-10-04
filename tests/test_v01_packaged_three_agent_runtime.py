@@ -613,6 +613,16 @@ def test_resume_rejects_malformed_or_mismatched_persisted_command(
         )
     ).outcome is RuntimeOutcome.FAILED
     assert _result_count(store) == prior_results
+    assert asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                payload={"command": command},
+            )
+        )
+    ).outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == prior_results
 
     reopened = V01PackagedThreeAgentRuntime(
         store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
@@ -692,3 +702,39 @@ def test_legacy_empty_checker_goal_uses_valid_durable_task_command(
             task_id=task_id, thread_id=thread_id, resume_token=token
         )
     ).status is RuntimeResumeProbeStatus.READY
+
+
+@pytest.mark.parametrize(
+    "stored_command",
+    [
+        pytest.param(True, id="nontext-stored-command"),
+        pytest.param("Changed after queueing.", id="stale-request-command"),
+    ],
+)
+def test_first_run_rejects_corrupt_or_rebound_durable_command_before_effects(
+    tmp_path: Path, stored_command: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (json.dumps({"command": stored_command}), task_id),
+        )
+    result = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert result.outcome is RuntimeOutcome.FAILED
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM multi_agent_teams").fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0] == 0
