@@ -776,3 +776,49 @@ def test_reschedule_skips_stale_runtime_activation_after_job_reassignment(
         "runtime.connectivity_wait_deferred",
         "runtime.connectivity_wait_rescheduled",
     ]
+
+
+def test_connectivity_service_prefers_persisted_only_scheduler_activation(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Persisted Scheduler Port" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    policy = RetryPolicy(max_retries=2, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 9, 3, 13, 0, tzinfo=UTC)
+    task_id = _running_task(queue)
+
+    class _PersistedOnlyScheduler(_RecordingScheduler):
+        def upsert(self, job: ScheduledJob) -> None:
+            raise AssertionError("connectivity must not use a durable scheduler upsert")
+
+        def activate_persisted(self, job: ScheduledJob) -> None:
+            self.jobs.append(job)
+
+    scheduler = _PersistedOnlyScheduler()
+    service = ConnectivityWaitService(
+        queue=queue,
+        jobs=jobs,
+        audit=audit,
+        probe=_ConnectivityProbe(available=False),
+        scheduler=scheduler,
+    )
+    service.defer(
+        task_id=task_id,
+        job_id="persisted-activation",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id="persisted-op", now=now),
+    )
+    assert scheduler.jobs == [jobs.get("persisted-activation")]
+
+    decision = service.evaluate(
+        job_id="persisted-activation",
+        policy=policy,
+        now=now + timedelta(seconds=2),
+        replay_safe=True,
+    )
+    assert decision.disposition is ScriptRetryDisposition.SCHEDULED
+    assert not decision.continuation_granted
+    assert scheduler.jobs[-1] == jobs.get("persisted-activation")
+    assert len(scheduler.jobs) == 2
+    assert queue.get(task_id).state is TaskState.WAITING_TOOL
