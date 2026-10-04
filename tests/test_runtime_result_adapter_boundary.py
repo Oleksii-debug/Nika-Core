@@ -11,6 +11,7 @@ from nika_core.kernel.task_state import TaskState
 from nika_core.runtime.contracts import (
     RuntimeCapability,
     RuntimeErrorCode,
+    RuntimeEvent,
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResult,
@@ -41,11 +42,56 @@ def _forged_result() -> RuntimeResult:
     return result
 
 
+def _forged_events() -> RuntimeResult:
+    result = RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+    object.__setattr__(result, "events", object())
+    return result
+
+
+def _forged_event_sequence() -> RuntimeResult:
+    event = RuntimeEvent(sequence=0, event_type="runtime.test")
+    object.__setattr__(event, "sequence", "0")
+    return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, events=(event,))
+
+
+def _invalid_event_payload() -> RuntimeResult:
+    event = RuntimeEvent(
+        sequence=0,
+        event_type="runtime.test",
+        payload={"unserializable": object()},
+    )
+    return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, events=(event,))
+
+
+def _forged_output() -> RuntimeResult:
+    result = RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+    object.__setattr__(result, "output", object())
+    return result
+
+
+def _forged_resume_token() -> RuntimeResult:
+    result = RuntimeResult(outcome=RuntimeOutcome.COMPLETED)
+    object.__setattr__(result, "resume_token", object())
+    return result
+
+
+def _forged_error() -> RuntimeResult:
+    result = RuntimeResult(outcome=RuntimeOutcome.FAILED, error="failure")
+    object.__setattr__(result, "error", object())
+    return result
+
+
 _BAD_RESULTS = (
     lambda: None,
     object,
     _HostileResult,
     _forged_result,
+    _forged_events,
+    _forged_event_sequence,
+    _invalid_event_payload,
+    _forged_output,
+    _forged_resume_token,
+    _forged_error,
     lambda: _ResultSubclass(outcome=RuntimeOutcome.COMPLETED),
 )
 
@@ -152,6 +198,23 @@ def test_valid_result_preserves_normal_coordinator_outcome_and_output(tmp_path):
     assert result == original
     assert result.output == {"done": True}
     assert queue.get(task_id).state is TaskState.COMPLETED
+
+
+def test_valid_runtime_events_are_snapshotted_before_audit(tmp_path):
+    _, queue, task_id, audit, coordinator = _ready(tmp_path)
+    original = RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.proof", {"status": "ok"}),),
+    )
+
+    result = asyncio.run(
+        coordinator.start(_Adapter(original), RuntimeRequest(task_id, "thread-1"))
+    )
+
+    assert result == original
+    assert queue.get(task_id).state is TaskState.COMPLETED
+    events = audit.list_for(entity_type="task", entity_id=task_id)
+    assert "runtime.proof" in [event.event_type for event in events]
 
 
 def test_canonical_result_rejects_forgery_without_consulting_hostile_properties():
