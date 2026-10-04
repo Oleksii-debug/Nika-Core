@@ -252,6 +252,10 @@ class V01ModelSettings:
                 "CREATE TABLE IF NOT EXISTS v01_model_settings_schema ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            if conn.execute(
+                "SELECT 1 FROM v01_model_settings_schema WHERE version < 1 LIMIT 1"
+            ).fetchone() is not None:
+                raise ModelSetupError("Версія налаштувань моделі некоректна.")
             current = (
                 conn.execute("SELECT MAX(version) FROM v01_model_settings_schema").fetchone()[0]
                 or 0
