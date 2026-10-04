@@ -203,14 +203,13 @@ try {
         # failed attempt left the test-owned registration completely absent.
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
         try {
-            $afterFailedEnable = if ($null -eq $key) {
-                $null
-            } else {
+            $afterFailedEnablePresent = $null -ne $key -and $key.GetValueNames() -ccontains 'NikaCore'
+            $afterFailedEnable = if ($afterFailedEnablePresent) {
                 $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-            }
+            } else { $null }
         } finally { if ($null -ne $key) { $key.Dispose() } }
 
-        if ($null -eq $afterFailedEnable) {
+        if ($null -eq $afterFailedEnable -and -not $afterFailedEnablePresent) {
             Write-Host 'Autostart enable attempt made no OS registration mutation; retrying once in a fresh process.'
             & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Enable
             if ($LASTEXITCODE -ne 0) {
@@ -232,14 +231,17 @@ try {
         # the OS proves that the failed attempt made no registration mutation at all.
         $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath)
         try {
-            $afterFailedDisable = if ($null -eq $key) {
-                $null
-            } else {
+            $afterFailedDisablePresent = $null -ne $key -and $key.GetValueNames() -ccontains 'NikaCore'
+            $afterFailedDisable = if ($afterFailedDisablePresent) {
                 $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-            }
+            } else { $null }
+            $afterFailedDisableKind = if ($afterFailedDisablePresent) {
+                $key.GetValueKind('NikaCore')
+            } else { $null }
         } finally { if ($null -ne $key) { $key.Dispose() } }
 
-        if ($afterFailedDisable -ceq $expectedCommand) {
+        if ($afterFailedDisable -ceq $expectedCommand -and
+            $afterFailedDisableKind -eq [Microsoft.Win32.RegistryValueKind]::String) {
             Write-Host 'Autostart disable attempt made no OS registration mutation; retrying once in a fresh process.'
             & $pwsh -NoProfile -File $proof -ExePath $ExePath -WindowTitle $WindowTitle -AutostartPhase Disable
             if ($LASTEXITCODE -ne 0) {
@@ -278,9 +280,17 @@ try {
     $key = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey($keyPath, $true)
     try {
         if ($null -ne $key) {
-            $current = $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
-            if ($current -ceq $expectedCommand) { $key.DeleteValue('NikaCore', $false) }
-            elseif ($null -ne $current) { Write-Warning 'A foreign registration appeared; left untouched.' }
+            $currentPresent = $key.GetValueNames() -ccontains 'NikaCore'
+            $current = if ($currentPresent) {
+                $key.GetValue('NikaCore', $null, [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+            } else { $null }
+            $currentKind = if ($currentPresent) { $key.GetValueKind('NikaCore') } else { $null }
+            if ($current -ceq $expectedCommand -and
+                $currentKind -eq [Microsoft.Win32.RegistryValueKind]::String) {
+                $key.DeleteValue('NikaCore', $false)
+            } elseif ($currentPresent) {
+                Write-Warning 'A foreign registration appeared; left untouched.'
+            }
         }
     } finally { if ($null -ne $key) { $key.Dispose() } }
 }
