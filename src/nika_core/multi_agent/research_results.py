@@ -190,11 +190,18 @@ def decode_source_result(
     # Check the item count before hashing worker-controlled evidence. A forged
     # result cannot demand unbounded serialization work to reach this limit.
     raw_result = _mapping(data["result_set"], "result_set")
-    raw_items = raw_result.get("items")
-    if isinstance(raw_items, list) and len(raw_items) > assignment.max_items:
+    _require_exact_keys(
+        raw_result, {"result_set_id", "workspace_id", "query", "created_at", "items"}, "result_set"
+    )
+    raw_items = raw_result["items"]
+    if not isinstance(raw_items, list):
+        raise SourceResultBindingError("result_set items must be a list")
+    if len(raw_items) > assignment.max_items:
         raise SourceResultBindingError("result exceeds assignment max_items")
 
     claimed_digest = _text(data["result_digest"], "result_digest")
+    if len(claimed_digest) != 64 or any(ch not in "0123456789abcdef" for ch in claimed_digest):
+        raise SourceResultBindingError("invalid result_digest")
     unsigned = {key: data[key] for key in data if key != "result_digest"}
     actual_digest = _payload_digest(unsigned)
     if not hmac.compare_digest(claimed_digest, actual_digest):
