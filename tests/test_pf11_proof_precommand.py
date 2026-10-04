@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
 
 from nika_core.config import AppConfig
 from nika_core.product_factory_packaged_journey import product_project_identity
-from nika_core.product_routing import route_command
+from nika_core.product_command.routing import route_command
 from scripts import nika_windows
 
 COMMAND = "Створи застосунок для керування витратами малого бізнесу"
@@ -58,7 +57,7 @@ def test_pf11_rejects_invalid_pre_command_state_without_dispatch(
         selected["status_count"] = True
 
     class InvalidBridge:
-        def get_state(self) -> Mapping[str, object] | object:
+        def get_state(self) -> object:
             return response
 
         def dispatch(self, _request: object) -> None:
