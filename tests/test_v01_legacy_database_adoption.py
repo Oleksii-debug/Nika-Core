@@ -229,6 +229,24 @@ def test_hardlink_alias_with_uncheckpointed_wal_is_ambiguous(tmp_path, alias_fir
         assert json.loads(_rows(source, "tasks")[0][4]) == {"from_wal": True}
 
 
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_broken_indirect_sidecar_makes_hardlink_alias_ambiguous(tmp_path, suffix):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "alias.db"
+    try:
+        alias.hardlink_to(source)
+        alias.with_name(alias.name + suffix).symlink_to(tmp_path / "missing-sidecar")
+    except OSError:
+        pytest.skip("File system does not support hard links or symlinks")
+    original = source.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._known_sources(target, [alias, source])
+    assert not target.exists()
+    assert source.read_bytes() == original
+
+
 def test_packaged_conflict_is_displayed_before_any_runtime_starts(monkeypatch):
     from scripts import nika_windows
 
