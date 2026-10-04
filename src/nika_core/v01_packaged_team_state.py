@@ -191,15 +191,29 @@ class V01PackagedTeamStateProvider:
             if not legacy_roster and not canonical_roster:
                 raise ValueError("V0.1 three-member roster is incomplete")
 
-        result_rows = conn.execute(
-            "SELECT result_id, member_id, outcome, payload_json, error, created_at "
-            "FROM multi_agent_results WHERE team_id = ? "
-            "ORDER BY result_id",
-            (team_id,),
-        ).fetchall()
+        # Retain the full historical count and duplicate-checker detection,
+        # but never materialize every historical result into the Windows view.
+        result_stats = conn.execute(
+            "SELECT COUNT(*) AS total_count, "
+            "SUM(CASE WHEN member_id = ? THEN 1 ELSE 0 END) AS checker_count "
+            "FROM multi_agent_results WHERE team_id = ?",
+            (root_id, team_id),
+        ).fetchone()
+        result_count = int(result_stats["total_count"])
+        checker_result_count = int(result_stats["checker_count"] or 0)
+        result_rows: list[Any] = []
         latest_result: dict[str, Any] = {}
-        for row in result_rows:
-            latest_result[str(row["member_id"])] = row
+        for member in member_rows:
+            member_id = str(member["member_id"])
+            row = conn.execute(
+                "SELECT result_id, member_id, outcome, payload_json, error, created_at "
+                "FROM multi_agent_results WHERE team_id = ? AND member_id = ? "
+                "ORDER BY result_id DESC LIMIT 1",
+                (team_id, member_id),
+            ).fetchone()
+            if row is not None:
+                result_rows.append(row)
+                latest_result[member_id] = row
 
         error_members = {
             str(row["sender_id"])
@@ -232,13 +246,14 @@ class V01PackagedTeamStateProvider:
             roles=roles,
             task_payload_by_member=task_payload_by_member,
             result_rows=result_rows,
+            checker_result_count=checker_result_count,
         )
         final_result = self._final_result(
             shared_task_id=shared_task_id,
             team_id=team_id,
             team_state=team_state,
             members=members,
-            result_count=len(result_rows),
+            result_count=result_count,
             comparison=comparison,
         )
         return {
@@ -619,6 +634,7 @@ class V01PackagedTeamStateProvider:
         roles: Mapping[str, str],
         task_payload_by_member: Mapping[str, Mapping[str, Any]],
         result_rows: list[Any],
+        checker_result_count: int,
     ) -> dict[str, Any] | None:
         """Reconstruct a bounded safe checker verdict from canonical durable evidence.
 
@@ -717,7 +733,7 @@ class V01PackagedTeamStateProvider:
                 handoffs=tuple(handoffs),
             ).to_payload()
             checker_rows = [row for row in result_rows if str(row["member_id"]) == root_id]
-            if len(checker_rows) != 1:
+            if checker_result_count != 1 or len(checker_rows) != 1:
                 return invalid
             checker_row = checker_rows[0]
             if checker_row["outcome"] != "completed" or checker_row["error"] is not None:
