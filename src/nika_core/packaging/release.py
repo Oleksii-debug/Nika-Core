@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import lzma
 import re
 import stat
 import tempfile
 import unicodedata
 import zipfile
+import zlib
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -489,6 +491,17 @@ def _decode_release_manifest(content: bytes) -> ReleaseManifest | None:
     )
 
 
+_ZIP_READ_ERRORS = (
+    OSError,
+    RuntimeError,
+    NotImplementedError,
+    EOFError,
+    zipfile.BadZipFile,
+    zlib.error,
+    lzma.LZMAError,
+)
+
+
 def _sha256_archive_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) -> str:
     digest = hashlib.sha256()
     with archive.open(member, "r") as handle:
@@ -500,6 +513,20 @@ def _sha256_archive_member(archive: zipfile.ZipFile, member: zipfile.ZipInfo) ->
 def _zip_member_is_symlink(member: zipfile.ZipInfo) -> bool:
     unix_mode = (member.external_attr >> 16) & 0xFFFF
     return member.create_system == 3 and stat.S_ISLNK(unix_mode)
+
+
+def _zip_member_has_invalid_type(member: zipfile.ZipInfo) -> bool:
+    # The DOS directory attribute and Unix type bits must agree with the ZIP
+    # path shape. Different extractors can otherwise materialize different trees.
+    if not member.is_dir() and member.external_attr & 0x10:
+        return True
+    if member.create_system != 3:
+        return False
+    unix_mode = (member.external_attr >> 16) & 0xFFFF
+    member_type = stat.S_IFMT(unix_mode)
+    expected_type = stat.S_IFDIR if member.is_dir() else stat.S_IFREG
+    # ZIP writers may omit the Unix type bits entirely; that is unambiguous.
+    return member_type not in (0, expected_type)
 
 
 def _zip_member_path(member: zipfile.ZipInfo) -> str:
@@ -551,6 +578,12 @@ def verify_release_archive(
                 if _zip_member_is_symlink(member):
                     findings.append(f"archive:symlink:{index}")
                     continue
+                if _zip_member_has_invalid_type(member):
+                    findings.append(f"archive:member-type:{index}")
+                    continue
+                if member.is_dir() and member.file_size:
+                    findings.append(f"archive:directory-content:{index}")
+                    continue
                 if member_path in seen_paths:
                     if member_path == _RELEASE_MANIFEST_NAME:
                         findings.append("archive:duplicate-manifest")
@@ -585,7 +618,7 @@ def verify_release_archive(
                 return ("archive:manifest-too-large",)
             try:
                 manifest_content = archive.read(manifest_member)
-            except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+            except _ZIP_READ_ERRORS:
                 return ("archive:invalid-manifest",)
             manifest = _decode_release_manifest(manifest_content)
             if manifest is None:
@@ -619,7 +652,7 @@ def verify_release_archive(
                     continue
                 try:
                     actual_sha256 = _sha256_archive_member(archive, member)
-                except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                except _ZIP_READ_ERRORS:
                     findings.append(f"archive:unreadable:{relative_path}")
                     continue
                 if actual_sha256 != entry.sha256:
@@ -627,7 +660,7 @@ def verify_release_archive(
                     continue
                 try:
                     has_secret_content = _archive_member_contains_secret_assignment(archive, member)
-                except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+                except _ZIP_READ_ERRORS:
                     findings.append(f"archive:unreadable:{relative_path}")
                     continue
                 if has_secret_content:
