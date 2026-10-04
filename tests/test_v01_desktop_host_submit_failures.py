@@ -165,7 +165,7 @@ def test_shutdown_fence_rejects_new_work_before_and_after_host_stop(tmp_path: Pa
     def close_backend() -> None:
         try:
             backend.close()
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - capture shutdown interrupt
             errors.append(exc)
 
     worker = threading.Thread(target=close_backend)
