@@ -179,3 +179,15 @@ def test_zip_builder_changes_trigger_m11_release_qualification() -> None:
     assert m11.count('      - "scripts/package_release_zip.py"') == 2
     m12 = M12_WORKFLOW.read_text(encoding="utf-8")
     assert m12.count('      - "scripts/**"') == 2
+
+def test_m11_runs_for_packaged_team_projection_source_and_regressions() -> None:
+    m11 = (ROOT / ".github" / "workflows" / "m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    event_configuration, separator, _ = m11.partition("\njobs:\n")
+    assert separator, "M11 jobs configuration is missing"
+    for path in (
+        '      - "src/nika_core/v01_packaged_team_state.py"',
+        '      - "tests/test_v01_packaged_team_state.py"',
+    ):
+        assert event_configuration.count(path) == 2, path
