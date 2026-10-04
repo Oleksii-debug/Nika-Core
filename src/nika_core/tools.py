@@ -35,6 +35,8 @@ class ToolSpec:
     def __post_init__(self) -> None:
         if not self.tool_id.strip():
             raise ValueError("tool_id must not be empty")
+        if type(self.risk) is not ToolRisk:
+            raise ValueError("risk must be a ToolRisk value")
         # Tool calls must have a real deadline; NaN, infinity and bool bypass <= 0.
         if (
             type(self.timeout_seconds) not in (int, float)
