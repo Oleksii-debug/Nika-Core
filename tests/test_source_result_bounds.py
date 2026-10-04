@@ -136,3 +136,26 @@ def test_malformed_item_container_fails_before_digest_serialization() -> None:
     result_data["items"] = {"forged": {1, 2}}
     with pytest.raises(SourceResultBindingError, match="result_set items must be a list"):
         decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+def test_unexpected_result_fields_fail_before_digest_serialization() -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    result_data["unrecognized"] = {1, 2}
+    with pytest.raises(SourceResultBindingError, match="result_set fields do not match schema"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+def test_bool_rank_still_fails_as_non_numeric_after_resigning() -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    items = result_data["items"]
+    assert isinstance(items, list)
+    items[0]["rank"] = True
+    _resign(output)
+    with pytest.raises(SourceResultBindingError, match="result rank must be numeric"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
