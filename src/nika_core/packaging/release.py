@@ -529,6 +529,53 @@ def _zip_member_has_invalid_type(member: zipfile.ZipInfo) -> bool:
     return member_type not in (0, expected_type)
 
 
+def _zip_extra_field_finding(extra: bytes) -> str | None:
+    """Reject alternate entry names and malformed ZIP extra-field framing."""
+    offset = 0
+    while offset < len(extra):
+        if len(extra) - offset < 4:
+            return "member-extra-format"
+        field_id = int.from_bytes(extra[offset : offset + 2], "little")
+        field_size = int.from_bytes(extra[offset + 2 : offset + 4], "little")
+        offset += 4
+        if field_size > len(extra) - offset:
+            return "member-extra-format"
+        # Info-ZIP 0x7075 supplies a second filename. ZIP extractors and
+        # Python versions differ on whether it overrides the normal name.
+        # The release format needs one unambiguous Windows path identity.
+        if field_id == 0x7075:
+            return "unicode-path-extra"
+        offset += field_size
+    return None
+
+
+def _zip_member_extra_finding(
+    archive: zipfile.ZipFile, member: zipfile.ZipInfo
+) -> str | None:
+    # ZipInfo.extra contains only central-directory fields. An alternate path
+    # in the local header is equally unsafe even if the central entry is clean.
+    central_finding = _zip_extra_field_finding(member.extra)
+    if central_finding is not None:
+        return central_finding
+    handle = archive.fp
+    if handle is None:
+        return "member-extra-format"
+    try:
+        handle.seek(member.header_offset)
+        header = handle.read(30)
+        if len(header) != 30 or header[:4] != b"PK\x5cx03\x5cx04":
+            return "member-extra-format"
+        filename_size = int.from_bytes(header[26:28], "little")
+        extra_size = int.from_bytes(header[28:30], "little")
+        handle.seek(filename_size, 1)
+        local_extra = handle.read(extra_size)
+    except (OSError, ValueError):
+        return "member-extra-format"
+    if len(local_extra) != extra_size:
+        return "member-extra-format"
+    return _zip_extra_field_finding(local_extra)
+
+
 def _zip_member_path(member: zipfile.ZipInfo) -> str:
     if member.is_dir() and member.filename.endswith("/"):
         return member.filename[:-1]
@@ -568,6 +615,10 @@ def verify_release_archive(
             windows_paths: set[str] = set()
             directory_paths: list[str] = []
             for index, member in enumerate(all_members):
+                extra_finding = _zip_member_extra_finding(archive, member)
+                if extra_finding is not None:
+                    findings.append(f"archive:{extra_finding}:{index}")
+                    continue
                 member_path = _zip_member_path(member)
                 if not _canonical_relative_path(member_path):
                     findings.append(f"archive:path:{index}")
