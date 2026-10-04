@@ -133,3 +133,50 @@ def test_malformed_running_catalog_never_promotes_readiness(bad_field: str) -> N
     assert snapshot.model_present is ModelHealthFact.YES
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
     assert calls == [f"{base}/api/tags", f"{base}/api/ps"]
+
+
+class _RecursiveResponse(_Response):
+    def __init__(self) -> None:
+        super().__init__([])
+
+    def json(self) -> dict[str, object]:
+        raise RecursionError("deep untrusted Ollama JSON")
+
+
+def test_recursive_tags_response_never_crashes_diagnostics() -> None:
+    base = "http://localhost:11434"
+    calls: list[str] = []
+    responses = {f"{base}/api/tags": _RecursiveResponse()}
+    probe = OllamaModelHealthProbe(
+        model_id="selected:1",
+        client_factory=lambda **_kwargs: _Client(responses, calls),
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.configured is ModelHealthFact.YES
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == [f"{base}/api/tags"]
+
+
+def test_recursive_running_response_preserves_presence_without_claiming_readiness() -> None:
+    base = "http://localhost:11434"
+    calls: list[str] = []
+    responses = {
+        f"{base}/api/tags": _Response([{"model": "selected:1"}]),
+        f"{base}/api/ps": _RecursiveResponse(),
+    }
+    probe = OllamaModelHealthProbe(
+        model_id="selected:1",
+        client_factory=lambda **_kwargs: _Client(responses, calls),
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.configured is ModelHealthFact.YES
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == [f"{base}/api/tags", f"{base}/api/ps"]
