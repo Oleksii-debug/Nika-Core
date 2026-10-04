@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from threading import Barrier, Lock
 
@@ -11,6 +12,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
+from nika_core.runtime import connectivity_wait as wait_module
 from nika_core.runtime.connectivity_wait import ConnectivityWaitService
 from nika_core.runtime.retry import (
     RetryPolicy,
@@ -438,3 +440,136 @@ def test_malformed_wait_payload_fails_closed_without_secret_leak(tmp_path) -> No
     assert events
     assert events[-1].event_type == "runtime.connectivity_wait_rejected"
     assert "НЕ_ЛОГУВАТИ" not in repr(events)
+
+@pytest.mark.parametrize("old_state", [TaskState.CANCELLED, TaskState.RETRYING])
+def test_stale_terminal_read_does_not_disable_reassigned_job(
+    tmp_path, monkeypatch, old_state
+) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Stale Wake" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    policy = RetryPolicy(max_retries=2, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 9, 3, 8, 0, tzinfo=UTC)
+    service = ConnectivityWaitService(
+        queue=queue, jobs=jobs, audit=audit, probe=_ConnectivityProbe(available=True)
+    )
+    old_task = _running_task(queue)
+    new_task = _running_task(queue)
+    service.defer(
+        task_id=old_task,
+        job_id="shared-wake",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id="old-op", now=now),
+    )
+    service.defer(
+        task_id=new_task,
+        job_id="successor-wake",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id="new-op", now=now),
+    )
+    queue.transition(old_task, old_state)
+    successor = replace(jobs.get("successor-wake"), job_id="shared-wake")
+    original_read = wait_module._read_task_state
+
+    def reassign_after_read(current_store, task_id):
+        state = original_read(current_store, task_id)
+        if task_id == old_task:
+            jobs.upsert(successor)
+        return state
+
+    monkeypatch.setattr(wait_module, "_read_task_state", reassign_after_read)
+    decision = service.evaluate(
+        job_id="shared-wake",
+        policy=policy,
+        now=now + timedelta(seconds=2),
+        replay_safe=True,
+    )
+    assert decision.disposition is ScriptRetryDisposition.WAITING
+    assert not decision.continuation_granted
+    assert jobs.get("shared-wake") == successor
+    assert jobs.get("shared-wake").enabled
+    assert queue.get(new_task).state is TaskState.WAITING_TOOL
+    events = audit.list_for(entity_type="scheduled_job", entity_id="shared-wake")
+    assert not any(event.event_type.endswith(("_blocked", "_cancelled", "_rejected"))
+                   for event in events)
+
+
+def test_malformed_old_snapshot_cannot_disable_new_valid_job(tmp_path, monkeypatch) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Corrupt Reassignment" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    policy = RetryPolicy(max_retries=1, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 9, 3, 8, 30, tzinfo=UTC)
+    service = ConnectivityWaitService(
+        queue=queue, jobs=jobs, audit=audit, probe=_ConnectivityProbe(available=True)
+    )
+    task_id = _running_task(queue)
+    service.defer(
+        task_id=task_id,
+        job_id="new-job",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id="new-op", now=now),
+    )
+    successor = replace(jobs.get("new-job"), job_id="reused-job")
+    jobs.upsert(replace(successor, payload={"malformed": True}))
+    original_decode = wait_module._decode_binding
+
+    def reassign_before_rejection(job):
+        if job.payload == {"malformed": True}:
+            jobs.upsert(successor)
+        return original_decode(job)
+
+    monkeypatch.setattr(wait_module, "_decode_binding", reassign_before_rejection)
+    decision = service.evaluate(
+        job_id="reused-job",
+        policy=policy,
+        now=now + timedelta(seconds=2),
+        replay_safe=True,
+    )
+    assert decision.disposition is ScriptRetryDisposition.NOT_RETRYABLE
+    assert not decision.continuation_granted
+    assert jobs.get("reused-job") == successor
+    assert jobs.get("reused-job").enabled
+    assert queue.get(task_id).state is TaskState.WAITING_TOOL
+    assert not any(
+        event.event_type == "runtime.connectivity_wait_rejected"
+        for event in audit.list_for(entity_type="scheduled_job", entity_id="reused-job")
+    )
+
+
+def test_defer_refuses_reused_job_id_without_abandoning_original_wait(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Unique Wake" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    policy = RetryPolicy(max_retries=1, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 9, 3, 9, 0, tzinfo=UTC)
+    service = ConnectivityWaitService(
+        queue=queue, jobs=jobs, audit=audit, probe=_ConnectivityProbe(available=False)
+    )
+    old_task = _running_task(queue)
+    new_task = _running_task(queue)
+    service.defer(
+        task_id=old_task,
+        job_id="occupied-job",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id="old-op", now=now),
+    )
+    incumbent = jobs.get("occupied-job")
+    with pytest.raises(ValueError, match="job_id already exists"):
+        service.defer(
+            task_id=new_task,
+            job_id="occupied-job",
+            action_id="runtime.resume_after_connectivity",
+            intent=_network_intent(policy, operation_id="new-op", now=now),
+        )
+    assert jobs.get("occupied-job") == incumbent
+    assert queue.get(old_task).state is TaskState.WAITING_TOOL
+    assert queue.get(new_task).state is TaskState.RUNNING
+    events = audit.list_for(entity_type="scheduled_job", entity_id="occupied-job")
+    assert [event.event_type for event in events] == ["runtime.connectivity_wait_deferred"]
