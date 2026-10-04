@@ -392,7 +392,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         handoff: Mapping[str, object],
     ) -> RuntimeResult:
         raw_assignments = handoff.get("source_assignments")
-        if not isinstance(raw_assignments, list):
+        # The packaged checker has exactly two declared sources. A corrupted
+        # handoff must not expand the decode/validation work or model input.
+        if not isinstance(raw_assignments, list) or len(raw_assignments) != 2:
             return self._failed()
         assignments = tuple(
             SourceInspectionAssignment.from_payload(cast(Mapping[str, object], item))
