@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,75 @@ def test_absent_watched_output_does_not_block_successful_process(tmp_path: Path)
     )
     assert result.returncode == 0
     assert result.stdout.strip() == b"ok"
+
+
+def test_already_cancelled_run_does_not_spawn_a_process(tmp_path: Path) -> None:
+    cancel_event = threading.Event()
+    cancel_event.set()
+    started = tmp_path / "subprocess-started"
+    code = "from pathlib import Path; Path('subprocess-started').touch()"
+    with pytest.raises(MediaError) as caught:
+        SafeProcessRunner().run(
+            (sys.executable, "-c", code),
+            cwd=tmp_path,
+            timeout_seconds=5,
+            cancel_event=cancel_event,
+        )
+    assert caught.value.code == MediaErrorCode.PROCESS_CANCELLED
+    assert not started.exists()
+
+
+def test_cancellation_during_watch_preflight_prevents_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cancel_event = threading.Event()
+    watched = tmp_path / "output.part"
+    original = SafeProcessRunner._watched_file_failure
+
+    def cancel_during_preflight(paths: tuple[Path, ...], *, max_bytes: int | None):
+        cancel_event.set()
+        return original(paths, max_bytes=max_bytes)
+
+    monkeypatch.setattr(
+        SafeProcessRunner, "_watched_file_failure", staticmethod(cancel_during_preflight)
+    )
+    started = tmp_path / "subprocess-started"
+    code = "from pathlib import Path; Path('subprocess-started').touch()"
+    with pytest.raises(MediaError) as caught:
+        SafeProcessRunner().run(
+            (sys.executable, "-c", code),
+            cwd=tmp_path,
+            timeout_seconds=5,
+            cancel_event=cancel_event,
+            watched_paths=(watched,),
+            max_watched_file_bytes=16,
+        )
+    assert caught.value.code == MediaErrorCode.PROCESS_CANCELLED
+    assert not started.exists()
+
+
+def test_uninspectable_watched_output_fails_closed_before_spawn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    watched = tmp_path / "output.part"
+    watched.write_bytes(b"hello")
+    original = Path.lstat
+
+    def denied_lstat(path: Path):
+        if path == watched:
+            raise PermissionError("synthetic permission denial")
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", denied_lstat)
+    started = tmp_path / "subprocess-started"
+    code = "from pathlib import Path; Path('subprocess-started').touch()"
+    with pytest.raises(MediaError) as caught:
+        SafeProcessRunner().run(
+            (sys.executable, "-c", code),
+            cwd=tmp_path,
+            timeout_seconds=5,
+            watched_paths=(watched,),
+            max_watched_file_bytes=16,
+        )
+    assert caught.value.code == MediaErrorCode.PATH_ESCAPE
+    assert not started.exists()
