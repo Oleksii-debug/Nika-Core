@@ -111,7 +111,25 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         )
 
     @staticmethod
+    def _valid_request_ids(task_id: object, thread_id: object) -> bool:
+        if (
+            type(task_id) is not str
+            or type(thread_id) is not str
+            or not task_id.strip()
+            or not thread_id.strip()
+        ):
+            return False
+        try:
+            task_id.encode("utf-8")
+            thread_id.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return True
+
+    @staticmethod
     def initial_resume_token(*, task_id: str, thread_id: str) -> str:
+        if not V01PackagedThreeAgentRuntime._valid_request_ids(task_id, thread_id):
+            raise ValueError("runtime task and thread IDs must be valid UTF-8 text")
         material = f"{_RUNTIME_ID}\0{task_id}\0{thread_id}".encode()
         return "v01:" + hashlib.sha256(material).hexdigest()
 
@@ -122,8 +140,13 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         thread_id: str,
         resume_token: str,
     ) -> RuntimeResumeProbe:
+        if not self._valid_request_ids(task_id, thread_id):
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.INVALID,
+                reason="V0.1 task or thread identity is invalid.",
+            )
         expected = self.initial_resume_token(task_id=task_id, thread_id=thread_id)
-        if resume_token != expected:
+        if type(resume_token) is not str or resume_token != expected:
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.INVALID,
                 reason="Persisted V0.1 runtime cursor does not match task identity.",
@@ -149,6 +172,8 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
+        if not self._valid_request_ids(request.task_id, request.thread_id):
+            return self._failed()
         if self._is_member_thread(request.thread_id):
             shared_task_id = self._member_shared_task_id(
                 task_id=request.task_id, thread_id=request.thread_id
@@ -173,8 +198,10 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
     async def resume(self, request: RuntimeResumeRequest) -> RuntimeResult:
         if request.mode is not RuntimeResumeMode.CONTINUE:
             return self._failed()
+        if not self._valid_request_ids(request.task_id, request.thread_id):
+            return self._failed()
         expected = self.initial_resume_token(task_id=request.task_id, thread_id=request.thread_id)
-        if request.resume_token != expected:
+        if type(request.resume_token) is not str or request.resume_token != expected:
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
                 error="V0.1 durable resume cursor is invalid.",
@@ -193,6 +220,8 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         return await self._run_outer(task_id=request.task_id, command=command)
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+        if not self._valid_request_ids(task_id, thread_id):
+            return False
         if self._is_member_thread(thread_id):
             identity = self._member_identity(thread_id)
             if identity is None:
@@ -750,7 +779,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
     @staticmethod
     def _member_identity(thread_id: str) -> tuple[str, str] | None:
-        parts = thread_id.split(":")
+        # Malformed untrusted threads may contain millions of separators.
+        # A fourth segment is already invalid, so never split the entire input.
+        parts = thread_id.split(":", 3)
         if len(parts) != 3 or parts[0] != "v01" or not parts[1] or not parts[2]:
             return None
         return parts[1], parts[2]
