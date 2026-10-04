@@ -59,3 +59,34 @@ def test_valid_classifier_pass_and_direct_unknown_keep_existing_semantics() -> N
     assert _classified_pass().merge_clearance is True
     unknown = verification.CandidateVerification(SHA_A, verification.VerificationState.UNKNOWN, ())
     assert unknown.merge_clearance is False
+
+
+class _BehavioralTuple(tuple):
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("mutated tuple must not run caller equality")
+
+
+class _BehavioralString(str):
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("mutated string must not run caller equality")
+
+
+def test_mutated_tuple_subclass_fails_closed_before_behavioral_comparison() -> None:
+    result = _classified_pass()
+    object.__setattr__(result, "evidence_refs", _BehavioralTuple(result.evidence_refs))
+
+    assert result.merge_clearance is False
+
+
+def test_mutated_ref_subclass_fails_closed_before_behavioral_comparison() -> None:
+    result = _classified_pass()
+    refs = tuple(_BehavioralString(ref) for ref in result.evidence_refs)
+    object.__setattr__(result, "evidence_refs", refs)
+
+    assert result.merge_clearance is False
+
+
+def test_uninitialized_result_without_fields_fails_closed() -> None:
+    result = object.__new__(verification.CandidateVerification)
+
+    assert result.merge_clearance is False
