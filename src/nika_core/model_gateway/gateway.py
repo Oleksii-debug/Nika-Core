@@ -6,6 +6,7 @@ import inspect
 from dataclasses import dataclass, replace
 from math import isfinite
 from typing import Protocol
+from unicodedata import category
 
 from .contracts import (
     ModelErrorCode,
@@ -504,7 +505,14 @@ class ModelGateway:
             or type(text) is not str
             # A blank response is not a completed text answer. Preserve
             # meaningful Unicode content and its original whitespace.
-            or not text.strip()
+            # Only formatting, combining marks or zero-width characters are
+            # not a usable answer for the accessible Windows text surface.
+            or not any(category(character)[0] in "LNPS" for character in text)
+            # Allow ordinary multiline/emoji text, never NUL/DEL/C1 controls.
+            or any(
+                category(character) == "Cc" and character not in "\t\n\r"
+                for character in text
+            )
             # Model text reaches UTF-8 persistence and the Windows UI. Never
             # publish a success DTO containing an unpaired UTF-16 surrogate.
             or any(0xD800 <= ord(character) <= 0xDFFF for character in text)
