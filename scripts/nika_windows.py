@@ -334,7 +334,8 @@ def _require_product_state(
         raise TypeError("PF11 packaged bridge did not expose ProductCommandCenter state")
     if (
         product_state.get("project_id") != project_id
-        or product_state.get("spec_version") != 1
+        or type(product_state.get("spec_version")) is not int
+        or product_state["spec_version"] != 1
         or not isinstance(product_state.get("status_count"), int)
         or isinstance(product_state.get("status_count"), bool)
         or not isinstance(product_state.get("decision_count"), int)
@@ -393,12 +394,24 @@ def _run_pf11_proof(
             )
         project_id = product_project_identity(decision.normalized_goal)
         recovered_before_command = bridge.get_state()
-        recovered_project = recovered_before_command.get("state", {}).get("product_project")
         if (
-            isinstance(recovered_project, Mapping)
-            and recovered_project.get("project_id") != project_id
+            not isinstance(recovered_before_command, Mapping)
+            or recovered_before_command.get("ok") is not True
         ):
-            raise RuntimeError("PF11 restart restored a different ProductProject selection")
+            raise RuntimeError("PF11 pre-command state could not be recovered")
+        recovered_state = recovered_before_command.get("state")
+        if not isinstance(recovered_state, Mapping) or "product_project" not in recovered_state:
+            raise RuntimeError("PF11 pre-command state is missing ProductProject selection")
+        recovered_project = recovered_state["product_project"]
+        if recovered_project is None:
+            selection_before_command = "absent"
+        elif isinstance(recovered_project, Mapping):
+            _require_product_state(recovered_before_command, project_id=project_id)
+            if recovered_project.get("goal") != decision.normalized_goal:
+                raise RuntimeError("PF11 restart restored a different ProductProject goal")
+            selection_before_command = "restored"
+        else:
+            raise RuntimeError("PF11 pre-command ProductProject selection is malformed")
         result = bridge.dispatch(
             {
                 "request_id": "pf11-packaged-proof",
@@ -439,6 +452,7 @@ def _run_pf11_proof(
             "bridge_state_status_count": product_state["status_count"],
             "bridge_state_decision_count": product_state["decision_count"],
             "restart_selection_integrity_proven": True,
+            "selection_before_command": selection_before_command,
             "bounded_projection_proven": True,
             "human_tested": False,
             "nvda_verified": False,
