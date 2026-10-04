@@ -87,9 +87,16 @@ def test_bool_int_drift_between_restart_proofs_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first = _valid_proof()
-    second = {**first, "state": True, "selection_before_command": "restored"}
-    first["state"] = 1
-    assert first == second  # The original Python dict equality silently accepted the drift.
+    second = {
+        **first,
+        "bridge_state_status_count": True,
+        "selection_before_command": "restored",
+    }
+    first_stable = {key: value for key, value in first.items() if key != "selection_before_command"}
+    second_stable = {
+        key: value for key, value in second.items() if key != "selection_before_command"
+    }
+    assert first_stable == second_stable  # Python incorrectly treats True as 1.
     with pytest.raises(RuntimeError, match="restart replay changed"):
         _run_proofs(tmp_path, monkeypatch, json.dumps(first), json.dumps(second))
 
@@ -252,3 +259,51 @@ def test_only_pre_command_selection_may_differ_between_valid_runs(
     second = {**first, "selection_before_command": "restored", "state": "changed"}
     with pytest.raises(RuntimeError, match="restart replay changed durable identity"):
         _run_proofs(tmp_path, monkeypatch, json.dumps(first), json.dumps(second))
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("selection_before_command", "restored"),
+        ("selection_before_command", None),
+        ("route", "ordinary_task"),
+        ("spec_version", True),
+        ("bridge_state_spec_version", False),
+        ("project_id", "   "),
+        ("bridge_state_status_count", -1),
+        ("bridge_state_decision_count", False),
+        ("current_command_proven", False),
+        ("bounded_projection_proven", None),
+        ("state", ""),
+        ("human_tested", True),
+    ],
+)
+def test_invalid_first_pf11_proof_never_starts_second_process(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    invalid: object,
+) -> None:
+    bundle = tmp_path / "NikaCore"
+    bundle.mkdir()
+    (bundle / "NikaCore.exe").write_bytes(b"mocked executable")
+    target = bundle / "pf11-packaged-product-journey.json"
+    previous = b"previous validated release evidence"
+    target.write_bytes(previous)
+    first = _valid_proof()
+    first[field] = invalid
+    calls: list[int] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(1)
+        if len(calls) != 1:
+            raise AssertionError("invalid first PF11 evidence launched a second process")
+        output = Path(argv[argv.index("--pf11-proof-output") + 1])
+        output.write_text(json.dumps(first), encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(RuntimeError):
+        prove_packaged_product_journey(bundle, source_sha=SOURCE_SHA)
+    assert calls == [1]
+    assert target.read_bytes() == previous
+    assert not tuple(bundle.glob(".pf11-proof-*.tmp"))
