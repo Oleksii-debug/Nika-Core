@@ -485,15 +485,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     try:
-        launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
-    except (OSError, RuntimeError):
+        try:
+            launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
+        finally:
+            session.close()
+    except (OSError, RuntimeError, sqlite3.Error):
+        # Cleanup failures must not override the safe windowless error presentation.
         show_recovery_error(
-            "Не вдалося відкрити вікно Ніки. Роботу застосунку припинено. "
-            "Перевірте компоненти Windows і спробуйте запустити застосунок знову."
+            "Помилка відкриття вікна або завершення роботи Ніки. "
+            "Перевірте компоненти Windows і локальні дані перед наступним запуском."
         )
         return 1
-    finally:
-        session.close()
     return 0
 
 
