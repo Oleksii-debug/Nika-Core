@@ -45,6 +45,10 @@ def test_ambiguous_unicode_hostname_cannot_retarget_authorized_cloud_effect(
         ("https://APPROVED.EXAMPLE.:443/v1", "approved.example"),
         ("https://bücher.example/v1", "bücher.example"),
         ("https://xn--bcher-kva.example/v1", "xn--bcher-kva.example"),
+        ("https://faß.de/v1", "faß.de"),
+        ("https://xn--fa-hia.de/v1", "xn--fa-hia.de"),
+        ("https://ς.gr/v1", "ς.gr"),
+        ("https://xn--3xa.gr/v1", "xn--3xa.gr"),
         ("https://[::1]:443/v1", "::1"),
     ),
 )
@@ -58,8 +62,10 @@ def test_valid_host_spellings_preserve_exact_outbound_authority(
     declared = provider.capabilities.effect_network_host
     assert declared == expected_authority
     assert declared is not None
-    assert declared.encode("idna").decode("ascii") == (
-        httpx.URL(base_url).raw_host.decode("ascii").rstrip(".")
+    transport_url = httpx.URL(base_url)
+    assert declared in (
+        transport_url.host.rstrip("."),
+        transport_url.raw_host.decode("ascii").rstrip("."),
     )
 
 
