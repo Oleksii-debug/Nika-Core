@@ -78,6 +78,7 @@ def test_valid_packaged_proof_preserves_restart_evidence(
     assert attempts == 2
     proof = json.loads(path.read_text(encoding="utf-8"))
     assert proof["source_sha"] == SOURCE_SHA
+    assert proof["product_project_id"] == valid["project_id"]
     assert proof["restart_replay_proven"] is True
     assert proof["human_tested"] is False
     assert proof["nvda_verified"] is False
@@ -274,6 +275,8 @@ def test_only_pre_command_selection_may_differ_between_valid_runs(
         ("current_command_proven", False),
         ("bounded_projection_proven", None),
         ("state", ""),
+        ("state", chr(0xD800)),
+        ("project_id", chr(0xD800)),
         ("human_tested", True),
     ],
 )
@@ -291,6 +294,8 @@ def test_invalid_first_pf11_proof_never_starts_second_process(
     target.write_bytes(previous)
     first = _valid_proof()
     first[field] = invalid
+    if field == "project_id":
+        first["bridge_state_project_id"] = invalid
     calls: list[int] = []
 
     def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
