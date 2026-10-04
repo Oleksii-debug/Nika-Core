@@ -573,3 +573,42 @@ def test_defer_refuses_reused_job_id_without_abandoning_original_wait(tmp_path) 
     assert queue.get(new_task).state is TaskState.RUNNING
     events = audit.list_for(entity_type="scheduled_job", entity_id="occupied-job")
     assert [event.event_type for event in events] == ["runtime.connectivity_wait_deferred"]
+
+def test_probe_action_swap_does_not_grant_stale_wake(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Swapped Wake Action" / "nika core.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    jobs = ScheduledJobStore(store)
+    audit = AuditLog(store)
+    policy = RetryPolicy(max_retries=1, base_delay_seconds=1, max_delay_seconds=5)
+    now = datetime(2026, 9, 3, 10, 0, tzinfo=UTC)
+    task_id = _running_task(queue)
+
+    class _ReassigningProbe:
+        def is_available(self) -> bool:
+            job = jobs.get("action-swap")
+            jobs.upsert(replace(job, action_id="runtime.other_action"))
+            return True
+
+    service = ConnectivityWaitService(
+        queue=queue, jobs=jobs, audit=audit, probe=_ReassigningProbe()
+    )
+    service.defer(
+        task_id=task_id,
+        job_id="action-swap",
+        action_id="runtime.resume_after_connectivity",
+        intent=_network_intent(policy, operation_id="action-swap-op", now=now),
+    )
+    decision = service.evaluate(
+        job_id="action-swap",
+        policy=policy,
+        now=now + timedelta(seconds=2),
+        replay_safe=True,
+    )
+    assert decision.disposition is ScriptRetryDisposition.WAITING
+    assert not decision.continuation_granted
+    assert queue.get(task_id).state is TaskState.WAITING_TOOL
+    assert jobs.get("action-swap").enabled
+    assert jobs.get("action-swap").action_id == "runtime.other_action"
+    events = audit.list_for(entity_type="scheduled_job", entity_id="action-swap")
+    assert not any(event.event_type == "runtime.connectivity_wait_ready" for event in events)
