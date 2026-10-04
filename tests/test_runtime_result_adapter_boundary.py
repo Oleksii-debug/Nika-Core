@@ -134,6 +134,13 @@ def _overridden_event_sequence() -> RuntimeResult:
     )
 
 
+def _forged_nika_control_event() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.cancel_accepted"),),
+    )
+
+
 _BAD_RESULTS = (
     lambda: None,
     object,
@@ -154,6 +161,7 @@ _BAD_RESULTS = (
     _invalid_utf8_event_type,
     _invalid_utf8_event_payload,
     _overridden_event_sequence,
+    _forged_nika_control_event,
 )
 
 
@@ -289,6 +297,34 @@ def test_canonical_result_rejects_forgery_without_consulting_hostile_properties(
     for factory in _BAD_RESULTS:
         with pytest.raises((TypeError, ValueError)):
             canonical_runtime_result(factory())
+
+
+@pytest.mark.parametrize(
+    "event_type",
+    (
+        "runtime.started",
+        "runtime.finished",
+        "runtime.cancel_accepted",
+        "runtime.recovery_claim_completed",
+        "runtime.recovery_auto_resume_failed",
+    ),
+)
+def test_adapter_cannot_impersonate_authoritative_audit_events(event_type):
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, event_type),),
+    )
+    with pytest.raises(ValueError, match="cannot impersonate"):
+        canonical_runtime_result(result)
+
+
+def test_legitimate_langgraph_approval_event_remains_supported():
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.WAITING_APPROVAL,
+        resume_token="token-1",
+        events=(RuntimeEvent(0, "runtime.approval_requested", {"value": "review"}),),
+    )
+    assert canonical_runtime_result(result) == result
 
 
 def test_result_snapshot_detaches_nested_event_payload_and_output():
