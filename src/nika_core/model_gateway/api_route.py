@@ -103,6 +103,27 @@ class ApiModelRouteConfig:
         if parsed.query or parsed.fragment:
             raise ValueError("API model route base_url must not contain query or fragment")
 
+        # urlsplit preserves Unicode dot variants in the hostname, whereas
+        # HTTPX/IDNA maps them to ASCII dots before making the real request.
+        # Never authorize one displayed hostname and send a credential to
+        # another. Accept ordinary Unicode domains and their punycode spelling.
+        try:
+            transport_url = httpx.URL(self.base_url)
+            transport_host = transport_url.host
+            outbound_port = transport_url.port
+            if outbound_port is not None and not 1 <= outbound_port <= 65535:
+                raise ValueError("invalid outbound HTTPS port")
+        except (httpx.InvalidURL, ValueError) as exc:
+            raise ValueError("API model route base_url has invalid HTTP authority") from exc
+        expected_host = parsed.hostname.lower().rstrip(".")
+        actual_host = transport_host.lower().rstrip(".") if transport_host else ""
+        # HTTPX uses IDNA2008 for the wire name. Python's built-in IDNA
+        # codec is IDNA2003, so re-encoding decoded hosts can reject valid
+        # punycode labels (for example, the sharp-s or final-sigma cases).
+        actual_wire_host = transport_url.raw_host.decode("ascii").rstrip(".")
+        if expected_host != actual_host and expected_host != actual_wire_host:
+            raise ValueError("API model route host differs from HTTP transport")
+
 
 class CredentialRefOpenAICompatibleProvider:
     """Thin credential-reference wrapper over Nika's OpenAI-compatible provider.
