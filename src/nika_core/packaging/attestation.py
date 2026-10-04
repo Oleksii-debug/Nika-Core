@@ -137,12 +137,31 @@ def build_release_attestation_evidence(
             "verified attestation output does not contain SLSA provenance for exact artifact digest"
         )
 
+    # The archive is read more than once: pre-human verification precedes the
+    # provenance digest. Reject a changed/replaced file instead of certifying
+    # provenance for bytes that differ from the pre-human candidate.
+    artifact_size = artifact_path.stat().st_size
+    refreshed_findings = verify_distributable_evidence(
+        artifact_path,
+        prehuman_evidence_path,
+        source_sha=normalized_source_sha,
+        artifact_reference=artifact_reference,
+        expected_product_version=expected_product_version,
+    )
+    if refreshed_findings:
+        raise ValueError(
+            "pre-human distributable evidence changed during attestation: "
+            + ", ".join(refreshed_findings)
+        )
+    if artifact_path.stat().st_size != artifact_size or _sha256(artifact_path) != artifact_sha256:
+        raise ValueError("attestation artifact changed during evidence binding")
+
     return ReleaseAttestationEvidence(
         schema_version=1,
         commit_sha=normalized_source_sha,
         artifact_reference=artifact_reference,
         artifact_sha256=artifact_sha256,
-        artifact_size=artifact_path.stat().st_size,
+        artifact_size=artifact_size,
         repository=repository,
         signer_workflow=signer_workflow,
         source_ref=source_ref,
