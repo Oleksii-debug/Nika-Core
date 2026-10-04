@@ -205,7 +205,10 @@ class PackagedProductCommandRouter:
         )
 
     def create(self, payload: Mapping[str, Any]) -> UIResult:
-        command = str(payload.get("command", "")).strip()
+        raw_command = payload.get("command", "")
+        if type(raw_command) is not str:
+            raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+        command = raw_command.strip()
         if not command:
             raise PackagedProductJourneyError(
                 "Введіть команду перед створенням завдання."

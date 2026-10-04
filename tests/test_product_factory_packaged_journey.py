@@ -154,6 +154,40 @@ def test_ordinary_agent_command_does_not_select_product_state(tmp_path: Path) ->
         repository.get(product_project_identity(ordinary_command))
 
 
+class _HostileCommand(str):
+    def strip(self, chars: str | None = None) -> str:
+        del chars
+        raise AssertionError("untrusted string subclass methods must not execute")
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        None,
+        7,
+        False,
+        ["Створи агента"],
+        {"command": "Створи застосунок"},
+        _HostileCommand("Створи застосунок"),
+    ),
+)
+def test_packaged_router_rejects_noncanonical_commands_without_side_effects(
+    tmp_path: Path,
+    command: object,
+) -> None:
+    router, repository, ordinary = _router(tmp_path / "invalid command.db")
+    valid_command = "Створи застосунок для безпечної перевірки"
+    project_id = product_project_identity(valid_command)
+    router.create({"command": valid_command})
+
+    with pytest.raises(PackagedProductJourneyError, match="звичайним текстом"):
+        router.create({"command": command})
+
+    assert ordinary.calls == []
+    assert router.active_project_id == project_id
+    assert repository.get(project_id).spec_version == 1
+
+
 def test_ambiguous_product_and_toolsmith_command_fails_closed(tmp_path: Path) -> None:
     router, _, ordinary = _router(tmp_path / "ambiguous.db")
 
