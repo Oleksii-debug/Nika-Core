@@ -68,7 +68,7 @@ def test_direct_fingerprint_rejects_unbounded_arguments(kind: str) -> None:
 
 
 def test_direct_fingerprint_uses_action_intent_canonical_json() -> None:
-    arguments = {"names": [{"e\\u0301": ["Київ", "😀"]}], "count": 1}
+    arguments = {"names": [{"e\u0301": ["Київ", "😀"]}], "count": 1}
     canonical = {"names": [{"é": ["Київ", "😀"]}], "count": 1}
     intent = ActionIntent(
         action_id="action-1",
@@ -88,7 +88,7 @@ def test_direct_fingerprint_uses_action_intent_canonical_json() -> None:
 
 def test_direct_fingerprint_rejects_normalized_duplicate_keys() -> None:
     with pytest.raises(ValueError, match="duplicate normalized key"):
-        tool_arguments_fingerprint({"e\\u0301": 1, "é": 2})
+        tool_arguments_fingerprint({"e\u0301": 1, "é": 2})
 
 
 def test_invalid_arguments_cannot_turn_host_policy_into_tool_execution() -> None:
