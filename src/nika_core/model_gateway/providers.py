@@ -118,10 +118,29 @@ class OpenAICompatibleProvider:
             ) from exc
 
         try:
-            raw_text = body["choices"][0]["message"]["content"]
+            if not isinstance(body, dict) or "error" in body:
+                raise ValueError("model provider did not return a successful object")
+            choice = body["choices"][0]
+            # This adapter returns text, not partial generations or tool calls.
+            # Some compatible providers omit finish_reason; when supplied,
+            # a nonterminal reason must never become a successful result.
+            if "finish_reason" in choice and choice["finish_reason"] != "stop":
+                raise ValueError("model response is not a completed text answer")
+            message = choice["message"]
+            if not isinstance(message, dict):
+                raise TypeError("message must be an object")
+            # A legacy compatible endpoint may omit role, but an explicitly
+            # non-assistant message must not be treated as the model's answer.
+            if "role" in message and message["role"] != "assistant":
+                raise ValueError("model response is not an assistant message")
+            raw_text = message["content"]
             if not isinstance(raw_text, str):
                 raise TypeError("message content must be text")
-            model = str(body.get("model") or request.model or self._default_model)
+            # The provider must positively attest its model identity. Never
+            # manufacture evidence from the outbound request or default.
+            model = body["model"]
+            if type(model) is not str or not model or model != model.strip():
+                raise ValueError("provider model identity is invalid")
             raw_usage = body.get("usage")
             if raw_usage is None:
                 raw_usage = {}
