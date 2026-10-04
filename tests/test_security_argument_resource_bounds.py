@@ -70,12 +70,33 @@ def test_oversized_arguments_fail_closed(kind: str) -> None:
 
 
 def test_normal_nested_unicode_arguments_preserve_exact_fingerprints() -> None:
-    a = _intent({"names": [{"é": ["Київ", "😀"]}], "count": 1})
+    a = _intent({"names": [{"e\u0301": ["Київ", "😀"]}], "count": 1})
     b = _intent({"names": [{"é": ["Київ", "😀"]}], "count": 1})
     assert a.effect_fingerprint == b.effect_fingerprint
     assert a.approval_fingerprint == b.approval_fingerprint
     assert a.normalized_arguments_json == b.normalized_arguments_json
     assert a.arguments["names"][0]["é"] == ("Київ", "😀")
+
+
+def test_exact_node_and_depth_boundaries_remain_usable() -> None:
+    # Root object + key + array + 19,997 integers = exactly 20,000 nodes.
+    assert _intent({"items": [0] * 19_997}).arguments["items"][-1] == 0
+
+    nested: object = "valid"
+    for _ in range(63):
+        nested = [nested]
+    # The leaf is at depth 64; only deeper values must be rejected.
+    assert _intent({"nested": nested}).normalized_arguments_json.startswith('{"nested":')
+
+
+def test_exact_serialized_size_boundary_and_one_byte_overflow() -> None:
+    # A single `text` entry adds eleven JSON punctuation/key bytes.
+    accepted = "x" * (8 * 1024 * 1024 - 11)
+    assert len(_intent({"text": accepted}).normalized_arguments_json) == 8 * 1024 * 1024
+    with pytest.raises(ValueError, match="deterministic JSON-compatible") as error:
+        _intent({"text": accepted + "x"})
+    assert error.value.__cause__ is not None
+    assert "byte size" in str(error.value.__cause__)
 
 
 def test_depth_within_limit_preserves_normal_arguments() -> None:
