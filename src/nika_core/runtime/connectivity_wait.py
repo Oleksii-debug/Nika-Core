@@ -193,6 +193,13 @@ class ConnectivityWaitService:
             job = self._jobs.get_with_connection(conn, job_id)
             if job is None:
                 return ConnectivityWaitDecision(ScriptRetryDisposition.NOT_RETRYABLE, False)
+            # The pre-probe snapshot is the only job this wake may consume.
+            # Guard the complete schedule/action identity before touching a successor.
+            if job != outer_job:
+                return ConnectivityWaitDecision(
+                    ScriptRetryDisposition.WAITING if job.enabled else ScriptRetryDisposition.PAUSED,
+                    False,
+                )
             try:
                 binding = _decode_binding(job)
             except (TypeError, ValueError):
@@ -205,13 +212,6 @@ class ConnectivityWaitService:
                     False,
                     binding.intent,
                 )
-            if not _same_binding(binding, outer_binding):
-                return ConnectivityWaitDecision(
-                    ScriptRetryDisposition.WAITING,
-                    False,
-                    binding.intent,
-                )
-
             state = _task_state_with_connection(conn, binding.task_id)
             if state is None:
                 self._jobs.set_enabled_with_connection(conn, job_id, False)
@@ -482,14 +482,6 @@ def _decode_binding(job: ScheduledJob) -> _WaitBinding:
     if job.trigger != expected_trigger:
         raise ValueError("retry wake time does not match durable retry intent")
     return _WaitBinding(task_id=task_id, operation_id=operation_id, intent=intent)
-
-
-def _same_binding(left: _WaitBinding, right: _WaitBinding) -> bool:
-    return (
-        left.task_id == right.task_id
-        and left.operation_id == right.operation_id
-        and left.intent.to_payload() == right.intent.to_payload()
-    )
 
 
 def _as_utc(value: datetime) -> datetime:
