@@ -160,9 +160,14 @@ def test_environment_resolver_rejects_control_bearing_variable_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resolver = EnvironmentCredentialResolver()
-    monkeypatch.setenv("NIKA_ROUTE_ADMISSION_TEST_TOKEN", "safe")
+    monkeypatch.setattr(
+        "nika_core.model_gateway.api_route.os.environ",
+        {
+            "NIKA_ROUTE_ADMISSION_TEST_TOKEN": "safe",
+            "NIKA_ROUTE_ADMISSION_TEST_TOKEN\nINJECTED": "safe",
+        },
+    )
     assert resolver.resolve(_REF) == "safe"
-    monkeypatch.setenv("NIKA_ROUTE_ADMISSION_TEST_TOKEN\nINJECTED", "safe")
     with pytest.raises(CredentialResolutionError, match="invalid"):
         resolver.resolve("env:NIKA_ROUTE_ADMISSION_TEST_TOKEN\nINJECTED")
 
