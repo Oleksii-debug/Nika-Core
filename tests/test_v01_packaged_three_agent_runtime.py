@@ -942,3 +942,158 @@ def test_packaged_checker_rejects_invalid_assignment_count_before_conversion(
         assert result.outcome is RuntimeOutcome.FAILED
         assert parsed == []
         assert _result_count(store) == before
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("task-command-swap", "task-blob", "checker-goal-swap"),
+)
+def test_direct_member_run_rechecks_durable_command_before_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, corruption: str
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    team_id = runtime._team_id(task_id)
+    previous_results = _result_count(store)
+    with store.connection() as conn:
+        if corruption == "checker-goal-swap":
+            row = conn.execute(
+                "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+                "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'task'",
+                (team_id,),
+            ).fetchone()
+            assert row is not None
+            handoff = json.loads(row["payload_json"])
+            handoff["user_goal"] = "Unapproved replacement goal."
+            changed = conn.execute(
+                "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+                (json.dumps(handoff), row["handoff_id"]),
+            )
+        else:
+            persisted = (
+                json.dumps({"command": "Unapproved replacement goal."})
+                if corruption == "task-command-swap"
+                else sqlite3.Binary(b'{"command":"corrupt SQLite BLOB"}')
+            )
+            changed = conn.execute(
+                "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+                (persisted, task_id),
+            )
+        assert changed.rowcount == 1
+    assert runtime._stored_outer_command(task_id) == ""
+
+    async def forbidden_member_effect(*, thread_id: str):
+        raise AssertionError(f"unbound direct member reached effect: {thread_id}")
+
+    reopened = V01PackagedThreeAgentRuntime(
+        store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
+    )
+    for current in (runtime, reopened):
+        monkeypatch.setattr(current, "_run_member_from_store", forbidden_member_effect)
+        for member_id in ("worker-a", "checker"):
+            result = asyncio.run(
+                current.run(
+                    RuntimeRequest(
+                        task_id=f"team:{team_id}:{member_id}",
+                        thread_id=f"v01:{team_id}:{member_id}",
+                        payload={},
+                    )
+                )
+            )
+            assert result.outcome is RuntimeOutcome.FAILED
+            assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize(
+    "invalid_goal",
+    ("changed", "boolean", "missing"),
+)
+def test_worker_handoff_goal_is_bound_before_run_probe_and_resume(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, invalid_goal: str
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    team_id = runtime._team_id(task_id)
+    previous_results = _result_count(store)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = 'worker-a' AND kind = 'task'",
+            (team_id,),
+        ).fetchone()
+        assert row is not None
+        handoff = json.loads(row["payload_json"])
+        if invalid_goal == "changed":
+            handoff["user_goal"] = "Unapproved replacement goal."
+        elif invalid_goal == "boolean":
+            handoff["user_goal"] = True
+        else:
+            handoff.pop("user_goal")
+        changed = conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+            (json.dumps(handoff), row["handoff_id"]),
+        )
+        assert changed.rowcount == 1
+
+    async def forbidden_member_effect(*, thread_id: str):
+        raise AssertionError(f"invalid worker goal reached effect: {thread_id}")
+
+    for current in (
+        runtime,
+        V01PackagedThreeAgentRuntime(
+            store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
+        ),
+    ):
+        monkeypatch.setattr(current, "_run_member_from_store", forbidden_member_effect)
+        member_task_id = f"team:{team_id}:worker-a"
+        member_thread = f"v01:{team_id}:worker-a"
+        token = current.initial_resume_token(
+            task_id=member_task_id, thread_id=member_thread
+        )
+        assert asyncio.run(
+            current.probe_resume(
+                task_id=member_task_id,
+                thread_id=member_thread,
+                resume_token=token,
+            )
+        ).status is RuntimeResumeProbeStatus.INVALID
+        assert asyncio.run(
+            current.resume(
+                RuntimeResumeRequest(
+                    task_id=member_task_id,
+                    thread_id=member_thread,
+                    resume_token=token,
+                    mode=RuntimeResumeMode.CONTINUE,
+                )
+            )
+        ).outcome is RuntimeOutcome.FAILED
+        assert asyncio.run(
+            current.run(
+                RuntimeRequest(
+                    task_id=member_task_id, thread_id=member_thread, payload={}
+                )
+            )
+        ).outcome is RuntimeOutcome.FAILED
+        assert _result_count(store) == previous_results
