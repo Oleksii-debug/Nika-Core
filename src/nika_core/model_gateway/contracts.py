@@ -6,6 +6,7 @@ from enum import StrEnum
 from math import isfinite
 from types import MappingProxyType
 from typing import Protocol
+from unicodedata import category
 
 
 class PrivacyClass(StrEnum):
@@ -76,8 +77,13 @@ class ModelMessage:
             raise ValueError(f"unsupported message role: {self.role}")
         if type(self.content) is not str:
             raise TypeError("message content must be text")
-        if not self.content.strip():
+        if not any(category(character)[0] in "LNPS" for character in self.content):
             raise ValueError("message content must not be empty")
+        if any(
+            category(character) == "Cc" and character not in "\t\n\r"
+            for character in self.content
+        ):
+            raise ValueError("message content contains unsafe control characters")
         if any(0xD800 <= ord(character) <= 0xDFFF for character in self.content):
             raise ValueError("message content must be valid Unicode text")
 
