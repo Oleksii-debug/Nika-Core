@@ -579,3 +579,55 @@ def test_completed_comparison_rejects_oversubscribed_handoff_history(
         store=SQLiteStore(store.path),
     )()["v01_team_task"]
     assert restarted == corrupted
+
+
+
+@pytest.mark.parametrize(
+    ("member_id", "validated"),
+    [
+        ("worker-a", True),
+        ("checker", False),
+        ("foreign-member", True),
+    ],
+)
+def test_bounded_result_history_preserves_count_and_checker_uniqueness(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    member_id: str,
+    validated: bool,
+) -> None:
+    store, queue, task_id, original, provider = _complete_packaged_task(
+        tmp_path,
+        monkeypatch,
+        source_b_text=_RAW_SOURCE_CANARY,
+    )
+    team_id = original["team"]["team_id"]
+    baseline_count = original["final_result"]["result_record_count"]
+    assert original["final_result"]["comparison"]["validated"] is True
+    with store.connection() as conn:
+        source = conn.execute(
+            "SELECT result_id FROM multi_agent_results "
+            "WHERE team_id = ? AND member_id = 'worker-a' LIMIT 1",
+            (team_id,),
+        ).fetchone()
+        assert source is not None
+        for _ in range(64):
+            conn.execute(
+                "INSERT INTO multi_agent_results("
+                "team_id, member_id, outcome, payload_json, error, created_at) "
+                "SELECT team_id, ?, outcome, payload_json, error, created_at "
+                "FROM multi_agent_results WHERE result_id = ?",
+                (member_id, source["result_id"]),
+            )
+
+    state = provider()["v01_team_task"]
+    assert state["available"] is True
+    assert state["final_result"]["result_record_count"] == baseline_count + 64
+    comparison = state["final_result"]["comparison"]
+    assert comparison["validated"] is validated
+    assert comparison["status"] == ("agree" if validated else "evidence_invalid")
+    assert _RAW_SOURCE_CANARY not in json.dumps(state, ensure_ascii=False)
+    assert V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state(queue, task_id),
+        store=SQLiteStore(store.path),
+    )()["v01_team_task"] == state
