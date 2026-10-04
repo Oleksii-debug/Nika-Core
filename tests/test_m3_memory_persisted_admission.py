@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,3 +208,78 @@ def test_finite_exponent_still_rehydrates_after_restart(tmp_path: Path) -> None:
     )
     assert record is not None
     assert record.value == {"range": [1e308, -1e308, 0.125]}
+
+
+@pytest.mark.parametrize("invalid_scope", ["user", None, SimpleNamespace(value="user")])
+def test_fake_user_scope_cannot_bypass_write_approval(
+    tmp_path: Path, invalid_scope: object
+) -> None:
+    store, memory = _memory(tmp_path)
+    with pytest.raises(ValueError, match="scope must be a MemoryScope"):
+        memory.put(
+            scope=invalid_scope,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+            value={"unapproved": True},
+            user_approved=False,
+        )
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("operation", ["get", "list", "delete"])
+def test_fake_scope_cannot_read_or_delete_memory(tmp_path: Path, operation: str) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory, scope=MemoryScope.USER)
+    fake_scope = SimpleNamespace(value="user")
+    with pytest.raises(ValueError, match="scope must be a MemoryScope"):
+        if operation == "get":
+            memory.get(
+                scope=fake_scope, owner_id="owner", namespace="scratch", key="entry"
+            )
+        elif operation == "list":
+            memory.list_namespace(
+                scope=fake_scope, owner_id="owner", namespace="scratch"
+            )
+        else:
+            memory.delete(
+                scope=fake_scope, owner_id="owner", namespace="scratch", key="entry"
+            )
+    record = memory.get(
+        scope=MemoryScope.USER, owner_id="owner", namespace="scratch", key="entry"
+    )
+    assert record is not None and record.user_approved is True
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid", "message"),
+    [
+        ("owner_id", 123, "owner_id must be text"),
+        ("namespace", None, "namespace must be text"),
+        ("key", [], "key must be text"),
+        ("owner_id", "\ud800", "owner_id must be valid UTF-8"),
+        ("namespace", "\udfff", "namespace must be valid UTF-8"),
+        ("key", "\ud800", "key must be valid UTF-8"),
+    ],
+)
+def test_invalid_write_identity_preserves_existing_record(
+    tmp_path: Path, field: str, invalid: object, message: str
+) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    params = {
+        "scope": MemoryScope.TASK,
+        "owner_id": "owner",
+        "namespace": "scratch",
+        "key": "entry",
+        "value": "replacement",
+    }
+    params[field] = invalid
+    with pytest.raises(ValueError, match=message):
+        memory.put(**params)
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 1
+    assert memory.get(
+        scope=MemoryScope.TASK, owner_id="owner", namespace="scratch", key="entry"
+    ).value == {"safe": True}

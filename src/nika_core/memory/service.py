@@ -26,6 +26,7 @@ class MemoryService:
         user_approved: bool = False,
         expires_at: datetime | None = None,
     ) -> MemoryRecord:
+        scope = _require_scope(scope)
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
         key = _required("key", key)
@@ -102,6 +103,7 @@ class MemoryService:
         key: str,
         now: datetime | None = None,
     ) -> MemoryRecord | None:
+        scope = _require_scope(scope)
         current = _as_utc(now) if now else datetime.now(UTC)
         with self._store.connection() as conn:
             row = conn.execute(
@@ -129,6 +131,7 @@ class MemoryService:
         namespace: str,
         now: datetime | None = None,
     ) -> tuple[MemoryRecord, ...]:
+        scope = _require_scope(scope)
         current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
             # Compare actual instants, not offset-sensitive ISO strings. Older
@@ -153,6 +156,7 @@ class MemoryService:
             return tuple(records)
 
     def delete(self, *, scope: MemoryScope, owner_id: str, namespace: str, key: str) -> bool:
+        scope = _require_scope(scope)
         with self._store.connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
@@ -191,10 +195,23 @@ class MemoryService:
         return deleted
 
 
+def _require_scope(scope: MemoryScope) -> MemoryScope:
+    # Comparing a StrEnum with a raw string is not an admission check.
+    if type(scope) is not MemoryScope:
+        raise ValueError("scope must be a MemoryScope")
+    return scope
+
+
 def _required(name: str, value: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{name} must be text")
     result = value.strip()
     if not result:
         raise ValueError(f"{name} must not be empty")
+    try:
+        result.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8") from exc
     return result
 
 
