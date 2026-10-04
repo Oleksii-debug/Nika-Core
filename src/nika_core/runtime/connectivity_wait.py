@@ -187,6 +187,9 @@ class ConnectivityWaitService:
         # Observe before the SQLite write claim so simultaneous wake callers contend on
         # canonical durable authority rather than an in-process ownership flag.
         initially_available = self._probe.is_available()
+        # Never call host callbacks while holding SQLite's cross-process writer lock.
+        # The full scheduled-job snapshot is rechecked under that lock below.
+        available_now = initially_available and self._probe.is_available()
         runtime_job: ScheduledJob | None = None
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -271,7 +274,6 @@ class ConnectivityWaitService:
                 self._audit_rejected_with_connection(conn, job_id, reason="retry_not_ready")
                 return ConnectivityWaitDecision(fresh.disposition, False, binding.intent)
 
-            available_now = initially_available and self._probe.is_available()
             if available_now:
                 self._queue.transition_with_connection(conn, binding.task_id, TaskState.RETRYING)
                 self._jobs.set_enabled_with_connection(conn, job_id, False)
