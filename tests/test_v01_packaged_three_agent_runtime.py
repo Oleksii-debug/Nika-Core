@@ -234,3 +234,55 @@ def test_unknown_packaged_task_cannot_create_orphan_source_binding(
             (missing_id,),
         ).fetchone()[0] == 0
         assert conn.execute("SELECT COUNT(*) FROM multi_agent_teams").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "persisted",
+    [
+        pytest.param("[]", id="non-object"),
+        pytest.param('{"command":"a","command":"b"}', id="duplicate-command"),
+        pytest.param(sqlite3.Binary(b'{"command":"test"}'), id="sqlite-blob"),
+    ],
+)
+def test_packaged_resume_rejects_corrupt_task_even_with_cached_checker_goal(
+    tmp_path: Path, persisted: object
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    assert runtime._multi_store.task_payload(runtime._team_id(task_id), "checker")[
+        "user_goal"
+    ] == command
+    prior_results = _result_count(store)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (persisted, task_id),
+        )
+
+    assert runtime._stored_outer_command(task_id) == ""
+    result = asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                resume_token=runtime.initial_resume_token(
+                    task_id=task_id, thread_id=thread_id
+                ),
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    )
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == prior_results
