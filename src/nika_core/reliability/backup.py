@@ -209,7 +209,10 @@ class SQLiteRecoveryManager:
         }
         if set(manifest) != expected:
             raise BackupVerificationError("backup manifest has unexpected or missing fields")
-        if type(manifest["format_version"]) is not int or manifest["format_version"] != _MANIFEST_VERSION:
+        if (
+            type(manifest["format_version"]) is not int
+            or manifest["format_version"] != _MANIFEST_VERSION
+        ):
             raise BackupVerificationError("unsupported backup manifest format")
         if manifest["database_file"] != database.name:
             raise BackupVerificationError("backup manifest does not match database filename")
@@ -728,7 +731,10 @@ class SQLiteRecoveryManager:
             raise RestoreSafetyError(
                 "interrupted restore marker has unexpected or missing fields"
             )
-        if type(marker["format_version"]) is not int or marker["format_version"] != _RESTORE_MARKER_VERSION:
+        if (
+            type(marker["format_version"]) is not int
+            or marker["format_version"] != _RESTORE_MARKER_VERSION
+        ):
             raise RestoreSafetyError("unsupported interrupted restore marker format")
         if marker["target_file"] != target.name:
             raise RestoreSafetyError("interrupted restore marker targets another database")
@@ -1214,10 +1220,12 @@ class SQLiteRecoveryManager:
             return result
 
         try:
-            content = json.loads(
-                path.read_text(encoding="utf-8"), object_pairs_hook=_unique_keys
-            )
-        except (OSError, UnicodeError, ValueError) as exc:
+            with path.open("rb") as handle:
+                raw = handle.read(65_537)
+            if len(raw) > 65_536:
+                raise ValueError("recovery metadata exceeds 64 KiB")
+            content = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys)
+        except (OSError, UnicodeError, ValueError, RecursionError) as exc:
             raise BackupVerificationError(
                 f"JSON recovery metadata is unreadable: {path.name}"
             ) from exc
