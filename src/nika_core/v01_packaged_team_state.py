@@ -13,6 +13,19 @@ _TERMINAL_TEAM_STATES = frozenset({"completed", "failed", "cancelled"})
 _TERMINAL_MEMBER_STATES = frozenset({"completed", "failed", "cancelled"})
 
 
+def _unique_handoff_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate handoff JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_handoff_number(value: str) -> Any:
+    raise ValueError(f"non-finite handoff JSON number: {value}")
+
+
 class V01PackagedTeamStateProvider:
     """Bounded read-only V0.1 team projection for the packaged pywebview shell."""
 
@@ -74,12 +87,23 @@ class V01PackagedTeamStateProvider:
         stage_by_member: dict[str, str] = {}
         shared_task_id: str | None = None
         saw_v01_marker = False
+        invalid_handoff = False
         for row in task_rows:
+            raw = row["payload_json"]
+            if type(raw) is not str:
+                invalid_handoff = True
+                continue
             try:
-                payload = json.loads(row["payload_json"])
-            except (TypeError, json.JSONDecodeError):
+                payload = json.loads(
+                    raw,
+                    object_pairs_hook=_unique_handoff_object,
+                    parse_constant=_reject_nonfinite_handoff_number,
+                )
+            except (ValueError, RecursionError):
+                invalid_handoff = True
                 continue
             if not isinstance(payload, dict):
+                invalid_handoff = True
                 continue
             marked = "shared_task_id" in payload or "stage" in payload
             if not marked:
@@ -108,6 +132,8 @@ class V01PackagedTeamStateProvider:
 
         if not saw_v01_marker:
             return None
+        if invalid_handoff:
+            raise ValueError("invalid V0.1 team task handoff")
         if shared_task_id is None or not {"worker", "source_worker"}.intersection(
             stage_by_member.values()
         ):
