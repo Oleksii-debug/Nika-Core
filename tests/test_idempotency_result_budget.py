@@ -145,3 +145,31 @@ def test_tuple_and_sibling_nodes_share_one_budget(tmp_path, monkeypatch) -> None
     decoded = {"first": [0] * 3, "second": [0] * 3}
     assert ledger.complete("effect:budget", accepted).result == decoded
     assert IdempotencyLedger(store).require("effect:budget").result == decoded
+
+def test_giant_string_is_rejected_before_json_serialization(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(idempotency_module, "_MAX_RESULT_BYTES", 256)
+    store, ledger = _ledger(tmp_path)
+
+    with pytest.raises(ValueError, match="JSON serializable") as failure:
+        ledger.complete("effect:budget", {"output": "x" * 257})
+    assert failure.value.__cause__ is not None
+    assert "string exceeds maximum" in str(failure.value.__cause__)
+    assert _raw(store)["status"] == IdempotencyStatus.PENDING.value
+    assert _raw(store)["result_json"] is None
+
+
+def test_wide_root_mapping_rejected_before_initial_copy(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(idempotency_module, "_MAX_RESULT_NODES", 64)
+    store, ledger = _ledger(tmp_path)
+    too_wide = {f"key-{index}": index for index in range(64)}
+
+    with pytest.raises(ValueError, match="JSON serializable") as failure:
+        ledger.complete("effect:budget", too_wide)
+    assert failure.value.__cause__ is not None
+    assert "node count" in str(failure.value.__cause__)
+    assert _raw(store)["status"] == IdempotencyStatus.PENDING.value
+    assert _raw(store)["result_json"] is None
