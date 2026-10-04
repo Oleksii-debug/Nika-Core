@@ -765,6 +765,10 @@ class DesktopBackend:
                 current = self._queue.get(task_id)
                 if current.state == TaskState.RUNNING:
                     self._queue.transition(task_id, TaskState.FAILED)
+                elif current.state == TaskState.READY:
+                    # Failure before the runtime acquired RUNNING must not strand READY.
+                    # An explicit manual resume is safer than an implicit replay.
+                    self._queue.transition(task_id, TaskState.PAUSED)
         self._record_background_failure(task_id, "desktop.runtime_host_failed")
 
     def _record_background_failure(self, task_id: str, event_type: str) -> None:
