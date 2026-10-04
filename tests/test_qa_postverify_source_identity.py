@@ -33,6 +33,7 @@ def test_postcheck_failure_propagates_without_success_message(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("NIKA_CANDIDATE_SHA", "0" * 40)
+
     def fail_postcheck(label: str, command: tuple[str, ...]) -> None:
         if label == "Post-verification source identity":
             raise SystemExit(23)
@@ -40,6 +41,7 @@ def test_postcheck_failure_propagates_without_success_message(
     with pytest.raises(SystemExit, match="23"):
         verify.main()
     assert "All verification steps passed" not in capsys.readouterr().out
+
 
 @pytest.mark.parametrize("mutate_source", [False, True])
 def test_real_postcheck_detects_changes_made_during_tests(
