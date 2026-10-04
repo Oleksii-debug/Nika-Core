@@ -15,7 +15,7 @@ from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
 )
-from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent import (
     MultiAgentStore,
@@ -155,8 +155,13 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             ) is None:
                 return self._failed()
             return await self._run_member_from_store(thread_id=request.thread_id)
-        command = str(request.payload.get("command", "")).strip()
-        if not command:
+        # A request may be stale or altered after its TaskQueue entry was saved.
+        # Bind the initial command to the same durable authority as recovery.
+        raw_command = request.payload.get("command")
+        if type(raw_command) is not str:
+            return self._failed()
+        command = raw_command.strip()
+        if not command or self._stored_outer_command(request.task_id) != command:
             return self._failed()
         return await self._run_outer(task_id=request.task_id, command=command)
 
@@ -603,12 +608,19 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
     def _stored_outer_command(self, task_id: str) -> str:
         try:
             task = TaskQueue(self._sqlite).get(task_id)
-        except TaskPayloadCorruptionError:
-            # A cached checker goal must never bypass corrupt durable task data.
+        except (TypeError, ValueError):
+            # A cached checker goal cannot bypass malformed durable task data,
+            # including an invalid task state or JSON payload.
             return ""
         except KeyError:
-            # Preserve pre-queue legacy teams that have a persisted checker handoff.
+            # Preserve pre-queue legacy teams with a saved checker goal.
             task = None
+        command = ""
+        if task is not None:
+            raw_command = task.payload.get("command")
+            if type(raw_command) is not str or not raw_command.strip():
+                return ""
+            command = raw_command.strip()
         team_id = self._team_id(task_id)
         try:
             handoff = self._multi_store.task_payload(team_id, "checker")
@@ -618,10 +630,17 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             # A corrupt durable checker handoff must not fall back to a new goal.
             return ""
         if isinstance(handoff, Mapping):
-            goal = str(handoff.get("user_goal", "")).strip()
+            raw_goal = handoff.get("user_goal", "")
+            if type(raw_goal) is not str:
+                return ""
+            goal = raw_goal.strip()
             if goal:
+                # After the first handoff the command is frozen. A later task
+                # edit must not silently replace the approved execution goal.
+                if task is not None and goal != command:
+                    return ""
                 return goal
-        return str(task.payload.get("command", "")).strip() if task is not None else ""
+        return command
 
     def _member_shared_task_id(self, *, task_id: str, thread_id: str) -> str | None:
         identity = self._member_identity(thread_id)
