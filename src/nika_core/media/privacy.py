@@ -115,23 +115,27 @@ def _is_sensitive_query_key(key: str) -> bool:
 def _contains_encoded_sensitive_query(value: str) -> bool:
     """Detect escaped nested credentials without decoding the public evidence."""
 
-    # Plain nested URLs are handled by _redact_query_match's recursive pass,
-    # which preserves the non-secret part of that URL.
-    if "?" in value:
-        return False
-    decoded = value
-    for _ in range(3):
-        if "%" not in decoded:
-            break
-        updated = unquote_plus(decoded)
-        if updated == decoded:
-            break
-        decoded = updated
-        if any(
-            _is_sensitive_query_key(match.group(2))
-            for match in _SENSITIVE_QUERY.finditer(decoded)
-        ):
-            return True
+    # Literal query assignments are handled by _redact_query_match's
+    # recursive pass. Still inspect escaped queries before a literal "?",
+    # and after a "?" that does not begin a literal query assignment.
+    prefix, separator, suffix = value.partition("?")
+    candidates = [prefix]
+    if separator and _SENSITIVE_QUERY.match("?" + suffix) is None:
+        candidates.append(suffix)
+    for candidate in candidates:
+        decoded = candidate
+        for _ in range(3):
+            if "%" not in decoded:
+                break
+            updated = unquote_plus(decoded)
+            if updated == decoded:
+                break
+            decoded = updated
+            if any(
+                _is_sensitive_query_key(match.group(2))
+                for match in _SENSITIVE_QUERY.finditer(decoded)
+            ):
+                return True
     return False
 
 
