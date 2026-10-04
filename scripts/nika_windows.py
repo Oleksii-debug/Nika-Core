@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -453,6 +454,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
         return 1
+    except (OSError, ValueError):
+        # Never expose environment values or user paths in a windowless startup error.
+        show_recovery_error(
+            "Ніка не може прочитати налаштування або підготувати локальні дані. "
+            "Перевірте налаштування, доступ до папки даних і резервну копію. "
+            "Якщо проблема повторюється, перевірте резервну копію перед наступною спробою."
+        )
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
@@ -467,10 +476,26 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Запуск зупинено без автоматичного повторення дій."
         )
         return 1
+    except (OSError, sqlite3.Error, ValueError):
+        # Opening a corrupt/unavailable store must not leave a windowless EXE silent.
+        show_recovery_error(
+            "Ніка не може відкрити або перевірити локальні дані. "
+            "Подальший запуск зупинено, щоб уникнути додаткових дій. "
+            "Перевірте доступ до папки даних і резервну копію."
+        )
+        return 1
     try:
-        launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
-    finally:
-        session.close()
+        try:
+            launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
+        finally:
+            session.close()
+    except (OSError, RuntimeError, sqlite3.Error):
+        # Cleanup failures must not override the safe windowless error presentation.
+        show_recovery_error(
+            "Не вдалося відкрити вікно Ніки або завершити роботу застосунку. "
+            "Перевірте компоненти Windows і локальні дані перед наступним запуском."
+        )
+        return 1
     return 0
 
 
