@@ -28,6 +28,10 @@ def _queue(tmp_path: Path) -> tuple[SQLiteStore, TaskQueue]:
         pytest.param('{"command":', id="broken-json"),
         pytest.param('{"command":"first","command":"second"}', id="duplicate"),
         pytest.param('{"metadata":{"x":1,"x":2}}', id="nested-duplicate"),
+        pytest.param('{"score":NaN}', id="nan"),
+        pytest.param('{"score":Infinity}', id="positive-infinity"),
+        pytest.param('{"score":-Infinity}', id="negative-infinity"),
+        pytest.param('{"score":1e999}', id="float-overflow"),
         pytest.param(sqlite3.Binary(b'{"command":"test"}'), id="sqlite-blob"),
         pytest.param(123, id="sqlite-numeric"),
     ],
@@ -102,3 +106,19 @@ def test_corruption_cannot_bind_current_sources_as_legacy_fallback(
             "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
             (task.task_id,),
         ).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf")])
+def test_create_rejects_nonfinite_payload_before_durable_write(
+    tmp_path: Path, value: float
+) -> None:
+    store, queue = _queue(tmp_path)
+    with pytest.raises(ValueError):
+        queue.create(
+            workspace_id="default",
+            agent_id="nika.default",
+            payload={"command": "Порівняй", "score": value},
+        )
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM task_events").fetchone()[0] == 0

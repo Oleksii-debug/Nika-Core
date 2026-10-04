@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -23,13 +24,29 @@ def _unique_payload_object(pairs: list[tuple[str, object]]) -> dict[str, object]
     return result
 
 
+def _reject_nonfinite_constant(_value: str) -> object:
+    raise ValueError("non-finite task JSON constant")
+
+
+def _finite_json_float(raw: str) -> float:
+    number = float(raw)
+    if not math.isfinite(number):
+        raise ValueError("non-finite task JSON float")
+    return number
+
+
 def _decode_task_payload(raw: object) -> dict[str, object]:
     error = "Збережені дані завдання пошкоджені."
     # SQLite TEXT affinity does not prevent external writes of BLOB values.
     if type(raw) is not str:
         raise TaskPayloadCorruptionError(error)
     try:
-        payload = json.loads(raw, object_pairs_hook=_unique_payload_object)
+        payload = json.loads(
+            raw,
+            object_pairs_hook=_unique_payload_object,
+            parse_constant=_reject_nonfinite_constant,
+            parse_float=_finite_json_float,
+        )
     except (TypeError, ValueError, RecursionError) as exc:
         raise TaskPayloadCorruptionError(error) from exc
     # A list, null or string is valid JSON but not a TaskRecord payload. Never
@@ -84,7 +101,7 @@ class TaskQueue:
                     workspace_id,
                     agent_id,
                     TaskState.CREATED.value,
-                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False),
                     now,
                     now,
                 ),
