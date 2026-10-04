@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import nika_core.product_factory_deployment_execution as execution_module
 from nika_core.product_factory_credentials import CredentialBroker, SecretRef
 from nika_core.product_factory_deployment import (
     DeploymentFabric,
@@ -458,3 +459,49 @@ def test_node_reassignment_during_health_probe_is_fenced_before_provider() -> No
     assert provider.deploy_calls == []
     (foreign_lease,) = coordinator.nodes.snapshot().leases
     assert coordinator.nodes.is_active_for(foreign_lease, second.request, now=NOW)
+
+def test_health_probe_cannot_authorize_expired_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MutableClock:
+        current = NOW
+
+        @classmethod
+        def now(cls, timezone: object) -> datetime:
+            assert timezone == UTC
+            return cls.current
+
+    @dataclass
+    class ExpiringHealth(FakeNodeHealth):
+        probes: int = 0
+
+        def is_available(self, node_id: str) -> bool:
+            self.probes += 1
+            if self.probes == 2:
+                MutableClock.current = NOW + timedelta(seconds=2)
+            return super().is_available(node_id)
+
+    health = ExpiringHealth()
+    coordinator, credentials, provider, _ = _coordinator(health=health)
+    spec = replace(
+        _spec("project-a", "messages"),
+        credential_ttl_seconds=1,
+        node_lease_seconds=300,
+    )
+    coordinator.submit(spec, now=NOW)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+
+    # complete() starts with a valid credential; the external health probe
+    # advances the real clock beyond its expiry before authorization.
+    monkeypatch.setattr(execution_module, "datetime", MutableClock)
+    blocked = coordinator.complete(spec.operation_id)
+
+    assert health.probes == 2
+    assert blocked.state is OperationState.BLOCKED_CREDENTIAL
+    assert blocked.updated_at == NOW + timedelta(seconds=2)
+    assert blocked.node_id is None
+    assert provider.deploy_calls == []
+    assert coordinator.nodes.snapshot().leases == ()
+    assert sum(
+        event.action == "use" for event in credentials.audit_events("project-a")
+    ) == 1
