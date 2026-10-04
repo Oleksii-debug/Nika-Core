@@ -325,5 +325,10 @@ class OllamaModelHealthProbe:
                 item_identities.append(value)
             if not item_identities:
                 return None
+            # Ollama exposes `name` and `model` for the same entry. Disagreement
+            # is malformed identity evidence, not an additional model alias.
+            # Preserve single-field entries and the separate `:latest` matching rule.
+            if len(item_identities) == 2 and item_identities[0] != item_identities[1]:
+                return None
             identities.update(item_identities)
         return identities
