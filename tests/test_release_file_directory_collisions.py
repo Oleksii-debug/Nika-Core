@@ -10,8 +10,10 @@ import pytest
 from nika_core.packaging.release import (
     ReleaseFile,
     ReleaseManifest,
+    build_release_manifest,
     verify_release_archive,
     verify_release_manifest,
+    write_release_manifest,
 )
 
 SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
@@ -118,3 +120,34 @@ def test_archive_allows_normal_nested_files_and_directory_entries(
         dirs=("bin/", "bin/plugins/"),
     )
     assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == ()
+
+
+@pytest.mark.parametrize("alias", ["Release-Manifest.json", "RELEASE-MANIFEST.JSON"])
+def test_manifest_rejects_casefold_alias_of_reserved_root_file(
+    tmp_path: Path, alias: str
+) -> None:
+    assert verify_release_manifest(tmp_path, _manifest(_file(alias, b"alias"))) == (
+        "manifest:path:0",
+    )
+
+
+def test_nested_manifest_named_asset_is_manifest_bound(tmp_path: Path) -> None:
+    bundle = tmp_path / "Nika Core"
+    (bundle / "assets").mkdir(parents=True)
+    (bundle / "NikaCore.exe").write_bytes(b"exe")
+    nested = bundle / "assets" / "release-manifest.json"
+    nested.write_bytes(b"nested")
+
+    manifest = build_release_manifest(
+        bundle, product="NikaCore", version="1.0.0", source_sha=SOURCE_SHA
+    )
+    assert {item.path for item in manifest.files} == {
+        "NikaCore.exe", "assets/release-manifest.json"
+    }
+    write_release_manifest(bundle, manifest)
+    assert verify_release_manifest(bundle, manifest) == ()
+
+    nested.write_bytes(b"modified")
+    assert verify_release_manifest(bundle, manifest) == (
+        "size:assets/release-manifest.json",
+    )
