@@ -126,7 +126,11 @@ class OpenAICompatibleProvider:
             raw_text = choice["message"]["content"]
             if not isinstance(raw_text, str):
                 raise TypeError("message content must be text")
-            model = str(body.get("model") or request.model or self._default_model)
+            # The provider must positively attest its model identity. Never
+            # manufacture evidence from the outbound request or default.
+            model = body["model"]
+            if type(model) is not str or not model or model != model.strip():
+                raise ValueError("provider model identity is invalid")
             raw_usage = body.get("usage")
             if raw_usage is None:
                 raw_usage = {}
