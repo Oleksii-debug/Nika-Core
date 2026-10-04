@@ -51,6 +51,27 @@ class _SlowOrCancellingModel:
         return "C:/Foundry Models/approved-alias"
 
 
+class _SlowOrCancellingAliasModel(_SlowOrCancellingModel):
+    @property
+    def alias(self) -> str:
+        provider = self.provider
+        if (
+            provider is not None
+            and provider._inference_lock.locked()
+            and not self.pre_download_getter_seen
+        ):
+            self.pre_download_getter_seen = True
+            if self.stage == "expired":
+                time.sleep(0.08)
+            elif self.stage == "cancelled":
+                self.cancellation.set()
+        return self._alias
+
+    @alias.setter
+    def alias(self, value: str) -> None:
+        self._alias = value
+
+
 def _provider(model: _SlowOrCancellingModel) -> FoundryLocalProvider:
     manager = SimpleNamespace(
         catalog=SimpleNamespace(get_model=lambda alias: model),
@@ -71,6 +92,7 @@ def _authorization() -> ModelDownloadAuthorization:
     )
 
 
+@pytest.mark.parametrize("getter", ("id", "alias"))
 @pytest.mark.parametrize(
     ("stage", "expected_code"),
     (
@@ -78,10 +100,14 @@ def _authorization() -> ModelDownloadAuthorization:
         ("cancelled", ModelErrorCode.CANCELLED),
     ),
 )
-def test_sdk_identity_getter_cannot_start_download_after_abandonment(
-    stage: str, expected_code: ModelErrorCode
+def test_sdk_getter_cannot_start_download_after_abandonment(
+    getter: str, stage: str, expected_code: ModelErrorCode
 ) -> None:
-    model = _SlowOrCancellingModel(stage)
+    model = (
+        _SlowOrCancellingModel(stage)
+        if getter == "id"
+        else _SlowOrCancellingAliasModel(stage)
+    )
     provider = _provider(model)
     with pytest.raises(ModelGatewayError) as caught:
         asyncio.run(
