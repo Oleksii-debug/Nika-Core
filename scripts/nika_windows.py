@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
@@ -114,31 +115,41 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             else None
         ),
     )
-    voice = build_packaged_voice(
-        config.database_path.parent,
-        submit=backend.submit_packaged_coroutine,
-    )
-    voice_model_setup = PackagedVoiceModelSetup(
-        config.database_path.parent,
-        submit=backend.submit_packaged_coroutine,
-    )
-    speech = build_packaged_speech()
+    # Each constructor may fail after the preceding component has acquired resources.
+    # Keep the initialized prefix so startup failures cannot strand the desktop host.
+    initialized: list[Any] = [backend]
     try:
-        backend.start_startup_recovery()
-    except Exception as exc:
+        voice = build_packaged_voice(
+            config.database_path.parent,
+            submit=backend.submit_packaged_coroutine,
+        )
+        initialized.append(voice)
+        voice_model_setup = PackagedVoiceModelSetup(
+            config.database_path.parent,
+            submit=backend.submit_packaged_coroutine,
+        )
+        initialized.append(voice_model_setup)
+        speech = build_packaged_speech()
+        initialized.append(speech)
         try:
-            voice_model_setup.close()
-        finally:
+            backend.start_startup_recovery()
+        except Exception as exc:
+            raise _StartupRecoveryInventoryError(
+                "packaged startup recovery inventory failed"
+            ) from exc
+    except Exception:
+        for component in reversed(initialized):
             try:
-                speech.close()
-            finally:
-                try:
-                    voice.close()
-                finally:
-                    backend.close()
-        raise _StartupRecoveryInventoryError(
-            "packaged startup recovery inventory failed"
-        ) from exc
+                component.close()
+            except Exception as close_exc:
+                # Continue closing the remaining components and preserve the
+                # original startup failure. Never log credential-bearing text.
+                logging.getLogger(__name__).warning(
+                    "Windows startup cleanup failed: component=%s exception_type=%s",
+                    type(component).__name__,
+                    type(close_exc).__name__,
+                )
+        raise
 
     products = ProductProjectCommandService(ProductProjectRepository(store))
     agent_definitions = AgentDefinitionRepository(store)
