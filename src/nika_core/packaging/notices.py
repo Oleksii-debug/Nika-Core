@@ -155,14 +155,21 @@ def _read_notices(target: Path) -> str | None:
             if (
                 not stat.S_ISREG(opened.st_mode)
                 or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+                or (opened.st_size, opened.st_mtime_ns)
+                != (before.st_size, before.st_mtime_ns)
             ):
                 return None
             data = source.read(_MAX_NOTICES_BYTES + 1)
             after = os.fstat(source.fileno())
+        current = target.lstat()
         if (
             len(data) > _MAX_NOTICES_BYTES
             or len(data) != after.st_size
-            or (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+            or (opened.st_dev, opened.st_ino, opened.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_mtime_ns)
+            or not stat.S_ISREG(current.st_mode)
+            or (current.st_dev, current.st_ino, current.st_mtime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_mtime_ns)
         ):
             return None
         return data.decode("utf-8")
