@@ -299,6 +299,9 @@ class FoundryLocalProvider:
                     provider_id=self.capabilities.provider_id,
                     retryable=False,
                 )
+            # Synchronous SDK catalog/manager work consumes the same deadline.
+            if deadline - loop.time() <= 0:
+                raise TimeoutError
             # Capture the first resolved artifact when no explicit release pin exists.
             expected_model_id = (
                 authorization.expected_model_id
@@ -319,6 +322,9 @@ class FoundryLocalProvider:
                         provider_id=self.capabilities.provider_id,
                         retryable=False,
                     )
+                # Cached-model SDK evidence getters may also exceed the deadline.
+                if deadline - loop.time() <= 0:
+                    raise TimeoutError
                 return evidence
 
             remaining = deadline - loop.time()
@@ -401,6 +407,9 @@ class FoundryLocalProvider:
                     provider_id=self.capabilities.provider_id,
                     retryable=False,
                 )
+            # A download succeeds only if evidence was checked in the original budget.
+            if deadline - loop.time() <= 0:
+                raise TimeoutError
             if not evidence.cached:
                 if effective_cancel_event.is_set():
                     raise ModelGatewayError(
