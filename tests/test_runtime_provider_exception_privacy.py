@@ -14,6 +14,8 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResumeMode,
+    RuntimeResumeProbe,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
@@ -122,3 +124,53 @@ def test_cancel_uncertain_preserves_authority_without_audit_secret(tmp_path, err
     assert events[-1].payload["error"] == error_type.__name__
     assert events[-1].payload["operation_key"] == records[0].operation_key
     assert _SECRET not in str(events)
+
+
+class _CheckpointFaultingRuntime(_FaultingRuntime):
+    capabilities = frozenset({
+        RuntimeCapability.CANCELLATION,
+        RuntimeCapability.DURABLE_RESUME,
+    })
+
+    async def probe_resume(self, *, task_id: str, thread_id: str, resume_token: str):
+        del task_id, thread_id, resume_token
+        return RuntimeResumeProbe(
+            status=RuntimeResumeProbeStatus.READY,
+            reason="known checkpoint",
+            checkpoint_id="checkpoint:private-error-runtime",
+        )
+
+
+@pytest.mark.parametrize("error_type", [OSError, RuntimeError, _UnprintableProviderError])
+def test_durable_resume_redacts_provider_exception_and_completes_recovery_claim(
+    tmp_path, error_type
+):
+    store, queue, task_id, audit, coordinator = _ready(tmp_path)
+    queue.transition(task_id, TaskState.RUNNING)
+    coordinator.sessions.record_active(
+        task_id=task_id,
+        runtime_id=_CheckpointFaultingRuntime.runtime_id,
+        thread_id="private-thread",
+        resume_token="private-token",
+    )
+    runtime = _CheckpointFaultingRuntime(error_type)
+
+    result = asyncio.run(coordinator.resume_saved(runtime, task_id=task_id))
+
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert result.error_code is RuntimeErrorCode.INTERNAL
+    assert result.error == "runtime resume failed"
+    assert queue.get(task_id).state is TaskState.FAILED
+    assert coordinator.sessions.get(task_id) is None
+    claims = [
+        record for record in IdempotencyLedger(store).list_for_task(task_id)
+        if record.operation_type == "runtime.recovery_resume"
+    ]
+    assert len(claims) == 1
+    assert claims[0].status is IdempotencyStatus.COMPLETED
+    assert claims[0].result["checkpoint_id"] == "checkpoint:private-error-runtime"
+    events = audit.list_for(entity_type="task", entity_id=task_id)
+    assert "runtime.saved_resume_started" in [event.event_type for event in events]
+    assert _SECRET not in str(result)
+    assert _SECRET not in str(events)
+    assert _SECRET not in str(claims)
