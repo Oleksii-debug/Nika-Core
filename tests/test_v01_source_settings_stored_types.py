@@ -9,6 +9,8 @@ import pytest
 
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue, TaskRecord
+from nika_core.kernel.task_state import TaskState
 from nika_core.v01_source_settings import (
     SourceSelection,
     SourceSetupError,
@@ -109,3 +111,70 @@ def test_blob_task_binding_fails_closed_for_legacy_task(tmp_path: Path) -> None:
         )
     with pytest.raises(SourceSetupError, match="пошкоджені"):
         settings.for_task("legacy-task")
+
+def test_unknown_task_cannot_create_source_binding(tmp_path: Path) -> None:
+    store, settings = _configured(tmp_path)
+    with pytest.raises(SourceSetupError, match="не знайдено"):
+        settings.for_task("nonexistent-task")
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            ("nonexistent-task",),
+        ).fetchone()[0] == 0
+
+
+def test_stale_task_read_cannot_create_orphan_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, settings = _configured(tmp_path)
+
+    def stale_get(_queue: TaskQueue, task_id: str) -> TaskRecord:
+        return TaskRecord(
+            task_id=task_id,
+            workspace_id="default",
+            agent_id="nika.default",
+            state=TaskState.CREATED,
+            payload={"command": "Порівняй"},
+        )
+
+    monkeypatch.setattr(TaskQueue, "get", stale_get)
+    with pytest.raises(SourceSetupError, match="не знайдено"):
+        settings.for_task("deleted-task")
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            ("deleted-task",),
+        ).fetchone()[0] == 0
+
+
+def test_valid_task_keeps_source_binding(tmp_path: Path) -> None:
+    store, settings = _configured(tmp_path)
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload({"command": "Порівняй"}),
+    )
+    selection = settings.for_task(task.task_id)
+    assert selection.source_a != selection.source_b
+    assert settings.for_task(task.task_id) == selection
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()[0] == 1
+
+
+def test_existing_legacy_binding_without_queue_row_remains_readable(tmp_path: Path) -> None:
+    store, settings = _configured(tmp_path)
+    snapshot = settings.snapshot()
+    selection = SourceSelection(
+        root=snapshot["root"],
+        source_a=snapshot["source_a"],
+        source_b=snapshot["source_b"],
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO v01_task_source_bindings VALUES (?, ?, ?)",
+            ("legacy-task", selection.model_dump_json(), "2026-10-04"),
+        )
+    assert settings.for_task("legacy-task") == selection
