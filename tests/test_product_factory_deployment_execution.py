@@ -458,3 +458,100 @@ def test_node_reassignment_during_health_probe_is_fenced_before_provider() -> No
     assert provider.deploy_calls == []
     (foreign_lease,) = coordinator.nodes.snapshot().leases
     assert coordinator.nodes.is_active_for(foreign_lease, second.request, now=NOW)
+
+
+@pytest.mark.parametrize("health_available", [True, False])
+def test_prepare_preserves_foreign_lease_when_health_callback_reassigns_node(
+    health_available: bool,
+) -> None:
+    @dataclass
+    class ReassigningHealth(FakeNodeHealth):
+        coordinator: DeploymentExecutionCoordinator | None = None
+        other_request: ExecutionRequest | None = None
+        moved: bool = False
+
+        def is_available(self, node_id: str) -> bool:
+            assert node_id == "local-linux"
+            if not self.moved:
+                assert self.coordinator is not None
+                assert self.other_request is not None
+                (incumbent,) = self.coordinator.nodes.snapshot().leases
+                self.coordinator.nodes.release(incumbent.lease_id)
+                self.coordinator.nodes.acquire(self.other_request, now=NOW)
+                self.moved = True
+            return self.available
+
+    health = ReassigningHealth(available=health_available)
+    coordinator, _, provider, _ = _coordinator(health=health)
+    first = _spec("project-a", "messages")
+    other = _spec("project-a", "profiles", SHA2)
+    health.coordinator = coordinator
+    health.other_request = other.request
+    coordinator.submit(first, now=NOW)
+
+    waiting = coordinator.prepare(first.operation_id, now=NOW)
+    assert waiting.state is OperationState.WAITING_FOR_NODE
+    assert waiting.node_id is None
+    assert waiting.attempt == 1
+    assert provider.deploy_calls == []
+    (foreign,) = coordinator.nodes.snapshot().leases
+    assert coordinator.nodes.is_active_for(foreign, other.request, now=NOW)
+    assert coordinator._node_leases == {}
+    assert coordinator._credential_leases == {}
+
+
+def test_prepare_releases_only_its_lease_when_health_disables_node() -> None:
+    @dataclass
+    class DisablingHealth(FakeNodeHealth):
+        coordinator: DeploymentExecutionCoordinator | None = None
+        disabled: bool = False
+
+        def is_available(self, node_id: str) -> bool:
+            assert node_id == "local-linux"
+            if not self.disabled:
+                assert self.coordinator is not None
+                self.coordinator.nodes.register(replace(local_linux_node(), enabled=False))
+                self.disabled = True
+            return True
+
+    health = DisablingHealth()
+    coordinator, _, provider, _ = _coordinator(health=health)
+    health.coordinator = coordinator
+    spec = _spec("project-a", "messages")
+    coordinator.submit(spec, now=NOW)
+
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.WAITING_FOR_NODE
+    assert coordinator.nodes.snapshot().leases == ()
+    assert provider.deploy_calls == []
+
+    coordinator.nodes.register(local_linux_node())
+    assert coordinator.retry(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [spec.intent.intent_id]
+
+
+def test_prepare_rechecks_lease_after_credential_authorization_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, credentials, provider, _ = _coordinator()
+    first = _spec("project-a", "messages")
+    other = _spec("project-a", "profiles", SHA2)
+    coordinator.submit(first, now=NOW)
+    original = type(credentials).authorize_use
+
+    def reassign_after_authorization(self: CredentialBroker, **kwargs: object):
+        use = original(self, **kwargs)
+        (incumbent,) = coordinator.nodes.snapshot().leases
+        coordinator.nodes.release(incumbent.lease_id)
+        coordinator.nodes.acquire(other.request, now=NOW)
+        return use
+
+    monkeypatch.setattr(type(credentials), "authorize_use", reassign_after_authorization)
+    waiting = coordinator.prepare(first.operation_id, now=NOW)
+    assert waiting.state is OperationState.WAITING_FOR_NODE
+    assert waiting.node_id is None
+    assert provider.deploy_calls == []
+    (foreign,) = coordinator.nodes.snapshot().leases
+    assert coordinator.nodes.is_active_for(foreign, other.request, now=NOW)
+    assert coordinator._node_leases == {}
+    assert coordinator._credential_leases == {}
