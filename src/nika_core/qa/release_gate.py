@@ -79,7 +79,9 @@ def evaluate_release_gate(evidence: ReleaseGateEvidence) -> ReleaseGateResult:
 
     if production_release_ready:
         stage = "NVDA_VERIFIED"
-    elif human_tested:
+    elif release_candidate_ready and human_tested:
+        # The release stage is ordered: a human-only result cannot promote a
+        # candidate whose automated acceptance evidence is still incomplete.
         stage = "HUMAN_TESTED"
     elif proven("windows_package_built"):
         stage = "PACKAGED"
