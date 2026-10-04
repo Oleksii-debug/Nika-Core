@@ -181,6 +181,22 @@ def _canonical_release_path(value: object) -> bool:
     return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
 
 
+def _release_file_directory_collisions(
+    file_paths: tuple[str, ...], directory_paths: tuple[str, ...] = ()
+) -> tuple[str, ...]:
+    """Reject file ancestors of files/directories under Windows path identity."""
+    file_identities = {path.casefold() for path in file_paths}
+    collisions: list[str] = []
+    for path in (*file_paths, *directory_paths):
+        parts = path.casefold().split("/")
+        if any(
+            "/".join(parts[:index]) in file_identities
+            for index in range(1, len(parts))
+        ):
+            collisions.append(path)
+    return tuple(collisions)
+
+
 def _valid_product_version(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -290,6 +306,10 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
             findings.append(f"manifest:size-format:{index}")
         if not isinstance(entry.sha256, str) or not _SHA256_RE.fullmatch(entry.sha256):
             findings.append(f"manifest:sha256-format:{index}")
+    for path in _release_file_directory_collisions(
+        tuple(sorted(seen_paths | {_RELEASE_MANIFEST_NAME}))
+    ):
+        findings.append(f"manifest:file-directory-collision:{path}")
     return tuple(findings)
 
 
@@ -503,6 +523,7 @@ def verify_release_archive(
             by_path: dict[str, zipfile.ZipInfo] = {}
             seen_paths: set[str] = set()
             windows_paths: set[str] = set()
+            directory_paths: list[str] = []
             for index, member in enumerate(all_members):
                 member_path = _zip_member_path(member)
                 if not _canonical_relative_path(member_path):
@@ -526,8 +547,16 @@ def verify_release_archive(
                     continue
                 seen_paths.add(member_path)
                 windows_paths.add(windows_identity)
-                if not member.is_dir():
+                if member.is_dir():
+                    directory_paths.append(member_path)
+                else:
                     by_path[member_path] = member
+            if findings:
+                return tuple(findings)
+            for path in _release_file_directory_collisions(
+                tuple(by_path), tuple(directory_paths)
+            ):
+                findings.append(f"archive:file-directory-collision:{path}")
             if findings:
                 return tuple(findings)
             if not by_path:
