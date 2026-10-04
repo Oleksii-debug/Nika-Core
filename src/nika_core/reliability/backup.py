@@ -480,6 +480,20 @@ class SQLiteRecoveryManager:
         if not marker_path.exists():
             return None
         marker = self._read_restore_marker(marker_path, target)
+        for name in (
+            marker["stage_file"],
+            marker["quarantine_file"],
+            marker["quarantine_wal_file"],
+            marker["quarantine_shm_file"],
+            self._manifest_path(target.parent / marker["quarantine_file"]).name,
+        ):
+            artifact = target.parent / name
+            if self._is_indirect_path(artifact) or (
+                artifact.exists() and not artifact.is_file()
+            ):
+                raise RestoreSafetyError(
+                    "interrupted restore artifact is indirect or not a regular file"
+                )
         stage = target.parent / marker["stage_file"]
         quarantine = target.parent / marker["quarantine_file"]
         old_sha = marker["current_sha256"]
