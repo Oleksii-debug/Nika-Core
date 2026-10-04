@@ -7,6 +7,8 @@ from unittest.mock import Mock
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler import (
     APSchedulerAdapter,
     ScheduledJob,
@@ -127,6 +129,43 @@ def test_unchanged_snapshot_installs_normally(tmp_path: Path) -> None:
         assert adapter._sync_runtime_job(job.job_id) == job
         runtime = adapter._scheduler.get_job(job.job_id)
         assert runtime is not None and runtime.args == (job.job_id, job)
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
+
+
+def test_terminal_task_during_install_suppresses_obsolete_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sqlite = SQLiteStore(tmp_path / "terminal-during-install.sqlite3")
+    sqlite.initialize()
+    queue = TaskQueue(sqlite)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "terminal during scheduler installation"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    jobs = ScheduledJobStore(sqlite)
+    resolver = Mock(return_value=Mock())
+    adapter = APSchedulerAdapter(jobs, resolver)
+    adapter.start()
+    job = replace(_job(), payload={"task_id": task.task_id})
+    jobs.upsert(job)
+    original_install = adapter._install
+
+    def install_then_cancel(current: ScheduledJob) -> None:
+        original_install(current)
+        queue.transition(task.task_id, TaskState.CANCELLED)
+
+    monkeypatch.setattr(adapter, "_install", install_then_cancel)
+    try:
+        assert adapter._sync_runtime_job(job.job_id) is None
+        assert queue.get(task.task_id).state is TaskState.CANCELLED
+        persisted = jobs.get(job.job_id)
+        assert persisted is not None and not persisted.enabled
+        assert adapter._scheduler.get_job(job.job_id) is None
         resolver.assert_not_called()
     finally:
         adapter.shutdown()
