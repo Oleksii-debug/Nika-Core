@@ -759,7 +759,11 @@ def build_release_archive(
     manifest_path = root / _RELEASE_MANIFEST_NAME
     if manifest_path not in files:
         raise ValueError("release bundle is missing its regular manifest")
-    manifest = _decode_release_manifest(manifest_path.read_bytes())
+    with manifest_path.open("rb") as handle:
+        raw_manifest = handle.read(_MAX_RELEASE_MANIFEST_BYTES + 1)
+    if len(raw_manifest) > _MAX_RELEASE_MANIFEST_BYTES:
+        raise ValueError("release bundle manifest exceeds the maximum size")
+    manifest = _decode_release_manifest(raw_manifest)
     if manifest is None:
         raise ValueError("release bundle has an invalid manifest")
     if manifest.source_sha != source_sha or manifest.version != expected_product_version:
