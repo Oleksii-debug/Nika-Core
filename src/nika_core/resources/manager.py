@@ -3,12 +3,14 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from math import isfinite
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.resources.contracts import (
     ResourceBudget,
     ResourceCapacityStatus,
     ResourceObserverPort,
+    ResourceSnapshot,
 )
 
 
@@ -17,6 +19,10 @@ class ResourceDecision:
     granted: bool
     reason: str
     queue_position: int | None = None
+
+
+class ResourceTelemetryError(RuntimeError):
+    """Resource admission cannot trust the current host telemetry."""
 
 
 class ResourceManager:
@@ -68,7 +74,7 @@ class ResourceManager:
     def status(self, *, scope: str, owner_id: str) -> ResourceCapacityStatus:
         """Return deterministic read-only capacity telemetry without changing admission state."""
         budget = self.get_budget(scope=scope, owner_id=owner_id)
-        snapshot = self._observer.snapshot()
+        snapshot = self._read_snapshot()
         active_count = self.active_count(scope=scope, owner_id=owner_id)
         queued_count = len(self.queued(scope=scope, owner_id=owner_id))
         pressure_reasons: list[str] = []
@@ -119,7 +125,10 @@ class ResourceManager:
         budget = self.get_budget(scope=scope, owner_id=owner_id)
         if len(active) >= budget.max_concurrent:
             return ResourceDecision(False, "concurrency_limit", position)
-        snapshot = self._observer.snapshot()
+        try:
+            snapshot = self._read_snapshot()
+        except ResourceTelemetryError:
+            return ResourceDecision(False, "telemetry_unavailable", position)
         if budget.max_cpu_percent is not None and snapshot.cpu_percent > budget.max_cpu_percent:
             return ResourceDecision(False, "cpu_limit", position)
         if (
@@ -131,6 +140,22 @@ class ResourceManager:
         queue.popleft()
         active.add(request_id)
         return ResourceDecision(True, "granted")
+
+    def _read_snapshot(self) -> ResourceSnapshot:
+        try:
+            snapshot = self._observer.snapshot()
+        except Exception:
+            # Never expose observer/host exception text or admit on missing telemetry.
+            raise ResourceTelemetryError("resource telemetry unavailable") from None
+        if (
+            type(snapshot) is not ResourceSnapshot
+            or not _valid_percent(snapshot.cpu_percent)
+            or not _valid_percent(snapshot.memory_percent)
+            or type(snapshot.available_memory_bytes) is not int
+            or snapshot.available_memory_bytes < 0
+        ):
+            raise ResourceTelemetryError("resource telemetry invalid")
+        return snapshot
 
     def release(self, *, scope: str, owner_id: str, request_id: str) -> bool:
         key = (scope, owner_id)
@@ -158,11 +183,15 @@ class ResourceManager:
 def _validate_budget(budget: ResourceBudget) -> None:
     if not budget.scope.strip() or not budget.owner_id.strip():
         raise ValueError("resource budget scope and owner_id must not be empty")
-    if budget.max_concurrent <= 0:
+    if type(budget.max_concurrent) is not int or budget.max_concurrent <= 0:
         raise ValueError("max_concurrent must be greater than zero")
     for name, value in (
         ("max_cpu_percent", budget.max_cpu_percent),
         ("max_memory_percent", budget.max_memory_percent),
     ):
-        if value is not None and not 0 < value <= 100:
-            raise ValueError(f"{name} must be in the range (0, 100]")
+        if value is not None and (not _valid_percent(value) or value == 0):
+            raise ValueError(f"{name} must be a finite number in the range (0, 100]")
+
+
+def _valid_percent(value: object) -> bool:
+    return type(value) in (int, float) and isfinite(value) and 0 <= value <= 100
