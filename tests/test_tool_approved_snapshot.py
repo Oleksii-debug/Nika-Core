@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.audit import AuditLog
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.tools import (
     ToolAuthorization,
@@ -270,3 +271,42 @@ def test_invalid_unicode_identity_returns_controlled_executor_failure(
     assert result.error == "tool effect not safe to execute"
     assert not invoked
     assert ledger.list_for_task("task-1") == ()
+
+
+@pytest.mark.parametrize("invalid_id", (7, chr(0xD800)))
+def test_rejected_malformed_call_id_is_audited_without_unicode_escape(
+    tmp_path: Path, invalid_id: object
+) -> None:
+    store = SQLiteStore(tmp_path / "malformed-audit.db")
+    store.initialize()
+    audit = AuditLog(store)
+    called = False
+
+    async def policy(_spec: ToolSpec, _call: ToolCall) -> ToolAuthorization:
+        return _authorization()
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        nonlocal called
+        called = True
+        return {"published": True}
+
+    executor = ToolExecutor(
+        approval_policy=policy,
+        effect_guard=ToolEffectGuard(IdempotencyLedger(store)),
+        audit_log=audit,
+    )
+    executor.register(SPEC, handler)
+    result = asyncio.run(executor.execute(ToolCall(
+        call_id=invalid_id,  # type: ignore[arg-type] - corrupted runtime carrier
+        tool_id=SPEC.tool_id,
+        task_id="task-1",
+        arguments={"command": "safe"},
+    )))
+    assert result.error == "tool effect not safe to execute"
+    assert not called
+    events = audit.list_for(
+        entity_type="tool_call", entity_id="invalid-tool-call-id"
+    )
+    assert len(events) == 1
+    assert events[0].event_type == "tool.denied"
+    assert events[0].payload["reason"] == "ValueError"
