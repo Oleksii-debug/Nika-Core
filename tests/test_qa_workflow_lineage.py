@@ -193,3 +193,16 @@ def test_m11_runs_for_packaged_team_projection_source_and_regressions() -> None:
         '      - "tests/test_v01_packaged_final_result.py"',
     ):
         assert event_configuration.count(path) == 2, path
+
+
+def test_m11_runs_for_packaged_runtime_source_and_resume_regressions() -> None:
+    m11 = (ROOT / ".github" / "workflows" / "m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+    event_configuration, separator, _ = m11.partition("\njobs:\n")
+    assert separator, "M11 jobs configuration is missing"
+    for path in (
+        '      - "src/nika_core/v01_packaged_team_runtime.py"',
+        '      - "tests/test_v01_packaged_three_agent_runtime.py"',
+    ):
+        assert event_configuration.count(path) == 2, path
