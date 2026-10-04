@@ -20,6 +20,7 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbePort,
     RuntimeResumeRequest,
     canonical_resume_probe,
+    canonical_runtime_result,
 )
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
@@ -1108,7 +1109,7 @@ class TaskRuntimeCoordinator:
         request: RuntimeRequest,
     ) -> RuntimeResult:
         try:
-            return await runtime.run(request)
+            return canonical_runtime_result(await runtime.run(request))
         except Exception:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
@@ -1122,7 +1123,7 @@ class TaskRuntimeCoordinator:
         request: RuntimeResumeRequest,
     ) -> RuntimeResult:
         try:
-            return await runtime.resume(request)
+            return canonical_runtime_result(await runtime.resume(request))
         except Exception:  # noqa: BLE001 - runtime adapter boundary normalizes failures
             return RuntimeResult(
                 outcome=RuntimeOutcome.FAILED,
