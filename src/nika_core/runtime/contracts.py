@@ -197,6 +197,28 @@ class RuntimeResult:
             raise ValueError("error_code is only valid for failed outcomes")
 
 
+def canonical_runtime_result(value: object) -> RuntimeResult:
+    """Snapshot an untrusted adapter result before it affects Nika's durable state.
+
+    A duck-typed object or forged dataclass must not leave an already RUNNING task
+    orphaned when retry, recovery, event or finalization code reads its fields.
+    """
+
+    if type(value) is not RuntimeResult:
+        raise TypeError("runtime adapter must return an exact RuntimeResult")
+    try:
+        return RuntimeResult(
+            outcome=object.__getattribute__(value, "outcome"),
+            events=object.__getattribute__(value, "events"),
+            output=object.__getattribute__(value, "output"),
+            resume_token=object.__getattribute__(value, "resume_token"),
+            error=object.__getattribute__(value, "error"),
+            error_code=object.__getattribute__(value, "error_code"),
+        )
+    except AttributeError:
+        raise ValueError("runtime adapter result is incomplete") from None
+
+
 @runtime_checkable
 class AgentRuntimePort(Protocol):
     @property
