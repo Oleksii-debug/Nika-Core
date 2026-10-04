@@ -377,6 +377,54 @@ def test_session_close_preserves_first_failure_while_backend_requires_retry() ->
     assert calls.count("backend") == 2
 
 
+@pytest.mark.parametrize(
+    ("message", "retryable"),
+    [
+        ("packaged speech worker did not settle during shutdown", True),
+        ("unrelated speech shutdown failure", False),
+    ],
+)
+def test_session_retries_only_canonical_unsettled_speech(
+    message: str,
+    retryable: bool,
+) -> None:
+    calls: list[str] = []
+
+    class Resource:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def close(self) -> None:
+            calls.append(self.name)
+            if self.name == "speech" and calls.count("speech") == 1:
+                raise RuntimeError(message)
+
+    session = nika_windows.WindowsBridgeSession(
+        bridge=object(),
+        products=object(),
+        backend=Resource("backend"),
+        voice=Resource("voice"),
+        voice_model_setup=Resource("voice_model_setup"),
+        speech=Resource("speech"),
+    )
+
+    with pytest.raises(RuntimeError, match=message):
+        session.close()
+    assert session._closed is not retryable
+    assert calls == ["speech", "voice_model_setup", "voice", "backend"]
+
+    session.close()
+    session.close()
+    if retryable:
+        assert session._closed is True
+        assert calls == [
+            "speech", "voice_model_setup", "voice", "backend",
+            "speech", "voice_model_setup", "voice", "backend",
+        ]
+    else:
+        assert calls == ["speech", "voice_model_setup", "voice", "backend"]
+
+
 def test_session_close_does_not_retry_unrelated_backend_failure() -> None:
     calls: list[str] = []
 
