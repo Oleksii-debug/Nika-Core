@@ -236,6 +236,7 @@ def test_incomplete_host_sample_keeps_queued_work_and_sanitizes_status(
     )
     assert manager.request(scope="agent", owner_id="worker", request_id="one").granted
 
+
 @pytest.mark.parametrize(
     ("field", "value"),
     (
