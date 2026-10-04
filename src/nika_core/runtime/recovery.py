@@ -207,6 +207,9 @@ class RuntimeRecoveryService:
                 )
                 executions.append(RecoveryExecution(candidate=checked, result=result))
             except Exception as exc:  # noqa: BLE001 - isolate one failed startup recovery item
+                # Provider exception messages may contain credentials or private paths.
+                # Preserve the failure category without persisting untrusted text.
+                error_type = type(exc).__name__
                 self._audit.append(
                     event_type="runtime.recovery_auto_resume_failed",
                     entity_type="task",
@@ -214,11 +217,11 @@ class RuntimeRecoveryService:
                     payload={
                         "runtime_id": candidate.runtime_id,
                         "thread_id": candidate.thread_id,
-                        "error": str(exc),
+                        "error": error_type,
                     },
                 )
                 executions.append(
-                    RecoveryExecution(candidate=candidate, result=None, error=str(exc))
+                    RecoveryExecution(candidate=candidate, result=None, error=error_type)
                 )
         return tuple(executions)
 
