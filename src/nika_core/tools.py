@@ -253,16 +253,41 @@ class ToolEffectGuard:
                 ) from exc
             except sqlite3.Error as exc:
                 raise ToolEffectConflictError("tool effect reservation failed closed") from exc
+            except RuntimeError as exc:
+                # Strict ledger readers reject corrupt persisted evidence with
+                # RuntimeError. Do not leak it or let a handler run after it.
+                raise ToolEffectConflictError("tool effect evidence is invalid") from exc
         except sqlite3.Error as exc:
             raise ToolEffectConflictError("tool effect reservation failed closed") from exc
+        except RuntimeError as exc:
+            raise ToolEffectConflictError("tool effect evidence is invalid") from exc
 
         if created:
             return ToolEffectReservation(operation_key=operation_key)
         if record.status is IdempotencyStatus.COMPLETED:
-            completed = dict(record.result or {})
+            # A corrupt/missing SQLite result must never become an affirmative
+            # replay with output=None. Only the canonical finalize envelope is
+            # evidence that this exact external effect finished durably.
+            completed = record.result
+            if (
+                type(completed) is not dict
+                or completed.get("completed") is not True
+                or "output" not in completed
+            ):
+                raise ToolEffectConflictError(
+                    "completed tool effect has invalid durable result evidence"
+                )
+            try:
+                json.dumps(
+                    completed, allow_nan=False, ensure_ascii=False, sort_keys=True
+                ).encode("utf-8")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ToolEffectConflictError(
+                    "completed tool effect has invalid durable result evidence"
+                ) from exc
             return ToolEffectReservation(
                 operation_key=operation_key,
-                completed_result=completed,
+                completed_result=dict(completed),
             )
         raise ToolEffectConflictError(
             f"tool effect is unresolved: {record.status.value}"
