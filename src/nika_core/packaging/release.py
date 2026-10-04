@@ -85,6 +85,8 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     (?P<value>
         "(?:\\.|[^"\\\r\n]){1,4096}"|
         '(?:\\.|[^'\\\r\n]){1,4096}'|
+        # Unquoted env-variable references are placeholders only when complete.
+        \$\{[A-Za-z_][A-Za-z0-9_]*\}(?=[\s,;\#}\]\r\n]|$)|
         [^\s,\#;}{\]\r\n]{1,4096}
     )
     """,
@@ -140,20 +142,34 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
     if not root.is_dir():
         raise ValueError("bundle_dir must be a directory")
     files: list[Path] = []
-    for candidate in root.rglob("*"):
-        # ZIP publication cannot materialize directory aliases. Fail closed.
-        if getattr(candidate, "is_junction", lambda: False)():
-            raise ValueError(f"bundle junction is unsupported: {candidate}")
-        if candidate.is_symlink():
-            resolved = candidate.resolve(strict=True)
-            try:
-                resolved.relative_to(root)
-            except ValueError as exc:
-                raise ValueError(f"bundle symlink escapes release root: {candidate}") from exc
-            if candidate.is_dir():
-                raise ValueError(f"bundle directory symlink is unsupported: {candidate}")
-        if candidate.is_file():
-            files.append(candidate)
+    directories = [root]
+    while directories:
+        # Path.rglob can suppress nested directory scanning errors. Explicit
+        # iteration must fail rather than certify a silently incomplete release.
+        for candidate in directories.pop().iterdir():
+            # ZIP publication cannot materialize directory aliases. Fail closed.
+            if getattr(candidate, "is_junction", lambda: False)():
+                raise ValueError(f"bundle junction is unsupported: {candidate}")
+            if candidate.is_symlink():
+                resolved = candidate.resolve(strict=True)
+                try:
+                    resolved.relative_to(root)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"bundle symlink escapes release root: {candidate}"
+                    ) from exc
+                if candidate.is_dir():
+                    raise ValueError(
+                        f"bundle directory symlink is unsupported: {candidate}"
+                    )
+            if candidate.is_file():
+                files.append(candidate)
+            elif candidate.is_dir():
+                directories.append(candidate)
+            else:
+                # Never silently omit FIFO, socket, device or special-file links.
+                # Opening a FIFO could also block the release worker indefinitely.
+                raise ValueError(f"unsupported release bundle entry: {candidate}")
     return tuple(sorted(files, key=lambda item: item.relative_to(root).as_posix()))
 
 
@@ -264,8 +280,18 @@ def _stream_contains_secret_assignment(handle: Any) -> bool:
         overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
 
 
+def _release_content_requires_secret_scan(relative_path: str) -> bool:
+    path = PurePosixPath(relative_path)
+    # .env.example is permitted by the path policy, but can still contain
+    # accidental live credentials; its .example suffix is not in the generic set.
+    return (
+        path.suffix.casefold() in _SECRET_CONTENT_SUFFIXES
+        or path.name.casefold() == ".env.example"
+    )
+
+
 def _release_file_contains_secret_assignment(relative_path: str, path: Path) -> bool:
-    if PurePosixPath(relative_path).suffix.casefold() not in _SECRET_CONTENT_SUFFIXES:
+    if not _release_content_requires_secret_scan(relative_path):
         return False
     try:
         with path.open("rb") as handle:
@@ -278,7 +304,7 @@ def _archive_member_contains_secret_assignment(
     archive: zipfile.ZipFile,
     member: zipfile.ZipInfo,
 ) -> bool:
-    if PurePosixPath(_zip_member_path(member)).suffix.casefold() not in _SECRET_CONTENT_SUFFIXES:
+    if not _release_content_requires_secret_scan(_zip_member_path(member)):
         return False
     with archive.open(member, "r") as handle:
         return _stream_contains_secret_assignment(handle)
