@@ -97,7 +97,25 @@ class ModelGateway:
     def providers(self) -> tuple[str, ...]:
         return tuple(sorted(self._providers))
 
+    @staticmethod
+    def _snapshot_request(request: object) -> ModelRequest:
+        # Frozen dataclasses can still be poisoned via object.__setattr__.
+        # Retain one private, validated request identity across awaits, fallback
+        # attempts, response validation and durable audit publication.
+        if type(request) is ModelRequest:
+            try:
+                return replace(request)
+            except Exception:  # noqa: BLE001 - caller-owned request is untrusted
+                pass
+        raise ModelGatewayError(
+            ModelErrorCode.INVALID_REQUEST,
+            "model request is invalid",
+            retryable=False,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        ) from None
+
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        request = self._snapshot_request(request)
         providers = self._select_candidates(request)
         self._validate_privacy_route(request, providers)
         loop = asyncio.get_running_loop()
@@ -135,7 +153,46 @@ class ModelGateway:
                     "attempt": index + 1,
                 },
             )
+            # The host authorizer sees a detached attempt DTO. Its decision
+            # applies only to the exact identity/content it inspected; a
+            # mistaken in-place edit must not retarget the following effect.
+            approved_snapshot = (
+                replace(attempt_request)
+                if capabilities.kind is ProviderKind.CLOUD
+                else None
+            )
             self._authorize_cloud_effect(attempt_request, capabilities)
+            if approved_snapshot is not None:
+                try:
+                    authority_unchanged = (
+                        replace(attempt_request) == approved_snapshot
+                    )
+                except Exception:  # noqa: BLE001 - authorizer may have poisoned the DTO
+                    authority_unchanged = False
+                if not authority_unchanged:
+                    error = ModelGatewayError(
+                        ModelErrorCode.INVALID_REQUEST,
+                        "cloud model request changed during authorization",
+                        provider_id=capabilities.provider_id,
+                        retryable=False,
+                        failure_effect=ModelFailureEffect.NO_EFFECT,
+                    )
+                    self._audit_failure(request, capabilities.provider_id, error)
+                    raise error
+
+            # Synchronous approval and audit work consume the same end-to-end
+            # deadline. Never start an external effect with a stale time budget.
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                error = ModelGatewayError(
+                    ModelErrorCode.TIMEOUT,
+                    "model request exceeded its deadline before provider execution",
+                    provider_id=capabilities.provider_id,
+                    retryable=False,
+                    failure_effect=ModelFailureEffect.NO_EFFECT,
+                )
+                self._audit_failure(request, capabilities.provider_id, error)
+                raise error
 
             response: ModelResponse | None = None
             terminal_error: ModelGatewayError | None = None
@@ -605,10 +662,12 @@ class ModelGateway:
 
 def _is_canonical_identity(value: object) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and bool(value)
         and value == value.strip()
-        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+        # Keep provider/model identifiers valid for ordinary UTF-8 persistence
+        # and the Windows UI, including unpinned provider-returned model names.
+        and all(char.isprintable() for char in value)
     )
 
 
@@ -620,7 +679,7 @@ def _is_canonical_network_host(value: object) -> bool:
         and value == value.lower().rstrip(".")
         and "://" not in value
         and not any(char in value for char in "/\\?#@")
-        and not any(ord(char) < 32 or ord(char) == 127 for char in value)
+        and all(char.isprintable() and not char.isspace() for char in value)
     )
 
 
