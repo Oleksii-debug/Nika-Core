@@ -29,14 +29,22 @@ _CANARY = "LATE_PROVIDER_PRIVATE_CANARY_619d"
 class _SlowInvalidResponse(ModelResponse):
     def __getattribute__(self, name: str) -> object:
         if name == "text":
-            time.sleep(0.20)
+            time.sleep(0.65)
         return super().__getattribute__(name)
 
 
 class _SlowErrorEnvelope(ModelGatewayError):
     def __getattribute__(self, name: str) -> object:
         if name == "code":
-            time.sleep(0.20)
+            time.sleep(0.65)
+        return super().__getattribute__(name)
+
+
+class _SlowThrowingResponse(ModelResponse):
+    def __getattribute__(self, name: str) -> object:
+        if name == "text":
+            time.sleep(0.65)
+            raise RuntimeError(_CANARY)
         return super().__getattribute__(name)
 
 
@@ -56,7 +64,7 @@ class _Primary:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self.calls += 1
         if self.mode == "late-typed":
-            time.sleep(0.20)
+            time.sleep(0.65)
         if self.mode in {"late-typed", "quick-typed"}:
             raise ModelGatewayError(
                 ModelErrorCode.UNAVAILABLE,
@@ -66,7 +74,7 @@ class _Primary:
                 failure_effect=ModelFailureEffect.NO_EFFECT,
             )
         if self.mode == "late-untyped":
-            time.sleep(0.20)
+            time.sleep(0.65)
             raise RuntimeError(_CANARY)
         if self.mode == "late-envelope":
             raise _SlowErrorEnvelope(
@@ -76,11 +84,10 @@ class _Primary:
                 retryable=True,
                 failure_effect=ModelFailureEffect.NO_EFFECT,
             )
-        response_cls = (
-            _SlowInvalidResponse
-            if self.mode == "late-invalid-response"
-            else ModelResponse
-        )
+        response_cls = {
+            "late-invalid-response": _SlowInvalidResponse,
+            "late-raising-getter": _SlowThrowingResponse,
+        }.get(self.mode, ModelResponse)
         return response_cls(
             request_id=request.request_id,
             text="",
@@ -131,7 +138,7 @@ def _fixture(
         model="fixture-model",
         fallback_provider_ids=("fallback",),
         privacy=PrivacyClass.PUBLIC,
-        timeout_seconds=0.05,
+        timeout_seconds=0.25,
     )
     return gateway, audit, primary, fallback, request
 
@@ -143,6 +150,7 @@ def _fixture(
         "late-untyped",
         "late-envelope",
         "late-invalid-response",
+        "late-raising-getter",
     ),
 )
 def test_late_failures_are_timeouts_without_replay_or_private_diagnostics(
