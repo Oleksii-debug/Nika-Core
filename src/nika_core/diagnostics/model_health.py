@@ -206,6 +206,7 @@ class OllamaModelHealthProbe:
             type(self._model_id) is not str
             or not self._model_id.strip()
             or self._model_id != self._model_id.strip()
+            or any(not char.isprintable() for char in self._model_id)
             or type(self._base_url) is not str
             or not self._base_url.strip()
             or self._base_url != self._base_url.strip()
@@ -325,7 +326,12 @@ class OllamaModelHealthProbe:
                 if key not in item:
                     continue
                 value = item[key]
-                if type(value) is not str or not value:
+                if (
+                    type(value) is not str
+                    or not value
+                    or value != value.strip()
+                    or any(not char.isprintable() for char in value)
+                ):
                     return None
                 item_identities.append(value)
             if not item_identities:
