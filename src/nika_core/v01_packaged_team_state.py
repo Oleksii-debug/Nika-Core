@@ -6,12 +6,12 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.kernel.task_queue import _decode_task_payload
 from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
     resolve_model_intelligence_mode,
 )
+from nika_core.kernel.task_queue import _decode_task_payload
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent.checker import V01CheckerAgent
 from nika_core.multi_agent.contracts import AgentHandoff, HandoffKind
