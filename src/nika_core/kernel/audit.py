@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -178,12 +179,15 @@ class AuditLog:
         """Append audit evidence inside a caller-owned SQLite transaction."""
         if not event_type.strip() or not entity_type.strip() or not entity_id.strip():
             raise ValueError("audit event identifiers must not be empty")
+        if payload is not None and not isinstance(payload, dict):
+            raise TypeError("audit payload must be a JSON object")
         body = json.dumps(
-            payload or {}, ensure_ascii=False, sort_keys=True,
+            {} if payload is None else payload, ensure_ascii=False, sort_keys=True,
             separators=(",", ":"), allow_nan=False,
         )
         cursor = conn.execute(
-            "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, created_at) "
+            "INSERT INTO audit_events(event_type, entity_type, entity_id, "
+            "payload_json, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
             (event_type, entity_type, entity_id, body, datetime.now(UTC).isoformat()),
         )
@@ -245,6 +249,7 @@ class AuditLog:
                 row["payload_json"],
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_nonfinite_json_constant,
+                parse_float=_reject_overflow_json_float,
             )
         except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
             raise AuditIntegrityError(
@@ -266,6 +271,13 @@ class AuditLog:
 
 def _reject_nonfinite_json_constant(_value: str) -> None:
     raise ValueError("noncanonical audit JSON numeric constant")
+
+
+def _reject_overflow_json_float(value: str) -> float:
+    number = float(value)
+    if not math.isfinite(number):
+        raise ValueError("non-finite audit JSON number")
+    return number
 
 
 def _reject_duplicate_json_keys(items: list[tuple[str, object]]) -> dict[str, object]:

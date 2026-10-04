@@ -74,7 +74,8 @@ raw evidence.
 ## Integrity behavior
 
 Persisted audit payloads are required to be canonical JSON objects. Non-finite
-numbers are rejected before append, and non-finite constants or duplicate keys
+numbers and non-object payloads are rejected before append. Non-finite JSON
+constants, finite-syntax float overflow or duplicate keys
 (including equal-value duplicates and nested duplicates) fail closed on read.
 Inspection fails closed with
 `AuditIntegrityError` if a selected row has malformed JSON or a non-object payload instead of

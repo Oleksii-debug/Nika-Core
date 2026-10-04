@@ -351,3 +351,64 @@ def test_inspection_rejects_noncanonical_persisted_json(tmp_path, corrupted):
         log.inspect()
     with pytest.raises(AuditIntegrityError, match=f"audit event {event_id}"):
         log.list_for(entity_type="task", entity_id="corrupt-json")
+
+@pytest.mark.parametrize("corrupted", ['{"value":1e9999}', '{"value":-1e9999}'])
+def test_inspection_rejects_finite_syntax_that_overflows_float(tmp_path, corrupted):
+    store, log = _make_log(tmp_path)
+    event_id = log.append(
+        event_type="task.created",
+        entity_type="task",
+        entity_id="overflow-json",
+        payload={"value": 1e308},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
+            (corrupted, event_id),
+        )
+    with pytest.raises(AuditIntegrityError, match=f"audit event {event_id}"):
+        log.inspect()
+
+
+def test_non_object_payload_is_not_silently_converted_to_empty_object(tmp_path):
+    _, log = _make_log(tmp_path)
+    with pytest.raises(TypeError, match="JSON object"):
+        log.append(
+            event_type="task.created",
+            entity_type="task",
+            entity_id="nonobject",
+            payload=[],
+        )
+    assert log.inspect() == ()
+
+
+def test_nonfinite_payload_rolls_back_earlier_audit_in_same_transaction(tmp_path):
+    store, log = _make_log(tmp_path)
+    with pytest.raises(ValueError, match="Out of range float"):
+        with store.connection() as conn:
+            log.append_with_connection(
+                conn,
+                event_type="task.started",
+                entity_type="task",
+                entity_id="rollback",
+                payload={"status": "running"},
+            )
+            log.append_with_connection(
+                conn,
+                event_type="task.completed",
+                entity_type="task",
+                entity_id="rollback",
+                payload={"score": float("nan")},
+            )
+    assert log.list_for(entity_type="task", entity_id="rollback") == ()
+
+
+def test_canonical_finite_json_number_round_trips(tmp_path):
+    _, log = _make_log(tmp_path)
+    log.append(
+        event_type="task.completed",
+        entity_type="task",
+        entity_id="finite",
+        payload={"score": 1e308},
+    )
+    assert log.inspect()[0].payload == {"score": 1e308}
