@@ -20,6 +20,8 @@ from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductJourneyError,
     PackagedProductStateProvider,
+    packaged_current_product_command,
+    packaged_product_reopen_target,
     product_project_identity,
 )
 from nika_core.product_project import ProductProjectRepository
@@ -409,3 +411,32 @@ def test_release_builder_records_packaged_pf11_restart_evidence(
     assert payload["human_tested"] is False
     assert payload["nvda_verified"] is False
     assert payload["production_release_ready"] is False
+
+
+class _HostileDirectHelperText(str):
+    def split(self, *args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        raise AssertionError("direct helper must not call untrusted string methods")
+
+
+@pytest.mark.parametrize(
+    "helper",
+    (product_project_identity, packaged_product_reopen_target, packaged_current_product_command),
+)
+@pytest.mark.parametrize(
+    "command",
+    (
+        None,
+        17,
+        False,
+        ["Створи застосунок"],
+        _HostileDirectHelperText("Створи застосунок"),
+        type("PlainHelperSubclass", (str,), {})("Створи застосунок"),
+    ),
+)
+def test_direct_product_helpers_reject_noncanonical_text_before_methods(
+    helper,
+    command: object,
+) -> None:
+    with pytest.raises(PackagedProductJourneyError, match="звичайним текстом"):
+        helper(command)

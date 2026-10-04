@@ -243,3 +243,54 @@ def test_agent_builder_route_cannot_replace_current_product_selection(tmp_path: 
     assert router.active_project_id == project_id
     assert ordinary.calls == []
     assert len(agent_builder.calls) == 1
+
+
+class _HostileDirectRouteText(str):
+    def split(self, *args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        raise AssertionError("direct router must not call untrusted string methods")
+
+
+@pytest.mark.parametrize(
+    "command",
+    (
+        None,
+        17,
+        False,
+        ["Create an agent"],
+        _HostileDirectRouteText("Create an agent"),
+        type("PlainRouteSubclass", (str,), {})("Create an agent"),
+    ),
+)
+def test_direct_route_boundary_requires_plain_str_before_invoking_methods(
+    command: object,
+) -> None:
+    with pytest.raises(TypeError, match="plain string"):
+        route_command(command)  # type: ignore[arg-type]
+
+
+class _HostileActiveProjectId(str):
+    def __str__(self) -> str:
+        raise AssertionError("untrusted active id must not be converted")
+
+
+@pytest.mark.parametrize(
+    "active_id",
+    (17, False, ["product-id"], _HostileActiveProjectId("product-id")),
+)
+def test_direct_route_rejects_noncanonical_active_project_id(active_id: object) -> None:
+    with pytest.raises(TypeError, match="active ProductProject id"):
+        route_command(
+            "Create product application for accessible reports",
+            active_project_id=active_id,  # type: ignore[arg-type]
+        )
+
+
+def test_direct_route_retains_valid_plain_active_project_id() -> None:
+    active_id = "product-" + "a" * 64
+    decision = route_command(
+        "Create product application for accessible reports",
+        active_project_id=active_id,
+    )
+    assert decision.route is CommandRouteKind.PRODUCT_PROJECT
+    assert decision.project_id == active_id
