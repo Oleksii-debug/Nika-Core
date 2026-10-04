@@ -109,9 +109,10 @@ def test_boolean_spec_version_is_not_the_integer_one(
     [
         '{"route":"product_project","route":"product_project"}',
         json.dumps({**_valid_proof(), "state": float("nan")}),
+        json.dumps(_valid_proof())[:-1] + ', "extra": 1e10000}',
         json.dumps({**_valid_proof(), "padding": "x" * (1024 * 1024)}),
     ],
-    ids=["duplicate-key", "nonfinite", "oversized"],
+    ids=["duplicate-key", "nonfinite", "overflow-exponent", "oversized"],
 )
 def test_ambiguous_or_oversized_proof_fails_before_publishing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, bad_evidence: str
@@ -119,6 +120,28 @@ def test_ambiguous_or_oversized_proof_fails_before_publishing(
     with pytest.raises(RuntimeError, match="valid JSON evidence"):
         _run_proofs(tmp_path, monkeypatch, bad_evidence, bad_evidence)
     assert not (tmp_path / "NikaCore" / "pf11-packaged-product-journey.json").exists()
+
+
+def test_nonfinite_first_pf11_proof_cannot_trigger_second_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = tmp_path / "NikaCore"
+    bundle.mkdir()
+    (bundle / "NikaCore.exe").write_bytes(b"mocked executable")
+    attempts: list[int] = []
+    bad = json.dumps(_valid_proof())[:-1] + ', "extra": 1e10000}'
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        attempts.append(1)
+        output = Path(argv[argv.index("--pf11-proof-output") + 1])
+        output.write_text(bad, encoding="utf-8")
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    with pytest.raises(RuntimeError, match="valid JSON evidence"):
+        prove_packaged_product_journey(bundle, source_sha=SOURCE_SHA)
+    assert attempts == [1]
+    assert not (bundle / "pf11-packaged-product-journey.json").exists()
 
 
 def test_explicit_empty_sha_does_not_fall_back_to_environment(
