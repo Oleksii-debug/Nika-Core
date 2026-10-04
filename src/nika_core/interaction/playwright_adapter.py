@@ -105,6 +105,10 @@ class _DownloadRecord:
     failed: bool = False
 
 
+class _DownloadDestinationExistsError(UnsupportedInteractionError):
+    """Known safe, actionable destination collision; never contains a filename."""
+
+
 @dataclass(slots=True)
 class DownloadBroker:
     """Persist browser downloads only beneath an explicitly approved artifact root."""
@@ -146,6 +150,11 @@ class DownloadBroker:
             if not record.saved:
                 try:
                     self.handle(record.download)
+                except _DownloadDestinationExistsError as exc:
+                    record.failed = True
+                    raise UnsupportedInteractionError(
+                        "download destination already exists"
+                    ) from exc
                 except Exception as exc:
                     record.failed = True
                     raise UnsupportedInteractionError("download could not be saved") from exc
@@ -160,7 +169,7 @@ class DownloadBroker:
         raw_destination = self.approved_root / filename
         # A pre-existing file (including a link) is never an implicit overwrite grant.
         if raw_destination.is_symlink() or raw_destination.exists():
-            raise UnsupportedInteractionError("download destination already exists")
+            raise _DownloadDestinationExistsError("download destination already exists")
         destination = raw_destination.resolve()
         if destination.parent != self.approved_root:
             raise UnsupportedInteractionError("download path escaped approved root")
@@ -177,7 +186,7 @@ class DownloadBroker:
             try:
                 os.link(staging, destination)
             except FileExistsError as exc:
-                raise UnsupportedInteractionError(
+                raise _DownloadDestinationExistsError(
                     "download destination already exists"
                 ) from exc
             self.saved.append(destination)
