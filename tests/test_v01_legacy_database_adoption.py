@@ -516,3 +516,43 @@ def test_canonical_hardlink_rejects_indirect_alias_sidecar(tmp_path, suffix):
     assert target.read_bytes() == before
     assert sidecar.is_symlink()
     assert not (target.parent / "legacy-adoption-backups").exists()
+
+
+def test_frozen_online_wal_backup_inspection_does_not_create_sidecars(tmp_path):
+    """Archived WAL-header copies are immutable; the live source is not."""
+    source = tmp_path / "old.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        live_wal = source.with_name(source.name + "-wal")
+        assert live_wal.stat().st_size > 0
+        expected = adoption._inspect(source)
+        assert expected is not None
+        backup = tmp_path / "snapshot.sqlite3"
+        manager = SQLiteRecoveryManager(SQLiteStore(source))
+        artifact = manager.create_backup(backup, record_audit=False)
+        for suffix in ("-wal", "-shm"):
+            assert not backup.with_name(backup.name + suffix).exists()
+        frozen = adoption._inspect(backup, immutable=True)
+        assert frozen is not None and frozen.digest == expected.digest
+        assert manager.verify_backup(backup).sha256 == artifact.sha256
+        for suffix in ("-wal", "-shm"):
+            assert not backup.with_name(backup.name + suffix).exists()
+        assert live_wal.stat().st_size > 0
+        assert adoption._inspect(source).digest == expected.digest
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_immutable_backup_inspection_rejects_unbound_sidecars(tmp_path, suffix):
+    source = tmp_path / "old.db"
+    _legacy(source)
+    backup = tmp_path / "snapshot.sqlite3"
+    SQLiteRecoveryManager(SQLiteStore(source)).create_backup(backup, record_audit=False)
+    sidecar = backup.with_name(backup.name + suffix)
+    sidecar.write_bytes(b"")
+    with pytest.raises(adoption.BackupRecoveryError):
+        adoption._inspect(backup, immutable=True)
+    assert sidecar.exists()
