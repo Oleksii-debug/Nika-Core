@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+import asyncio
+import httpx
+import pytest
+
+from nika_core.model_gateway.api_route import (
+    ApiModelRouteConfig,
+    CredentialRefOpenAICompatibleProvider,
+    EnvironmentCredentialResolver,
+)
+from nika_core.model_gateway.contracts import (
+    ModelErrorCode,
+    ModelFailureEffect,
+    ModelGatewayError,
+    ModelMessage,
+    ModelRequest,
+)
+
+_REF = "env:NIKA_ROUTE_ADMISSION_TEST_TOKEN"
+
+
+def _config(base_url: str = "https://api.example.test/v1") -> ApiModelRouteConfig:
+    return ApiModelRouteConfig(
+        provider_id="approved-api",
+        base_url=base_url,
+        default_model="model-a",
+        credential_ref=_REF,
+    )
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.example.test/v1\t/chat",
+        "https://api.example.test/v1\n/chat",
+        "https://api.example.test/v1\r/chat",
+        "https://api.example.test/v1\\other",
+        "https://api.example.test/v1\u200b",
+        "https://api.example.test:65536/v1",
+        "https://api.example.test:abc/v1",
+        "https://api.example.test:0/v1",
+        "https://api.example%2Etest/v1",
+        "https://api.example.test/v1?",
+        "https://api.example.test/v1#",
+    ],
+)
+def test_ambiguous_cloud_route_is_rejected_before_credential_resolution(
+    base_url: str,
+) -> None:
+    with pytest.raises(ValueError):
+        _config(base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        "https://api.example.test/v1",
+        "https://api.example.test:443/v1",
+        "https://[2001:db8::1]:443/v1",
+        "https://api.example.test/версія",
+    ],
+)
+def test_explicit_valid_https_route_remains_supported(base_url: str) -> None:
+    assert _config(base_url).base_url == base_url
+
+
+class _Resolver:
+    def __init__(self, secret: str) -> None:
+        self.secret = secret
+        self.calls = 0
+
+    def resolve(self, credential_ref: str) -> str:
+        assert credential_ref == _REF
+        self.calls += 1
+        return self.secret
+
+
+def _request() -> ModelRequest:
+    return ModelRequest(
+        request_id="unsafe-key-test",
+        provider_id="approved-api",
+        messages=(ModelMessage(role="user", content="safe fixture"),),
+    )
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "valid\r\nX-Injection: yes",
+        "bad\n",
+        "\x00",
+        "space in key",
+        " leading-key",
+        "trailing-key ",
+        "nonascii-é",
+        "surrogate-\ud800",
+        "x" * 8193,
+    ],
+)
+def test_unsafe_bearer_is_denied_before_http_client_creation(secret: str) -> None:
+    resolver = _Resolver(secret)
+    creations = 0
+
+    def client_factory(*, timeout: float) -> httpx.AsyncClient:
+        nonlocal creations
+        creations += 1
+        raise AssertionError(f"network factory must not be called: {timeout}")
+
+    provider = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=resolver,
+        client_factory=client_factory,
+    )
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(provider.complete(_request()))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.AUTHENTICATION
+    assert error.retryable is False
+    assert error.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert error.__cause__ is None
+    assert "valid" not in str(error)
+    assert "nonascii" not in str(error)
+    assert resolver.calls == 1
+    assert creations == 0
+
+
+def test_longest_allowed_printable_ascii_credential_remains_valid() -> None:
+    token = "a" * 8192
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.headers["Authorization"])
+        return httpx.Response(
+            200,
+            json={
+                "model": "model-a",
+                "choices": [{"message": {"content": "ok"}}],
+            },
+        )
+
+    def client_factory(*, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), timeout=timeout
+        )
+
+    provider = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=_Resolver(token),
+        client_factory=client_factory,
+    )
+    response = asyncio.run(provider.complete(_request()))
+    assert response.text == "ok"
+    assert seen == [f"Bearer {token}"]
+
+
+def test_environment_resolver_rejects_control_bearing_variable_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = EnvironmentCredentialResolver()
+    monkeypatch.setenv("NIKA_ROUTE_ADMISSION_TEST_TOKEN", "safe")
+    assert resolver.resolve(_REF) == "safe"
+    with pytest.raises(Exception):
+        resolver.resolve("env:NIKA_ROUTE_ADMISSION_TEST_TOKEN\nINJECTED")
