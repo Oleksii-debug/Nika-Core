@@ -180,10 +180,25 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         "nvda_verified": False,
         "production_release_ready": False,
     }
-    target.write_text(
-        json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    encoded = json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=bundle_dir,
+            prefix=".pf11-proof-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return target
 
 
