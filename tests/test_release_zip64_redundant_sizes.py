@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import struct
 import zipfile
 from pathlib import Path
 
@@ -52,3 +53,37 @@ def test_rejects_unreferenced_local_zip64_size_fields(
 def test_preserves_ordinary_benign_extra_fields(tmp_path: Path) -> None:
     artifact = _archive_with_extra(tmp_path, b"\xfe\xca\x02\x00ok")
     assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == ()
+
+
+def test_rejects_trailing_values_in_required_local_zip64_field(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "trailing.zip"
+    with zipfile.ZipFile(artifact, "w") as output:
+        with output.open("NikaCore.exe", "w", force_zip64=True) as handle:
+            handle.write(b"portable fixture")
+    assert verify_release_archive(
+        artifact, source_sha=SOURCE_SHA
+    ) == ("archive:missing-manifest",)
+
+    damaged = bytearray(artifact.read_bytes())
+    name_size = int.from_bytes(damaged[26:28], "little")
+    extra_size = int.from_bytes(damaged[28:30], "little")
+    extra_start = 30 + name_size
+    assert damaged[extra_start : extra_start + 4] == b"\x01\x00\x10\x00"
+    # Preserve both genuine ZIP64 sizes but append an alternate third size.
+    insertion = extra_start + 4 + 16
+    damaged[insertion:insertion] = b"\x00" * 8
+    struct.pack_into("<H", damaged, extra_start + 2, 24)
+    struct.pack_into("<H", damaged, 28, extra_size + 8)
+    eocd = damaged.rfind(b"PK\x05\x06")
+    assert eocd != -1
+    central_offset = struct.unpack_from("<I", damaged, eocd + 16)[0]
+    struct.pack_into("<I", damaged, eocd + 16, central_offset + 8)
+    artifact.write_bytes(damaged)
+    with zipfile.ZipFile(artifact) as archive:
+        assert archive.read("NikaCore.exe") == b"portable fixture"
+
+    assert "archive:member-header-mismatch:0" in verify_release_archive(
+        artifact, source_sha=SOURCE_SHA
+    )
