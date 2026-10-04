@@ -194,7 +194,21 @@ class APSchedulerAdapter(SchedulerPort):
                 except Exception:
                     self._remove_runtime_job(job_id)
                     raise
-                return current
+                # Another process may replace or disable the durable snapshot
+                # while APScheduler is installing it. Reconcile the successor
+                # instead of leaving a stale runtime job until its old trigger
+                # fires (whose dispatch authority would correctly reject it).
+                after_install = self._jobs.get(job_id)
+                if after_install != current:
+                    continue
+                if not self._task_authority_allows(after_install):
+                    if self._jobs.get(job_id) != after_install:
+                        continue
+                    self._remove_runtime_job(job_id)
+                    return None
+                if self._jobs.get(job_id) != after_install:
+                    continue
+                return after_install
             self._remove_runtime_job(job_id)
             return None
 
