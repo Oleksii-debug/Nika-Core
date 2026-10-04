@@ -123,7 +123,10 @@ class ModelSelection(BaseModel):
     def finite_timeout(cls, value: Any) -> float:
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise TypeError("timeout_seconds must be numeric")
-        number = float(value)
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise ValueError("timeout_seconds must be finite") from exc
         if not math.isfinite(number):
             raise ValueError("timeout_seconds must be finite")
         return number
