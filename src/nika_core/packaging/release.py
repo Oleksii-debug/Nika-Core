@@ -20,6 +20,7 @@ _MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
+_MAX_WINDOWS_COMPONENT_UTF16_UNITS = 255
 _UNSAFE_UNICODE_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 _SECRET_RELEASE_BASENAMES = frozenset({".env", "token.json", "cookies.txt"})
 _SECRET_CONTENT_SUFFIXES = frozenset(
@@ -165,6 +166,10 @@ def _canonical_relative_path(value: object) -> bool:
             or unicodedata.category(character) in _UNSAFE_UNICODE_CATEGORIES
             for character in part
         ):
+            return False
+        # NTFS counts UTF-16 code units, not Python Unicode code points.
+        # Extended-length path support never lifts the per-component limit.
+        if sum(2 if ord(char) > 0xFFFF else 1 for char in part) > _MAX_WINDOWS_COMPONENT_UTF16_UNITS:
             return False
         if PureWindowsPath(part).is_reserved():
             return False
