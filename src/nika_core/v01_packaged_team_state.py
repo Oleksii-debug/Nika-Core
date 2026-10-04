@@ -11,7 +11,11 @@ from nika_core.intelligence.provenance import (
     IntelligenceResultStatus,
     resolve_model_intelligence_mode,
 )
-from nika_core.kernel.task_queue import _decode_task_payload, _finite_json_float
+from nika_core.kernel.task_queue import (
+    TaskPayloadCorruptionError,
+    _decode_task_payload,
+    _finite_json_float,
+)
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent.checker import V01CheckerAgent
 from nika_core.multi_agent.contracts import AgentHandoff, HandoffKind
@@ -414,7 +418,7 @@ class V01PackagedTeamStateProvider:
         model_bound_audits = conn.execute(
             "SELECT payload_json FROM audit_events "
             "WHERE event_type = 'v01.model.bound' AND entity_type = 'task' AND entity_id = ? "
-            "ORDER BY event_id",
+            "ORDER BY event_id LIMIT 2",
             (shared_task_id,),
         ).fetchall()
 
@@ -467,7 +471,12 @@ class V01PackagedTeamStateProvider:
 
         if len(model_bound_audits) != 1:
             raise ValueError("model binding audit is missing or ambiguous")
-        audit_payload = json.loads(model_bound_audits[0]["payload_json"])
+        # The audit must have the same strict JSON/TEXT authority as the task row.
+        # A permissive decoder would accept duplicate keys or UTF-8 SQLite BLOBs.
+        try:
+            audit_payload = _decode_task_payload(model_bound_audits[0]["payload_json"])
+        except TaskPayloadCorruptionError as exc:
+            raise ValueError("invalid durable model binding audit") from exc
         if (
             type(audit_payload) is not dict
             or type(audit_payload.get("schema_version")) is not int
