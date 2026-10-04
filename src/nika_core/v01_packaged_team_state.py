@@ -689,7 +689,7 @@ class V01PackagedTeamStateProvider:
             ).fetchall()
             handoffs: list[AgentHandoff] = []
             for row in handoff_rows:
-                payload = json.loads(row["payload_json"])
+                payload = _decode_task_payload(row["payload_json"])
                 if not isinstance(payload, dict):
                     return invalid
                 handoffs.append(
@@ -717,7 +717,7 @@ class V01PackagedTeamStateProvider:
             checker_row = checker_rows[0]
             if checker_row["outcome"] != "completed" or checker_row["error"] is not None:
                 return invalid
-            persisted = json.loads(checker_row["payload_json"])
+            persisted = _decode_task_payload(checker_row["payload_json"])
             frozen_model_identity = V01PackagedTeamStateProvider._frozen_model_identity(
                 conn,
                 shared_task_id=shared_task_id,
