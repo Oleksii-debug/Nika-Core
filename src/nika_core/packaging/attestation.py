@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -158,8 +160,36 @@ def write_release_attestation_evidence(
     path: Path,
     evidence: ReleaseAttestationEvidence,
 ) -> None:
+    # An automated provenance sidecar must not assert a human acceptance gate.
+    if (
+        type(evidence.schema_version) is not int
+        or evidence.schema_version != 1
+        or evidence.verification_result_bound is not True
+        or evidence.source_ref != "refs/heads/main"
+        or evidence.human_tested is not False
+        or evidence.nvda_verified is not False
+        or evidence.production_release_ready is not False
+    ):
+        raise ValueError("attestation evidence has invalid automated release gates")
+
+    serialized = json.dumps(asdict(evidence), indent=2, sort_keys=True) + "\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(asdict(evidence), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            newline="\n",
+            dir=path.parent,
+            prefix=".m12-attestation-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(serialized)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(path)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
