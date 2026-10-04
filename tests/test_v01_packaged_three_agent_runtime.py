@@ -1484,3 +1484,48 @@ def test_member_identity_parser_bounds_untrusted_separator_count() -> None:
     assert V01PackagedThreeAgentRuntime._member_identity(
         "v01:valid-team:worker-a"
     ) == ("valid-team", "worker-a")
+
+@pytest.mark.parametrize("token_kind", ("object", "text-subclass", "boolean", "bytes"))
+def test_runtime_resume_token_rejects_spoofed_comparison_objects(
+    tmp_path: Path, token_kind: str
+) -> None:
+    class ForgedMismatch:
+        def __ne__(self, other: object) -> bool:
+            del other
+            return False
+
+    class ForgedText(str):
+        def __ne__(self, other: object) -> bool:
+            del other
+            return False
+
+    tokens = {
+        "object": ForgedMismatch(),
+        "text-subclass": ForgedText("v01:not-a-valid-token"),
+        "boolean": False,
+        "bytes": b"v01:not-a-valid-token",
+    }
+    token = tokens[token_kind]
+    store, runtime = _configured_runtime(tmp_path)
+    task_id = _created_task(store, "Compare the two declared local sources.")
+    thread_id = f"desktop-{task_id}"
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=token
+        )
+    )
+    assert probe.status is RuntimeResumeProbeStatus.INVALID
+    result = asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                resume_token=token,
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    )
+    assert result.outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == 0
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM multi_agent_teams").fetchone()[0] == 0
