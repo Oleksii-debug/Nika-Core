@@ -147,3 +147,15 @@ def test_post_proof_identity_checks_follow_proofs_before_publication() -> None:
     )
     for end_step, reverify_step, next_step in proof_steps:
         assert m12.index(end_step) < m12.index(reverify_step) < m12.index(next_step)
+
+def test_final_windows_packages_include_local_voice_runtime_dependencies() -> None:
+    install_voice = 'python -m pip install -e ".[gui,voice,qa,dev]"'
+    m11 = WORKFLOWS[1].read_text(encoding="utf-8")
+    assert install_voice in m11
+
+    m12 = M12_WORKFLOW.read_text(encoding="utf-8")
+    _, separator, package_and_attestation = m12.partition("\n  packaged-windows:\n")
+    assert separator, "M12 packaged Windows job is missing"
+    packaged, separator, _ = package_and_attestation.partition(ATTEST_MAIN_JOB)
+    assert separator, "M12 trusted-main attestation job is missing"
+    assert install_voice in packaged
