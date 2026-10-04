@@ -115,10 +115,14 @@ def _snapshot_tool_arguments(arguments: Mapping[str, object]) -> dict[str, objec
 def _require_tool_identity(value: object, *, label: str) -> str:
     if type(value) is not str or not value.strip():
         raise ValueError(f"{label} must be nonempty text")
+    if len(value) > 512:
+        raise ValueError(f"{label} exceeds maximum UTF-8 byte length")
     try:
-        value.encode("utf-8")
+        encoded = value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ValueError(f"{label} must be valid UTF-8") from exc
+    if len(encoded) > 512:
+        raise ValueError(f"{label} exceeds maximum UTF-8 byte length")
     return value
 
 
