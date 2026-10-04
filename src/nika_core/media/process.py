@@ -232,6 +232,13 @@ class SafeProcessRunner:
                     MediaErrorCode.INVALID_SOURCE,
                     "watched media output must be a regular file",
                 )
+            # A regular file may still alias another inode through a hard link.
+            # Never let an external subprocess overwrite an aliased output.
+            if metadata.st_nlink != 1:
+                return MediaError(
+                    MediaErrorCode.PATH_ESCAPE,
+                    "watched media output must not have hard-link aliases",
+                )
             if metadata.st_size > max_bytes:
                 return MediaError(
                     MediaErrorCode.SOURCE_TOO_LARGE,
