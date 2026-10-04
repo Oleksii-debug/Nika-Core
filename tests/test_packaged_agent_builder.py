@@ -137,6 +137,51 @@ def test_packaged_handler_rejects_nontext_command_without_persisting(
     assert count == 0
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        None,
+        7,
+        False,
+        ["Створи агента"],
+        {"command": "Create an agent"},
+    ),
+)
+def test_packaged_bridge_rejects_nontext_command_across_restart(
+    tmp_path: Path,
+    command: object,
+) -> None:
+    path = (tmp_path / "invalid bridge command.db").resolve()
+    session = nika_windows.build_windows_session(AppConfig(database_path=path))
+    try:
+        response = session.bridge.dispatch(
+            {
+                "request_id": "reject-nontext",
+                "action_id": "task.create",
+                "payload": {"command": command},
+            }
+        )
+        assert response["status"] == "rejected"
+        assert "звичайним текстом" in response["message"]
+        state = session.bridge.get_state()
+        assert state["ok"] is True
+        assert state["state"]["tasks"] == []
+        assert state["state"]["agent_builder_definitions"] == []
+        assert state["state"]["product_project"] is None
+    finally:
+        session.close()
+
+    reopened = nika_windows.build_windows_session(AppConfig(database_path=path))
+    try:
+        state = reopened.bridge.get_state()
+        assert state["ok"] is True
+        assert state["state"]["tasks"] == []
+        assert state["state"]["agent_builder_definitions"] == []
+        assert state["state"]["product_project"] is None
+    finally:
+        reopened.close()
+
+
 def test_distinct_explicit_goals_get_distinct_draft_identities(tmp_path: Path) -> None:
     handler, _repository, store = _handler(tmp_path / "distinct.db")
 
