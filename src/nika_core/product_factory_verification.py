@@ -255,6 +255,10 @@ def _validate_utf8(value: str, field: str) -> None:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise VerificationError(f"{field} must be valid UTF-8 text") from exc
+    if not value.isprintable():
+        # Evidence enters audit/status surfaces: control and invisible format
+        # characters must not spoof lines, check names, or provenance references.
+        raise VerificationError(f"{field} must be printable text")
 
 
 def _validate_sha(value: str) -> None:
