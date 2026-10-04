@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterator
 
 import httpx
@@ -21,7 +22,8 @@ def _client_factory(
 
 
 def _response(models: list[dict[str, object]]) -> httpx.Response:
-    return httpx.Response(200, json={"models": models})
+    data = json.dumps({"models": models}).encode("utf-8")
+    return httpx.Response(200, stream=httpx.ByteStream(data))
 
 
 class _CountingBody(httpx.SyncByteStream):
