@@ -187,6 +187,40 @@ def test_packaged_speech_close_cancels_active_work_and_is_idempotent() -> None:
     assert after_close.status == "rejected"
 
 
+def test_packaged_speech_close_retries_join_after_initial_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    port = _StubbornCancellingSpeechPort()
+    feature = PackagedSpeechFeature(output=port)
+    feature.speak({"text": "Озвучення має завершитися перед виходом."})
+    assert port.started.wait(timeout=1)
+    stream = feature._stream
+    assert stream is not None
+    real_wait = stream.wait
+    waits: list[float] = []
+
+    def first_wait_times_out(timeout: float) -> bool:
+        waits.append(timeout)
+        return False if len(waits) == 1 else real_wait(timeout)
+
+    monkeypatch.setattr(stream, "wait", first_wait_times_out)
+
+    with pytest.raises(RuntimeError, match="did not settle during shutdown"):
+        feature.close()
+
+    assert feature._closed is True
+    assert feature._shutdown_settled is False
+    assert feature.speak({"text": "Новий звук заборонено."}).status == "rejected"
+
+    port.release.set()
+    feature.close()
+    feature.close()
+
+    assert waits == [5.0, 5.0]
+    assert feature._shutdown_settled is True
+    assert feature.snapshot()["status"] == "cancelled"
+
+
 @pytest.mark.parametrize(
     "payload",
     [

@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
+from pydantic_settings import SettingsError
 
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
@@ -63,16 +67,45 @@ class WindowsBridgeSession:
         if self._closed:
             return
         self._closed = True
-        try:
-            self.voice_model_setup.close()
-        finally:
+        first_error: BaseException | None = None
+        retry_incomplete_resource = False
+        for name, resource in (
+            ("speech", self.speech),
+            ("voice_model_setup", self.voice_model_setup),
+            ("voice", self.voice),
+            ("backend", self.backend),
+        ):
             try:
-                self.speech.close()
-            finally:
-                try:
-                    self.voice.close()
-                finally:
-                    self.backend.close()
+                resource.close()
+            except BaseException as exc:
+                if type(exc) is RuntimeError and (
+                    (
+                        name == "backend"
+                        and exc.args == (
+                            "cannot close desktop runtime loop while tasks are active",
+                        )
+                    )
+                    or (
+                        name == "speech"
+                        and exc.args == ("packaged speech worker did not settle during shutdown",)
+                    )
+                ):
+                    # Neither a pending runtime nor an unfinished speech worker is abandoned.
+                    # Other resources expose idempotent close() boundaries.
+                    retry_incomplete_resource = True
+                if first_error is None:
+                    first_error = exc
+                else:
+                    # Continue teardown; preserve its first error and log only safe metadata.
+                    logging.getLogger(__name__).error(
+                        "Packaged shutdown cleanup failed: component=%s exception_type=%s",
+                        name,
+                        type(exc).__name__,
+                    )
+        if retry_incomplete_resource:
+            self._closed = False
+        if first_error is not None:
+            raise first_error
 
 
 def _focus(focus_id: str, message: str) -> UIResult:
@@ -82,6 +115,34 @@ def _focus(focus_id: str, message: str) -> UIResult:
         message=message,
         focus_id=focus_id,
     )
+
+
+def _close_failed_startup_resources(
+    backend: DesktopBackend,
+    *,
+    voice: PackagedVoiceFeature | None,
+    voice_model_setup: PackagedVoiceModelSetup | None,
+    speech: PackagedSpeechFeature | None,
+) -> None:
+    """Release every successfully constructed component after a failed startup."""
+    for name, resource in (
+        ("speech", speech),
+        ("voice_model_setup", voice_model_setup),
+        ("voice", voice),
+        ("backend", backend),
+    ):
+        if resource is None:
+            continue
+        try:
+            resource.close()
+        except BaseException as exc:
+            # A teardown interrupt must not replace the original startup error.
+            # Failure diagnostics may contain private paths or model details.
+            logging.getLogger(__name__).error(
+                "Packaged startup cleanup failed: component=%s exception_type=%s",
+                name,
+                type(exc).__name__,
+            )
 
 
 def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
@@ -113,133 +174,143 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
             else None
         ),
     )
-    voice = build_packaged_voice(
-        config.database_path.parent,
-        submit=backend.submit_packaged_coroutine,
-    )
-    voice_model_setup = PackagedVoiceModelSetup(
-        config.database_path.parent,
-        submit=backend.submit_packaged_coroutine,
-    )
-    speech = build_packaged_speech()
+    voice: PackagedVoiceFeature | None = None
+    voice_model_setup: PackagedVoiceModelSetup | None = None
+    speech: PackagedSpeechFeature | None = None
+    try:
+        voice = build_packaged_voice(
+            config.database_path.parent,
+            submit=backend.submit_packaged_coroutine,
+        )
+        voice_model_setup = PackagedVoiceModelSetup(
+            config.database_path.parent,
+            submit=backend.submit_packaged_coroutine,
+        )
+        speech = build_packaged_speech()
+    except BaseException:
+        _close_failed_startup_resources(
+            backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
+        )
+        raise
     try:
         backend.start_startup_recovery()
-    except Exception as exc:
-        try:
-            voice_model_setup.close()
-        finally:
-            try:
-                speech.close()
-            finally:
-                try:
-                    voice.close()
-                finally:
-                    backend.close()
+    except BaseException as exc:
+        _close_failed_startup_resources(
+            backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
+        )
+        if not isinstance(exc, Exception):
+            raise
         raise _StartupRecoveryInventoryError(
             "packaged startup recovery inventory failed"
         ) from exc
 
-    products = ProductProjectCommandService(ProductProjectRepository(store))
-    agent_definitions = AgentDefinitionRepository(store)
+    try:
+        products = ProductProjectCommandService(ProductProjectRepository(store))
+        agent_definitions = AgentDefinitionRepository(store)
 
-    def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
-        try:
-            return backend.create_task(payload)
-        except ModelSetupError as exc:
-            return UIResult(
-                request_id="desktop-handler",
-                status="rejected",
-                message=str(exc),
-                focus_id="model-route-kind",
-            )
+        def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
+            try:
+                return backend.create_task(payload)
+            except ModelSetupError as exc:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="rejected",
+                    message=str(exc),
+                    focus_id="model-route-kind",
+                )
 
-    product_router = PackagedProductCommandRouter(
-        products=products,
-        ordinary_handler=create_ordinary_task,
-        agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
-        selection_store=PackagedProductSelectionStore(store),
-    )
-    agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
-    command_center = ProductCommandCenter(products)
-    product_state = PackagedProductStateProvider(
-        base_state=backend.snapshot,
-        router=product_router,
-        command_center=command_center,
-    )
-    packaged_state = V01PackagedTeamStateProvider(
-        base_state=product_state,
-        store=store,
-    )
-
-    def source_state() -> Mapping[str, Any]:
-        state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
-        state["v01_model_settings"] = model_settings.snapshot()
-        state["voice"] = voice.snapshot()
-        state["voice_model_setup"] = voice_model_setup.snapshot()
-        state["speech"] = speech.snapshot()
-        return agent_builder_state.decorate(state)
-
-    def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
-        if payload:
-            return UIResult(
-                request_id="model-settings",
-                status="rejected",
-                message="Перечитування моделі не приймає параметрів.",
-                focus_id="model-route-kind",
-            )
-        snapshot = model_settings.snapshot()
-        if snapshot.get("status") == "invalid":
-            return UIResult(
-                request_id="model-settings",
-                status="failed",
-                message="Не вдалося прочитати збережені налаштування моделі.",
-                focus_id="model-route-kind",
-            )
-        return UIResult(
-            request_id="model-settings",
-            status="completed",
-            message="Збережені налаштування моделі перечитано.",
-            focus_id="model-route-kind",
+        product_router = PackagedProductCommandRouter(
+            products=products,
+            ordinary_handler=create_ordinary_task,
+            agent_builder_handler=PackagedAgentBuilderDraftHandler(agent_definitions),
+            selection_store=PackagedProductSelectionStore(store),
+        )
+        agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
+        command_center = ProductCommandCenter(products)
+        product_state = PackagedProductStateProvider(
+            base_state=backend.snapshot,
+            router=product_router,
+            command_center=command_center,
+        )
+        packaged_state = V01PackagedTeamStateProvider(
+            base_state=product_state,
+            store=store,
         )
 
-    bridge = UIActionBridge(
-        actions,
-        keymap,
-        handlers={
-            "task.create": product_router.create,
-            "task.pause": backend.pause_task,
-            "task.resume": backend.resume_task,
-            "agent.stop": backend.stop_agent,
-            "voice.start": voice.start,
-            "voice.cancel": voice.cancel,
-            "voice.model.import": voice_model_setup.start,
-            "voice.model.cancel": voice_model_setup.cancel,
-            "speech.start": speech.speak,
-            "speech.cancel": speech.cancel,
-            "team.sources.configure": source_settings.configure,
-            "settings.autostart.configure": backend.autostart_settings.configure,
-            "settings.autostart.refresh": backend.autostart_settings.refresh,
-            "settings.model.configure": model_settings.configure,
-            "settings.model.refresh": refresh_model_settings,
-            "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
-            "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
-            "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
-            "nav.workspaces": lambda _payload: _focus(
-                "workspaces-heading", "Робочі простори відкрито."
-            ),
-            "command.focus": lambda _payload: _focus("command-input", "Командне поле активне."),
-        },
-        state_provider=source_state,
-    )
-    return WindowsBridgeSession(
-        bridge=bridge,
-        products=products,
-        backend=backend,
-        voice=voice,
-        voice_model_setup=voice_model_setup,
-        speech=speech,
-    )
+        def source_state() -> Mapping[str, Any]:
+            state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
+            state["v01_model_settings"] = model_settings.snapshot()
+            state["voice"] = voice.snapshot()
+            state["voice_model_setup"] = voice_model_setup.snapshot()
+            state["speech"] = speech.snapshot()
+            return agent_builder_state.decorate(state)
 
+        def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
+            if payload:
+                return UIResult(
+                    request_id="model-settings",
+                    status="rejected",
+                    message="Перечитування моделі не приймає параметрів.",
+                    focus_id="model-route-kind",
+                )
+            snapshot = model_settings.snapshot()
+            if snapshot.get("status") == "invalid":
+                return UIResult(
+                    request_id="model-settings",
+                    status="failed",
+                    message="Не вдалося прочитати збережені налаштування моделі.",
+                    focus_id="model-route-kind",
+                )
+            return UIResult(
+                request_id="model-settings",
+                status="completed",
+                message="Збережені налаштування моделі перечитано.",
+                focus_id="model-route-kind",
+            )
+
+        bridge = UIActionBridge(
+            actions,
+            keymap,
+            handlers={
+                "task.create": product_router.create,
+                "task.pause": backend.pause_task,
+                "task.resume": backend.resume_task,
+                "agent.stop": backend.stop_agent,
+                "voice.start": voice.start,
+                "voice.cancel": voice.cancel,
+                "voice.model.import": voice_model_setup.start,
+                "voice.model.cancel": voice_model_setup.cancel,
+                "speech.start": speech.speak,
+                "speech.cancel": speech.cancel,
+                "team.sources.configure": source_settings.configure,
+                "settings.autostart.configure": backend.autostart_settings.configure,
+                "settings.autostart.refresh": backend.autostart_settings.refresh,
+                "settings.model.configure": model_settings.configure,
+                "settings.model.refresh": refresh_model_settings,
+                "nav.tasks": lambda _payload: _focus("tasks-heading", "Завдання відкрито."),
+                "nav.agents": lambda _payload: _focus("agents-heading", "Агенти відкрито."),
+                "nav.logs": lambda _payload: _focus("logs-heading", "Журнал відкрито."),
+                "nav.workspaces": lambda _payload: _focus(
+                    "workspaces-heading", "Робочі простори відкрито."
+                ),
+                "command.focus": lambda _payload: _focus("command-input", "Командне поле активне."),
+            },
+            state_provider=source_state,
+        )
+        return WindowsBridgeSession(
+            bridge=bridge,
+            products=products,
+            backend=backend,
+            voice=voice,
+            voice_model_setup=voice_model_setup,
+            speech=speech,
+        )
+
+    except BaseException:
+        _close_failed_startup_resources(
+            backend, voice=voice, voice_model_setup=voice_model_setup, speech=speech
+        )
+        raise
 
 def build_windows_bridge(
     config: AppConfig,
@@ -453,6 +524,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
         return 1
+    except (ValidationError, SettingsError):
+        # The validation exception can embed paths, endpoint details or env values.
+        # Do not expose it in the windowless packaged entrypoint or start the runtime.
+        show_recovery_error(
+            "Некоректні налаштування Nika (NIKA_*). Перевірте конфігурацію "
+            "та перезапустіть програму. Дані не змінено."
+        )
+        return 1
+    except Exception as exc:
+        # Unexpected configuration/source failures can also contain private values.
+        logging.getLogger(__name__).error(
+            "Packaged configuration failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося прочитати налаштування Nika. Збережіть наявні дані, "
+            "перевірте конфігурацію та повторіть запуск."
+        )
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
@@ -467,11 +556,54 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Запуск зупинено без автоматичного повторення дій."
         )
         return 1
+    except Exception as exc:
+        # All session-construction failures must fail closed before a UI exists.
+        # Exception messages can contain private paths, values or model details.
+        logging.getLogger(__name__).error(
+            "Packaged startup failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося відкрити дані або підготувати запуск Nika. "
+            "Перевірте доступність папки даних; наявну базу не видаляйте."
+        )
+        return 1
+    launch_error: Exception | None = None
+    close_error: BaseException | None = None
     try:
         launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
-    finally:
+    except Exception as exc:
+        launch_error = exc
+    except BaseException:
+        # Preserve KeyboardInterrupt/SystemExit even if teardown also fails.
+        try:
+            session.close()
+        except BaseException as exc:
+            # Cleanup failure must not replace the original shell interruption.
+            logging.getLogger(__name__).error(
+                "Packaged shutdown failed: exception_type=%s", type(exc).__name__
+            )
+        raise
+    try:
         session.close()
-    return 0
+    except BaseException as exc:
+        if launch_error is None and not isinstance(exc, Exception):
+            # An actual shutdown interruption remains observable when the shell succeeded.
+            raise
+        # A cleanup interruption cannot hide an earlier shell failure.
+        close_error = exc
+
+    if launch_error is None and close_error is None:
+        return 0
+    logger = logging.getLogger(__name__)
+    if launch_error is not None:
+        logger.error("Packaged shell failed: exception_type=%s", type(launch_error).__name__)
+    if close_error is not None:
+        logger.error("Packaged shutdown failed: exception_type=%s", type(close_error).__name__)
+    show_recovery_error(
+        "Під час роботи вікна або завершення Nika сталася помилка. "
+        "Збережіть папку даних і перевірте журнал перед повторним запуском."
+    )
+    return 1
 
 
 if __name__ == "__main__":

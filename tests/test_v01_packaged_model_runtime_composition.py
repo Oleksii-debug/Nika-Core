@@ -177,6 +177,7 @@ def test_packaged_selected_local_model_drives_two_workers_and_checker(
             json={
                 "model": payload["model"],
                 "message": {"role": "assistant", "content": answer},
+                "done": True,
             },
         )
 
@@ -233,6 +234,7 @@ def test_packaged_restart_uses_task_frozen_model_after_default_changes(
             json={
                 "model": payload["model"],
                 "message": {"role": "assistant", "content": "stable analysis"},
+                "done": True,
             },
         )
 
@@ -402,6 +404,7 @@ def test_packaged_local_response_model_substitution_fails_closed(tmp_path: Path)
             json={
                 "model": "different-local-model",
                 "message": {"role": "assistant", "content": "must not be accepted"},
+                "done": True,
             },
         )
 

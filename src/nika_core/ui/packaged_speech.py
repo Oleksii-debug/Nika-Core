@@ -34,6 +34,7 @@ class PackagedSpeechFeature:
         self._stream: IncrementalSpeechStream | None = None
         self._generation = 0
         self._closed = False
+        self._shutdown_settled = False
 
     @property
     def available(self) -> bool:
@@ -207,11 +208,12 @@ class PackagedSpeechFeature:
 
     def close(self) -> None:
         with self._lock:
-            if self._closed:
+            if self._shutdown_settled:
                 return
             self._closed = True
             stream = self._stream
             if stream is None:
+                self._shutdown_settled = True
                 return
             if stream.snapshot().state in {
                 SpeechStreamState.RUNNING,
@@ -219,7 +221,10 @@ class PackagedSpeechFeature:
             }:
                 stream.cancel()
         if not stream.wait(5.0):
+            # Remain closed to new speech, but allow a later close to join this worker.
             raise RuntimeError("packaged speech worker did not settle during shutdown")
+        with self._lock:
+            self._shutdown_settled = True
 
 
 def build_packaged_speech() -> PackagedSpeechFeature:
