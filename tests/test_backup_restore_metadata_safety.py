@@ -160,7 +160,6 @@ def test_recovery_metadata_size_is_bounded_even_with_json_whitespace(
 ) -> None:
     target = tmp_path / "live.db"
     manager = _manager(target)
-    original_sha = _digest(target)
     if kind == "backup":
         artifact = manager.create_backup(tmp_path / "backup.sqlite3", record_audit=False)
         metadata = json.loads(artifact.manifest_path.read_text(encoding="utf-8"))
@@ -168,6 +167,7 @@ def test_recovery_metadata_size_is_bounded_even_with_json_whitespace(
     else:
         metadata = _marker(manager, target)
         path = manager._restore_marker_path(target)
+    original_sha = _digest(target)
     path.write_text(json.dumps(metadata) + " " * 65_537, encoding="utf-8")
 
     with pytest.raises(BackupVerificationError, match="JSON recovery metadata"):
