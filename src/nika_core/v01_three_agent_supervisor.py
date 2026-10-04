@@ -204,9 +204,12 @@ class V01ThreeAgentSupervisor:
             checker_grants=checker_grants,
             assignments=assignments,
         )
+        # Two source workers provide two results; retain the third as
+        # evidence of ambiguity, but reject larger corrupt histories in SQL.
         handoffs = self._store.inbound_result_handoffs(
             fixed_team_id,
             self._config.checker.member_id,
+            max_handoffs=3,
         )
         expected_summary = self._checker.compare(
             team_id=fixed_team_id,
