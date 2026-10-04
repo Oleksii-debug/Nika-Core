@@ -6,6 +6,7 @@ on:
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
+      - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/product_command/**"
       - "src/nika_core/product_factory_packaged_journey.py"
       - "src/nika_core/product_project*.py"
@@ -22,6 +23,7 @@ on:
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_v01_legacy_database_adoption.py"
       - "tests/test_m11_pf11_proof_integrity.py"
       - "tests/test_m11_voice_proof_integrity.py"
       - "tests/test_pf11_proof_precommand.py"
@@ -43,6 +45,7 @@ on:
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
+      - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/product_command/**"
       - "src/nika_core/product_factory_packaged_journey.py"
       - "src/nika_core/product_project*.py"
@@ -59,6 +62,7 @@ on:
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_v01_legacy_database_adoption.py"
       - "tests/test_m11_pf11_proof_integrity.py"
       - "tests/test_m11_voice_proof_integrity.py"
       - "tests/test_pf11_proof_precommand.py"
@@ -113,6 +117,7 @@ jobs:
         run: >-
           python -m pytest
           tests/test_m11_m12_release.py
+          tests/test_v01_legacy_database_adoption.py
           tests/test_m11_pf11_proof_integrity.py
           tests/test_m11_voice_proof_integrity.py
           tests/test_pf11_proof_precommand.py

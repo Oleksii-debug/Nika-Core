@@ -104,7 +104,14 @@ def test_online_snapshot_includes_uncheckpointed_wal(tmp_path):
         live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
         live.commit()
         assert source.with_name(source.name + "-wal").stat().st_size > 0
-        adoption.prepare_default_database(target, [source])
+        try:
+            adoption.prepare_default_database(target, [source])
+        except adoption.LegacyDatabaseConflict as error:
+            # Production correctly hides internal recovery details. Expose the
+            # suppressed underlying exception only in this CI regression.
+            if error.__context__ is not None:
+                raise error.__context__ from error
+            raise
         assert json.loads(_rows(target, "tasks")[0][4]) == {"from_wal": True}
 
 
@@ -191,6 +198,75 @@ def test_source_aliases_are_one_candidate(tmp_path):
     adoption.prepare_default_database(target, [source, alias])
     adoption.prepare_default_database(target, [alias])
     assert len(_rows(target, "tasks")) == 1
+
+
+
+@pytest.mark.parametrize("alias_first", [False, True])
+def test_hardlink_alias_with_uncheckpointed_wal_is_ambiguous(tmp_path, alias_first):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "alias.db"
+    try:
+        alias.hardlink_to(source)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        assert source.with_name(source.name + "-wal").stat().st_size > 0
+        # Repeating an identical path is still one unambiguous WAL source.
+        assert adoption._known_sources(target, [source, source]) == [source.resolve()]
+        before = source.read_bytes()
+        candidates = [alias, source] if alias_first else [source, alias]
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption._known_sources(target, candidates)
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption.prepare_default_database(target, candidates)
+        assert not target.exists()
+        assert source.read_bytes() == before
+        assert json.loads(_rows(source, "tasks")[0][4]) == {"from_wal": True}
+
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_broken_indirect_sidecar_makes_hardlink_alias_ambiguous(tmp_path, suffix):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "alias.db"
+    try:
+        alias.hardlink_to(source)
+        alias.with_name(alias.name + suffix).symlink_to(tmp_path / "missing-sidecar")
+    except OSError:
+        pytest.skip("File system does not support hard links or symlinks")
+    original = source.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._known_sources(target, [alias, source])
+    assert not target.exists()
+    assert source.read_bytes() == original
+
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("indirect", [False, True])
+def test_unsafe_single_source_sidecar_fails_before_any_backup(tmp_path, suffix, indirect):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    sidecar = source.with_name(source.name + suffix)
+    if indirect:
+        try:
+            sidecar.symlink_to(tmp_path / "missing-sidecar")
+        except OSError:
+            pytest.skip("File system does not support symlinks")
+    else:
+        sidecar.mkdir()
+    original = source.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [source])
+    assert source.read_bytes() == original
+    assert not target.exists()
+    assert not (target.parent / "legacy-adoption-backups").exists()
 
 
 def test_packaged_conflict_is_displayed_before_any_runtime_starts(monkeypatch):

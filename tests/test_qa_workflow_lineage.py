@@ -181,6 +181,22 @@ def test_zip_builder_changes_trigger_m11_release_qualification() -> None:
     assert m12.count('      - "scripts/**"') == 2
 
 
+
+def test_m11_requalifies_legacy_adoption_before_windows_package() -> None:
+    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    for path in (
+        "src/nika_core/reliability/legacy_database.py",
+        "tests/test_v01_legacy_database_adoption.py",
+    ):
+        assert workflow.count(f'      - "{path}"') == 2, path
+
+    regressions = workflow.split("- name: Run M11 M12 source regressions", 1)[1]
+    regressions = regressions.split("- name: Build standalone", 1)[0]
+    assert "tests/test_v01_legacy_database_adoption.py" in regressions
+
+
+
+
 M11_PACKAGED_SOURCE_TRIGGERS = (
     "src/nika_core/product_command/**",
     "src/nika_core/product_factory_packaged_journey.py",
