@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import stat
 from collections.abc import Callable, Iterator
@@ -208,15 +209,14 @@ class SQLiteRecoveryManager:
         }
         if set(manifest) != expected:
             raise BackupVerificationError("backup manifest has unexpected or missing fields")
-        if manifest["format_version"] != _MANIFEST_VERSION:
+        if type(manifest["format_version"]) is not int or manifest["format_version"] != _MANIFEST_VERSION:
             raise BackupVerificationError("unsupported backup manifest format")
         if manifest["database_file"] != database.name:
             raise BackupVerificationError("backup manifest does not match database filename")
-        try:
-            size = int(manifest["size_bytes"])
-            schema = int(manifest["schema_version"])
-        except (TypeError, ValueError) as exc:
-            raise BackupVerificationError("backup manifest numeric fields are invalid") from exc
+        if type(manifest["size_bytes"]) is not int or type(manifest["schema_version"]) is not int:
+            raise BackupVerificationError("backup manifest numeric fields are invalid")
+        size = manifest["size_bytes"]
+        schema = manifest["schema_version"]
         if size <= 0 or database.stat().st_size != size:
             raise BackupVerificationError("backup database size does not match manifest")
 
@@ -728,7 +728,7 @@ class SQLiteRecoveryManager:
             raise RestoreSafetyError(
                 "interrupted restore marker has unexpected or missing fields"
             )
-        if marker["format_version"] != _RESTORE_MARKER_VERSION:
+        if type(marker["format_version"]) is not int or marker["format_version"] != _RESTORE_MARKER_VERSION:
             raise RestoreSafetyError("unsupported interrupted restore marker format")
         if marker["target_file"] != target.name:
             raise RestoreSafetyError("interrupted restore marker targets another database")
@@ -743,6 +743,22 @@ class SQLiteRecoveryManager:
                 raise RestoreSafetyError(
                     "interrupted restore marker contains an unsafe path"
                 )
+        if not re.fullmatch(
+            rf"\.{re.escape(target.name)}\.restore-stage\.[0-9a-f]{{32}}\.tmp",
+            marker["stage_file"],
+        ):
+            raise RestoreSafetyError("interrupted restore marker contains an unsafe path")
+        if not re.fullmatch(
+            rf"{re.escape(target.name)}\.unrecoverable-"
+            rf"[0-9]{{8}}T[0-9]{{12}}Z-[0-9a-f]{{8}}\.sqlite3",
+            marker["quarantine_file"],
+        ):
+            raise RestoreSafetyError("interrupted restore marker contains an unsafe path")
+        if (
+            marker["quarantine_wal_file"] != marker["quarantine_file"] + "-wal"
+            or marker["quarantine_shm_file"] != marker["quarantine_file"] + "-shm"
+        ):
+            raise RestoreSafetyError("interrupted restore marker contains an unsafe path")
         for key in ("stage_sha256", "current_sha256", "backup_sha256"):
             value = marker[key]
             if not isinstance(value, str) or not self._is_sha256(value):
@@ -1189,9 +1205,19 @@ class SQLiteRecoveryManager:
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
+        def _unique_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON recovery metadata key")
+                result[key] = value
+            return result
+
         try:
-            content = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            content = json.loads(
+                path.read_text(encoding="utf-8"), object_pairs_hook=_unique_keys
+            )
+        except (OSError, UnicodeError, ValueError) as exc:
             raise BackupVerificationError(
                 f"JSON recovery metadata is unreadable: {path.name}"
             ) from exc
