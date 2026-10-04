@@ -4,6 +4,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from importlib import metadata
 from pathlib import Path
 
@@ -110,8 +111,27 @@ def build_third_party_notices(bundle_dir: Path) -> Path:
             ) from exc
         title, body = _distribution_section(distribution_name, dist)
         sections.extend(["", f"===== {title} =====", body])
+    payload = ("\n".join(sections).rstrip() + "\n").encode("utf-8")
+    if len(payload) > _MAX_NOTICES_BYTES:
+        raise RuntimeError("Generated third-party notices exceed the release size limit")
     target = bundle_dir / "THIRD_PARTY_NOTICES.txt"
-    target.write_text("\n".join(sections).rstrip() + "\n", encoding="utf-8")
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=".THIRD_PARTY_NOTICES-",
+            suffix=".tmp",
+            dir=bundle_dir,
+            delete=False,
+        ) as output:
+            temporary = Path(output.name)
+            output.write(payload)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, target)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return target
 
 
