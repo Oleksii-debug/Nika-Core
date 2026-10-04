@@ -15,7 +15,7 @@ from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
 )
-from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.model_gateway.gateway import model_identity_fingerprint
 from nika_core.multi_agent import (
     MultiAgentStore,
@@ -608,7 +608,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
     def _stored_outer_command(self, task_id: str) -> str:
         try:
             task = TaskQueue(self._sqlite).get(task_id)
-        except (TaskPayloadCorruptionError, TypeError, ValueError):
+        except (TypeError, ValueError):
             # A cached checker goal cannot bypass malformed durable task data,
             # including an invalid task state or JSON payload.
             return ""
