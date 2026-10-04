@@ -148,3 +148,21 @@ def test_corrupt_existing_task_binding_is_not_silently_replaced(
             (task.task_id,),
         ).fetchone()[0] == damaged
         assert conn.execute("SELECT COUNT(*) FROM audit_events").fetchone()[0] == before_audit
+
+
+def test_valid_selection_reopens_and_keeps_original_task_binding(tmp_path: Path) -> None:
+    store, config, settings = _settings(tmp_path)
+    build_windows_bridge(config)
+    expected = settings.snapshot()
+    assert expected["status"] == "ready"
+    payload = settings.prepare_task_payload({"command": "Порівняй"})
+    task = TaskQueue(store).create(
+        workspace_id="default", agent_id="nika.default", payload=payload
+    )
+    reopened = V01SourceSettings(SQLiteStore(config.database_path), config)
+    assert reopened.snapshot() == expected
+    selection = reopened.for_task(task.task_id)
+    assert selection.root == expected["root"]
+    assert selection.source_a == expected["source_a"]
+    assert selection.source_b == expected["source_b"]
+    assert reopened.for_task(task.task_id) == selection
