@@ -194,3 +194,81 @@ def test_durable_route_identifiers_reject_invalid_unicode(
     values.update(overrides)
     with pytest.raises(ValueError, match="control characters"):
         ApiModelRouteConfig(**values)
+
+
+def test_resolver_exception_does_not_expose_secret_through_exception_context() -> None:
+    canary = "SYNTHETIC_RESOLVER_SECRET_CANARY"
+
+    class LeakingResolver:
+        def resolve(self, credential_ref: str) -> str:
+            raise RuntimeError(f"{credential_ref}: {canary}")
+
+    provider = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=LeakingResolver(),
+    )
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(provider.complete(_request()))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.AUTHENTICATION
+    assert error.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert canary not in repr(error)
+
+
+def test_http_error_does_not_expose_bearer_through_exception_context() -> None:
+    canary = "SYNTHETIC_HTTP_HEADER_SECRET_CANARY"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == f"Bearer {canary}"
+        return httpx.Response(401, json={"error": "unauthorized"})
+
+    def factory(*, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), timeout=timeout
+        )
+
+    provider = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=_Resolver(canary),
+        client_factory=factory,
+    )
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(provider.complete(_request()))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.AUTHENTICATION
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert canary not in repr(error)
+
+
+def test_untyped_transport_exception_is_sanitized_without_secret_or_context() -> None:
+    canary = "SYNTHETIC_TRANSPORT_SECRET_CANARY"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["Authorization"] == f"Bearer {canary}"
+        raise RuntimeError(f"unsafe transport diagnostic: {canary}")
+
+    def factory(*, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), timeout=timeout
+        )
+
+    provider = CredentialRefOpenAICompatibleProvider(
+        config=_config(),
+        credential_resolver=_Resolver(canary),
+        client_factory=factory,
+    )
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(provider.complete(_request()))
+
+    error = caught.value
+    assert error.code is ModelErrorCode.PROVIDER_ERROR
+    assert error.failure_effect is ModelFailureEffect.UNKNOWN
+    assert error.retryable is False
+    assert error.__cause__ is None
+    assert error.__context__ is None
+    assert canary not in str(error)
