@@ -226,8 +226,22 @@ def _known_sources(target: Path, candidates: Sequence[Path]) -> list[Path]:
         path = candidate.resolve()
         if not path.exists() or path == target or (target.exists() and path.samefile(target)):
             continue
-        if not any(path.samefile(other) for other in paths):
-            paths.append(path)
+        duplicate = next((other for other in paths if path.samefile(other)), None)
+        if duplicate is not None:
+            # Hard links share SQLite's main file but not the path-named WAL/SHM.
+            # Treat two aliases with live sidecars as ambiguous rather than
+            # silently choosing whichever candidate happened to appear first.
+            if path != duplicate and any(
+                sidecar.exists() or sidecar.is_symlink()
+                for origin in (path, duplicate)
+                for sidecar in (
+                    origin.with_name(origin.name + "-wal"),
+                    origin.with_name(origin.name + "-shm"),
+                )
+            ):
+                raise LegacyDatabaseConflict(_MESSAGE)
+            continue
+        paths.append(path)
     return paths
 
 
