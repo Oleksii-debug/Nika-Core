@@ -359,6 +359,20 @@ def test_packaged_cached_legacy_goal_survives_missing_task_row(tmp_path: Path) -
         "user_goal"
     ] == command
     assert runtime._stored_outer_command(task_id) == command
+    # A real pre-queue legacy team may resume, but a new run must not borrow
+    # its checker goal when the durable TaskQueue record has been removed.
+    previous_results = _result_count(store)
+    rejected = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=thread_id,
+                payload={"command": command},
+            )
+        )
+    )
+    assert rejected.outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == previous_results
     outer_token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
     assert asyncio.run(
         runtime.probe_resume(
@@ -738,3 +752,46 @@ def test_first_run_rejects_corrupt_or_rebound_durable_command_before_effects(
             "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
             (task_id,),
         ).fetchone()[0] == 0
+
+def test_initial_run_rejects_missing_task_even_with_legacy_checker_goal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id, thread_id=thread_id, payload={"command": command}
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    previous_results = _result_count(store)
+    real_get = TaskQueue.get
+
+    def missing_get(queue: TaskQueue, requested_id: str):
+        if requested_id == task_id:
+            raise KeyError("simulated missing queued task")
+        return real_get(queue, requested_id)
+
+    monkeypatch.setattr(TaskQueue, "get", missing_get)
+    # Preserve legacy resume's authentic cached goal, but never use it to
+    # authorize a fresh run when the canonical queue entry is absent.
+    assert runtime._stored_outer_command(task_id) == command
+    token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=token
+        )
+    ).status is RuntimeResumeProbeStatus.READY
+    second = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id, thread_id=thread_id, payload={"command": command}
+            )
+        )
+    )
+    assert second.outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == previous_results

@@ -161,7 +161,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         if type(raw_command) is not str:
             return self._failed()
         command = raw_command.strip()
-        if not command or self._stored_outer_command(request.task_id) != command:
+        if not command or self._stored_outer_command(
+            request.task_id, require_task=True
+        ) != command:
             return self._failed()
         return await self._run_outer(task_id=request.task_id, command=command)
 
@@ -605,7 +607,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             if active.definition != definition:
                 raise PermissionError("existing V0.1 packaged agent definition differs")
 
-    def _stored_outer_command(self, task_id: str) -> str:
+    def _stored_outer_command(
+        self, task_id: str, *, require_task: bool = False
+    ) -> str:
         try:
             task = TaskQueue(self._sqlite).get(task_id)
         except (TypeError, ValueError):
@@ -613,7 +617,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             # including an invalid task state or JSON payload.
             return ""
         except KeyError:
-            # Preserve pre-queue legacy teams with a saved checker goal.
+            # Legacy cached goals authorize resume only, never a new run.
+            if require_task:
+                return ""
             task = None
         command = ""
         if task is not None:
