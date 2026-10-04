@@ -134,6 +134,8 @@ class V01SourceSettings:
                 conn.execute("SELECT MAX(version) FROM v01_source_settings_schema").fetchone()[0]
                 or 0
             )
+            if type(current) is not int or current < 0:
+                raise SourceSetupError("Версія налаштувань джерел некоректна.")
             if current > _SCHEMA_VERSION:
                 raise SourceSetupError("Версія налаштувань джерел новіша за цю програму.")
             for version in range(current + 1, _SCHEMA_VERSION + 1):
