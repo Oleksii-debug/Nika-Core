@@ -13,6 +13,7 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_m11_pf11_proof_integrity.py"
+      - "tests/test_pf11_proof_precommand.py"
       - "tests/test_qa_workflow_lineage.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
@@ -30,6 +31,7 @@ on:
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
       - "tests/test_m11_pf11_proof_integrity.py"
+      - "tests/test_pf11_proof_precommand.py"
       - "tests/test_qa_workflow_lineage.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
@@ -74,6 +76,7 @@ jobs:
           python -m pytest
           tests/test_m11_m12_release.py
           tests/test_m11_pf11_proof_integrity.py
+          tests/test_pf11_proof_precommand.py
           tests/test_qa_workflow_lineage.py -q
       - name: Build standalone one-dir Windows candidate, notices and manifest
         shell: pwsh
