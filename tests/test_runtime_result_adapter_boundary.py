@@ -21,7 +21,11 @@ from nika_core.runtime.contracts import (
     canonical_runtime_result,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
-from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
+from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyStatus,
+)
 
 
 _PRIVATE_MARKER = "SYNTHETIC_UNTRUSTED_ADAPTER_SECRET"
@@ -34,6 +38,11 @@ class _HostileResult:
 
 class _ResultSubclass(RuntimeResult):
     pass
+
+
+class _HostileBool:
+    def __bool__(self):
+        raise AssertionError(f"{_PRIVATE_MARKER}: boolean conversion attempted")
 
 
 def _forged_result() -> RuntimeResult:
@@ -100,10 +109,12 @@ class _Adapter:
     runtime_id = "malformed-result-runtime"
     capabilities = frozenset({RuntimeCapability.DURABLE_RESUME})
 
-    def __init__(self, result: object) -> None:
+    def __init__(self, result: object, *, cancel_response: object = True) -> None:
         self.result = result
+        self.cancel_response = cancel_response
         self.run_calls = 0
         self.resume_calls = 0
+        self.cancel_calls = 0
 
     async def run(self, request: RuntimeRequest):
         del request
@@ -114,6 +125,11 @@ class _Adapter:
         del request
         self.resume_calls += 1
         return self.result
+
+    async def cancel(self, *, task_id: str, thread_id: str):
+        del task_id, thread_id
+        self.cancel_calls += 1
+        return self.cancel_response
 
     async def probe_resume(self, *, task_id: str, thread_id: str, resume_token: str):
         del task_id, thread_id, resume_token
@@ -221,3 +237,39 @@ def test_canonical_result_rejects_forgery_without_consulting_hostile_properties(
     for factory in _BAD_RESULTS:
         with pytest.raises((TypeError, ValueError)):
             canonical_runtime_result(factory())
+
+
+@pytest.mark.parametrize("response", (None, 0, 1, "false", object(), _HostileBool()))
+def test_malformed_cancel_acknowledgement_keeps_external_effect_uncertain(
+    tmp_path, response
+):
+    store, queue, task_id, audit, coordinator = _ready(tmp_path)
+    queue.transition(task_id, TaskState.RUNNING)
+    coordinator.sessions.record_active(
+        task_id=task_id,
+        runtime_id=_Adapter.runtime_id,
+        thread_id="thread-1",
+        resume_token="token-1",
+    )
+    runtime = _Adapter(None, cancel_response=response)
+
+    with pytest.raises(TypeError, match="cancellation acknowledgement must be boolean"):
+        asyncio.run(coordinator.cancel(runtime, task_id=task_id, thread_id="thread-1"))
+
+    assert runtime.cancel_calls == 1
+    assert queue.get(task_id).state is TaskState.RUNNING
+    assert coordinator.sessions.get(task_id) is not None
+    operations = IdempotencyLedger(store).list_for_task(task_id)
+    assert len(operations) == 1
+    assert operations[0].operation_type == "runtime.cancel"
+    assert operations[0].status is IdempotencyStatus.UNCERTAIN
+    events = audit.list_for(entity_type="task", entity_id=task_id)
+    assert [event.event_type for event in events] == [
+        "runtime.cancel_requested",
+        "runtime.cancel_uncertain",
+    ]
+    assert events[-1].payload["error"] == "TypeError"
+    assert _PRIVATE_MARKER not in str(events)
+    with pytest.raises(IdempotencyConflictError, match="pending or uncertain"):
+        asyncio.run(coordinator.cancel(runtime, task_id=task_id, thread_id="thread-1"))
+    assert runtime.cancel_calls == 1
