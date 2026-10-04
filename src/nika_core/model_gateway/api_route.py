@@ -17,7 +17,10 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
-from nika_core.model_gateway.providers import OpenAICompatibleProvider
+from nika_core.model_gateway.providers import (
+    OpenAICompatibleProvider,
+    _direct_httpx_client,
+)
 
 
 class CredentialResolutionError(RuntimeError):
@@ -114,7 +117,7 @@ class CredentialRefOpenAICompatibleProvider:
         *,
         config: ApiModelRouteConfig,
         credential_resolver: CredentialResolverPort,
-        client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
+        client_factory: Callable[..., httpx.AsyncClient] = _direct_httpx_client,
     ) -> None:
         # ApiModelRouteConfig is caller-owned even though it is frozen: callers
         # retaining the object can still use object.__setattr__. Cross that
