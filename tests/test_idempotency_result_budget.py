@@ -129,3 +129,19 @@ def test_multibyte_utf8_result_cannot_bypass_character_precheck(
     with pytest.raises(RuntimeError, match="result_json is invalid"):
         ledger.require("effect:budget")
     assert _raw(store)["result_json"] == forged
+
+def test_tuple_and_sibling_nodes_share_one_budget(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(idempotency_module, "_MAX_RESULT_NODES", 9)
+    store, ledger = _ledger(tmp_path)
+    rejected = {"first": [0] * 4, "second": (0,) * 4}
+
+    with pytest.raises(ValueError, match="JSON serializable") as failure:
+        ledger.complete("effect:budget", rejected)
+    assert failure.value.__cause__ is not None
+    assert "node count" in str(failure.value.__cause__)
+    assert _raw(store)["result_json"] is None
+
+    accepted = {"first": [0] * 3, "second": (0,) * 3}
+    decoded = {"first": [0] * 3, "second": [0] * 3}
+    assert ledger.complete("effect:budget", accepted).result == decoded
+    assert IdempotencyLedger(store).require("effect:budget").result == decoded
