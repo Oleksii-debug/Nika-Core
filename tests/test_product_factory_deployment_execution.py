@@ -689,3 +689,68 @@ def test_prepare_refreshes_credential_clock_after_health_probe(
     assert coordinator.complete(spec.operation_id).state is OperationState.SUCCEEDED
     assert health.probes == 2
     assert provider.deploy_calls == [spec.intent.intent_id]
+
+def test_completion_health_callback_failure_releases_only_its_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, _, provider, health = _coordinator()
+    first = _spec("project-a", "messages")
+    other = _spec("project-a", "profiles", SHA2)
+    coordinator.submit(first, now=NOW)
+    assert coordinator.prepare(first.operation_id, now=NOW).state is OperationState.PREPARED
+    original_health = health.is_available
+    successor_leases = []
+
+    def broken_health(node_id: str) -> bool:
+        assert node_id == "local-linux"
+        (incumbent,) = coordinator.nodes.snapshot().leases
+        coordinator.nodes.release(incumbent.lease_id)
+        successor_leases.append(coordinator.nodes.acquire(other.request, now=NOW))
+        raise OSError("private-node-path")
+
+    monkeypatch.setattr(health, "is_available", broken_health)
+    with pytest.raises(DeploymentExecutionError, match="node availability check failed"):
+        coordinator.complete(first.operation_id, now=NOW)
+
+    assert coordinator.get(first.operation_id).state is OperationState.WAITING_FOR_NODE
+    assert coordinator.get(first.operation_id).node_id is None
+    assert coordinator._node_leases == {}
+    assert coordinator._credential_leases == {}
+    assert provider.deploy_calls == []
+    assert coordinator.nodes.snapshot().leases == tuple(successor_leases)
+    assert coordinator.nodes.is_active_for(successor_leases[0], other.request, now=NOW)
+
+    monkeypatch.setattr(health, "is_available", original_health)
+    coordinator.nodes.release(successor_leases[0].lease_id)
+    assert coordinator.retry(first.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(first.operation_id, now=NOW).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [first.intent.intent_id]
+
+
+def test_completion_credential_callback_failure_allows_safe_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, credentials, provider, _ = _coordinator()
+    spec = _spec("project-a", "messages")
+    coordinator.submit(spec, now=NOW)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    original_authorize = type(credentials).authorize_use
+
+    def broken_authorize(self: CredentialBroker, **kwargs: object):
+        raise RuntimeError("private-credential-token")
+
+    monkeypatch.setattr(type(credentials), "authorize_use", broken_authorize)
+    with pytest.raises(DeploymentExecutionError, match="credential authorization failed"):
+        coordinator.complete(spec.operation_id, now=NOW)
+
+    assert coordinator.get(spec.operation_id).state is OperationState.BLOCKED_CREDENTIAL
+    assert coordinator.get(spec.operation_id).node_id is None
+    assert coordinator.nodes.snapshot().leases == ()
+    assert coordinator._node_leases == {}
+    assert coordinator._credential_leases == {}
+    assert provider.deploy_calls == []
+
+    monkeypatch.setattr(type(credentials), "authorize_use", original_authorize)
+    assert coordinator.retry(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [spec.intent.intent_id]
