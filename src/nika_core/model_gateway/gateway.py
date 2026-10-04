@@ -454,6 +454,9 @@ class ModelGateway:
             or provider_id != trusted_provider_id
             or provider_kind is not trusted_provider_kind
             or type(text) is not str
+            # A blank response is not a completed text answer. Preserve
+            # meaningful Unicode content and its original whitespace.
+            or not text.strip()
             # Model text reaches UTF-8 persistence and the Windows UI. Never
             # publish a success DTO containing an unpaired UTF-16 surrogate.
             or any(0xD800 <= ord(character) <= 0xDFFF for character in text)
