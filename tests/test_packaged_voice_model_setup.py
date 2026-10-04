@@ -23,7 +23,7 @@ def _write_source(root: Path) -> Path:
     source.mkdir()
     (source / "encoder.onnx").write_bytes(b"encoder")
     (source / "decoder.onnx").write_bytes(b"decoder")
-    (source / "tokens.txt").write_bytes("ніка\n".encode("utf-8"))
+    (source / "tokens.txt").write_bytes("ніка\n".encode())
     return source
 
 
@@ -77,7 +77,7 @@ def test_voice_model_setup_imports_exact_files_and_requires_restart(
     assert str(source) not in repr(snapshot)
     assert (target / "encoder.onnx").read_bytes() == b"encoder"
     assert (target / "decoder.onnx").read_bytes() == b"decoder"
-    assert (target / "tokens.txt").read_bytes() == "ніка\n".encode("utf-8")
+    assert (target / "tokens.txt").read_bytes() == "ніка\n".encode()
     assert (source / "encoder.onnx").read_bytes() == b"encoder"
     assert not list((data_root / "voice").glob(".whisper-import-*"))
     restarted = PackagedVoiceModelSetup(data_root).snapshot()
@@ -369,7 +369,7 @@ def test_voice_model_copy_rejects_partial_destination_write() -> None:
             return max(0, len(data) - 1)
 
     with pytest.raises(RuntimeError, match="partial write"):
-        model_setup._stream_copy(  # noqa: SLF001 - focused copy fence regression
+        model_setup._stream_copy(
             io.BytesIO(b"model-bytes"),
             _PartialWriter(),  # type: ignore[arg-type]
             len(b"model-bytes"),
@@ -384,12 +384,14 @@ def test_voice_model_copy_rejects_post_open_metadata_change(tmp_path: Path) -> N
     changed_mtime = expected.st_mtime_ns + 2_000_000_000
     os.utime(source, ns=(expected.st_atime_ns, changed_mtime))
 
-    with source.open("rb", buffering=0) as reader:
-        with pytest.raises(RuntimeError, match="identity changed"):
-            model_setup._require_same_regular_file(  # noqa: SLF001
-                expected,
-                os.fstat(reader.fileno()),
-            )
+    with (
+        source.open("rb", buffering=0) as reader,
+        pytest.raises(RuntimeError, match="identity changed"),
+    ):
+        model_setup._require_same_regular_file(
+            expected,
+            os.fstat(reader.fileno()),
+        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="UNC path semantics are Windows-specific")

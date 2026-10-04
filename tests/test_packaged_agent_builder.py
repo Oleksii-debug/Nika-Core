@@ -122,6 +122,21 @@ def test_packaged_handler_rejects_invalid_text_without_persisting(
     assert count == 0
 
 
+@pytest.mark.parametrize("command", (None, 7, False, ["agent"]))
+def test_packaged_handler_rejects_nontext_command_without_persisting(
+    tmp_path: Path,
+    command: object,
+) -> None:
+    handler, _repository, store = _handler(tmp_path / "invalid-type.db")
+
+    with pytest.raises(TypeError, match="має бути текстом"):
+        handler({"command": command})
+
+    with store.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM agent_definitions").fetchone()[0]
+    assert count == 0
+
+
 def test_distinct_explicit_goals_get_distinct_draft_identities(tmp_path: Path) -> None:
     handler, _repository, store = _handler(tmp_path / "distinct.db")
 
