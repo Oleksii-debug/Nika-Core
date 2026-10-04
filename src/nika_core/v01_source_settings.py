@@ -130,6 +130,10 @@ class V01SourceSettings:
                 "CREATE TABLE IF NOT EXISTS v01_source_settings_schema ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            if conn.execute(
+                "SELECT 1 FROM v01_source_settings_schema WHERE version < 1 LIMIT 1"
+            ).fetchone() is not None:
+                raise SourceSetupError("Версія налаштувань джерел некоректна.")
             current = (
                 conn.execute("SELECT MAX(version) FROM v01_source_settings_schema").fetchone()[0]
                 or 0
