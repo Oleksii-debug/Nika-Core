@@ -236,3 +236,111 @@ def test_running_task_failure_still_uses_failed_not_paused(tmp_path: Path) -> No
     assert [event.event_type for event in events] == ["desktop.runtime_host_failed"]
     assert "PRIVATE_EXECUTION_FAILURE" not in str(events)
     backend.close()
+
+def test_cancelled_before_runtime_start_is_durable_and_manually_recoverable(
+    tmp_path: Path,
+) -> None:
+    host = _RejectingHost()
+    backend = _backend(tmp_path, host)
+    task = backend._queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "Do not abandon a cancelled pre-start task"},
+    )
+    backend._queue.transition(task.task_id, TaskState.READY)
+    cancelled: Future[object] = Future()
+    backend._active_futures[task.task_id] = cancelled
+    backend._active_threads[task.task_id] = "cancelled-before-start"
+
+    assert cancelled.cancel()
+    backend._runtime_done(task.task_id, cancelled)
+
+    assert backend._queue.get(task.task_id).state is TaskState.PAUSED
+    assert backend._never_started(task.task_id)
+    assert task.task_id not in backend._active_futures
+    assert task.task_id not in backend._active_threads
+    events = backend._audit.list_for(entity_type="task", entity_id=task.task_id)
+    assert [event.event_type for event in events] == [
+        "desktop.runtime_host_cancelled_before_start"
+    ]
+    assert events[0].payload == {"runtime_id": backend._runtime.runtime_id}
+    backend.close()
+
+    new_host = _RejectingHost()
+    restarted = _backend(tmp_path, new_host)
+    assert restarted._queue.get(task.task_id).state is TaskState.PAUSED
+    assert restarted.start_startup_recovery(startup_wait_seconds=0)["auto_resume_count"] == 0
+    assert new_host.attempted == []
+    restarted.close()
+
+
+def test_stale_cancelled_future_does_not_pause_replacement_ready_task(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path, _RejectingHost())
+    task = backend._queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "The newer future remains authoritative"},
+    )
+    backend._queue.transition(task.task_id, TaskState.READY)
+    stale: Future[object] = Future()
+    assert stale.cancel()
+    replacement: Future[object] = Future()
+    backend._active_futures[task.task_id] = replacement
+    backend._active_threads[task.task_id] = "replacement-thread"
+
+    backend._runtime_done(task.task_id, stale)
+
+    assert backend._queue.get(task.task_id).state is TaskState.READY
+    assert backend._active_futures[task.task_id] is replacement
+    assert backend._active_threads[task.task_id] == "replacement-thread"
+    assert backend._audit.list_for(entity_type="task", entity_id=task.task_id) == ()
+    replacement.set_result(None)
+    backend.close()
+
+
+def test_cancelled_running_future_does_not_claim_safe_manual_replay(
+    tmp_path: Path,
+) -> None:
+    backend = _backend(tmp_path, _RejectingHost())
+    task = backend._queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "A started effect may be uncertain"},
+    )
+    backend._queue.transition(task.task_id, TaskState.READY)
+    backend._queue.transition(task.task_id, TaskState.RUNNING)
+    cancelled: Future[object] = Future()
+    backend._active_futures[task.task_id] = cancelled
+    backend._active_threads[task.task_id] = "already-running"
+
+    assert cancelled.cancel()
+    backend._runtime_done(task.task_id, cancelled)
+
+    assert backend._queue.get(task.task_id).state is TaskState.RUNNING
+    assert not backend._never_started(task.task_id)
+    assert backend._audit.list_for(entity_type="task", entity_id=task.task_id) == ()
+    assert task.task_id not in backend._active_futures
+    backend.close()
+
+
+def test_cancelled_future_does_not_override_explicit_pause(tmp_path: Path) -> None:
+    backend = _backend(tmp_path, _RejectingHost())
+    task = backend._queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "Keep the user's pause"},
+    )
+    backend._queue.transition(task.task_id, TaskState.READY)
+    backend._queue.transition(task.task_id, TaskState.PAUSED)
+    cancelled: Future[object] = Future()
+    backend._active_futures[task.task_id] = cancelled
+    backend._active_threads[task.task_id] = "cancelled-after-pause"
+
+    assert cancelled.cancel()
+    backend._runtime_done(task.task_id, cancelled)
+
+    assert backend._queue.get(task.task_id).state is TaskState.PAUSED
+    assert backend._audit.list_for(entity_type="task", entity_id=task.task_id) == ()
+    backend.close()
