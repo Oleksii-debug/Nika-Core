@@ -19,6 +19,8 @@ from nika_core.ui.bridge_models import UIResult
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 MAX_SETUP_REVISION = (1 << 53) - 1
+# Three maximum-length UTF-8 paths plus the small versioned JSON envelope fit below 512 KiB.
+_MAX_STORED_SELECTION_BYTES = 512 * 1024
 _SCHEMA_VERSION = 1
 _MIGRATIONS = {
     1: (
@@ -90,7 +92,15 @@ class SourceSelection(BaseModel):
 
     @classmethod
     def from_stored(cls, value: str) -> SourceSelection:
+        # SQLite TEXT columns can contain BLOBs and unexpectedly large legacy rows.
+        # Reject both before JSON parsing; a malformed row must not break recovery.
+        if not isinstance(value, str) or len(value) > _MAX_STORED_SELECTION_BYTES:
+            raise SourceSetupError(
+                "Збережені налаштування джерел пошкоджені або несумісні."
+            )
         try:
+            if len(value.encode("utf-8")) > _MAX_STORED_SELECTION_BYTES:
+                raise ValueError("oversized source selection")
             selection = cls.model_validate_json(value)
             root = Path(selection.root)
             paths = (Path(selection.source_a), Path(selection.source_b))
@@ -186,12 +196,13 @@ class V01SourceSettings:
             "SELECT selection_json FROM v01_source_selections WHERE selection_id = ?",
             (selection_id,),
         ).fetchone()
-        if (
-            row is None
-            or hashlib.sha256(row["selection_json"].encode("utf-8")).hexdigest() != selection_id
-        ):
+        if row is None:
             raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
-        return SourceSelection.from_stored(row["selection_json"])
+        body = row["selection_json"]
+        selection = SourceSelection.from_stored(body)
+        if hashlib.sha256(body.encode("utf-8")).hexdigest() != selection_id:
+            raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
+        return selection
 
     def _default_selection(self) -> SourceSelection | None:
         values = (
