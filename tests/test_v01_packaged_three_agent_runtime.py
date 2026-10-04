@@ -13,6 +13,7 @@ from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
     RuntimeResumeMode,
+    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
@@ -272,6 +273,41 @@ def test_packaged_resume_rejects_corrupt_task_even_with_cached_checker_goal(
         )
 
     assert runtime._stored_outer_command(task_id) == ""
+    token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
+    outer_probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=token
+        )
+    )
+    assert outer_probe.status is RuntimeResumeProbeStatus.INVALID
+    assert outer_probe.checkpoint_id is None
+
+    team_id = runtime._team_id(task_id)
+    member_thread = f"v01:{team_id}:worker-a"
+    member_task_id = f"team:{team_id}:worker-a"
+    member_token = runtime.initial_resume_token(
+        task_id=member_task_id, thread_id=member_thread
+    )
+    member_probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=member_task_id,
+            thread_id=member_thread,
+            resume_token=member_token,
+        )
+    )
+    assert member_probe.status is RuntimeResumeProbeStatus.INVALID
+    member_result = asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                task_id=member_task_id,
+                thread_id=member_thread,
+                resume_token=member_token,
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    )
+    assert member_result.outcome is RuntimeOutcome.FAILED
+
     result = asyncio.run(
         runtime.resume(
             RuntimeResumeRequest(
@@ -311,3 +347,85 @@ def test_packaged_cached_legacy_goal_survives_missing_task_row(tmp_path: Path) -
         "user_goal"
     ] == command
     assert runtime._stored_outer_command(task_id) == command
+    outer_token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=outer_token
+        )
+    ).status is RuntimeResumeProbeStatus.READY
+    team_id = runtime._team_id(task_id)
+    member_task_id = f"team:{team_id}:worker-a"
+    member_thread = f"v01:{team_id}:worker-a"
+    member_token = runtime.initial_resume_token(
+        task_id=member_task_id, thread_id=member_thread
+    )
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=member_task_id,
+            thread_id=member_thread,
+            resume_token=member_token,
+        )
+    ).status is RuntimeResumeProbeStatus.READY
+
+
+def test_member_resume_never_rebinds_another_member_task_id(tmp_path: Path) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    previous_results = _result_count(store)
+    team_id = runtime._team_id(task_id)
+    member_thread = f"v01:{team_id}:worker-a"
+    correct_task_id = f"team:{team_id}:worker-a"
+    correct_token = runtime.initial_resume_token(
+        task_id=correct_task_id, thread_id=member_thread
+    )
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=correct_task_id,
+            thread_id=member_thread,
+            resume_token=correct_token,
+        )
+    ).status is RuntimeResumeProbeStatus.READY
+    forged_task_id = f"team:{team_id}:worker-b"
+    forged_token = runtime.initial_resume_token(
+        task_id=forged_task_id, thread_id=member_thread
+    )
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=forged_task_id,
+            thread_id=member_thread,
+            resume_token=forged_token,
+        )
+    ).status is RuntimeResumeProbeStatus.INVALID
+    forged_resume = asyncio.run(
+        runtime.resume(
+            RuntimeResumeRequest(
+                task_id=forged_task_id,
+                thread_id=member_thread,
+                resume_token=forged_token,
+                mode=RuntimeResumeMode.CONTINUE,
+            )
+        )
+    )
+    assert forged_resume.outcome is RuntimeOutcome.FAILED
+    forged_run = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=forged_task_id,
+                thread_id=member_thread,
+                payload={"command": command},
+            )
+        )
+    )
+    assert forged_run.outcome is RuntimeOutcome.FAILED
+    assert _result_count(store) == previous_results
