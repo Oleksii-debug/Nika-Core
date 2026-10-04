@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import nika_core.product_factory_deployment_execution as execution_module
 from nika_core.product_factory_credentials import CredentialBroker, SecretRef
 from nika_core.product_factory_deployment import (
     DeploymentFabric,
@@ -598,3 +599,161 @@ def test_prepare_releases_node_lease_when_broker_callback_raises(
     monkeypatch.setattr(type(credentials), "issue_lease", original)
     assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
     assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
+
+
+def test_health_probe_cannot_authorize_expired_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MutableClock:
+        current = NOW
+
+        @classmethod
+        def now(cls, timezone: object) -> datetime:
+            assert timezone == UTC
+            return cls.current
+
+    @dataclass
+    class ExpiringHealth(FakeNodeHealth):
+        probes: int = 0
+
+        def is_available(self, node_id: str) -> bool:
+            self.probes += 1
+            if self.probes == 2:
+                MutableClock.current = NOW + timedelta(seconds=2)
+            return super().is_available(node_id)
+
+    health = ExpiringHealth()
+    coordinator, credentials, provider, _ = _coordinator(health=health)
+    spec = replace(
+        _spec("project-a", "messages"),
+        credential_ttl_seconds=1,
+        node_lease_seconds=300,
+    )
+    coordinator.submit(spec, now=NOW)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+
+    # complete() starts with a valid credential; the external health probe
+    # advances the real clock beyond its expiry before authorization.
+    monkeypatch.setattr(execution_module, "datetime", MutableClock)
+    blocked = coordinator.complete(spec.operation_id)
+
+    assert health.probes == 2
+    assert blocked.state is OperationState.BLOCKED_CREDENTIAL
+    assert blocked.updated_at == NOW + timedelta(seconds=2)
+    assert blocked.node_id is None
+    assert provider.deploy_calls == []
+    assert coordinator.nodes.snapshot().leases == ()
+    assert sum(
+        event.action == "use" for event in credentials.audit_events("project-a")
+    ) == 1
+
+
+def test_prepare_refreshes_credential_clock_after_health_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MutableClock:
+        current = NOW
+
+        @classmethod
+        def now(cls, timezone: object) -> datetime:
+            assert timezone == UTC
+            return cls.current
+
+    @dataclass
+    class SlowHealth(FakeNodeHealth):
+        probes: int = 0
+
+        def is_available(self, node_id: str) -> bool:
+            self.probes += 1
+            if self.probes == 1:
+                MutableClock.current = NOW + timedelta(seconds=2)
+            return super().is_available(node_id)
+
+    health = SlowHealth()
+    coordinator, credentials, provider, _ = _coordinator(health=health)
+    spec = replace(
+        _spec("project-a", "messages"),
+        credential_ttl_seconds=1,
+        node_lease_seconds=300,
+    )
+    coordinator.submit(spec, now=NOW)
+
+    monkeypatch.setattr(execution_module, "datetime", MutableClock)
+    prepared = coordinator.prepare(spec.operation_id)
+    assert prepared.state is OperationState.PREPARED
+    assert prepared.updated_at == NOW + timedelta(seconds=2)
+    preparation_uses = [
+        event for event in credentials.audit_events("project-a") if event.action == "use"
+    ]
+    assert len(preparation_uses) == 1
+    assert preparation_uses[0].at == NOW + timedelta(seconds=2)
+
+    assert coordinator.complete(spec.operation_id).state is OperationState.SUCCEEDED
+    assert health.probes == 2
+    assert provider.deploy_calls == [spec.intent.intent_id]
+
+
+def test_completion_health_callback_failure_releases_only_its_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, _, provider, health = _coordinator()
+    first = _spec("project-a", "messages")
+    other = _spec("project-a", "profiles", SHA2)
+    coordinator.submit(first, now=NOW)
+    assert coordinator.prepare(first.operation_id, now=NOW).state is OperationState.PREPARED
+    original_health = health.is_available
+    successor_leases = []
+
+    def broken_health(node_id: str) -> bool:
+        assert node_id == "local-linux"
+        (incumbent,) = coordinator.nodes.snapshot().leases
+        coordinator.nodes.release(incumbent.lease_id)
+        successor_leases.append(coordinator.nodes.acquire(other.request, now=NOW))
+        raise OSError("private-node-path")
+
+    monkeypatch.setattr(health, "is_available", broken_health)
+    with pytest.raises(DeploymentExecutionError, match="node availability check failed"):
+        coordinator.complete(first.operation_id, now=NOW)
+
+    assert coordinator.get(first.operation_id).state is OperationState.WAITING_FOR_NODE
+    assert coordinator.get(first.operation_id).node_id is None
+    assert coordinator._node_leases == {}
+    assert coordinator._credential_leases == {}
+    assert provider.deploy_calls == []
+    assert coordinator.nodes.snapshot().leases == tuple(successor_leases)
+    assert coordinator.nodes.is_active_for(successor_leases[0], other.request, now=NOW)
+
+    monkeypatch.setattr(health, "is_available", original_health)
+    coordinator.nodes.release(successor_leases[0].lease_id)
+    assert coordinator.retry(first.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(first.operation_id, now=NOW).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [first.intent.intent_id]
+
+
+def test_completion_credential_callback_failure_allows_safe_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinator, credentials, provider, _ = _coordinator()
+    spec = _spec("project-a", "messages")
+    coordinator.submit(spec, now=NOW)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    original_authorize = type(credentials).authorize_use
+
+    def broken_authorize(self: CredentialBroker, **kwargs: object):
+        raise RuntimeError("private-credential-token")
+
+    monkeypatch.setattr(type(credentials), "authorize_use", broken_authorize)
+    with pytest.raises(DeploymentExecutionError, match="credential authorization failed"):
+        coordinator.complete(spec.operation_id, now=NOW)
+
+    assert coordinator.get(spec.operation_id).state is OperationState.BLOCKED_CREDENTIAL
+    assert coordinator.get(spec.operation_id).node_id is None
+    assert coordinator.nodes.snapshot().leases == ()
+    assert coordinator._node_leases == {}
+    assert coordinator._credential_leases == {}
+    assert provider.deploy_calls == []
+
+    monkeypatch.setattr(type(credentials), "authorize_use", original_authorize)
+    assert coordinator.retry(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [spec.intent.intent_id]

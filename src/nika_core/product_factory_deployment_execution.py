@@ -159,20 +159,22 @@ class DeploymentExecutionCoordinator:
                     updated_at=instant,
                 )
             )
+        # A slow health probe must not backdate newly issued credentials.
+        credential_instant = _aware(now or datetime.now(UTC))
         try:
             credential_lease = self.credentials.issue_lease(
                 project_id=record.spec.intent.project_id,
                 secret_ref=record.spec.credential_ref,
                 audience=record.spec.credential_audience,
                 scopes=frozenset({record.spec.credential_scope}),
-                now=instant,
+                now=credential_instant,
                 ttl_seconds=record.spec.credential_ttl_seconds,
             )
             use = self.credentials.authorize_use(
                 lease_id=credential_lease.lease_id,
                 project_id=record.spec.intent.project_id,
                 scope=record.spec.credential_scope,
-                now=instant,
+                now=credential_instant,
             )
         except CredentialBrokerError:
             self.nodes.release_if_current(node_lease)
@@ -182,7 +184,7 @@ class DeploymentExecutionCoordinator:
                     state=OperationState.BLOCKED_CREDENTIAL,
                     node_id=None,
                     attempt=record.attempt + 1,
-                    updated_at=instant,
+                    updated_at=credential_instant,
                 )
             )
         except Exception:
@@ -199,7 +201,7 @@ class DeploymentExecutionCoordinator:
                     state=OperationState.WAITING_FOR_NODE,
                     node_id=None,
                     attempt=record.attempt + 1,
-                    updated_at=instant,
+                    updated_at=credential_instant,
                 )
             )
         self._node_leases[operation_id] = node_lease
@@ -215,7 +217,7 @@ class DeploymentExecutionCoordinator:
                 node_id=node_lease.node_id,
                 evidence_refs=evidence,
                 attempt=record.attempt + 1,
-                updated_at=instant,
+                updated_at=credential_instant,
             )
         )
 
@@ -230,9 +232,23 @@ class DeploymentExecutionCoordinator:
             return self._save(
                 replace(record, state=OperationState.RECOVERY_REQUIRED, updated_at=instant)
             )
-        if not self.nodes.is_active_for(
-            node_lease, record.spec.request, now=instant
-        ) or not self.node_health.is_available(node_lease.node_id):
+        try:
+            node_available = self.nodes.is_active_for(
+                node_lease, record.spec.request, now=instant
+            ) and self.node_health.is_available(node_lease.node_id)
+        except Exception:
+            # A failing external probe must not retain the node lease.
+            self._release_ephemeral(operation_id)
+            self._save(
+                replace(
+                    record,
+                    state=OperationState.WAITING_FOR_NODE,
+                    node_id=None,
+                    updated_at=instant,
+                )
+            )
+            raise DeploymentExecutionError("node availability check failed") from None
+        if not node_available:
             self._release_ephemeral(operation_id)
             return self._save(
                 replace(
@@ -242,12 +258,15 @@ class DeploymentExecutionCoordinator:
                     updated_at=instant,
                 )
             )
+        # Health probes are external and can outlive a short credential lease.
+        # Authorize using the time after the probe, not complete() entry.
+        credential_instant = _aware(now or datetime.now(UTC))
         try:
             use = self.credentials.authorize_use(
                 lease_id=credential_lease_id,
                 project_id=record.spec.intent.project_id,
                 scope=record.spec.credential_scope,
-                now=instant,
+                now=credential_instant,
             )
         except CredentialBrokerError:
             self._release_ephemeral(operation_id)
@@ -256,9 +275,21 @@ class DeploymentExecutionCoordinator:
                     record,
                     state=OperationState.BLOCKED_CREDENTIAL,
                     node_id=None,
-                    updated_at=instant,
+                    updated_at=credential_instant,
                 )
             )
+        except Exception:
+            # Keep retries possible without leaking a provider's raw error text.
+            self._release_ephemeral(operation_id)
+            self._save(
+                replace(
+                    record,
+                    state=OperationState.BLOCKED_CREDENTIAL,
+                    node_id=None,
+                    updated_at=credential_instant,
+                )
+            )
+            raise DeploymentExecutionError("credential authorization failed") from None
         # External health/credential callbacks may have changed node ownership.
         # Recheck immediately before invoking the deployment provider.
         effect_instant = _aware(now or datetime.now(UTC))
@@ -279,7 +310,7 @@ class DeploymentExecutionCoordinator:
         finally:
             self._release_ephemeral(operation_id)
         evidence = record.evidence_refs + (f"credential-use:{use.event_id}",) + deployment.provider_evidence_refs
-        return self._save(self._from_deployment(record, deployment, evidence, instant))
+        return self._save(self._from_deployment(record, deployment, evidence, effect_instant))
 
     def reconcile(self, operation_id: str, *, now: datetime | None = None) -> DeploymentExecutionRecord:
         instant = _aware(now or datetime.now(UTC))
