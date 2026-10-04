@@ -210,15 +210,13 @@ class CodingWorkerComponentAdapter:
         await self.cancel(record.request.work_id)
         state = await self.inspect(record.request.work_id)
         if state is None:
-            blocked = coordinator.block(
-                component_id,
-                "worker cancellation has no recoverable state; host reconciliation required",
-            )
+            # A successful cancel request is not proof that the external effect stopped.
+            # Retain RUNNING authority until recovery can prove a terminal state.
             return ComponentWorkerOutcome(
                 component_id=component_id,
                 work_id=record.request.work_id,
                 disposition=ComponentWorkerDisposition.CANCEL_RECOVERY_UNAVAILABLE,
-                record=blocked,
+                record=record,
             )
 
         envelope = await self.recover(record.request, state)

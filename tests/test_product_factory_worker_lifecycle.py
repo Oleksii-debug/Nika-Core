@@ -201,7 +201,7 @@ def test_safe_repair_uses_exact_failed_result_sha_and_preserves_component_scope(
     assert repair.work_id != first.work_id
 
 
-def test_cancel_requires_recoverable_post_cancel_state_or_blocks_fail_closed() -> None:
+def test_cancel_without_recovery_state_retains_running_authority_fail_closed() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
     worker = Worker(_success, inspect_state=None)
@@ -211,8 +211,8 @@ def test_cancel_requires_recoverable_post_cancel_state_or_blocks_fail_closed() -
 
     assert worker.cancelled == [request.work_id]
     assert outcome.disposition is ComponentWorkerDisposition.CANCEL_RECOVERY_UNAVAILABLE
-    assert outcome.record.state is WorkState.BLOCKED
-    assert "host reconciliation required" in (outcome.record.blocker or "")
+    assert outcome.record.state is WorkState.RUNNING
+    assert outcome.record.blocker is None
     assert worker.recovered == []
 
 

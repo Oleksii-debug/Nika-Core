@@ -92,7 +92,13 @@ class FakeRecoveryPort:
             job_id=request.work_id,
             test_evidence=()
             if self.failure is not None
-            else (TestEvidence(("pytest",), 0, "tests-ok"),),
+            else (
+                TestEvidence(
+                    ("python", "-m", "pytest", "tests/core"),
+                    0,
+                    "tests-ok",
+                ),
+            ),
             recovery_state=state,
             failure=self.failure,
         )
@@ -128,7 +134,7 @@ def test_restart_recovery_returns_running_component_to_independent_review() -> N
     assert "ui" not in ready
 
 
-def test_missing_worker_state_blocks_only_the_lost_component() -> None:
+def test_missing_worker_state_retains_running_authority_and_blocks_replay() -> None:
     coordinator = _coordinator()
     coordinator.start("core")
     worker = FakeRecoveryPort(None)
@@ -136,8 +142,8 @@ def test_missing_worker_state_blocks_only_the_lost_component() -> None:
     outcome = _run(ProductFactoryWorkerRecovery(worker).recover_running(coordinator, "core"))
 
     assert outcome.disposition is WorkerRecoveryDisposition.BLOCKED_MISSING_STATE
-    assert outcome.record.state is WorkState.BLOCKED
-    assert "host reconciliation required" in (outcome.record.blocker or "")
+    assert outcome.record.state is WorkState.RUNNING
+    assert outcome.record.blocker is None
     assert {item.component_id for item in coordinator.ready_requests()} == {"docs"}
 
 
