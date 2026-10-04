@@ -159,3 +159,54 @@ def test_notice_publication_replaces_existing_link_without_following_it(
     assert target.is_file() and not target.is_symlink()
     assert outside.read_text(encoding="utf-8") == "unchanged external content"
     assert notices.verify_third_party_notices(bundle) == ()
+
+
+def test_python_runtime_license_is_bounded_before_notice_assembly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notices.sys, "base_prefix", str(tmp_path))
+    monkeypatch.setattr(notices, "_MAX_NOTICES_BYTES", 64)
+    license_file = tmp_path / "LICENSE.txt"
+    license_file.write_text("PSF license", encoding="utf-8")
+    assert notices._python_license() == "PSF license"
+    license_file.write_bytes(b"A" * 65)
+    with pytest.raises(RuntimeError, match="license evidence is invalid"):
+        notices._python_license()
+
+
+@pytest.mark.parametrize("payload", [b"A" * 65, b"PSF\xff"])
+def test_distribution_license_is_bounded_and_utf8_strict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+) -> None:
+    monkeypatch.setattr(notices, "_MAX_NOTICES_BYTES", 64)
+    license_file = tmp_path / "LICENSE"
+    license_file.write_bytes(payload)
+
+    class Distribution:
+        files = ("LICENSE",)
+
+        def locate_file(self, _item: str) -> Path:
+            return license_file
+
+    with pytest.raises(RuntimeError, match="license evidence is invalid"):
+        notices._license_texts(Distribution())
+
+
+def test_distribution_license_regular_utf8_is_preserved(
+    tmp_path: Path,
+) -> None:
+    license_file = tmp_path / "LICENSE"
+    license_file.write_text("SPDX compatible text\n", encoding="utf-8")
+
+    class Distribution:
+        files = ("LICENSE",)
+
+        def locate_file(self, _item: str) -> Path:
+            return license_file
+
+    assert notices._license_texts(Distribution()) == (
+        ("LICENSE", "SPDX compatible text"),
+    )
