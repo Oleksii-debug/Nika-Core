@@ -206,3 +206,19 @@ def test_oversized_catalog_identity_cannot_prove_presence(identity: str) -> None
     assert snapshot.model_present is ModelHealthFact.UNKNOWN
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
     assert calls == ["/api/tags"]
+
+def test_preconsumed_response_fails_closed_without_crashing_probe() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        # httpx.Response(json=...) is already consumed before Client.stream().
+        return httpx.Response(200, json={"models": [{"model": "selected:1"}]})
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="selected:1", client_factory=_client_factory(handler)
+    ).snapshot()
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["/api/tags"]
