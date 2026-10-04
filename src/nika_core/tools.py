@@ -93,7 +93,12 @@ def tool_arguments_fingerprint(arguments: Mapping[str, object]) -> str:
     # and direct tool calls. Import lazily to avoid the policy -> tools import cycle.
     from nika_core.security.policy import _canonical_arguments
 
-    encoded, _frozen = _canonical_arguments(arguments)
+    try:
+        encoded, _frozen = _canonical_arguments(arguments)
+    except (TypeError, ValueError):
+        raise
+    except Exception as exc:  # noqa: BLE001 - contain hostile Mapping implementations.
+        raise ValueError("tool arguments must be deterministic JSON-compatible data") from exc
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
