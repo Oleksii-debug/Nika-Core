@@ -90,14 +90,25 @@ class ApiModelRouteConfig:
         if not isinstance(self.supports_hard_cancellation, bool):
             raise TypeError("supports_hard_cancellation must be a boolean")
 
-        parsed = urlsplit(self.base_url)
+        # urlsplit silently removes CR/LF/TAB and leading C0 controls. Reject
+        # them before parsing so the approved endpoint cannot be reinterpreted.
+        if any(not char.isprintable() or char == "\\" for char in self.base_url):
+            raise ValueError("API model route base_url contains unsafe characters")
+        try:
+            parsed = urlsplit(self.base_url)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            raise ValueError("API model route base_url is invalid") from None
         if parsed.scheme.lower() != "https":
             raise ValueError("API model route requires HTTPS")
-        if not parsed.hostname:
+        if not hostname:
             raise ValueError("API model route base_url requires a host")
+        if "%" in parsed.netloc or port == 0:
+            raise ValueError("API model route base_url has an invalid authority")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("API model route base_url must not contain userinfo")
-        if parsed.query or parsed.fragment:
+        if "?" in self.base_url or "#" in self.base_url:
             raise ValueError("API model route base_url must not contain query or fragment")
 
 
@@ -178,7 +189,15 @@ class CredentialRefOpenAICompatibleProvider:
                 retryable=False,
                 failure_effect=ModelFailureEffect.NO_EFFECT,
             ) from None
-        if not isinstance(material, str) or not material or "\x00" in material:
+        # A bearer token is an HTTP header value. Fail before constructing
+        # a client when a resolver returns a control, Unicode, oversized or
+        # whitespace-bearing value that cannot be a safe bearer credential.
+        if (
+            type(material) is not str
+            or not material
+            or len(material) > 8192
+            or any(ord(char) < 33 or ord(char) > 126 for char in material)
+        ):
             raise ModelGatewayError(
                 ModelErrorCode.AUTHENTICATION,
                 "model credential could not be resolved",
