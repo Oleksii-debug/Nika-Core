@@ -24,6 +24,7 @@ from nika_core.research import (
     SourceSpec,
     discover_html_pagination,
 )
+from nika_core.research.pagination_jobs import _policy_from_payload
 
 PUBLIC_IP = "93.184.216.34"
 
@@ -576,3 +577,29 @@ def test_processed_checkpoint_rejects_other_task_or_failed_redirect_evidence(
         paginated.run(task_id)
     assert TaskQueue(store).get(task_id).state.value.casefold() == "ready"
     assert requested == []
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("max_pages", "2"),
+        ("max_pages", True),
+        ("max_discovered_links_per_page", "8"),
+        ("max_discovered_links_per_page", 1.5),
+        ("same_origin_only", "false"),
+        ("same_origin_only", 0),
+    ],
+)
+def test_persisted_pagination_policy_rejects_lossy_scalar_coercion(
+    field: str, invalid: object,
+) -> None:
+    payload: dict[str, object] = {
+        "max_pages": 2,
+        "max_discovered_links_per_page": 8,
+        "same_origin_only": False,
+        "json_next_fields": ["next"],
+    }
+    assert _policy_from_payload(payload).same_origin_only is False
+    payload[field] = invalid
+    with pytest.raises(TypeError, match="policy scalar fields"):
+        _policy_from_payload(payload)
