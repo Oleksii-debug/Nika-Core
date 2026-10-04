@@ -130,6 +130,7 @@ def test_multibyte_utf8_result_cannot_bypass_character_precheck(
         ledger.require("effect:budget")
     assert _raw(store)["result_json"] == forged
 
+
 def test_tuple_and_sibling_nodes_share_one_budget(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(idempotency_module, "_MAX_RESULT_NODES", 9)
     store, ledger = _ledger(tmp_path)
@@ -145,6 +146,7 @@ def test_tuple_and_sibling_nodes_share_one_budget(tmp_path, monkeypatch) -> None
     decoded = {"first": [0] * 3, "second": [0] * 3}
     assert ledger.complete("effect:budget", accepted).result == decoded
     assert IdempotencyLedger(store).require("effect:budget").result == decoded
+
 
 def test_giant_string_is_rejected_before_json_serialization(
     tmp_path, monkeypatch
