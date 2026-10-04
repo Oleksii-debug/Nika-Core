@@ -234,7 +234,9 @@ class SemanticInteractionCoordinator:
             action_started = True
             self.adapter.act(action_node, request.action, request.value)
             after = self.adapter.observe()
-            if not self.adapter.verify(pre_action, after, action_node, request.action, request.value):
+            if not self.adapter.verify(
+                pre_action, after, action_node, request.action, request.value
+            ):
                 if reserved:
                     self.idempotency.mark_uncertain(request.operation_key)
                 raise InteractionUncertainError(
