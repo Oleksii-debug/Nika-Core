@@ -305,7 +305,7 @@ def test_bound_local_route_only_calls_ollama_chat_and_never_acquires_model(tmp_p
             json={
                 "model": "qwen3:8b",
                 "message": {"role": "assistant", "content": "local result"},
-                    "done": True,
+                "done": True,
             },
         )
 
