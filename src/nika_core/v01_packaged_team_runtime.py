@@ -646,6 +646,15 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             # A corrupt durable checker handoff must not fall back to a new goal.
             return ""
         if isinstance(handoff, Mapping):
+            # This checker handoff freezes the *same* queued task's command.
+            # A syntactically valid handoff from a different task or stage
+            # cannot authorize a run or a restart, even with the same goal.
+            if (
+                handoff.get("stage") != "checker"
+                or type(handoff.get("shared_task_id")) is not str
+                or handoff["shared_task_id"] != task_id
+            ):
+                return ""
             raw_goal = handoff.get("user_goal", "")
             if type(raw_goal) is not str:
                 return ""
