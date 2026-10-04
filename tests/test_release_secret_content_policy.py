@@ -217,3 +217,26 @@ def test_env_example_reference_remains_publishable(tmp_path: Path) -> None:
     assert verify_release_manifest(bundle, manifest) == ()
     artifact = _archive_bundle(tmp_path, bundle)
     assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == ()
+
+
+@pytest.mark.parametrize(
+    ("filename", "content"),
+    [
+        ("settings.conf", b"api_key=${NIKA_API_KEY}\n"),
+        (".env.example", b"api_key=${NIKA_API_KEY} # inherited from environment\n"),
+    ],
+)
+def test_complete_unquoted_environment_reference_is_not_a_packaged_secret(
+    tmp_path: Path, filename: str, content: bytes
+) -> None:
+    bundle = _bundle(tmp_path, filename, content)
+    assert verify_release_manifest(bundle, _manifest(bundle)) == ()
+
+
+def test_unquoted_environment_reference_with_appended_value_is_rejected(
+    tmp_path: Path,
+) -> None:
+    bundle = _bundle(tmp_path, ".env.example", b"api_key=${NIKA_API_KEY}live-key\n")
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:.env.example",
+    )
