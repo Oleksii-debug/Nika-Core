@@ -64,10 +64,15 @@ def test_pf11_rejects_invalid_pre_command_state_without_dispatch(
         def dispatch(self, _request: object) -> None:
             pytest.fail("PF11 must not dispatch a command after failed recovery")
 
+    close_events: list[str] = []
     monkeypatch.setattr(
-        nika_windows, "build_windows_session",
-        lambda _config: SimpleNamespace(bridge=InvalidBridge(), products=object(), close=lambda: None),
+        nika_windows,
+        "build_windows_session",
+        lambda _config: SimpleNamespace(
+            bridge=InvalidBridge(), products=object(), close=lambda: close_events.append("closed")
+        ),
     )
     config = AppConfig(database_path=tmp_path / "pre-command-proof.db")
     with pytest.raises((RuntimeError, TypeError), match="PF11"):
         nika_windows._run_pf11_proof(config, command=COMMAND, output_path=None)
+    assert close_events == ["closed"]
