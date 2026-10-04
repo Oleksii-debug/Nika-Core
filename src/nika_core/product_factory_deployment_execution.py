@@ -137,8 +137,14 @@ class DeploymentExecutionCoordinator:
                     updated_at=instant,
                 )
             )
-        if not self.node_health.is_available(node_lease.node_id):
-            self.nodes.release(node_lease.lease_id)
+        # A health callback may expire, disable, or reassign the prepared node.
+        if (
+            not self.node_health.is_available(node_lease.node_id)
+            or not self.nodes.is_active_for(
+                node_lease, record.spec.request, now=_aware(now or datetime.now(UTC))
+            )
+        ):
+            self.nodes.release_if_current(node_lease)
             return self._save(
                 replace(
                     record,
@@ -164,11 +170,25 @@ class DeploymentExecutionCoordinator:
                 now=instant,
             )
         except CredentialBrokerError:
-            self.nodes.release(node_lease.lease_id)
+            self.nodes.release_if_current(node_lease)
             return self._save(
                 replace(
                     record,
                     state=OperationState.BLOCKED_CREDENTIAL,
+                    node_id=None,
+                    attempt=record.attempt + 1,
+                    updated_at=instant,
+                )
+            )
+        # Credential broker callbacks can also change registry ownership.
+        if not self.nodes.is_active_for(
+            node_lease, record.spec.request, now=_aware(now or datetime.now(UTC))
+        ):
+            self.nodes.release_if_current(node_lease)
+            return self._save(
+                replace(
+                    record,
+                    state=OperationState.WAITING_FOR_NODE,
                     node_id=None,
                     attempt=record.attempt + 1,
                     updated_at=instant,
@@ -326,10 +346,7 @@ class DeploymentExecutionCoordinator:
     def _release_ephemeral(self, operation_id: str) -> None:
         node_lease = self._node_leases.pop(operation_id, None)
         if node_lease is not None:
-            try:
-                self.nodes.release(node_lease.lease_id)
-            except DeploymentFabricError:
-                pass
+            self.nodes.release_if_current(node_lease)
         self._credential_leases.pop(operation_id, None)
 
     def _record(self, operation_id: str) -> DeploymentExecutionRecord:
