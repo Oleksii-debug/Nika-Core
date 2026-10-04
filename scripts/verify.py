@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from collections.abc import Sequence
@@ -23,6 +24,11 @@ def main() -> int:
     )
     for label, command in steps:
         run_step(label, command)
+    if "NIKA_CANDIDATE_SHA" in os.environ:
+        run_step(
+            "Post-verification source identity",
+            (python, "scripts/qa_assert_checkout_identity.py"),
+        )
     print("\nAll verification steps passed.", flush=True)
     return 0
 
