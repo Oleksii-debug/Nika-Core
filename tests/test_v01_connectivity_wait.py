@@ -574,7 +574,8 @@ def test_defer_refuses_reused_job_id_without_abandoning_original_wait(tmp_path) 
     events = audit.list_for(entity_type="scheduled_job", entity_id="occupied-job")
     assert [event.event_type for event in events] == ["runtime.connectivity_wait_deferred"]
 
-def test_probe_action_swap_does_not_grant_stale_wake(tmp_path) -> None:
+@pytest.mark.parametrize("swap_on_call", [1, 2])
+def test_probe_action_swap_does_not_grant_stale_wake(tmp_path, swap_on_call) -> None:
     store = SQLiteStore(tmp_path / "Ніка Swapped Wake Action" / "nika core.db")
     store.initialize()
     queue = TaskQueue(store)
@@ -585,9 +586,14 @@ def test_probe_action_swap_does_not_grant_stale_wake(tmp_path) -> None:
     task_id = _running_task(queue)
 
     class _ReassigningProbe:
+        def __init__(self) -> None:
+            self.calls = 0
+
         def is_available(self) -> bool:
-            job = jobs.get("action-swap")
-            jobs.upsert(replace(job, action_id="runtime.other_action"))
+            self.calls += 1
+            if self.calls == swap_on_call:
+                job = jobs.get("action-swap")
+                jobs.upsert(replace(job, action_id="runtime.other_action"))
             return True
 
     service = ConnectivityWaitService(
