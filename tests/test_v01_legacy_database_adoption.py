@@ -247,6 +247,28 @@ def test_broken_indirect_sidecar_makes_hardlink_alias_ambiguous(tmp_path, suffix
     assert source.read_bytes() == original
 
 
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("indirect", [False, True])
+def test_unsafe_single_source_sidecar_fails_before_any_backup(tmp_path, suffix, indirect):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    sidecar = source.with_name(source.name + suffix)
+    if indirect:
+        try:
+            sidecar.symlink_to(tmp_path / "missing-sidecar")
+        except OSError:
+            pytest.skip("File system does not support symlinks")
+    else:
+        sidecar.mkdir()
+    original = source.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [source])
+    assert source.read_bytes() == original
+    assert not target.exists()
+    assert not (target.parent / "legacy-adoption-backups").exists()
+
+
 def test_packaged_conflict_is_displayed_before_any_runtime_starts(monkeypatch):
     from scripts import nika_windows
 
