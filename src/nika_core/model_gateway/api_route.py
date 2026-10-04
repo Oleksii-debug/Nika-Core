@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -20,6 +21,7 @@ from nika_core.model_gateway.contracts import (
 from nika_core.model_gateway.providers import (
     OpenAICompatibleProvider,
     _direct_httpx_client,
+    _pretransport_timeout,
 )
 
 
@@ -217,9 +219,13 @@ class CredentialRefOpenAICompatibleProvider:
         return self._credential_ref
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        started = time.perf_counter()
         material = self._resolve_material()
         provider: OpenAICompatibleProvider | None = None
         try:
+            remaining = request.timeout_seconds - (time.perf_counter() - started)
+            if remaining <= 0:
+                raise _pretransport_timeout(self._provider_id)
             provider = OpenAICompatibleProvider(
                 provider_id=self._provider_id,
                 base_url=self._base_url,
@@ -231,7 +237,12 @@ class CredentialRefOpenAICompatibleProvider:
                 client_factory=self._client_factory,
             )
             try:
-                return await provider.complete(request)
+                # Never reset the end-to-end budget after credential lookup or
+                # synchronous construction of the authorized provider.
+                remaining = request.timeout_seconds - (time.perf_counter() - started)
+                if remaining <= 0:
+                    raise _pretransport_timeout(self._provider_id)
+                return await provider.complete(replace(request, timeout_seconds=remaining))
             except ModelGatewayError as error:
                 raise ModelGatewayError(
                     error.code,
