@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -25,6 +26,7 @@ class MemoryService:
         user_approved: bool = False,
         expires_at: datetime | None = None,
     ) -> MemoryRecord:
+        scope = _require_scope(scope)
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
         key = _required("key", key)
@@ -38,6 +40,10 @@ class MemoryService:
         body = json.dumps(
             value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
         )
+        try:
+            body.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("memory JSON contains invalid Unicode") from exc
         with self._store.connection() as conn:
             existing = conn.execute(
                 "SELECT created_at FROM memory_records WHERE scope = ? AND owner_id = ? "
@@ -97,6 +103,7 @@ class MemoryService:
         key: str,
         now: datetime | None = None,
     ) -> MemoryRecord | None:
+        scope = _require_scope(scope)
         current = _as_utc(now) if now else datetime.now(UTC)
         with self._store.connection() as conn:
             row = conn.execute(
@@ -124,24 +131,32 @@ class MemoryService:
         namespace: str,
         now: datetime | None = None,
     ) -> tuple[MemoryRecord, ...]:
+        scope = _require_scope(scope)
         current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
-            # A namespace read must not delete another owner's or scope's memory.
-            # Keep expiry cleanup and the returned snapshot in one transaction.
-            conn.execute(
-                "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
-                "AND namespace = ? AND expires_at IS NOT NULL AND expires_at <= ?",
-                (scope.value, owner_id, namespace, current.isoformat()),
-            )
+            # Compare actual instants, not offset-sensitive ISO strings. Older
+            # databases may contain non-UTC timestamps even though put() writes UTC.
             rows = conn.execute(
                 "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
                 "AND namespace = ? ORDER BY memory_key",
                 (scope.value, owner_id, namespace),
             ).fetchall()
-            # Decode before commit, so corrupt rows roll back scoped expiry cleanup.
-            return tuple(_record_from_row(row) for row in rows)
+            records: list[MemoryRecord] = []
+            for row in rows:
+                expiry = _parse_optional(row["expires_at"])
+                if expiry is not None and _as_utc(expiry) <= current:
+                    conn.execute(
+                        "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                        "AND namespace = ? AND memory_key = ?",
+                        (scope.value, owner_id, namespace, row["memory_key"]),
+                    )
+                else:
+                    records.append(_record_from_row(row))
+            # Failure to parse a later row rolls back all scoped deletions.
+            return tuple(records)
 
     def delete(self, *, scope: MemoryScope, owner_id: str, namespace: str, key: str) -> bool:
+        scope = _require_scope(scope)
         with self._store.connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
@@ -161,17 +176,42 @@ class MemoryService:
     def purge_expired(self, *, now: datetime | None = None) -> int:
         current = _as_utc(now) if now else datetime.now(UTC)
         with self._store.connection() as conn:
-            cursor = conn.execute(
-                "DELETE FROM memory_records WHERE expires_at IS NOT NULL AND expires_at <= ?",
-                (current.isoformat(),),
-            )
-        return int(cursor.rowcount)
+            # An explicit global purge must obey the same offset-aware expiry
+            # semantics as get() and scoped reads; invalid dates roll back.
+            rows = conn.execute(
+                "SELECT scope, owner_id, namespace, memory_key, expires_at "
+                "FROM memory_records WHERE expires_at IS NOT NULL"
+            ).fetchall()
+            deleted = 0
+            for row in rows:
+                expiry = _parse_optional(row["expires_at"])
+                if expiry is not None and _as_utc(expiry) <= current:
+                    cursor = conn.execute(
+                        "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                        "AND namespace = ? AND memory_key = ?",
+                        (row["scope"], row["owner_id"], row["namespace"], row["memory_key"]),
+                    )
+                    deleted += cursor.rowcount
+        return deleted
+
+
+def _require_scope(scope: MemoryScope) -> MemoryScope:
+    # Comparing a StrEnum with a raw string is not an admission check.
+    if type(scope) is not MemoryScope:
+        raise ValueError("scope must be a MemoryScope")
+    return scope
 
 
 def _required(name: str, value: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{name} must be text")
     result = value.strip()
     if not result:
         raise ValueError(f"{name} must not be empty")
+    try:
+        result.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8") from exc
     return result
 
 
@@ -187,6 +227,14 @@ def _parse_optional(value: str | None) -> datetime | None:
 
 def _reject_memory_constant(value: str) -> None:
     raise ValueError(f"invalid stored memory JSON constant: {value}")
+
+
+def _finite_memory_float(number: str) -> float:
+    # JSON's finite-looking exponent can overflow the binary float decoder.
+    value = float(number)
+    if not math.isfinite(value):
+        raise ValueError("invalid stored memory JSON number")
+    return value
 
 
 def _unique_memory_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -224,7 +272,8 @@ def _record_from_row(row: Any) -> MemoryRecord:
     if type(body) is not str:
         raise ValueError("stored memory JSON must be text")
     value = json.loads(
-        body, parse_constant=_reject_memory_constant, object_pairs_hook=_unique_memory_pairs
+        body, parse_constant=_reject_memory_constant, parse_float=_finite_memory_float,
+        object_pairs_hook=_unique_memory_pairs
     )
     _validate_scalar_unicode(value)
     return MemoryRecord(
