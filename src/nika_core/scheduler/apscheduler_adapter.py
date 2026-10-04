@@ -193,6 +193,11 @@ class APSchedulerAdapter(SchedulerPort):
                     self._install(current)
                 except Exception:
                     self._remove_runtime_job(job_id)
+                    # Failure of an obsolete trigger must not strand a valid
+                    # successor committed concurrently by another process.
+                    # Preserve the original failure if identity is unchanged.
+                    if self._jobs.get(job_id) != current:
+                        continue
                     raise
                 # Another process may replace or disable the durable snapshot
                 # while APScheduler is installing it. Reconcile the successor
