@@ -104,7 +104,7 @@ class ApiModelRouteConfig:
             raise ValueError("API model route requires HTTPS")
         if not hostname:
             raise ValueError("API model route base_url requires a host")
-        if "%" in parsed.netloc or port == 0:
+        if "%" in parsed.netloc or port == 0 or parsed.netloc.endswith(":"):
             raise ValueError("API model route base_url has an invalid authority")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("API model route base_url must not contain userinfo")
@@ -181,7 +181,7 @@ class CredentialRefOpenAICompatibleProvider:
     def _resolve_material(self) -> str:
         try:
             material = self._credential_resolver.resolve(self._config.credential_ref)
-        except Exception:  # noqa: BLE001 - untrusted resolvers may fail with arbitrary exception types
+        except Exception:  # noqa: BLE001 - untrusted resolvers can raise any exception
             raise ModelGatewayError(
                 ModelErrorCode.AUTHENTICATION,
                 "model credential could not be resolved",
