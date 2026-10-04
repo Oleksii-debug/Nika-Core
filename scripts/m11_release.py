@@ -318,7 +318,7 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         "schema_version": 2,
         "source_sha": source_sha,
         "route": first["route"],
-        "product_project_id": project_id,
+        "product_project_id": first["project_id"],
         "product_project_spec_version": first["spec_version"],
         "product_project_state": first.get("state"),
         "product_command_center_proven": True,
