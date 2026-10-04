@@ -104,7 +104,14 @@ def test_online_snapshot_includes_uncheckpointed_wal(tmp_path):
         live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
         live.commit()
         assert source.with_name(source.name + "-wal").stat().st_size > 0
-        adoption.prepare_default_database(target, [source])
+        try:
+            adoption.prepare_default_database(target, [source])
+        except adoption.LegacyDatabaseConflict as error:
+            # Production correctly hides internal recovery details. Expose the
+            # suppressed underlying exception only in this CI regression.
+            if error.__context__ is not None:
+                raise error.__context__ from error
+            raise
         assert json.loads(_rows(target, "tasks")[0][4]) == {"from_wal": True}
 
 
@@ -213,6 +220,8 @@ def test_hardlink_alias_with_uncheckpointed_wal_is_ambiguous(tmp_path, alias_fir
         assert adoption._known_sources(target, [source, source]) == [source.resolve()]
         before = source.read_bytes()
         candidates = [alias, source] if alias_first else [source, alias]
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption._known_sources(target, candidates)
         with pytest.raises(adoption.LegacyDatabaseConflict):
             adoption.prepare_default_database(target, candidates)
         assert not target.exists()
