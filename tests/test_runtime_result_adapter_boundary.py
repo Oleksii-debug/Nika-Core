@@ -105,6 +105,20 @@ def _invalid_output_key() -> RuntimeResult:
     return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output={1: "non-string"})
 
 
+def _invalid_nested_output_key() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        output={"nested": [{1: "coerced-key"}]},
+    )
+
+
+def _invalid_nested_event_payload_key() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.proof", {"nested": {"value": {True: "coerced"}}}),),
+    )
+
+
 def _invalid_utf8_error() -> RuntimeResult:
     return RuntimeResult(outcome=RuntimeOutcome.FAILED, error="\ud800")
 
@@ -172,6 +186,8 @@ _BAD_RESULTS = (
     _unserializable_nested_output,
     _nonfinite_output,
     _invalid_output_key,
+    _invalid_nested_output_key,
+    _invalid_nested_event_payload_key,
     _invalid_utf8_error,
     _invalid_utf8_resume_token,
     _invalid_utf8_event_type,
