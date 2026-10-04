@@ -153,11 +153,11 @@ def _snapshot_json_value(
             ]
         return tuple(
             _snapshot_json_value(
-                    item,
-                    active_containers=active_containers,
-                    depth=depth + 1,
-                    node_count=node_count,
-                )
+                item,
+                active_containers=active_containers,
+                depth=depth + 1,
+                node_count=node_count,
+            )
             for item in value
         )
     finally:
