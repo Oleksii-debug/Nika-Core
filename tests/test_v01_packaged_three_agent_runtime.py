@@ -1282,3 +1282,53 @@ def test_packaged_member_cancel_never_targets_unrelated_model(
             assert cancelled_ok is False
             assert cancelled == []
         assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize("member_id", ("worker-a", "worker-b", "checker"))
+def test_valid_member_cancel_survives_corrupt_queued_task(
+    tmp_path: Path, member_id: str
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    team_id = runtime._team_id(task_id)
+    member_task = f"team:{team_id}:{member_id}"
+    member_thread = f"v01:{team_id}:{member_id}"
+    previous_results = _result_count(store)
+    with store.connection() as conn:
+        changed = conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (sqlite3.Binary(b'{"command":"untrusted"}'), task_id),
+        )
+        assert changed.rowcount == 1
+
+    for current in (
+        runtime,
+        V01PackagedThreeAgentRuntime(
+            store=SQLiteStore(store.path), config=AppConfig(database_path=store.path)
+        ),
+    ):
+        cancelled: list[tuple[str, str]] = []
+
+        class ModelCanceller:
+            async def cancel(self, *, task_id: str, thread_id: str) -> bool:
+                cancelled.append((task_id, thread_id))
+                return True
+
+        current._model_runtimes[task_id] = ModelCanceller()
+        assert current._stored_outer_command(task_id) == ""
+        assert asyncio.run(
+            current.cancel(task_id=member_task, thread_id=member_thread)
+        ) is True
+        assert cancelled == [(task_id, member_thread)]
+        assert _result_count(store) == previous_results
