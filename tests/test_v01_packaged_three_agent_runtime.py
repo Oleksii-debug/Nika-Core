@@ -532,6 +532,8 @@ def test_initial_outer_run_rejects_nontext_or_unbound_command(
     ("carrier", "replacement"),
     [
         pytest.param("task", True, id="task-boolean"),
+        pytest.param("task", None, id="task-null"),
+        pytest.param("task", "", id="task-empty"),
         pytest.param("task", {"goal": "other"}, id="task-object"),
         pytest.param("task", "Different instruction.", id="task-mismatch"),
         pytest.param("checker", True, id="checker-boolean"),
@@ -649,3 +651,44 @@ def test_unicode_and_whitespace_command_remains_restart_safe(tmp_path: Path) -> 
             )
         )
     ).outcome is RuntimeOutcome.COMPLETED
+
+
+@pytest.mark.parametrize("fallback", ("blank", "missing"))
+def test_legacy_empty_checker_goal_uses_valid_durable_task_command(
+    tmp_path: Path, fallback: str
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    thread_id = f"desktop-{task_id}"
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id, thread_id=thread_id, payload={"command": command}
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'task'",
+            (runtime._team_id(task_id),),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        if fallback == "blank":
+            payload["user_goal"] = ""
+        else:
+            payload.pop("user_goal", None)
+        conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+            (json.dumps(payload, ensure_ascii=False), row["handoff_id"]),
+        )
+    assert runtime._stored_outer_command(task_id) == command
+    token = runtime.initial_resume_token(task_id=task_id, thread_id=thread_id)
+    assert asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id, thread_id=thread_id, resume_token=token
+        )
+    ).status is RuntimeResumeProbeStatus.READY
