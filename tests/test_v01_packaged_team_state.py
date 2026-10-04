@@ -582,3 +582,104 @@ def test_oversized_member_roster_fails_closed_after_restart(tmp_path) -> None:
     assert V01PackagedTeamStateProvider(
         base_state=lambda: _base_state("task-v01-71"), store=SQLiteStore(store.path)
     )()["v01_team_task"] == expected
+
+def test_surplus_task_history_rejects_before_decoding_and_after_restart(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = SQLiteStore(tmp_path / "надмірні доручення.db")
+    store.initialize()
+    _create_team(store)
+    with store.connection() as conn:
+        original = conn.execute(
+            "SELECT handoff_id FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND kind = 'task' LIMIT 1",
+            ("team-v01-71",),
+        ).fetchone()
+        assert original is not None
+        for index in range(64):
+            conn.execute(
+                "INSERT INTO multi_agent_handoffs("
+                "handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at) "
+                "SELECT ?, team_id, sender_id, recipient_id, 'task', "
+                "correlation_id, ?, created_at "
+                "FROM multi_agent_handoffs WHERE handoff_id = ?",
+                (
+                    f"surplus-task-{index:03}",
+                    '{"unrelated":true}',
+                    original["handoff_id"],
+                ),
+            )
+
+    provider = V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"), store=store
+    )
+    expected = {
+        "available": False,
+        "message": "Стан командного завдання недоступний.",
+    }
+    original_loads = json.loads
+    decode_count = 0
+
+    def counted_loads(*args: object, **kwargs: object) -> object:
+        nonlocal decode_count
+        decode_count += 1
+        return original_loads(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr("nika_core.v01_packaged_team_state.json.loads", counted_loads)
+        assert provider()["v01_team_task"] == expected
+    assert decode_count == 0, "surplus task history must reject before JSON decoding"
+    assert V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"),
+        store=SQLiteStore(store.path),
+    )()["v01_team_task"] == expected
+
+
+def test_generic_task_history_does_not_hide_earlier_v01_team(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "звичайна команда.db")
+    store.initialize()
+    _create_team(store)
+    teams = MultiAgentStore(store)
+    teams.create_team(
+        team_id="generic-team",
+        root_member_id="generic-root",
+        root_agent_id="generic-agent",
+        root_agent_version=1,
+        root_thread_id="generic-root-thread",
+        root_grants=(),
+        quota=TeamQuota(
+            max_depth=1,
+            max_children_per_parent=4,
+            max_total_agents=5,
+            max_parallel=4,
+        ),
+    )
+    for index in range(4):
+        child_id = f"generic-worker-{index}"
+        teams.spawn_child(
+            team_id="generic-team",
+            parent_id="generic-root",
+            child_id=child_id,
+            agent_id="generic-agent",
+            agent_version=1,
+            thread_id=f"generic-thread-{index}",
+            requested_grants=(),
+            task_handoff=AgentHandoff(
+                team_id="generic-team",
+                sender_id="generic-root",
+                recipient_id=child_id,
+                kind=HandoffKind.TASK,
+                payload={"note": "unrelated generic work"},
+            ),
+        )
+    provider = V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"), store=store
+    )
+    projected = provider()["v01_team_task"]
+    assert projected["available"] is True
+    assert projected["team"]["team_id"] == "team-v01-71"
+    assert V01PackagedTeamStateProvider(
+        base_state=lambda: _base_state("task-v01-71"),
+        store=SQLiteStore(store.path),
+    )()["v01_team_task"] == projected
