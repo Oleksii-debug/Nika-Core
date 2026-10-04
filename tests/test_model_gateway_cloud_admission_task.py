@@ -123,3 +123,29 @@ def test_cloud_authorizer_must_not_grant_effect_from_return_value(
     assert caught.value.provider_id == "cloud-provider"
     assert authorizer.calls == 1
     assert provider.task is None
+
+
+
+def test_cloud_authorizer_coroutine_is_closed_without_admitting_effect() -> None:
+    executed = False
+
+    async def invalid_async_approval() -> None:
+        nonlocal executed
+        executed = True
+
+    coroutine = invalid_async_approval()
+    authorizer = _ReturningCloudAuthorizer(coroutine)
+    provider = _RecordingCloudProvider()
+    gateway = ModelGateway(cloud_effect_authorizer=authorizer)
+    gateway.register(provider)
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(_request()))
+
+    assert caught.value.code is ModelErrorCode.INVALID_REQUEST
+    assert caught.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert caught.value.retryable is False
+    assert authorizer.calls == 1
+    assert provider.task is None
+    assert not executed
+    assert coroutine.cr_frame is None

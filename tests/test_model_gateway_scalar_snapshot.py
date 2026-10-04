@@ -176,3 +176,24 @@ def test_request_resnapshots_message_text_and_keeps_valid_unicode() -> None:
     object.__setattr__(message, "content", "приклад\ud800")
     with pytest.raises(ValueError, match="valid Unicode text"):
         ModelRequest(request_id="poisoned-message", messages=(message,))
+
+
+@pytest.mark.parametrize("value", ("note\ud800", "\udfff note"))
+def test_request_rejects_non_utf8_metadata_values(value: str) -> None:
+    with pytest.raises(ValueError, match="metadata values must be valid Unicode text"):
+        ModelRequest(
+            request_id="invalid-metadata",
+            messages=(ModelMessage(role="user", content="ok"),),
+            metadata={"note": value},
+        )
+
+
+def test_request_snapshots_valid_unicode_metadata() -> None:
+    metadata = {"note": "Українська 🧠\nДругий рядок"}
+    request = ModelRequest(
+        request_id="valid-metadata",
+        messages=(ModelMessage(role="user", content="ok"),),
+        metadata=metadata,
+    )
+    metadata["note"] = "mutated\ud800"
+    assert request.metadata["note"] == "Українська 🧠\nДругий рядок"

@@ -161,6 +161,8 @@ class ModelRequest:
                 raise TypeError("metadata values must be text")
             if not value.strip():
                 raise ValueError("metadata values must not be empty")
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+                raise ValueError("metadata values must be valid Unicode text")
             canonical_metadata[canonical_key] = value
         object.__setattr__(
             self,
