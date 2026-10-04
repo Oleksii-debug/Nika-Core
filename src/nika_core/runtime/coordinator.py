@@ -711,6 +711,8 @@ class TaskRuntimeCoordinator:
 
         try:
             accepted = await runtime.cancel(task_id=task_id, thread_id=thread_id)
+            if type(accepted) is not bool:
+                raise TypeError("runtime cancellation acknowledgement must be boolean")
         except Exception as exc:
             with self._queue.store.connection() as conn:
                 self._idempotency.mark_uncertain_with_connection(conn, operation_key)
