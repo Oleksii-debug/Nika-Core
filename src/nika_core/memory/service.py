@@ -120,8 +120,15 @@ class MemoryService:
         namespace: str,
         now: datetime | None = None,
     ) -> tuple[MemoryRecord, ...]:
-        self.purge_expired(now=now)
+        current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
+            # A namespace read must not delete another owner's or scope's memory.
+            # Keep expiry cleanup and the returned snapshot in one transaction.
+            conn.execute(
+                "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND expires_at IS NOT NULL AND expires_at <= ?",
+                (scope.value, owner_id, namespace, current.isoformat()),
+            )
             rows = conn.execute(
                 "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
                 "AND namespace = ? ORDER BY memory_key",
