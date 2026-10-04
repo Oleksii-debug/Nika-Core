@@ -296,6 +296,11 @@ class ToolEffectGuard:
         return hashlib.sha256(encoded).hexdigest()
 
 
+def _snapshot_tool_spec(spec: ToolSpec) -> ToolSpec:
+    """Detach authority metadata and schema from a boundary's caller."""
+    return replace(spec, input_schema=deepcopy(spec.input_schema))
+
+
 class ToolExecutor:
     def __init__(
         self,
@@ -313,7 +318,7 @@ class ToolExecutor:
         # A frozen dataclass can still be changed through object.__setattr__, and
         # input_schema contains mutable nested data. Never let a caller's original
         # spec change the registered risk, identity or deadline after admission.
-        admitted = replace(spec, input_schema=deepcopy(spec.input_schema))
+        admitted = _snapshot_tool_spec(spec)
         if admitted.tool_id in self._tools:
             raise ValueError(f"duplicate tool_id: {admitted.tool_id}")
         self._tools[admitted.tool_id] = (admitted, handler)
@@ -321,7 +326,7 @@ class ToolExecutor:
     def specs(self) -> tuple[ToolSpec, ...]:
         # Catalog consumers must not receive the authority-bearing registry objects.
         return tuple(
-            replace(spec, input_schema=deepcopy(spec.input_schema))
+            _snapshot_tool_spec(spec)
             for spec, _handler in self._tools.values()
         )
 
@@ -342,7 +347,7 @@ class ToolExecutor:
             authorization: ToolAuthorization | None = None
             if self._approval_policy is not None:
                 try:
-                    decision = await self._approval_policy(spec, call)
+                    decision = await self._approval_policy(_snapshot_tool_spec(spec), call)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - trusted boundary fails closed.
@@ -410,7 +415,9 @@ class ToolExecutor:
                     authorized_call,
                     arguments=_snapshot_tool_arguments(authorized_call.arguments),
                 )
-                reservation = self._effect_guard.reserve(spec=spec, call=guard_call)
+                reservation = self._effect_guard.reserve(
+                    spec=_snapshot_tool_spec(spec), call=guard_call
+                )
                 call = authorized_call
             except (ToolEffectConflictError, ValueError) as exc:
                 self._audit("tool.denied", call, spec, {"reason": type(exc).__name__})
