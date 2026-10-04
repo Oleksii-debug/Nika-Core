@@ -58,6 +58,9 @@ class AutostartSettings:
                 return self._result("rejected", _MESSAGES["unavailable"])
             enabled = payload["enabled"]
             try:
+                # A disabled UI control is not an authorization boundary: reject
+                # unreadable/malformed OS state before auditing or any mutation.
+                self._service.status()
                 # Record intent before an OS mutation. A failed audit stops the write.
                 self._record("requested", enabled)
                 status = self._service.enable() if enabled else self._service.disable()
