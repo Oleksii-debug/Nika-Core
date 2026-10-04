@@ -542,6 +542,7 @@ def _valid_snapshot(snapshot: ResourceSnapshot) -> bool:
         return False
     return power_plugged is None or type(power_plugged) is bool
 
+
 def _validate_budget(budget: ResourceBudget) -> None:
     if not budget.scope.strip() or not budget.owner_id.strip():
         raise ValueError("resource budget scope and owner_id must not be empty")
