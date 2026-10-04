@@ -719,9 +719,12 @@ class FoundryLocalProvider:
         if type(raw_text) is not str:
             raise TypeError("Foundry Local response content must be text")
         usage = self._usage(response)
-        resolved_model = self._sdk_text(model, "alias")
+        # Usage and final identity getters can mutate the SDK's model alias.
+        # Bind the result to the selected alias, not late mutable metadata.
+        self._validate_model_alias(model, model_alias)
         self._validate_model_identity(model, operation_model_id)
-        return raw_text, resolved_model, usage
+        self._validate_model_alias(model, model_alias)
+        return raw_text, model_alias, usage
 
     def _get_model(self, alias: str) -> Any:
         try:
