@@ -104,8 +104,10 @@ def test_message_preserves_readable_unicode_and_line_endings(content: str) -> No
 
 @pytest.mark.parametrize(
     "directional_control",
-    ("\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
-     "\u2066", "\u2067", "\u2068", "\u2069"),
+    (
+        "\u061c", "\u200e", "\u200f", "\u202a", "\u202b", "\u202c",
+        "\u202d", "\u202e", "\u2066", "\u2067", "\u2068", "\u2069",
+    ),
 )
 def test_directional_formatting_cannot_spoof_message_or_metadata(
     directional_control: str,
