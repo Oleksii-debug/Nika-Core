@@ -28,13 +28,20 @@ def _request() -> ModelRequest:
     )
 
 
-def _response(*, include_reason: bool, reason: object = "stop") -> httpx.Response:
+def _response(
+    *,
+    include_reason: bool,
+    reason: object = "stop",
+    model: object = "test-model",
+    include_model: bool = True,
+) -> httpx.Response:
     choice: dict[str, object] = {"message": {"content": "possible partial text"}}
     if include_reason:
         choice["finish_reason"] = reason
-    return httpx.Response(
-        200, json={"model": "test-model", "choices": [choice]}
-    )
+    body: dict[str, object] = {"choices": [choice]}
+    if include_model:
+        body["model"] = model
+    return httpx.Response(200, json=body)
 
 
 def _factory(response: httpx.Response):
@@ -117,3 +124,35 @@ def test_credential_reference_route_inherits_terminal_reason_gate() -> None:
     assert caught.value.retryable is False
     assert caught.value.__cause__ is None
     assert "synthetic-canary-not-to-log" not in repr(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("include_model", "raw_model"),
+    (
+        (False, "test-model"),
+        (True, None),
+        (True, ""),
+        (True, " "),
+        (True, " test-model"),
+        (True, "test-model "),
+        (True, 7),
+        (True, True),
+        (True, ["test-model"]),
+    ),
+)
+def test_success_requires_attested_nonblank_model_identity(
+    include_model: bool, raw_model: object
+) -> None:
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(
+            _provider(
+                _response(
+                    include_reason=True,
+                    include_model=include_model,
+                    model=raw_model,
+                )
+            ).complete(_request())
+        )
+    assert caught.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert caught.value.provider_id == "test-api"
+    assert caught.value.retryable is False
