@@ -189,5 +189,7 @@ def test_m11_runs_for_packaged_team_projection_source_and_regressions() -> None:
     for path in (
         '      - "src/nika_core/v01_packaged_team_state.py"',
         '      - "tests/test_v01_packaged_team_state.py"',
+        '      - "tests/test_v01_packaged_model_authority_compatibility.py"',
+        '      - "tests/test_v01_packaged_final_result.py"',
     ):
         assert event_configuration.count(path) == 2, path

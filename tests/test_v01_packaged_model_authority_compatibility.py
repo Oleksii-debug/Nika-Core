@@ -203,3 +203,79 @@ def test_current_audit_rejects_unknown_authority_fields(tmp_path: Path) -> None:
     _rewrite_bound_audit(store, task_id, add_unknown)
     with pytest.raises(ValueError, match="model binding audit differs from frozen selection"):
         _frozen_identity(store, task_id)
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    (
+        "duplicate-schema",
+        "shadowed-provider",
+        "shadowed-nan",
+        "shadowed-overflow",
+        "sqlite-blob",
+        "array",
+        "truncated",
+    ),
+)
+def test_frozen_model_rejects_ambiguous_or_nontext_binding_audit(
+    tmp_path: Path,
+    corruption: str,
+) -> None:
+    store, task_id, selection = _bound_task(tmp_path, "ollama")
+    assert _frozen_identity(store, task_id) == (
+        "ollama",
+        "local",
+        model_identity_fingerprint(selection.model),
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_id, payload_json FROM audit_events "
+            "WHERE event_type = 'v01.model.bound' AND entity_type = 'task' AND entity_id = ?",
+            (task_id,),
+        ).fetchone()
+        assert row is not None
+        original = row["payload_json"]
+        if corruption == "duplicate-schema":
+            hostile = original[:-1] + ',"schema_version":1}'
+        elif corruption == "shadowed-provider":
+            hostile = '{"provider_id":"forged",' + original[1:]
+        elif corruption == "shadowed-nan":
+            hostile = '{"schema_version":NaN,' + original[1:]
+        elif corruption == "shadowed-overflow":
+            hostile = '{"schema_version":1e999,' + original[1:]
+        elif corruption == "sqlite-blob":
+            hostile = original.encode("utf-8")
+        elif corruption == "array":
+            hostile = "[]"
+        else:
+            hostile = '{"schema_version":'
+        conn.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
+            (hostile, row["event_id"]),
+        )
+
+    # Restart is material: never promote a persisted, ambiguously decoded
+    # model selection as if its audit still identified the same provider.
+    with pytest.raises(ValueError, match="invalid durable model binding audit"):
+        _frozen_identity(SQLiteStore(store.path), task_id)
+
+
+def test_frozen_model_rejects_multiple_bound_audit_records(tmp_path: Path) -> None:
+    store, task_id, _ = _bound_task(tmp_path, "ollama")
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_type, entity_type, entity_id, payload_json, created_at "
+            "FROM audit_events WHERE event_type = 'v01.model.bound' "
+            "AND entity_type = 'task' AND entity_id = ?",
+            (task_id,),
+        ).fetchone()
+        assert row is not None
+        for _ in range(3):
+            conn.execute(
+                "INSERT INTO audit_events("
+                "event_type, entity_type, entity_id, payload_json, created_at"
+                ") VALUES (?, ?, ?, ?, ?)",
+                tuple(row),
+            )
+    with pytest.raises(ValueError, match="missing or ambiguous"):
+        _frozen_identity(store, task_id)
