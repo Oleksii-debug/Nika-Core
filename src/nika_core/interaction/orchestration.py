@@ -33,7 +33,7 @@ from .domain import (
     SemanticSnapshot,
     StaleSnapshotError,
 )
-from .resolver import resolve_strict, validate_snapshot
+from .resolver import resolve_strict, validate_action_target, validate_snapshot
 
 
 class InteractionRisk(StrEnum):
@@ -166,8 +166,7 @@ class SemanticInteractionCoordinator:
         current = self.adapter.observe()
         validate_snapshot(observed, current)
         current_node = resolve_strict(current, request.locator)
-        if current_node.node_id != node.node_id:
-            raise StaleSnapshotError("Resolved semantic node changed during validation")
+        validate_action_target(node, current_node)
 
         reserved = False
         if request.risk.durable_side_effect:
