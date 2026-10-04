@@ -159,20 +159,22 @@ class DeploymentExecutionCoordinator:
                     updated_at=instant,
                 )
             )
+        # A slow health probe must not backdate newly issued credentials.
+        credential_instant = _aware(now or datetime.now(UTC))
         try:
             credential_lease = self.credentials.issue_lease(
                 project_id=record.spec.intent.project_id,
                 secret_ref=record.spec.credential_ref,
                 audience=record.spec.credential_audience,
                 scopes=frozenset({record.spec.credential_scope}),
-                now=instant,
+                now=credential_instant,
                 ttl_seconds=record.spec.credential_ttl_seconds,
             )
             use = self.credentials.authorize_use(
                 lease_id=credential_lease.lease_id,
                 project_id=record.spec.intent.project_id,
                 scope=record.spec.credential_scope,
-                now=instant,
+                now=credential_instant,
             )
         except CredentialBrokerError:
             self.nodes.release_if_current(node_lease)
@@ -182,7 +184,7 @@ class DeploymentExecutionCoordinator:
                     state=OperationState.BLOCKED_CREDENTIAL,
                     node_id=None,
                     attempt=record.attempt + 1,
-                    updated_at=instant,
+                    updated_at=credential_instant,
                 )
             )
         except Exception:
@@ -199,7 +201,7 @@ class DeploymentExecutionCoordinator:
                     state=OperationState.WAITING_FOR_NODE,
                     node_id=None,
                     attempt=record.attempt + 1,
-                    updated_at=instant,
+                    updated_at=credential_instant,
                 )
             )
         self._node_leases[operation_id] = node_lease
@@ -215,7 +217,7 @@ class DeploymentExecutionCoordinator:
                 node_id=node_lease.node_id,
                 evidence_refs=evidence,
                 attempt=record.attempt + 1,
-                updated_at=instant,
+                updated_at=credential_instant,
             )
         )
 
