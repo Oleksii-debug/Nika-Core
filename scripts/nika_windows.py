@@ -459,7 +459,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         show_recovery_error(
             "Ніка не може прочитати налаштування або підготувати локальні дані. "
             "Перевірте налаштування, доступ до папки даних і резервну копію. "
-            "Автоматичне відновлення не запускалося."
+            "Якщо проблема повторюється, перевірте резервну копію перед наступною спробою."
         )
         return 1
     if args.pf11_proof:
@@ -480,7 +480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Opening a corrupt/unavailable store must not leave a windowless EXE silent.
         show_recovery_error(
             "Ніка не може відкрити або перевірити локальні дані. "
-            "Запуск зупинено без зміни бази чи повторення завдань. "
+            "Подальший запуск зупинено, щоб уникнути додаткових дій. "
             "Перевірте доступ до папки даних і резервну копію."
         )
         return 1
@@ -488,7 +488,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         launch_windows_shell(session.bridge, title=f"Nika Core {config.app_version}")
     except (OSError, RuntimeError):
         show_recovery_error(
-            "Не вдалося відкрити вікно Ніки. Дані залишилися без змін. "
+            "Не вдалося відкрити вікно Ніки. Роботу застосунку припинено. "
             "Перевірте компоненти Windows і спробуйте запустити застосунок знову."
         )
         return 1
