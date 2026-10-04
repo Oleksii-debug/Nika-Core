@@ -96,7 +96,7 @@ def test_invalid_enabled_storage_still_fails_closed_without_fetching_disabled(
     with pytest.raises(ValueError, match="persisted enabled is corrupt"):
         jobs.list_enabled()
     assert "a-disabled" not in sqlite.fetched_job_ids
-    assert "b-corrupt" in sqlite.fetched_job_ids
+    assert "b-corrupt" not in sqlite.fetched_job_ids
 
     sqlite.record_rows = False
     with sqlite.connection() as conn:
@@ -105,3 +105,85 @@ def test_invalid_enabled_storage_still_fails_closed_without_fetching_disabled(
     sqlite.record_rows = True
     assert jobs.list_enabled() == (_job("c-live", enabled=True),)
     assert sqlite.fetched_job_ids == ["c-live"]
+
+
+@pytest.mark.parametrize(
+    ("column", "carrier"),
+    (
+        ("trigger_json", "blob"),
+        ("payload_json", "blob"),
+        ("payload_json", "oversized-text"),
+    ),
+)
+def test_active_invalid_json_never_crosses_hydration_boundary(
+    tmp_path: Path, column: str, carrier: str
+) -> None:
+    sqlite = RecordingSQLiteStore(tmp_path / "Українська папка" / "nika.db")
+    sqlite.initialize()
+    jobs = ScheduledJobStore(sqlite)
+    jobs.upsert(_job("a-corrupt", enabled=True))
+    jobs.upsert(_job("b-live", enabled=True))
+    jobs.upsert(_job("c-disabled", enabled=False))
+    value = (
+        sqlite3.Binary(b"x" * 2_000_000)
+        if carrier == "blob"
+        else "x" * 2_000_000
+    )
+    with sqlite.connection() as conn:
+        conn.execute(
+            f"UPDATE scheduled_jobs SET {column} = ? WHERE job_id = ?",
+            (value, "a-corrupt"),
+        )
+        # An oversized disabled history must not block a valid enabled job.
+        conn.execute(
+            "UPDATE scheduled_jobs SET payload_json = ? WHERE job_id = ?",
+            (sqlite3.Binary(b"x" * 2_000_000), "c-disabled"),
+        )
+
+    for current in (sqlite, RecordingSQLiteStore(sqlite.path)):
+        current.record_rows = True
+        current_jobs = ScheduledJobStore(current)
+        label = "trigger" if column == "trigger_json" else "payload"
+        with pytest.raises(ValueError, match=f"persisted {label} is corrupt"):
+            current_jobs.list_enabled()
+        assert current.fetched_job_ids == []
+
+    sqlite.record_rows = False
+    assert jobs.set_enabled("a-corrupt", False)
+    sqlite.fetched_job_ids.clear()
+    sqlite.record_rows = True
+    assert jobs.list_enabled() == (_job("b-live", enabled=True),)
+    assert sqlite.fetched_job_ids == ["b-live"]
+
+
+def test_invalid_enabled_blob_rejected_without_materializing_payload(
+    tmp_path: Path,
+) -> None:
+    sqlite = RecordingSQLiteStore(tmp_path / "nika.db")
+    sqlite.initialize()
+    jobs = ScheduledJobStore(sqlite)
+    jobs.upsert(_job("a-corrupt", enabled=True))
+    jobs.upsert(_job("b-live", enabled=True))
+    with sqlite.connection() as conn:
+        conn.execute("PRAGMA ignore_check_constraints = ON")
+        conn.execute(
+            "UPDATE scheduled_jobs SET enabled = ?, payload_json = ? WHERE job_id = ?",
+            (
+                sqlite3.Binary(b"x" * 2_000_000),
+                sqlite3.Binary(b"x" * 2_000_000),
+                "a-corrupt",
+            ),
+        )
+
+    for current in (sqlite, RecordingSQLiteStore(sqlite.path)):
+        current.record_rows = True
+        with pytest.raises(ValueError, match="persisted enabled is corrupt"):
+            ScheduledJobStore(current).list_enabled()
+        assert current.fetched_job_ids == []
+
+    sqlite.record_rows = False
+    assert jobs.set_enabled("a-corrupt", False)
+    sqlite.fetched_job_ids.clear()
+    sqlite.record_rows = True
+    assert jobs.list_enabled() == (_job("b-live", enabled=True),)
+    assert sqlite.fetched_job_ids == ["b-live"]

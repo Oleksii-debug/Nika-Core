@@ -98,12 +98,30 @@ class ScheduledJobStore:
 
     def list_enabled(self) -> tuple[ScheduledJob, ...]:
         with self._store.connection() as conn:
-            # Filter valid disabled rows in SQLite, before materializing any JSON.
-            # Keep malformed enabled carriers visible to _stored_bool so they fail closed.
+            # One snapshot for cheap validation and full-row hydration.
+            # Never materialize corrupt enabled carriers or oversized JSON in Python.
+            conn.execute("BEGIN")
+            invalid_enabled = conn.execute(
+                "SELECT 1 FROM scheduled_jobs "
+                "WHERE enabled IS NOT 0 "
+                "AND (typeof(enabled) != 'integer' OR enabled != 1) LIMIT 1"
+            ).fetchone()
+            if invalid_enabled is not None:
+                raise ValueError("persisted enabled is corrupt")
+            for column, label in (("trigger_json", "trigger"), ("payload_json", "payload")):
+                invalid_json = conn.execute(
+                    "SELECT 1 FROM scheduled_jobs "
+                    "WHERE enabled = 1 AND typeof(enabled) = 'integer' "
+                    f"AND (typeof({column}) != 'text' "
+                    f"OR length(CAST({column} AS BLOB)) > ?) LIMIT 1",
+                    (_MAX_RAW_JSON_BYTES,),
+                ).fetchone()
+                if invalid_json is not None:
+                    raise ValueError(f"persisted {label} is corrupt or exceeds raw size limit")
+            # Disabled rows never cross the SQLite/Python hydration boundary.
             rows = conn.execute(
                 "SELECT * FROM scheduled_jobs "
-                "WHERE enabled IS NOT 0 OR typeof(enabled) != 'integer' "
-                "ORDER BY job_id"
+                "WHERE enabled = 1 AND typeof(enabled) = 'integer' ORDER BY job_id"
             ).fetchall()
         enabled_jobs: list[ScheduledJob] = []
         for row in rows:
