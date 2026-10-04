@@ -198,11 +198,29 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             if identity is None:
                 return True
             team_id, member_id = identity
+            if task_id != f"team:{team_id}:{member_id}":
+                return False
             try:
                 handoff = self._multi_store.task_payload(team_id, member_id)
             except KeyError:
                 return True
-            shared_task_id = str(handoff.get("shared_task_id", "")).strip()
+            except (TypeError, ValueError, RuntimeError):
+                return False
+            shared_task_id = handoff.get("shared_task_id")
+            stage = handoff.get("stage")
+            # Cancellation must not target another task's cached model runtime
+            # through a corrupted or retargeted member handoff. Unlike run,
+            # cancellation does not depend on the current command's validity.
+            if (
+                type(shared_task_id) is not str
+                or not shared_task_id
+                or shared_task_id != shared_task_id.strip()
+                or self._team_id(shared_task_id) != team_id
+                or (member_id == "checker" and stage != "checker")
+                or (member_id in {"worker-a", "worker-b"} and stage != "source_worker")
+                or member_id not in {"checker", "worker-a", "worker-b"}
+            ):
+                return False
             model_runtime = self._model_runtimes.get(shared_task_id)
             if model_runtime is not None:
                 await model_runtime.cancel(
@@ -646,6 +664,15 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             # A corrupt durable checker handoff must not fall back to a new goal.
             return ""
         if isinstance(handoff, Mapping):
+            # This checker handoff freezes the *same* queued task's command.
+            # A syntactically valid handoff from a different task or stage
+            # cannot authorize a run or a restart, even with the same goal.
+            if (
+                handoff.get("stage") != "checker"
+                or type(handoff.get("shared_task_id")) is not str
+                or handoff["shared_task_id"] != task_id
+            ):
+                return ""
             raw_goal = handoff.get("user_goal", "")
             if type(raw_goal) is not str:
                 return ""
