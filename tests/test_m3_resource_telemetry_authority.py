@@ -182,3 +182,55 @@ def test_valid_boundary_observation_still_grants(tmp_path: Path) -> None:
     )
     assert manager.request(scope="agent", owner_id="worker", request_id="one").granted
     assert manager.status(scope="agent", owner_id="worker").cpu_headroom_percent == 0
+
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "cpu_percent",
+        "memory_percent",
+        "available_memory_bytes",
+        "disk_percent",
+        "logical_cpu_count",
+        "power_plugged",
+    ),
+)
+def test_incomplete_snapshot_fails_closed_before_resource_admission(
+    missing_field: str,
+) -> None:
+    snapshot = ResourceSnapshot(
+        cpu_percent=20, memory_percent=30, available_memory_bytes=1_000_000
+    )
+    object.__delattr__(snapshot, missing_field)
+    assert not _valid_snapshot(snapshot)
+    budget = ResourceBudget(scope="agent", owner_id="worker")
+    assert _resource_pressure_reason(budget, snapshot) == "invalid_observation"
+
+
+def test_uninitialized_snapshot_fails_closed() -> None:
+    incomplete = object.__new__(ResourceSnapshot)
+    budget = ResourceBudget(scope="agent", owner_id="worker")
+    assert not _valid_snapshot(incomplete)
+    assert _resource_pressure_reason(budget, incomplete) == "invalid_observation"
+
+
+def test_incomplete_host_sample_keeps_queued_work_and_sanitizes_status(
+    tmp_path: Path,
+) -> None:
+    manager, observer, _ = _manager(tmp_path)
+    sample = ResourceSnapshot(
+        cpu_percent=20, memory_percent=30, available_memory_bytes=1_000_000
+    )
+    object.__delattr__(sample, "battery_percent")
+    observer.current = sample
+
+    decision = manager.request(scope="agent", owner_id="worker", request_id="one")
+    assert (decision.granted, decision.reason) == (False, "invalid_observation")
+    assert manager.active_count(scope="agent", owner_id="worker") == 0
+    assert manager.queued(scope="agent", owner_id="worker") == ("one",)
+    with pytest.raises(ResourceTelemetryError, match="resource telemetry invalid"):
+        manager.status(scope="agent", owner_id="worker")
+
+    observer.current = ResourceSnapshot(
+        cpu_percent=20, memory_percent=30, available_memory_bytes=1_000_000
+    )
+    assert manager.request(scope="agent", owner_id="worker", request_id="one").granted
