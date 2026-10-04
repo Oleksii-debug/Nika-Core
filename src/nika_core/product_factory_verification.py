@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
 MAX_EVIDENCE_REF_LENGTH = 512
+MAX_CHECK_ID_LENGTH = 256
+MAX_EVIDENCE_ITEMS = 256
 PRODUCT_FACTORY_REQUIRED_CHECK_IDS = ("core", "factory")
 
 
@@ -40,11 +42,13 @@ class ExactShaCheckEvidence:
     def __post_init__(self) -> None:
         if type(self.check_id) is not str or type(self.evidence_ref) is not str:
             raise VerificationError("verification evidence identity must be text")
+        if len(self.check_id) > MAX_CHECK_ID_LENGTH:
+            raise VerificationError("verification check id exceeds maximum length")
+        _validate_evidence_ref(self.evidence_ref)
         if not self.check_id.strip() or not self.evidence_ref.strip():
             raise VerificationError("verification evidence identity must not be empty")
         _validate_utf8(self.check_id, "verification check id")
         _validate_utf8(self.evidence_ref, "verification evidence ref")
-        _validate_evidence_ref(self.evidence_ref)
         _validate_sha(self.candidate_sha)
         if type(self.state) is not CheckState:
             raise VerificationError("verification check state must be a CheckState")
@@ -59,6 +63,9 @@ class CandidateVerification:
     candidate_sha: str
     state: VerificationState
     evidence_refs: tuple[str, ...]
+    _classified_identity: tuple[str, VerificationState, tuple[str, ...]] = field(
+        init=False, repr=False, compare=False
+    )
 
     def __init__(
         self,
@@ -72,12 +79,32 @@ class CandidateVerification:
         object.__setattr__(self, "candidate_sha", candidate_sha)
         object.__setattr__(self, "state", state)
         object.__setattr__(self, "evidence_refs", evidence_refs)
+        object.__setattr__(
+            self, "_classified_identity", (candidate_sha, state, evidence_refs)
+        )
 
     @property
     def merge_clearance(self) -> bool:
-        """Verification can only clear its own exact head after all required checks pass."""
+        """Only an unchanged classifier-issued PASS is a clearance signal.
 
-        return self.state is VerificationState.PASS
+        This protects against one-field post-construction mutation; arbitrary hostile
+        in-process Python can also forge private fields. Never use a caller-supplied
+        carrier as independent authorization: recheck trusted exact-SHA CI evidence.
+        """
+
+        if (
+            type(self) is not CandidateVerification
+            or type(getattr(self, "candidate_sha", None)) is not str
+            or getattr(self, "state", None) is not VerificationState.PASS
+            or type(getattr(self, "evidence_refs", None)) is not tuple
+            or any(type(ref) is not str for ref in self.evidence_refs)
+        ):
+            return False
+        return getattr(self, "_classified_identity", None) == (
+            self.candidate_sha,
+            self.state,
+            self.evidence_refs,
+        )
 
 
 def classify_candidate_verification(
@@ -97,6 +124,8 @@ def classify_candidate_verification(
     _validate_authoritative_required_profile(required_check_ids)
     if type(evidence) is not tuple:
         raise VerificationError("verification evidence must be a tuple")
+    if len(evidence) > MAX_EVIDENCE_ITEMS:
+        raise VerificationError("verification evidence exceeds maximum item count")
 
     canonical_evidence = tuple(_snapshot_evidence(item) for item in evidence)
     refs = tuple(item.evidence_ref for item in canonical_evidence)
@@ -141,6 +170,9 @@ def classify_candidate_verification(
     object.__setattr__(result, "candidate_sha", candidate_sha)
     object.__setattr__(result, "state", VerificationState.PASS)
     object.__setattr__(result, "evidence_refs", refs)
+    object.__setattr__(
+        result, "_classified_identity", (candidate_sha, VerificationState.PASS, refs)
+    )
     return result
 
 
@@ -174,11 +206,15 @@ def _validate_candidate_verification(
         raise VerificationError("verification state must be a VerificationState")
     if type(evidence_refs) is not tuple:
         raise VerificationError("verification evidence refs must be a tuple")
-    if any(type(ref) is not str or not ref.strip() for ref in evidence_refs):
+    if len(evidence_refs) > MAX_EVIDENCE_ITEMS:
+        raise VerificationError("verification evidence refs exceed maximum item count")
+    if any(type(ref) is not str for ref in evidence_refs):
         raise VerificationError("verification evidence refs must be non-empty text")
     for ref in evidence_refs:
-        _validate_utf8(ref, "verification evidence ref")
         _validate_evidence_ref(ref)
+        if not ref.strip():
+            raise VerificationError("verification evidence refs must be non-empty text")
+        _validate_utf8(ref, "verification evidence ref")
     if len(evidence_refs) != len(set(evidence_refs)):
         raise VerificationError("verification evidence refs must be unique")
 
@@ -188,7 +224,13 @@ def _validate_required_check_ids(required_check_ids: tuple[str, ...]) -> None:
         raise VerificationError("required check ids must be a tuple")
     if not required_check_ids:
         raise VerificationError("required check ids must not be empty")
-    if any(type(check_id) is not str or not check_id.strip() for check_id in required_check_ids):
+    if len(required_check_ids) > len(PRODUCT_FACTORY_REQUIRED_CHECK_IDS):
+        raise VerificationError("required check ids exceed authoritative profile size")
+    if any(type(check_id) is not str for check_id in required_check_ids):
+        raise VerificationError("required check ids must be non-empty text")
+    if any(len(check_id) > MAX_CHECK_ID_LENGTH for check_id in required_check_ids):
+        raise VerificationError("required check id exceeds maximum length")
+    if any(not check_id.strip() for check_id in required_check_ids):
         raise VerificationError("required check ids must be non-empty text")
     for check_id in required_check_ids:
         _validate_utf8(check_id, "required check id")
