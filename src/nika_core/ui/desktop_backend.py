@@ -333,7 +333,19 @@ class DesktopBackend:
         if not auto_resume:
             return self.startup_recovery_snapshot()
 
-        future = self._host().submit(recovery.resume_safe_crash_sessions())
+        coroutine = recovery.resume_safe_crash_sessions()
+        try:
+            future = self._host().submit(coroutine)
+        except BaseException:
+            self._discard_unsubmitted(coroutine)
+            self._set_startup_recovery_state(
+                {
+                    **self.startup_recovery_snapshot(),
+                    "status": "attention",
+                    "resume_failed_count": 1,
+                }
+            )
+            raise
         with self._startup_recovery_lock:
             self._startup_recovery_future = future
         future.add_done_callback(lambda done: self._startup_recovery_done(recovery, done))
@@ -390,7 +402,11 @@ class DesktopBackend:
         """Run and track internal packaged async work on the single desktop host."""
 
         with self._active_lock:
-            future = self._host().submit(coroutine)
+            try:
+                future = self._host().submit(coroutine)
+            except BaseException:
+                self._discard_unsubmitted(coroutine)
+                raise
             self._packaged_futures.add(future)
         future.add_done_callback(self._packaged_done)
         return future
@@ -554,6 +570,17 @@ class DesktopBackend:
             self._runtime_loop = _DesktopRuntimeLoop()
         return self._runtime_loop
 
+    @staticmethod
+    def _discard_unsubmitted(coroutine: Coroutine[Any, Any, Any]) -> None:
+        try:
+            coroutine.close()
+        except BaseException as exc:
+            # Never replace the original submission failure with cleanup failure.
+            _LOGGER.warning(
+                "Desktop coroutine cleanup failed; exception_type=%s",
+                type(exc).__name__,
+            )
+
     def _schedule_start(self, task_id: str, command: str) -> None:
         thread_id = f"desktop-{task_id}"
         self._submit_runtime(
@@ -585,13 +612,16 @@ class DesktopBackend:
         existing = self._cancel_futures.get(task_id)
         if existing is not None and not existing.done():
             raise ValueError("Запит на зупинку цього завдання вже виконується.")
-        future = self._host().submit(
-            self._coordinator.cancel(
-                self._runtime,
-                task_id=task_id,
-                thread_id=thread_id,
-            )
+        coroutine = self._coordinator.cancel(
+            self._runtime,
+            task_id=task_id,
+            thread_id=thread_id,
         )
+        try:
+            future = self._host().submit(coroutine)
+        except BaseException:
+            self._discard_unsubmitted(coroutine)
+            raise
         self._cancel_futures[task_id] = future
         return future
 
@@ -604,9 +634,15 @@ class DesktopBackend:
         with self._active_lock:
             existing = self._active_futures.get(task_id)
             if existing is not None and not existing.done():
+                self._discard_unsubmitted(coroutine)
                 raise ValueError("Завдання вже має активне runtime-виконання.")
             self._active_threads[task_id] = thread_id
-            future = self._host().submit(coroutine)
+            try:
+                future = self._host().submit(coroutine)
+            except BaseException:
+                self._active_threads.pop(task_id, None)
+                self._discard_unsubmitted(coroutine)
+                raise
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
 
