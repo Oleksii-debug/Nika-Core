@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -121,6 +122,10 @@ class RuntimeResumeProbe:
             raise ValueError("resume probe reason must not be empty")
         if len(self.reason) > _MAX_RESUME_PROBE_REASON_CHARS:
             raise ValueError("resume probe reason is too long")
+        try:
+            self.reason.encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("resume probe reason must be valid UTF-8") from None
         if self.checkpoint_id is not None:
             if type(self.checkpoint_id) is not str:
                 raise TypeError("checkpoint_id must be an exact string when provided")
@@ -130,8 +135,15 @@ class RuntimeResumeProbe:
                 raise ValueError("checkpoint_id must not have surrounding whitespace")
             if len(self.checkpoint_id) > _MAX_RESUME_CHECKPOINT_ID_CHARS:
                 raise ValueError("checkpoint_id is too long")
-            if any(ord(char) < 32 or ord(char) == 127 for char in self.checkpoint_id):
-                raise ValueError("checkpoint_id must not contain control characters")
+            try:
+                self.checkpoint_id.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("checkpoint_id must be valid UTF-8") from None
+            if any(
+                unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+                for char in self.checkpoint_id
+            ):
+                raise ValueError("checkpoint_id must not contain control or format characters")
         if self.status is RuntimeResumeProbeStatus.READY and self.checkpoint_id is None:
             raise ValueError("ready resume probe requires checkpoint_id")
 
@@ -231,14 +243,29 @@ _NIKA_OWNED_RUNTIME_AUDIT_EVENTS = frozenset(
 )
 
 
+def _require_json_string_keys(value: Any, *, field_name: str) -> None:
+    """Reject nested keys that JSON would otherwise silently coerce to strings."""
+
+    if isinstance(value, dict):
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                raise TypeError(f"{field_name} keys must be exact strings")
+            _require_json_string_keys(item, field_name=field_name)
+    elif isinstance(value, list):
+        for item in list.__iter__(value):
+            _require_json_string_keys(item, field_name=field_name)
+    elif isinstance(value, tuple):
+        for item in tuple.__iter__(value):
+            _require_json_string_keys(item, field_name=field_name)
+
+
 def _snapshot_json_mapping(value: Mapping[str, Any], *, field_name: str) -> dict[str, Any]:
     """Copy adapter output into JSON-safe, detached Nika-owned values."""
 
     if not isinstance(value, Mapping):
         raise TypeError(f"{field_name} must be a mapping")
     copied = dict(value)
-    if any(type(key) is not str for key in copied):
-        raise TypeError(f"{field_name} keys must be exact strings")
+    _require_json_string_keys(copied, field_name=field_name)
     encoded = json.dumps(copied, ensure_ascii=False, allow_nan=False, sort_keys=True)
     # SQLite and the Windows JSON transport cannot store unpaired surrogates.
     encoded.encode("utf-8")
@@ -287,6 +314,11 @@ def canonical_runtime_result(value: object) -> RuntimeResult:
         if type(event_type) is not str or not event_type.strip():
             raise ValueError("runtime event type must be an exact nonempty string")
         event_type.encode("utf-8")
+        if any(
+            unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in event_type
+        ):
+            raise ValueError("runtime event type contains control or formatting characters")
         if event_type in _NIKA_OWNED_RUNTIME_AUDIT_EVENTS:
             raise ValueError("runtime adapter cannot impersonate Nika-owned audit events")
         event_payload = _snapshot_json_mapping(

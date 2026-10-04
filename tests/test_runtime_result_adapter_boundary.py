@@ -105,6 +105,20 @@ def _invalid_output_key() -> RuntimeResult:
     return RuntimeResult(outcome=RuntimeOutcome.COMPLETED, output={1: "non-string"})
 
 
+def _invalid_nested_output_key() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        output={"nested": [{1: "coerced-key"}]},
+    )
+
+
+def _invalid_nested_event_payload_key() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.proof", {"nested": {"value": {True: "coerced"}}}),),
+    )
+
+
 def _invalid_utf8_error() -> RuntimeResult:
     return RuntimeResult(outcome=RuntimeOutcome.FAILED, error="\ud800")
 
@@ -117,6 +131,22 @@ def _invalid_utf8_event_type() -> RuntimeResult:
     return RuntimeResult(
         outcome=RuntimeOutcome.COMPLETED,
         events=(RuntimeEvent(0, "\ud800"),),
+    )
+
+
+
+
+def _invalid_control_event_type() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.proof\x00forged"),),
+    )
+
+
+def _invalid_bidi_event_type() -> RuntimeResult:
+    return RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "runtime.proof\u202eforged"),),
     )
 
 
@@ -156,9 +186,13 @@ _BAD_RESULTS = (
     _unserializable_nested_output,
     _nonfinite_output,
     _invalid_output_key,
+    _invalid_nested_output_key,
+    _invalid_nested_event_payload_key,
     _invalid_utf8_error,
     _invalid_utf8_resume_token,
     _invalid_utf8_event_type,
+    _invalid_control_event_type,
+    _invalid_bidi_event_type,
     _invalid_utf8_event_payload,
     _overridden_event_sequence,
     _forged_nika_control_event,
@@ -385,3 +419,25 @@ def test_malformed_cancel_acknowledgement_keeps_external_effect_uncertain(
     with pytest.raises(IdempotencyConflictError, match="pending or uncertain"):
         asyncio.run(coordinator.cancel(runtime, task_id=task_id, thread_id="thread-1"))
     assert runtime.cancel_calls == 1
+
+
+@pytest.mark.parametrize(
+    "character", ("\x00", "\n", "\u007f", "\u0085", "\u2028", "\u2029",
+                  "\u202e", "\u2066")
+)
+def test_runtime_event_type_control_characters_are_rejected(character):
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, f"reference.{character}completed"),),
+    )
+    with pytest.raises(ValueError, match="control or formatting characters"):
+        canonical_runtime_result(result)
+
+
+def test_valid_unicode_runtime_event_names_remain_supported():
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.COMPLETED,
+        events=(RuntimeEvent(0, "подія.готова", {"підсумок": True}),),
+    )
+    canonical = canonical_runtime_result(result)
+    assert canonical.events == result.events
