@@ -46,9 +46,9 @@ class _Client:
         "http://localhost:11434/#",
         "http://localhost:0",
         "http://localhost:11434 ",
-        "http://local\\nhost:11434",
-        "http://local\\thost:11434",
-        "http://localhost:11434/\\x7f",
+        "http://local\nhost:11434",
+        "http://local\thost:11434",
+        "http://localhost:11434/\x7f",
     ],
 )
 def test_invalid_route_never_queries_evidence_or_starts_http(route: str) -> None:
