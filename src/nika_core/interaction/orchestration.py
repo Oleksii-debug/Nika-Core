@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from typing import Protocol
 
@@ -162,6 +162,9 @@ class SemanticInteractionCoordinator:
         """
         observed = self.adapter.observe()
         node = resolve_strict(observed, request.locator)
+        # An adapter may reuse a mutable control carrier across observations.
+        # Freeze the action-relevant evidence before asking it to observe again.
+        node = replace(node, attributes=tuple(node.attributes))
 
         current = self.adapter.observe()
         validate_snapshot(observed, current)
