@@ -637,6 +637,13 @@ class FoundryLocalProvider:
         already_loaded = self._sdk_bool(model, "is_loaded")
         self._validate_model_alias(model, model_alias)
         self._validate_model_identity(model, operation_model_id)
+        if abandon_event.is_set():
+            raise ModelGatewayError(
+                ModelErrorCode.CANCELLED,
+                "Foundry Local inference was abandoned before model load",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
         if not already_loaded:
             try:
                 model.load()
@@ -670,6 +677,18 @@ class FoundryLocalProvider:
         self._validate_model_identity(model, operation_model_id)
         if request.temperature is not None and hasattr(client, "settings"):
             client.settings.temperature = request.temperature
+
+        # SDK client setup and setters may block, retarget the artifact or
+        # outlive the caller's deadline. Never start chat after abandonment.
+        self._validate_model_alias(model, model_alias)
+        self._validate_model_identity(model, operation_model_id)
+        if abandon_event.is_set():
+            raise ModelGatewayError(
+                ModelErrorCode.CANCELLED,
+                "Foundry Local inference was abandoned before chat execution",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+            )
 
         response = client.complete_chat(
             [{"role": message.role, "content": message.content} for message in request.messages]
