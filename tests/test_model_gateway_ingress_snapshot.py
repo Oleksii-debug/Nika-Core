@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -188,6 +189,50 @@ def test_cloud_authorizer_cannot_retarget_request_after_approval(
     assert caught.value.failure_effect is ModelFailureEffect.NO_EFFECT
     assert caught.value.retryable is False
     assert authorizer.calls == 1
+    assert provider.calls == 0
+    assert audit.events == [
+        ("model.requested", "trusted-request"),
+        ("model.failed", "trusted-request"),
+    ]
+
+
+class _SlowApproval:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def authorize_cloud_effect(
+        self, *, request: ModelRequest, provider: ProviderCapabilities
+    ) -> None:
+        self.calls += 1
+        # Deliberately block synchronously: an asyncio timeout cannot fire
+        # until control returns to the event loop.
+        time.sleep(0.04)
+
+
+def test_expired_cloud_authorization_budget_has_no_provider_effect() -> None:
+    provider = _Provider(kind=ProviderKind.CLOUD)
+    approval = _SlowApproval()
+    audit = _Audit()
+    gateway = ModelGateway(cloud_effect_authorizer=approval, audit_log=audit)
+    gateway.register(provider)
+    original = _request(privacy=PrivacyClass.PUBLIC)
+    request = ModelRequest(
+        request_id=original.request_id,
+        model=original.model,
+        provider_id=original.provider_id,
+        messages=original.messages,
+        metadata=original.metadata,
+        privacy=original.privacy,
+        timeout_seconds=0.005,
+    )
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(request))
+
+    assert caught.value.code is ModelErrorCode.TIMEOUT
+    assert caught.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert caught.value.retryable is False
+    assert approval.calls == 1
     assert provider.calls == 0
     assert audit.events == [
         ("model.requested", "trusted-request"),

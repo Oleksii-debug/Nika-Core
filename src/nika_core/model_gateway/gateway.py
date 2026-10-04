@@ -180,6 +180,20 @@ class ModelGateway:
                     self._audit_failure(request, capabilities.provider_id, error)
                     raise error
 
+            # Synchronous approval and audit work consume the same end-to-end
+            # deadline. Never start an external effect with a stale time budget.
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                error = ModelGatewayError(
+                    ModelErrorCode.TIMEOUT,
+                    "model request exceeded its deadline before provider execution",
+                    provider_id=capabilities.provider_id,
+                    retryable=False,
+                    failure_effect=ModelFailureEffect.NO_EFFECT,
+                )
+                self._audit_failure(request, capabilities.provider_id, error)
+                raise error
+
             response: ModelResponse | None = None
             terminal_error: ModelGatewayError | None = None
             cancelled = False
