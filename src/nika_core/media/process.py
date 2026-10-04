@@ -192,7 +192,25 @@ class SafeProcessRunner:
     @staticmethod
     def _bounded_watch_path(path: Path, *, cwd: Path) -> Path:
         candidate = path if path.is_absolute() else cwd / path
-        parent = candidate.par        for path in paths:
+        parent = candidate.parent.resolve(strict=True)
+        try:
+            parent.relative_to(cwd)
+        except ValueError as exc:
+            raise MediaError(
+                MediaErrorCode.PATH_ESCAPE,
+                "watched media path escapes subprocess cwd",
+            ) from exc
+        return parent / candidate.name
+
+    @staticmethod
+    def _watched_file_failure(
+        paths: tuple[Path, ...],
+        *,
+        max_bytes: int | None,
+    ) -> MediaError | None:
+        if max_bytes is None:
+            return None
+        for path in paths:
             # One no-follow observation avoids exists/resolve/stat races and
             # detects a dangling link as a link, not as an absent output.
             try:
@@ -215,18 +233,6 @@ class SafeProcessRunner:
                     "watched media output must be a regular file",
                 )
             if metadata.st_size > max_bytes:
-                return MediaError(
-                    MediaErrorCode.SOURCE_TOO_LARGE,
-                    "media subprocess output exceeded the configured byte limit",
-                )
-ed media output changed during validation",
-                )
-            if not resolved.is_file():
-                return MediaError(
-                    MediaErrorCode.INVALID_SOURCE,
-                    "watched media output must be a regular file",
-                )
-            if resolved.stat().st_size > max_bytes:
                 return MediaError(
                     MediaErrorCode.SOURCE_TOO_LARGE,
                     "media subprocess output exceeded the configured byte limit",
