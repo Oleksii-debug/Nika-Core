@@ -183,6 +183,7 @@ def test_valid_boundary_observation_still_grants(tmp_path: Path) -> None:
     assert manager.request(scope="agent", owner_id="worker", request_id="one").granted
     assert manager.status(scope="agent", owner_id="worker").cpu_headroom_percent == 0
 
+
 @pytest.mark.parametrize(
     "missing_field",
     (
