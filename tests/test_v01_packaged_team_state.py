@@ -423,3 +423,41 @@ def test_malformed_unmarked_generic_team_is_not_claimed_as_v01(tmp_path) -> None
         base_state=lambda: _base_state("unrelated"),
         store=store,
     )()["v01_team_task"] is None
+
+
+def test_team_event_projection_reads_only_latest_twenty_in_chronological_order(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.db")
+    store.initialize()
+    _create_team(store)
+    with store.connection() as conn:
+        for index in range(30):
+            created_at = f"2031-01-01T00:00:{index:02}+00:00"
+            conn.execute(
+                "INSERT INTO multi_agent_handoffs("
+                "handoff_id, team_id, sender_id, recipient_id, kind, "
+                "correlation_id, payload_json, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    f"bounded-event-{index:02}",
+                    "team-v01-71",
+                    "worker",
+                    "supervisor",
+                    "result",
+                    "bounded-proof",
+                    "{}",
+                    created_at,
+                ),
+            )
+        events = V01PackagedTeamStateProvider._event_views(
+            conn,
+            team_id="team-v01-71",
+            roles={"supervisor": "supervisor", "worker": "worker"},
+        )
+
+    assert len(events) == 20
+    assert [event["time"] for event in events] == [
+        f"2031-01-01T00:00:{index:02}+00:00" for index in range(10, 30)
+    ]
+    assert all(event["code"] == "worker.result" for event in events)
