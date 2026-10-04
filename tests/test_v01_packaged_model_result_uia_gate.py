@@ -56,7 +56,7 @@ def test_controlled_model_response_canary_is_bounded_and_restored() -> None:
     )
     assert '"content": RESULT_TEXT' in wrapper
     assert "controlled loopback response" not in wrapper
-    assert '"`"$resultCanary`""'in wrapper
+    assert '"`"$resultCanary`""' in wrapper
     assert "$lines.Count -ne 3" in wrapper
     assert "$request.think -ne $false" in wrapper
     assert "$request.stream -ne $false" in wrapper
