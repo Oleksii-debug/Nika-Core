@@ -178,3 +178,35 @@ def test_existing_legacy_binding_without_queue_row_remains_readable(tmp_path: Pa
             ("legacy-task", selection.model_dump_json(), "2026-10-04"),
         )
     assert settings.for_task("legacy-task") == selection
+
+
+def test_task_get_is_write_fenced_before_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, settings = _configured(tmp_path)
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload({"command": "Порівняй"}),
+    )
+    original_get = TaskQueue.get
+    observed = []
+
+    def read_while_other_writer_competes(queue: TaskQueue, task_id: str) -> TaskRecord:
+        record = original_get(queue, task_id)
+        # A second SQLite connection must be unable to delete/reuse the task
+        # between the canonical task read and the source-binding write.
+        with sqlite3.connect(store.path, timeout=0) as competing:
+            with pytest.raises(sqlite3.OperationalError):
+                competing.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        observed.append(task_id)
+        return record
+
+    monkeypatch.setattr(TaskQueue, "get", read_while_other_writer_competes)
+    assert settings.for_task(task.task_id).source_a != ""
+    assert observed == [task.task_id]
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()[0] == 1

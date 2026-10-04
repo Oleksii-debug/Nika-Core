@@ -295,14 +295,17 @@ class V01SourceSettings:
     ) -> SourceSelection:
         if not isinstance(task_id, str) or not task_id.strip():
             raise SourceSetupError("Немає коректного ідентифікатора завдання.")
-        try:
-            payload = TaskQueue(self._store).get(task_id).payload
-            task_found = True
-        except KeyError:
-            payload = {}
-            task_found = False
         with self._store.connection() as conn:
+            # Task acquisition and binding must share one write transaction.
+            # Otherwise the task can be removed/replaced after the initial
+            # read but before the binding is durably recorded.
             conn.execute("BEGIN IMMEDIATE")
+            try:
+                payload = TaskQueue(self._store).get(task_id).payload
+                task_found = True
+            except KeyError:
+                payload = {}
+                task_found = False
             accepted = (
                 self._selection_by_id(conn, payload["v01_source_selection"])
                 if "v01_source_selection" in payload
