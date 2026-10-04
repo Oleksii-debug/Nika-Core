@@ -187,6 +187,13 @@ def decode_source_result(
         if actual != expected_value:
             raise SourceResultBindingError(f"{key} does not match declared assignment")
 
+    # Check the item count before hashing worker-controlled evidence. A forged
+    # result cannot demand unbounded serialization work to reach this limit.
+    raw_result = _mapping(data["result_set"], "result_set")
+    raw_items = raw_result.get("items")
+    if isinstance(raw_items, list) and len(raw_items) > assignment.max_items:
+        raise SourceResultBindingError("result exceeds assignment max_items")
+
     claimed_digest = _text(data["result_digest"], "result_digest")
     unsigned = {key: data[key] for key in data if key != "result_digest"}
     actual_digest = _payload_digest(unsigned)
@@ -267,10 +274,7 @@ def _validate_result_set(
         _require_text(item.title, "title")
         _string(item.snippet, "snippet")
         _require_text(item.why_matched, "why_matched")
-        if isinstance(item.rank, bool) or not isinstance(item.rank, (int, float)):
-            raise SourceResultBindingError("result rank must be numeric")
-        if not math.isfinite(float(item.rank)):
-            raise SourceResultBindingError("result rank must be finite")
+        _finite_rank(item.rank)
         if not item.evidence:
             raise SourceResultBindingError("result item has no provenance evidence")
         for evidence in item.evidence:
@@ -352,18 +356,28 @@ def _decode_item(value: object) -> ResearchResultItem:
     raw_evidence = data["evidence"]
     if not isinstance(raw_evidence, list):
         raise SourceResultBindingError("result evidence must be a list")
-    rank = data["rank"]
-    if isinstance(rank, bool) or not isinstance(rank, (int, float)):
-        raise SourceResultBindingError("result rank must be numeric")
+    rank = _finite_rank(data["rank"])
     return ResearchResultItem(
         ordinal=_integer(data["ordinal"], "ordinal"),
         document_id=_text(data["document_id"], "document_id"),
         title=_text(data["title"], "title"),
         snippet=_string(data["snippet"], "snippet"),
-        rank=float(rank),
+        rank=rank,
         why_matched=_text(data["why_matched"], "why_matched"),
         evidence=tuple(_decode_evidence(item) for item in raw_evidence),
     )
+
+
+def _finite_rank(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SourceResultBindingError("result rank must be numeric")
+    try:
+        rank = float(value)
+    except OverflowError as exc:
+        raise SourceResultBindingError("result rank must be finite") from exc
+    if not math.isfinite(rank):
+        raise SourceResultBindingError("result rank must be finite")
+    return rank
 
 
 def _decode_evidence(value: object) -> ResearchEvidence:
