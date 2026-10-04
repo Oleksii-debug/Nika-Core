@@ -154,6 +154,11 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
                 raise ValueError(f"bundle directory symlink is unsupported: {candidate}")
         if candidate.is_file():
             files.append(candidate)
+        elif not candidate.is_dir():
+            # Never certify an incomplete ZIP by silently omitting FIFOs,
+            # sockets, devices or symlinks to special files. Opening such an
+            # entry could also block a release worker indefinitely.
+            raise ValueError(f"unsupported release bundle entry: {candidate}")
     return tuple(sorted(files, key=lambda item: item.relative_to(root).as_posix()))
 
 
