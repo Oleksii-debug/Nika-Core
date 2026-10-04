@@ -317,3 +317,38 @@ def test_resolution_errors_never_echo_sensitive_locator_contents() -> None:
     with pytest.raises(AmbiguousTargetError) as ambiguous:
         resolve_strict(_snapshot(duplicate, duplicate), ControlLocator(name=sensitive))
     assert sensitive not in str(ambiguous.value)
+
+
+@pytest.mark.parametrize("enabled,visible", [("false", True), (True, "false"), (1, True)])
+def test_non_boolean_actionability_cannot_authorize_effect(
+    tmp_path: Path, enabled: object, visible: object
+) -> None:
+    # Runtime adapter DTOs are not protected by dataclass type annotations.
+    forged = ControlNode("save", "button", "Save", enabled=enabled, visible=visible)
+    adapter = FakeAdapter([_snapshot(forged), _snapshot(forged)])
+    ledger = FakeLedger()
+    with pytest.raises(StaleSnapshotError, match="disabled or hidden"):
+        _coordinator(tmp_path, adapter, ledger).execute(
+            _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+        )
+    assert adapter.act_calls == 0
+    assert ledger.reserved is False
+
+
+def test_reused_mutated_control_carrier_is_fenced_before_effect(tmp_path: Path) -> None:
+    shared = ControlNode("save", "button", "Save", value="draft")
+
+    class MutatingAdapter(FakeAdapter):
+        def observe(self) -> SemanticSnapshot:
+            if self.index == 1:
+                object.__setattr__(shared, "value", "publish")
+            return super().observe()
+
+    adapter = MutatingAdapter([_snapshot(shared), _snapshot(shared)])
+    ledger = FakeLedger()
+    with pytest.raises(StaleSnapshotError, match="target changed"):
+        _coordinator(tmp_path, adapter, ledger).execute(
+            _request(InteractionRisk.R2_EXTERNAL_SIDE_EFFECT)
+        )
+    assert adapter.act_calls == 0
+    assert ledger.reserved is False
