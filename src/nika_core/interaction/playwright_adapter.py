@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -155,11 +157,32 @@ class DownloadBroker:
         filename = Path(str(download.suggested_filename)).name
         if not filename or filename in {".", ".."}:
             raise UnsupportedInteractionError("download did not provide a safe filename")
-        destination = (self.approved_root / filename).resolve()
+        raw_destination = self.approved_root / filename
+        # A pre-existing file (including a link) is never an implicit overwrite grant.
+        if raw_destination.is_symlink() or raw_destination.exists():
+            raise UnsupportedInteractionError("download destination already exists")
+        destination = raw_destination.resolve()
         if destination.parent != self.approved_root:
             raise UnsupportedInteractionError("download path escaped approved root")
-        download.save_as(str(destination))
-        self.saved.append(destination)
+
+        # A complete download is published with a no-clobber filesystem operation.
+        # The staging file lives on the same filesystem for os.link on Windows/Unix.
+        fd, staging_name = tempfile.mkstemp(
+            prefix=".nika-download-", suffix=".part", dir=self.approved_root
+        )
+        os.close(fd)
+        staging = Path(staging_name)
+        try:
+            download.save_as(str(staging))
+            try:
+                os.link(staging, destination)
+            except FileExistsError as exc:
+                raise UnsupportedInteractionError(
+                    "download destination already exists"
+                ) from exc
+            self.saved.append(destination)
+        finally:
+            staging.unlink(missing_ok=True)
 
 
 @dataclass(slots=True)
