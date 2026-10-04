@@ -24,6 +24,7 @@ def _queue(tmp_path: Path) -> tuple[SQLiteStore, TaskQueue]:
     [
         pytest.param("[]", id="array"),
         pytest.param("null", id="null"),
+        pytest.param("[" * 3000 + "0" + "]" * 3000, id="deeply-nested"),
         pytest.param('"not-a-command"', id="scalar-string"),
         pytest.param('{"command":', id="broken-json"),
         pytest.param('{"command":"first","command":"second"}', id="duplicate"),
