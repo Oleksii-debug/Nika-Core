@@ -352,3 +352,42 @@ def test_reused_mutated_control_carrier_is_fenced_before_effect(tmp_path: Path) 
         )
     assert adapter.act_calls == 0
     assert ledger.reserved is False
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ControlNode("save", "button", "Save", enabled=False),
+        ControlNode("save", "button", "Save", visible=False),
+        ControlNode("save", "button", "Save", value="unexpected"),
+        ControlNode("replacement", "button", "Save"),
+    ],
+)
+def test_focus_transition_cannot_redirect_or_disable_the_action(
+    tmp_path: Path, changed: ControlNode
+) -> None:
+    save = ControlNode("save", "button", "Save")
+
+    class ChangingFocusAdapter(FakeAdapter):
+        def focus(self, node: ControlNode) -> None:
+            super().focus(node)
+            self.snapshots.append(_snapshot(changed))
+
+    adapter = ChangingFocusAdapter([_snapshot(save), _snapshot(save)])
+    with pytest.raises(StaleSnapshotError):
+        _coordinator(tmp_path, adapter, FakeLedger()).execute(_request())
+    assert adapter.act_calls == 0
+
+
+def test_focus_navigation_rejects_stale_target_before_effect(tmp_path: Path) -> None:
+    save = ControlNode("save", "button", "Save")
+
+    class NavigatingFocusAdapter(FakeAdapter):
+        def focus(self, node: ControlNode) -> None:
+            super().focus(node)
+            self.snapshots.append(_snapshot(save, generation=2))
+
+    adapter = NavigatingFocusAdapter([_snapshot(save), _snapshot(save)])
+    with pytest.raises(StaleSnapshotError, match="changed after focus"):
+        _coordinator(tmp_path, adapter, FakeLedger()).execute(_request())
+    assert adapter.act_calls == 0
