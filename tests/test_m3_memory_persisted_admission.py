@@ -59,6 +59,41 @@ def test_corrupt_stored_json_is_not_rehydrated(
         memory.list_namespace(scope=MemoryScope.TASK, owner_id="owner", namespace="scratch")
 
 
+@pytest.mark.parametrize(
+    "stored",
+    [
+        '"\\ud800"',
+        '"\\udfff"',
+        '{"\\ud800": true}',
+        '{"nested": ["\\udfff"]}',
+    ],
+)
+def test_unpaired_surrogate_is_not_restored(tmp_path: Path, stored: str) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET value_json = ? WHERE memory_key = 'entry'",
+            (stored,),
+        )
+    with pytest.raises(ValueError, match="invalid Unicode"):
+        memory.get(scope=MemoryScope.TASK, owner_id="owner", namespace="scratch", key="entry")
+
+
+def test_valid_unicode_escape_pair_is_preserved(tmp_path: Path) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET value_json = ? WHERE memory_key = 'entry'",
+            ('"\\ud83d\\ude00"',),
+        )
+    record = memory.get(
+        scope=MemoryScope.TASK, owner_id="owner", namespace="scratch", key="entry"
+    )
+    assert record is not None and record.value == "😀"
+
+
 def test_non_text_json_blob_is_rejected_before_rehydration(tmp_path: Path) -> None:
     store, memory = _memory(tmp_path)
     _put(memory)
