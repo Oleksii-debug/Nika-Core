@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from collections.abc import Mapping
 
 import pytest
 
@@ -111,3 +112,43 @@ def test_invalid_arguments_cannot_turn_host_policy_into_tool_execution() -> None
     result = asyncio.run(executor.execute(call))
     assert result.error == "approval required"
     assert called == 0
+
+
+class CrashingMapping(Mapping[str, object]):
+    def __getitem__(self, key: str) -> object:
+        raise RuntimeError("untrusted mapping lookup")
+
+    def __iter__(self):
+        raise RuntimeError("untrusted mapping iteration")
+
+    def __len__(self) -> int:
+        return 1
+
+
+def test_hostile_mapping_is_denied_by_all_direct_tool_boundaries() -> None:
+    arguments = CrashingMapping()
+    with pytest.raises(ValueError, match="deterministic JSON-compatible"):
+        tool_arguments_fingerprint(arguments)
+
+    call = ToolCall(
+        call_id="call-1", tool_id="external.test", task_id="task-1",
+        arguments=arguments,  # type: ignore[arg-type] - untrusted runtime carrier
+    )
+    assert not _authorization().matches(spec=_spec(), call=call)
+    with pytest.raises(ValueError, match="durable tool arguments"):
+        ToolEffectGuard._fingerprint(spec=_spec(), call=call)
+
+
+@pytest.mark.parametrize("kind", ("cycle", "width"))
+def test_guard_rejects_invalid_arguments_without_reserving_an_effect(kind: str) -> None:
+    class ReservationTrap:
+        def reserve_once(self, **_kwargs: object) -> None:
+            pytest.fail("the ledger must not be reached before argument admission")
+
+    guard = ToolEffectGuard(ReservationTrap())  # type: ignore[arg-type]
+    call = ToolCall(
+        call_id="call-1", tool_id="external.test", task_id="task-1",
+        arguments=_invalid_arguments(kind),
+    )
+    with pytest.raises(ValueError, match="durable tool arguments"):
+        guard.reserve(spec=_spec(), call=call)
