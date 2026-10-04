@@ -268,7 +268,7 @@ def _payload_digest(payload: Mapping[str, object]) -> str:
             if encoded_size > _MAX_RESULT_JSON_BYTES:
                 raise SourceResultBindingError("result evidence exceeds maximum JSON size")
             digest.update(encoded_chunk)
-    except (TypeError, ValueError, OverflowError) as exc:
+    except (TypeError, ValueError, OverflowError, RecursionError) as exc:
         if isinstance(exc, SourceResultBindingError):
             raise
         raise SourceResultBindingError("result evidence must be canonical JSON") from exc
