@@ -154,3 +154,33 @@ def test_stable_temperature_setting_still_completes() -> None:
     assert response.text == "готово"
     assert response.model == "approved-alias"
     assert model.chat_calls == 1
+
+
+def test_async_cancellation_during_client_creation_prevents_delayed_chat() -> None:
+    entered = Event()
+    release = Event()
+    model = _Model()
+
+    def blocked_client() -> None:
+        entered.set()
+        assert release.wait(5.0)
+
+    model.on_client = blocked_client
+    provider = _provider(model)
+
+    async def exercise() -> None:
+        task = asyncio.create_task(provider.complete(_request()))
+        try:
+            assert await asyncio.to_thread(entered.wait, 1.5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            release.set()
+        # The native worker must finish before its deferred lock release.
+        await asyncio.wait_for(provider._inference_lock.acquire(), timeout=2.0)
+        provider._inference_lock.release()
+
+    asyncio.run(exercise())
+    assert model.client_calls == 1
+    assert model.chat_calls == 0
