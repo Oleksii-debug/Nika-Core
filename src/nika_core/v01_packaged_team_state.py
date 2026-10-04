@@ -100,9 +100,13 @@ class V01PackagedTeamStateProvider:
             "SELECT handoff_id, recipient_id, payload_json, created_at "
             "FROM multi_agent_handoffs "
             "WHERE team_id = ? AND kind = 'task' "
-            "ORDER BY created_at, handoff_id",
+            "ORDER BY created_at, handoff_id LIMIT 4",
             (team_id,),
         ).fetchall()
+        # A packaged team has at most three task assignments, including the
+        # optional root task. Reject surplus history before decoding any payload.
+        if len(task_rows) > 3:
+            raise ValueError("excess V0.1 team task handoffs")
 
         stage_by_member: dict[str, str] = {}
         task_payload_by_member: dict[str, dict[str, Any]] = {}
