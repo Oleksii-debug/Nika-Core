@@ -152,3 +152,40 @@ def test_duplicate_restore_marker_field_fails_before_effects(
         manager.recover_interrupted_restore()
     assert _digest(target) == before_sha
     assert marker_path.exists()
+
+
+@pytest.mark.parametrize("kind", ["backup", "marker"])
+def test_recovery_metadata_size_is_bounded_even_with_json_whitespace(
+    tmp_path: Path, kind: str
+) -> None:
+    target = tmp_path / "live.db"
+    manager = _manager(target)
+    original_sha = _digest(target)
+    if kind == "backup":
+        artifact = manager.create_backup(tmp_path / "backup.sqlite3", record_audit=False)
+        metadata = json.loads(artifact.manifest_path.read_text(encoding="utf-8"))
+        path = artifact.manifest_path
+    else:
+        metadata = _marker(manager, target)
+        path = manager._restore_marker_path(target)
+    path.write_text(json.dumps(metadata) + " " * 65_537, encoding="utf-8")
+
+    with pytest.raises(BackupVerificationError, match="JSON recovery metadata"):
+        if kind == "backup":
+            manager.verify_backup(artifact.database_path)
+        else:
+            manager._read_restore_marker(path, target)
+    assert _digest(target) == original_sha
+
+
+def test_deeply_nested_restore_metadata_is_a_typed_failure(tmp_path: Path) -> None:
+    target = tmp_path / "live.db"
+    manager = _manager(target)
+    original_sha = _digest(target)
+    marker_path = manager._restore_marker_path(target)
+    marker_path.write_text("[" * 1_500 + "0" + "]" * 1_500, encoding="utf-8")
+
+    with pytest.raises(BackupVerificationError, match="JSON recovery metadata"):
+        manager.recover_interrupted_restore()
+    assert _digest(target) == original_sha
+    assert marker_path.exists()
