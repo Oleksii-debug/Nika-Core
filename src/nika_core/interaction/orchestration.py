@@ -210,15 +210,25 @@ class SemanticInteractionCoordinator:
         focus_before = self.adapter.capture_focus()
         action_started = False
         try:
+            pre_focus_node = replace(current_node, attributes=tuple(current_node.attributes))
             self.adapter.focus(current_node)
             focused = self.adapter.capture_focus()
             if focused != current_node.node_id:
                 raise StaleSnapshotError("Semantic target did not receive verified focus")
 
+            # A focus handler can change the live control or navigate the page.
+            # Re-observe before the effect, without treating focus-only revision
+            # changes as a new action identity.
+            pre_action = self.adapter.observe()
+            if pre_action.target != current.target or pre_action.generation != current.generation:
+                raise StaleSnapshotError("Interaction target changed after focus")
+            action_node = resolve_strict(pre_action, request.locator)
+            validate_action_target(pre_focus_node, action_node)
+
             action_started = True
-            self.adapter.act(current_node, request.action, request.value)
+            self.adapter.act(action_node, request.action, request.value)
             after = self.adapter.observe()
-            if not self.adapter.verify(current, after, current_node, request.action, request.value):
+            if not self.adapter.verify(pre_action, after, action_node, request.action, request.value):
                 if reserved:
                     self.idempotency.mark_uncertain(request.operation_key)
                 raise InteractionUncertainError(
@@ -239,9 +249,9 @@ class SemanticInteractionCoordinator:
                 succeeded=True,
                 action=request.action,
                 evidence=InteractionEvidence(
-                    snapshot_generation=current.generation,
-                    snapshot_revision=current.revision,
-                    matched_node_id=current_node.node_id,
+                    snapshot_generation=pre_action.generation,
+                    snapshot_revision=pre_action.revision,
+                    matched_node_id=action_node.node_id,
                     focus_before=focus_before,
                     focus_after=focus_after,
                     details=(("risk", request.risk.value),),
