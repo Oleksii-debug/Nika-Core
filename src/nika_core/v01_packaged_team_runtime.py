@@ -684,6 +684,17 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             or self._team_id(shared_task_id) != team_id
         ):
             return None
+        # A source member's own stored goal is model input. It must not
+        # silently diverge from the canonical queued/checker instruction.
+        if member_id in {"worker-a", "worker-b"}:
+            expected_goal = self._stored_outer_command(shared_task_id)
+            worker_goal = handoff.get("user_goal")
+            if (
+                not expected_goal
+                or type(worker_goal) is not str
+                or worker_goal.strip() != expected_goal
+            ):
+                return None
         return shared_task_id
 
     @staticmethod
