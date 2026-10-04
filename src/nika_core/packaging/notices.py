@@ -39,7 +39,10 @@ def _python_license() -> str:
     license_file = Path(sys.base_prefix) / "LICENSE.txt"
     if not license_file.exists():
         raise RuntimeError(f"Python runtime license not found: {license_file}")
-    return license_file.read_text(encoding="utf-8", errors="replace").strip()
+    text = _read_notices(license_file)
+    if text is None or not text.strip():
+        raise RuntimeError("Python runtime license evidence is invalid")
+    return text.strip()
 
 
 def _metadata_license(dist: metadata.Distribution) -> str | None:
@@ -65,12 +68,13 @@ def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
             continue
         try:
             path = Path(dist.locate_file(item))
-            if path.is_file():
-                text = path.read_text(encoding="utf-8", errors="replace").strip()
-                if text:
-                    collected.append((str(item).replace("\\", "/"), text))
-        except OSError:
-            continue
+            text = _read_notices(path)
+            if text is None:
+                raise RuntimeError("Runtime distribution license evidence is invalid")
+            if text.strip():
+                collected.append((str(item).replace("\\", "/"), text.strip()))
+        except OSError as exc:
+            raise RuntimeError("Runtime distribution license evidence is unreadable") from exc
     return tuple(sorted(collected))
 
 
