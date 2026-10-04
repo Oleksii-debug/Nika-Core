@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -356,3 +356,105 @@ def test_scale_many_services_remain_independent_across_restart() -> None:
     assert len(provider.deploy_calls) == 30
     assert len(set(provider.deploy_calls)) == 30
     assert all(restored.get(spec.operation_id).state is OperationState.SUCCEEDED for spec in specs)
+
+
+@pytest.mark.parametrize("elapsed_seconds", [300, 301])
+def test_expired_node_lease_blocks_provider_and_allows_fresh_retry(
+    elapsed_seconds: int,
+) -> None:
+    coordinator, _, provider, _ = _coordinator()
+    spec = replace(
+        _spec("project-a", "messages"),
+        credential_ttl_seconds=600,
+        node_lease_seconds=300,
+    )
+    coordinator.submit(spec, now=NOW)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    later = NOW + timedelta(seconds=elapsed_seconds)
+
+    waiting = coordinator.complete(spec.operation_id, now=later)
+    assert waiting.state is OperationState.WAITING_FOR_NODE
+    assert waiting.node_id is None
+    assert provider.deploy_calls == []
+    assert coordinator.nodes.snapshot().leases == ()
+
+    assert coordinator.retry(spec.operation_id, now=later).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=later).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [spec.intent.intent_id]
+
+
+def test_reassigned_node_lease_is_not_released_by_stale_completion() -> None:
+    coordinator, _, provider, _ = _coordinator()
+    first = _spec("project-a", "messages")
+    second = _spec("project-a", "profiles", SHA2)
+    coordinator.submit(first, now=NOW)
+    assert coordinator.prepare(first.operation_id, now=NOW).state is OperationState.PREPARED
+
+    later = NOW + timedelta(seconds=301)
+    successor_lease = coordinator.nodes.acquire(second.request, now=later)
+    assert successor_lease.node_id == "local-linux"
+
+    stale = coordinator.complete(first.operation_id, now=later)
+    assert stale.state is OperationState.WAITING_FOR_NODE
+    assert provider.deploy_calls == []
+    assert coordinator.nodes.snapshot().leases == (successor_lease,)
+    assert not coordinator.nodes.is_active_for(successor_lease, first.request, now=later)
+    assert coordinator.nodes.is_active_for(successor_lease, second.request, now=later)
+
+    coordinator.nodes.release(successor_lease.lease_id)
+    assert coordinator.retry(first.operation_id, now=later).state is OperationState.PREPARED
+    assert coordinator.complete(first.operation_id, now=later).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [first.intent.intent_id]
+
+
+def test_disabled_node_blocks_prepared_deployment_before_provider() -> None:
+    coordinator, _, provider, _ = _coordinator()
+    spec = _spec("project-a", "messages")
+    coordinator.submit(spec, now=NOW)
+    assert coordinator.prepare(spec.operation_id, now=NOW).state is OperationState.PREPARED
+
+    coordinator.nodes.register(replace(local_linux_node(), enabled=False))
+    waiting = coordinator.complete(spec.operation_id, now=NOW)
+    assert waiting.state is OperationState.WAITING_FOR_NODE
+    assert waiting.node_id is None
+    assert provider.deploy_calls == []
+
+    coordinator.nodes.register(local_linux_node())
+    assert coordinator.retry(spec.operation_id, now=NOW).state is OperationState.PREPARED
+    assert coordinator.complete(spec.operation_id, now=NOW).state is OperationState.SUCCEEDED
+    assert provider.deploy_calls == [spec.intent.intent_id]
+
+
+def test_node_reassignment_during_health_probe_is_fenced_before_provider() -> None:
+    @dataclass
+    class ReassigningHealth(FakeNodeHealth):
+        coordinator: DeploymentExecutionCoordinator | None = None
+        foreign_request: ExecutionRequest | None = None
+        probes: int = 0
+
+        def is_available(self, node_id: str) -> bool:
+            assert node_id
+            self.probes += 1
+            if self.probes == 2:
+                assert self.coordinator is not None
+                assert self.foreign_request is not None
+                original = self.coordinator.nodes.snapshot().leases[0]
+                self.coordinator.nodes.release(original.lease_id)
+                self.coordinator.nodes.acquire(self.foreign_request, now=NOW)
+            return True
+
+    health = ReassigningHealth()
+    coordinator, _, provider, _ = _coordinator(health=health)
+    first = _spec("project-a", "messages")
+    second = _spec("project-a", "profiles", SHA2)
+    health.coordinator = coordinator
+    health.foreign_request = second.request
+    coordinator.submit(first, now=NOW)
+    assert coordinator.prepare(first.operation_id, now=NOW).state is OperationState.PREPARED
+
+    waiting = coordinator.complete(first.operation_id, now=NOW)
+    assert health.probes == 2
+    assert waiting.state is OperationState.WAITING_FOR_NODE
+    assert provider.deploy_calls == []
+    (foreign_lease,) = coordinator.nodes.snapshot().leases
+    assert coordinator.nodes.is_active_for(foreign_lease, second.request, now=NOW)

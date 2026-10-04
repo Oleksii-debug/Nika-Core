@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -15,6 +15,7 @@ from nika_core.product_factory_deployment import (
     EnvironmentTier,
     ExecutionNode,
     ExecutionNodeRegistry,
+    ExecutionRegistrySnapshot,
     ExecutionRequest,
     HealthEvidence,
     NodeCapabilities,
@@ -323,3 +324,72 @@ def test_release_sha_is_exact_and_lowercase_hex() -> None:
         ReleaseRef("project-1", "1.0.0", "not-a-sha", DIGEST_A)
     with pytest.raises(DeploymentFabricError, match="40-character"):
         ReleaseRef("project-1", "1.0.0", "A" * 40, DIGEST_A)
+
+
+def test_node_restore_rejects_rewound_counter_before_reusing_active_lease() -> None:
+    registry = ExecutionNodeRegistry()
+    registry.register(local_windows_node())
+    request = ExecutionRequest(
+        "project-1",
+        "work-1",
+        Platform.WINDOWS,
+        frozenset(),
+        frozenset({"python"}),
+        ResourceEnvelope(1, 512, 512),
+    )
+    lease = registry.acquire(request, now=NOW)
+    snapshot = registry.snapshot()
+    invalid = replace(snapshot, next_lease=1)
+
+    with pytest.raises(DeploymentFabricError, match="counter collides"):
+        registry.restore(invalid)
+    assert registry.snapshot() == snapshot
+    assert registry.is_active_for(lease, request, now=NOW)
+
+
+@pytest.mark.parametrize(
+    "bad_id",
+    [
+        "lease-1",
+        "lease-00000000",
+        "lease-000000001",
+        "lease-00000001extra",
+        "lease-０００００００１",
+    ],
+)
+def test_node_restore_rejects_noncanonical_lease_ids(bad_id: str) -> None:
+    registry = ExecutionNodeRegistry()
+    registry.register(local_windows_node())
+    lease = registry.acquire(
+        ExecutionRequest(
+            "project-1",
+            "work-1",
+            Platform.WINDOWS,
+            frozenset(),
+            frozenset(),
+            ResourceEnvelope(1, 512, 512),
+        ),
+        now=NOW,
+    )
+    original = registry.snapshot()
+    bad_snapshot = ExecutionRegistrySnapshot(
+        original.nodes,
+        (replace(lease, lease_id=bad_id),),
+        original.next_lease,
+    )
+
+    with pytest.raises(DeploymentFabricError, match="lease id is not canonical"):
+        registry.restore(bad_snapshot)
+    assert registry.snapshot() == original
+
+
+@pytest.mark.parametrize("bad_counter", [True, 1.5, "2", 0])
+def test_node_restore_rejects_noninteger_or_zero_counter(bad_counter: object) -> None:
+    registry = ExecutionNodeRegistry()
+    registry.register(local_windows_node())
+    original = registry.snapshot()
+    bad_snapshot = ExecutionRegistrySnapshot(original.nodes, (), bad_counter)
+
+    with pytest.raises(DeploymentFabricError, match="counter is invalid"):
+        registry.restore(bad_snapshot)
+    assert registry.snapshot() == original

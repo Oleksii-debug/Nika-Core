@@ -170,6 +170,26 @@ class ExecutionNodeRegistry:
         if self._leases.pop(lease_id, None) is None:
             raise DeploymentFabricError("unknown work lease")
 
+    def is_active_for(
+        self,
+        lease: WorkLease,
+        request: ExecutionRequest,
+        *,
+        now: datetime | None = None,
+    ) -> bool:
+        """Check the actual lease owner and live node before an external effect."""
+
+        instant = _aware(now or datetime.now(UTC))
+        node = self._nodes.get(lease.node_id)
+        return (
+            self._leases.get(lease.lease_id) == lease
+            and lease.issued_at <= instant < lease.expires_at
+            and lease.project_id == request.project_id
+            and lease.work_id == request.work_id
+            and node is not None
+            and self._matches(node, request)
+        )
+
     def snapshot(self) -> ExecutionRegistrySnapshot:
         return ExecutionRegistrySnapshot(
             tuple(self._nodes[key] for key in sorted(self._nodes)),
@@ -198,8 +218,22 @@ class ExecutionNodeRegistry:
             expires_at = _aware(lease.expires_at)
             if expires_at <= issued_at:
                 raise DeploymentFabricError("snapshot lease expiry must be after issue time")
-        if snapshot.next_lease < 1:
+        if type(snapshot.next_lease) is not int or snapshot.next_lease < 1:
             raise DeploymentFabricError("snapshot next lease counter is invalid")
+        for lease in snapshot.leases:
+            suffix = lease.lease_id.removeprefix("lease-")
+            if (
+                not lease.lease_id.startswith("lease-")
+                or not suffix.isascii()
+                or not suffix.isdecimal()
+                or len(suffix) > 32
+            ):
+                raise DeploymentFabricError("snapshot lease id is not canonical")
+            sequence = int(suffix)
+            if sequence < 1 or lease.lease_id != f"lease-{sequence:08d}":
+                raise DeploymentFabricError("snapshot lease id is not canonical")
+            if sequence >= snapshot.next_lease:
+                raise DeploymentFabricError("snapshot lease counter collides with active lease")
         self._nodes = {node.identity.node_id: node for node in snapshot.nodes}
         self._leases = {lease.lease_id: lease for lease in snapshot.leases}
         self._next_lease = snapshot.next_lease
