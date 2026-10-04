@@ -135,7 +135,20 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
             outputs.append(payload)
 
     first, second = outputs
-    if _proof_identity(first) != _proof_identity(second):
+    # The first run starts with a fresh isolated DB; the second must actually
+    # observe its persisted selection before dispatch, not re-create it.
+    for attempt, payload in enumerate(outputs, start=1):
+        if payload.get("selection_before_command") not in ("absent", "restored"):
+            raise RuntimeError(
+                f"packaged PF11 proof lacks pre-command selection for attempt {attempt}"
+            )
+    if first["selection_before_command"] != "absent":
+        raise RuntimeError("packaged PF11 first run did not start without a selection")
+    if second["selection_before_command"] != "restored":
+        raise RuntimeError("packaged PF11 restart did not restore pre-command selection")
+    first_stable = {key: value for key, value in first.items() if key != "selection_before_command"}
+    second_stable = {key: value for key, value in second.items() if key != "selection_before_command"}
+    if _proof_identity(first_stable) != _proof_identity(second_stable):
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
     project_id = first.get("project_id")
     if (
@@ -181,6 +194,8 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         "bridge_state_decision_count": decision_count,
         "packaged_executable_proven": True,
         "restart_replay_proven": True,
+        "first_run_selection_absent": True,
+        "second_run_selection_restored": True,
         "human_tested": False,
         "nvda_verified": False,
         "production_release_ready": False,
