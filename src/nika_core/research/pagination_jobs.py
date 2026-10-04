@@ -50,10 +50,19 @@ def _policy_from_payload(payload: object) -> PaginationPolicy:
     fields = payload.get("json_next_fields")
     if not isinstance(fields, list) or not all(isinstance(item, str) for item in fields):
         raise TypeError("pagination json_next_fields payload is invalid")
+    max_pages = payload.get("max_pages", 50)
+    max_links = payload.get("max_discovered_links_per_page", 8)
+    same_origin_only = payload.get("same_origin_only", True)
+    if (
+        type(max_pages) is not int
+        or type(max_links) is not int
+        or type(same_origin_only) is not bool
+    ):
+        raise TypeError("pagination policy scalar fields are invalid")
     return PaginationPolicy(
-        max_pages=int(payload.get("max_pages", 50)),
-        max_discovered_links_per_page=int(payload.get("max_discovered_links_per_page", 8)),
-        same_origin_only=bool(payload.get("same_origin_only", True)),
+        max_pages=max_pages,
+        max_discovered_links_per_page=max_links,
+        same_origin_only=same_origin_only,
         json_next_fields=tuple(fields),
     )
 
@@ -161,9 +170,28 @@ class PaginatedResearchRefreshService:
                 raise ValueError("paginated Research checkpoint source belongs to another workspace")
             if position > 0 and item.source_id != _page_source_id(root_source_id, source.url):
                 raise ValueError("paginated Research checkpoint page source identity is invalid")
-            # Processed pages can have a redirected final URL; queued pages must
-            # retain their registered fetch URL, not an arbitrary checkpoint URL.
-            if position >= next_index and item.url != source.url:
+            # A completed page may use its registered URL or a recorded redirect.
+            # An older redirect can remain valid after another refresh changes the
+            # source's current final URL. Bind historical evidence to this task.
+            if position < next_index and item.url not in {source.url, source.final_url}:
+                with self._network._store.connection() as conn:
+                    recorded = conn.execute(
+                        """SELECT 1 FROM research_http_attempts
+                        WHERE task_id=? AND source_id=? AND final_url=?
+                        AND disposition IN (?, ?, ?)
+                        LIMIT 1""",
+                        (
+                            task_id,
+                            item.source_id,
+                            item.url,
+                            RefreshDisposition.CHANGED.value,
+                            RefreshDisposition.UNCHANGED.value,
+                            RefreshDisposition.NOT_MODIFIED.value,
+                        ),
+                    ).fetchone()
+                if recorded is None:
+                    raise ValueError("paginated Research checkpoint processed URL changed")
+            elif position >= next_index and item.url != source.url:
                 raise ValueError("paginated Research checkpoint pending URL changed")
         return frontier, next_index, *counts
 

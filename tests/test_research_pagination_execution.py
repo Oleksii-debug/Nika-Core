@@ -17,12 +17,14 @@ from nika_core.research import (
     NetworkResearchRepository,
     PaginatedResearchRefreshService,
     PaginationPolicy,
+    RefreshDisposition,
     ResearchRepository,
     ResearchWorkspace,
     SourceKind,
     SourceSpec,
     discover_html_pagination,
 )
+from nika_core.research.pagination_jobs import _policy_from_payload
 
 PUBLIC_IP = "93.184.216.34"
 
@@ -410,3 +412,194 @@ def test_source_reassigned_to_another_workspace_cannot_run_old_task(
         paginated.run(task_id)
     assert requested == []
     assert TaskQueue(store).get(task_id).state.value.casefold() == "ready"
+
+
+def test_processed_checkpoint_url_tampering_cannot_complete_a_job(
+    tmp_path: Path,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, _, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [{"source_id": "root", "url": "https://other.example/spoof"}],
+            "next_index": 1,
+            "changed": 1,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="processed URL changed"):
+        paginated.run(task_id)
+    assert TaskQueue(store).get(task_id).state.value.casefold() == "ready"
+    assert requested == []
+
+
+def test_processed_checkpoint_accepts_recorded_final_redirect(
+    tmp_path: Path,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, network, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    network.finalize_source(
+        "root",
+        disposition=RefreshDisposition.CHANGED,
+        final_url="https://example.com/redirected",
+        status_code=200,
+    )
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [{"source_id": "root", "url": "https://example.com/redirected"}],
+            "next_index": 1,
+            "changed": 1,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+
+    summary = paginated.run(task_id)
+    assert summary.state == "completed"
+    assert summary.processed == 1
+    assert requested == []
+
+
+def test_processed_checkpoint_accepts_historical_task_redirect_after_new_refresh(
+    tmp_path: Path,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, network, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    historical_url = "https://example.com/previous-final"
+    network.record_attempt(
+        source_id="root",
+        attempt_number=1,
+        disposition=RefreshDisposition.CHANGED,
+        requested_url="https://example.com/page",
+        final_url=historical_url,
+        status_code=200,
+        error_code=None,
+        error_message="",
+        retryable=False,
+        task_id=task_id,
+    )
+    network.finalize_source(
+        "root",
+        disposition=RefreshDisposition.CHANGED,
+        final_url="https://example.com/new-final",
+        status_code=200,
+    )
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [{"source_id": "root", "url": historical_url}],
+            "next_index": 1,
+            "changed": 1,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+
+    summary = paginated.run(task_id)
+    assert summary.state == "completed"
+    assert summary.processed == 1
+    assert requested == []
+
+
+@pytest.mark.parametrize(
+    ("same_task", "disposition"),
+    [(False, RefreshDisposition.CHANGED), (True, RefreshDisposition.FAILED)],
+)
+def test_processed_checkpoint_rejects_other_task_or_failed_redirect_evidence(
+    tmp_path: Path,
+    same_task: bool,
+    disposition: RefreshDisposition,
+) -> None:
+    requested: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requested.append(request.url.path)
+        return httpx.Response(200, content=b"unexpected network request")
+
+    store, network, web, paginated = _stack(tmp_path, handler)
+    _register_root(web)
+    task_id = paginated.create_job(root_source_id="root")
+    evidence_task_id = task_id if same_task else paginated.create_job(root_source_id="root")
+    historical_url = "https://example.com/untrusted-final"
+    network.record_attempt(
+        source_id="root",
+        attempt_number=1,
+        disposition=disposition,
+        requested_url="https://example.com/page",
+        final_url=historical_url,
+        status_code=200 if disposition is RefreshDisposition.CHANGED else 500,
+        error_code=None,
+        error_message="",
+        retryable=False,
+        task_id=evidence_task_id,
+    )
+    CheckpointService(store).save(
+        task_id=task_id,
+        stage=paginated.CHECKPOINT_STAGE,
+        payload={
+            "frontier": [{"source_id": "root", "url": historical_url}],
+            "next_index": 1,
+            "changed": 1,
+            "unchanged": 0,
+            "failed": 0,
+        },
+    )
+
+    with pytest.raises(ValueError, match="processed URL changed"):
+        paginated.run(task_id)
+    assert TaskQueue(store).get(task_id).state.value.casefold() == "ready"
+    assert requested == []
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("max_pages", "2"),
+        ("max_pages", True),
+        ("max_discovered_links_per_page", "8"),
+        ("max_discovered_links_per_page", 1.5),
+        ("same_origin_only", "false"),
+        ("same_origin_only", 0),
+    ],
+)
+def test_persisted_pagination_policy_rejects_lossy_scalar_coercion(
+    field: str, invalid: object,
+) -> None:
+    payload: dict[str, object] = {
+        "max_pages": 2,
+        "max_discovered_links_per_page": 8,
+        "same_origin_only": False,
+        "json_next_fields": ["next"],
+    }
+    assert _policy_from_payload(payload).same_origin_only is False
+    payload[field] = invalid
+    with pytest.raises(TypeError, match="policy scalar fields"):
+        _policy_from_payload(payload)
