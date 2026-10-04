@@ -65,5 +65,10 @@ def validate_action_target(expected: ControlNode, current: ControlNode) -> None:
         or expected.attributes != current.attributes
     ):
         raise StaleSnapshotError("Semantic action target changed; re-observation is required")
-    if not expected.enabled or not current.enabled or not expected.visible or not current.visible:
+    if (
+        expected.enabled is not True
+        or current.enabled is not True
+        or expected.visible is not True
+        or current.visible is not True
+    ):
         raise StaleSnapshotError("Semantic action target is disabled or hidden")
