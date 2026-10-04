@@ -78,6 +78,7 @@ def test_valid_packaged_proof_preserves_restart_evidence(
     assert attempts == 2
     proof = json.loads(path.read_text(encoding="utf-8"))
     assert proof["source_sha"] == SOURCE_SHA
+    assert proof["product_project_id"] == valid["project_id"]
     assert proof["restart_replay_proven"] is True
     assert proof["human_tested"] is False
     assert proof["nvda_verified"] is False
