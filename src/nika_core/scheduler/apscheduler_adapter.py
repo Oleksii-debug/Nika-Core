@@ -241,8 +241,15 @@ class APSchedulerAdapter(SchedulerPort):
                 return
         job = self._jobs.get(job_id)
         if job is None or not job.enabled:
+            # Cross-process disable/delete may leave an obsolete live trigger.
+            if self._started or self._starting:
+                self._sync_runtime_job(job_id)
             return
         if installed_job is not None and job != installed_job:
+            # A stale occurrence is never authorized to run, but may be the
+            # only wakeup available to install the durable successor trigger.
+            if self._started or self._starting:
+                self._sync_runtime_job(job_id)
             return
         if not self._task_authority_allows(job):
             if self._started or self._starting:
