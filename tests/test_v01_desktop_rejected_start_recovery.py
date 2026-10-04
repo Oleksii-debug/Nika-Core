@@ -237,6 +237,7 @@ def test_running_task_failure_still_uses_failed_not_paused(tmp_path: Path) -> No
     assert "PRIVATE_EXECUTION_FAILURE" not in str(events)
     backend.close()
 
+
 def test_cancelled_before_runtime_start_is_durable_and_manually_recoverable(
     tmp_path: Path,
 ) -> None:
