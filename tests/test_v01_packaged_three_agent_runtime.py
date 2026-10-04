@@ -10,6 +10,7 @@ import pytest
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
+from nika_core.multi_agent import SourceInspectionAssignment
 from nika_core.runtime.contracts import (
     RuntimeOutcome,
     RuntimeRequest,
@@ -872,3 +873,72 @@ def test_packaged_checker_rejects_surplus_inbound_before_decode_or_model(
         assert result.outcome is RuntimeOutcome.FAILED
         assert decoded_surplus == []
         assert _result_count(store) == previous_results
+
+
+@pytest.mark.parametrize("assignment_count", (0, 1, 3, 64))
+def test_packaged_checker_rejects_invalid_assignment_count_before_conversion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, assignment_count: int
+) -> None:
+    store, runtime = _configured_runtime(tmp_path)
+    command = "Compare the two declared local sources."
+    task_id = _created_task(store, command)
+    first = asyncio.run(
+        runtime.run(
+            RuntimeRequest(
+                task_id=task_id,
+                thread_id=f"desktop-{task_id}",
+                payload={"command": command},
+            )
+        )
+    )
+    assert first.outcome is RuntimeOutcome.COMPLETED
+    before = _result_count(store)
+    team_id = runtime._team_id(task_id)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT handoff_id, payload_json FROM multi_agent_handoffs "
+            "WHERE team_id = ? AND recipient_id = 'checker' AND kind = 'task' "
+            "LIMIT 1",
+            (team_id,),
+        ).fetchone()
+        assert row is not None
+        handoff = json.loads(row["payload_json"])
+        original_assignments = handoff["source_assignments"]
+        assert len(original_assignments) == 2
+        handoff["source_assignments"] = (
+            original_assignments * (assignment_count // 2 + 1)
+        )[:assignment_count]
+        conn.execute(
+            "UPDATE multi_agent_handoffs SET payload_json = ? WHERE handoff_id = ?",
+            (json.dumps(handoff, ensure_ascii=False), row["handoff_id"]),
+        )
+
+    real_parse = SourceInspectionAssignment.from_payload
+    parsed: list[int] = []
+
+    def counted_parse(payload: object):
+        parsed.append(1)
+        return real_parse(payload)
+
+    monkeypatch.setattr(SourceInspectionAssignment, "from_payload", staticmethod(counted_parse))
+    member_task_id = f"team:{team_id}:checker"
+    member_thread = f"v01:{team_id}:checker"
+    for current in (
+        runtime,
+        V01PackagedThreeAgentRuntime(
+            store=SQLiteStore(store.path),
+            config=AppConfig(database_path=store.path),
+        ),
+    ):
+        result = asyncio.run(
+            current.run(
+                RuntimeRequest(
+                    task_id=member_task_id,
+                    thread_id=member_thread,
+                    payload={},
+                )
+            )
+        )
+        assert result.outcome is RuntimeOutcome.FAILED
+        assert parsed == []
+        assert _result_count(store) == before
