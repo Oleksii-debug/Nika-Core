@@ -90,17 +90,17 @@ class ToolAuthorization:
 
     def matches(self, *, spec: ToolSpec, call: ToolCall) -> bool:
         try:
-            _snapshot_tool_authorization(self)
+            admitted = _snapshot_tool_authorization(self)
         except (TypeError, ValueError):
             return False
         if not (
-            self.tool_id == spec.tool_id == call.tool_id
-            and self.task_id == call.task_id
-            and self.risk is spec.risk
+            admitted.tool_id == spec.tool_id == call.tool_id
+            and admitted.task_id == call.task_id
+            and admitted.risk is spec.risk
         ):
             return False
         try:
-            return self.arguments_fingerprint == tool_arguments_fingerprint(call.arguments)
+            return admitted.arguments_fingerprint == tool_arguments_fingerprint(call.arguments)
         except (TypeError, ValueError):
             # Malformed model/tool arguments are never affirmative authorization.
             return False
