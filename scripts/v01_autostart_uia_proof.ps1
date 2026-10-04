@@ -24,6 +24,12 @@ $serverScript = Join-Path $qaRoot 'ollama_loopback.py'
 $readyPath = Join-Path $qaRoot 'ready.txt'
 $requestLog = Join-Path $qaRoot 'requests.jsonl'
 $qaServer = $null
+$previousResultCanary = [System.Environment]::GetEnvironmentVariable(
+    'NIKA_UIA_MODEL_RESULT_CANARY',
+    'Process'
+)
+$resultCanary = 'NIKA_UIA_MODEL_RESULT_' + [guid]::NewGuid().ToString('N')
+
 
 function Assert-SelectedModelRequests {
     if (-not (Test-Path -LiteralPath $requestLog)) {
@@ -65,6 +71,7 @@ $serverSource = @'
 from __future__ import annotations
 
 import json
+import re
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -72,6 +79,9 @@ from pathlib import Path
 
 READY = Path(sys.argv[1])
 REQUESTS = Path(sys.argv[2])
+RESULT_TEXT = sys.argv[3]
+if re.fullmatch(r"NIKA_UIA_MODEL_RESULT_[0-9a-f]{32}", RESULT_TEXT) is None:
+    raise SystemExit("invalid UIA model-result canary")
 LOCK = threading.Lock()
 MAX_BODY_BYTES = 2_000_000
 
@@ -108,7 +118,7 @@ class Handler(BaseHTTPRequestHandler):
                 "model": payload.get("model"),
                 "message": {
                     "role": "assistant",
-                    "content": "controlled loopback response",
+                    "content": RESULT_TEXT,
                 },
                 "done": True,
                 "prompt_eval_count": 1,
@@ -136,6 +146,8 @@ server.serve_forever(poll_interval=0.1)
 $serverSource | Set-Content -LiteralPath $serverScript -Encoding utf8
 
 try {
+    $env:NIKA_UIA_MODEL_RESULT_CANARY = $resultCanary
+
     # Own the exact loopback port before launching Nika. If anything else (including
     # physical Ollama) already owns it, the QA server exits and this proof fails
     # closed rather than sending controlled source text to a foreign process.
@@ -143,7 +155,8 @@ try {
     $qaServer = Start-Process -FilePath $python -ArgumentList @(
         "`"$serverScript`"",
         "`"$readyPath`"",
-        "`"$requestLog`""
+        "`"$requestLog`"",
+        "`"$resultCanary`""
     ) -PassThru -WindowStyle Hidden
     $readyDeadline = [DateTime]::UtcNow.AddSeconds(10)
     while (-not (Test-Path -LiteralPath $readyPath)) {
@@ -253,6 +266,12 @@ try {
     if (Test-Path -LiteralPath $qaRoot) {
         Remove-Item -LiteralPath $qaRoot -Recurse -Force -ErrorAction SilentlyContinue
     }
+    [System.Environment]::SetEnvironmentVariable(
+        'NIKA_UIA_MODEL_RESULT_CANARY',
+        $previousResultCanary,
+        'Process'
+    )
+
 
     # Remove only our exact test-owned value if a later phase failed. Preserve any
     # concurrently replaced registration; never delete the Run key or other values.
