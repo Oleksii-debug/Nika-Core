@@ -153,7 +153,11 @@ class DesktopBackend:
             payload=task_payload,
         )
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except BaseException:
+            self._preserve_rejected_start(record.task_id)
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -234,7 +238,11 @@ class DesktopBackend:
         if not command:
             raise ValueError("Збережене завдання не містить команди для безпечного запуску.")
         self._queue.transition(record.task_id, TaskState.READY)
-        self._schedule_start(record.task_id, command)
+        try:
+            self._schedule_start(record.task_id, command)
+        except BaseException:
+            self._preserve_rejected_start(record.task_id)
+            raise
         return UIResult(
             request_id="desktop-handler",
             status="accepted",
@@ -630,6 +638,26 @@ class DesktopBackend:
                 type(exc).__name__,
             )
 
+    def _preserve_rejected_start(self, task_id: str) -> None:
+        """Keep an unsubmitted READY task available for explicit manual resume.
+
+        The caller holds _active_lock. Never turn a host rejection into an
+        implicit retry or hide the original submission exception.
+        """
+        try:
+            tracked = self._active_futures.get(task_id)
+            if (
+                (tracked is None or tracked.done())
+                and self._queue.get(task_id).state is TaskState.READY
+            ):
+                self._queue.transition(task_id, TaskState.PAUSED)
+            self._record_background_failure(task_id, "desktop.runtime_submission_failed")
+        except BaseException as exc:
+            _LOGGER.error(
+                "Desktop rejected-start reconciliation failed; exception_type=%s",
+                type(exc).__name__,
+            )
+
     def _schedule_start(self, task_id: str, command: str) -> None:
         thread_id = f"desktop-{task_id}"
         self._submit_runtime(
@@ -738,6 +766,10 @@ class DesktopBackend:
                 current = self._queue.get(task_id)
                 if current.state == TaskState.RUNNING:
                     self._queue.transition(task_id, TaskState.FAILED)
+                elif current.state == TaskState.READY:
+                    # Failure before the runtime acquired RUNNING must not strand READY.
+                    # An explicit manual resume is safer than an implicit replay.
+                    self._queue.transition(task_id, TaskState.PAUSED)
         self._record_background_failure(task_id, "desktop.runtime_host_failed")
 
     def _record_background_failure(self, task_id: str, event_type: str) -> None:
