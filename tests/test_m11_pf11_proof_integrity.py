@@ -25,6 +25,7 @@ def _valid_proof() -> dict[str, object]:
         "current_command_proven": True,
         "current_command_focus_proven": True,
         "restart_selection_integrity_proven": True,
+        "selection_before_command": "absent",
         "bounded_projection_proven": True,
         "bridge_state_project_id": "project-1",
         "bridge_state_spec_version": 1,
@@ -70,7 +71,9 @@ def test_valid_packaged_proof_preserves_restart_evidence(
 ) -> None:
     valid = _valid_proof()
     first = json.dumps(valid)
-    second = json.dumps(dict(reversed(list(valid.items()))))
+    second = json.dumps(
+        dict(reversed(list({**valid, "selection_before_command": "restored"}.items())))
+    )
     path, attempts = _run_proofs(tmp_path, monkeypatch, first, second)
     assert attempts == 2
     proof = json.loads(path.read_text(encoding="utf-8"))
@@ -84,7 +87,7 @@ def test_bool_int_drift_between_restart_proofs_is_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     first = _valid_proof()
-    second = {**first, "state": True}
+    second = {**first, "state": True, "selection_before_command": "restored"}
     first["state"] = 1
     assert first == second  # The original Python dict equality silently accepted the drift.
     with pytest.raises(RuntimeError, match="restart replay changed"):
@@ -159,7 +162,8 @@ def test_failed_fsync_preserves_previous_pf11_evidence(
 
     monkeypatch.setattr(os, "fsync", fail_fsync)
     with pytest.raises(OSError, match="simulated proof write interruption"):
-        _run_proofs(tmp_path, monkeypatch, valid, valid, existing_evidence=previous)
+        second = json.dumps({**_valid_proof(), "selection_before_command": "restored"})
+        _run_proofs(tmp_path, monkeypatch, valid, second, existing_evidence=previous)
     bundle = tmp_path / "NikaCore"
     assert (bundle / "pf11-packaged-product-journey.json").read_bytes() == previous
     assert not tuple(bundle.glob(".pf11-proof-*.tmp"))
@@ -194,3 +198,34 @@ def test_nontext_or_blank_product_state_fails_closed(
     payload = json.dumps(invalid)
     with pytest.raises(RuntimeError, match="invalid route evidence"):
         _run_proofs(tmp_path, monkeypatch, payload, payload)
+
+@pytest.mark.parametrize(
+    ("first_selection", "second_selection"),
+    [
+        ("absent", "absent"),   # Lost selection and re-created project on restart.
+        ("restored", "restored"),  # First run did not use a clean isolated database.
+        ("restored", "absent"),
+        ("absent", None),  # Missing producer evidence must fail closed.
+        ("absent", True),
+    ],
+)
+def test_restart_proof_requires_observed_pre_command_transition(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_selection: object,
+    second_selection: object,
+) -> None:
+    first = {**_valid_proof(), "selection_before_command": first_selection}
+    second = {**_valid_proof(), "selection_before_command": second_selection}
+    with pytest.raises(RuntimeError, match="pre-command selection|first run|restart did not"):
+        _run_proofs(tmp_path, monkeypatch, json.dumps(first), json.dumps(second))
+    assert not (tmp_path / "NikaCore" / "pf11-packaged-product-journey.json").exists()
+
+
+def test_only_pre_command_selection_may_differ_between_valid_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _valid_proof()
+    second = {**first, "selection_before_command": "restored", "state": "changed"}
+    with pytest.raises(RuntimeError, match="restart replay changed durable identity"):
+        _run_proofs(tmp_path, monkeypatch, json.dumps(first), json.dumps(second))
