@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import sqlite3
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pydantic import ValidationError
+from pydantic_settings import SettingsError
 
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
@@ -453,6 +458,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     except LegacyDatabaseConflict as exc:
         show_recovery_error(str(exc))
         return 1
+    except (ValidationError, SettingsError):
+        # The validation exception can embed paths, endpoint details or env values.
+        # Do not expose it in the windowless packaged entrypoint or start the runtime.
+        show_recovery_error(
+            "Некоректні налаштування Nika (NIKA_*). Перевірте конфігурацію "
+            "та перезапустіть програму. Дані не змінено."
+        )
+        return 1
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
@@ -465,6 +478,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         show_recovery_error(
             "Nika не може безпечно перевірити незавершену роботу після перезапуску. "
             "Запуск зупинено без автоматичного повторення дій."
+        )
+        return 1
+    except (sqlite3.Error, OSError, RuntimeError) as exc:
+        # A corrupt/newer database or inaccessible storage must not show traceback
+        # or its private path in a windowless Windows build.
+        logging.getLogger(__name__).error(
+            "Packaged startup failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося відкрити дані або підготувати запуск Nika. "
+            "Перевірте доступність папки даних; наявну базу не видаляйте."
         )
         return 1
     try:
