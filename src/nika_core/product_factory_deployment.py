@@ -233,7 +233,7 @@ class ExecutionNodeRegistry:
             if sequence < 1 or lease.lease_id != f"lease-{sequence:08d}":
                 raise DeploymentFabricError("snapshot lease id is not canonical")
             if sequence >= snapshot.next_lease:
-                raise DeploymentFabricError("snapshot next lease counter collides with active lease")
+                raise DeploymentFabricError("snapshot lease counter collides with active lease")
         self._nodes = {node.identity.node_id: node for node in snapshot.nodes}
         self._leases = {lease.lease_id: lease for lease in snapshot.leases}
         self._next_lease = snapshot.next_lease
