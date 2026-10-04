@@ -645,3 +645,47 @@ def test_health_probe_cannot_authorize_expired_credential(
     assert sum(
         event.action == "use" for event in credentials.audit_events("project-a")
     ) == 1
+
+def test_prepare_refreshes_credential_clock_after_health_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MutableClock:
+        current = NOW
+
+        @classmethod
+        def now(cls, timezone: object) -> datetime:
+            assert timezone == UTC
+            return cls.current
+
+    @dataclass
+    class SlowHealth(FakeNodeHealth):
+        probes: int = 0
+
+        def is_available(self, node_id: str) -> bool:
+            self.probes += 1
+            if self.probes == 1:
+                MutableClock.current = NOW + timedelta(seconds=2)
+            return super().is_available(node_id)
+
+    health = SlowHealth()
+    coordinator, credentials, provider, _ = _coordinator(health=health)
+    spec = replace(
+        _spec("project-a", "messages"),
+        credential_ttl_seconds=1,
+        node_lease_seconds=300,
+    )
+    coordinator.submit(spec, now=NOW)
+
+    monkeypatch.setattr(execution_module, "datetime", MutableClock)
+    prepared = coordinator.prepare(spec.operation_id)
+    assert prepared.state is OperationState.PREPARED
+    assert prepared.updated_at == NOW + timedelta(seconds=2)
+    preparation_uses = [
+        event for event in credentials.audit_events("project-a") if event.action == "use"
+    ]
+    assert len(preparation_uses) == 1
+    assert preparation_uses[0].at == NOW + timedelta(seconds=2)
+
+    assert coordinator.complete(spec.operation_id).state is OperationState.SUCCEEDED
+    assert health.probes == 2
+    assert provider.deploy_calls == [spec.intent.intent_id]
