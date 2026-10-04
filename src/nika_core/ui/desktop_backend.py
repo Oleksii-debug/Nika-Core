@@ -752,7 +752,22 @@ class DesktopBackend:
             if is_current:
                 self._active_threads.pop(task_id, None)
                 self._active_futures.pop(task_id, None)
-        if future.cancelled() or future.exception() is None:
+        if future.cancelled():
+            # A cancelled host future may never enter the coroutine or RUNNING state.
+            # Keep an unstarted READY task recoverable by explicit user action.
+            # A RUNNING task remains untouched: its side effects may be uncertain.
+            if is_current:
+                with self._active_lock:
+                    if (
+                        task_id not in self._active_futures
+                        and self._queue.get(task_id).state is TaskState.READY
+                    ):
+                        self._queue.transition(task_id, TaskState.PAUSED)
+                        self._record_background_failure(
+                            task_id, "desktop.runtime_host_cancelled_before_start"
+                        )
+            return
+        if future.exception() is None:
             return
         if not is_current:
             # Report the old failure without changing the replacement task's state.
