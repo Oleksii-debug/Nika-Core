@@ -48,13 +48,20 @@ def safe_evidence_reference(reference: str) -> str:
     too large for the public EvidenceReference contract.
     """
 
-    # Percent encoding cannot make a credential-shaped key safe to display.
-    normalized = unquote(reference.strip().casefold())
-    sensitive = any(marker in normalized for marker in _SENSITIVE_REFERENCE_MARKERS)
-    if not sensitive and "://" in reference:
+    # Encoded URL keys and userinfo cannot bypass the public evidence boundary.
+    normalized = reference.strip().casefold()
+    for _ in range(3):
+        decoded = unquote(normalized)
+        if decoded == normalized:
+            break
+        normalized = decoded
+    sensitive = unquote(normalized) != normalized or any(
+        marker in normalized for marker in _SENSITIVE_REFERENCE_MARKERS
+    )
+    if not sensitive and "://" in normalized:
         try:
             # Userinfo may contain a password even without a named token parameter.
-            sensitive = urlsplit(reference).username is not None
+            sensitive = urlsplit(normalized).username is not None
         except ValueError:
             # Malformed authority must not bypass the public evidence boundary.
             sensitive = True
