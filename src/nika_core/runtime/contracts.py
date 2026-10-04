@@ -232,14 +232,29 @@ _NIKA_OWNED_RUNTIME_AUDIT_EVENTS = frozenset(
 )
 
 
+def _require_json_string_keys(value: Any, *, field_name: str) -> None:
+    """Reject nested keys that JSON would otherwise silently coerce to strings."""
+
+    if isinstance(value, dict):
+        for key, item in dict.items(value):
+            if type(key) is not str:
+                raise TypeError(f"{field_name} keys must be exact strings")
+            _require_json_string_keys(item, field_name=field_name)
+    elif isinstance(value, list):
+        for item in list.__iter__(value):
+            _require_json_string_keys(item, field_name=field_name)
+    elif isinstance(value, tuple):
+        for item in tuple.__iter__(value):
+            _require_json_string_keys(item, field_name=field_name)
+
+
 def _snapshot_json_mapping(value: Mapping[str, Any], *, field_name: str) -> dict[str, Any]:
     """Copy adapter output into JSON-safe, detached Nika-owned values."""
 
     if not isinstance(value, Mapping):
         raise TypeError(f"{field_name} must be a mapping")
     copied = dict(value)
-    if any(type(key) is not str for key in copied):
-        raise TypeError(f"{field_name} keys must be exact strings")
+    _require_json_string_keys(copied, field_name=field_name)
     encoded = json.dumps(copied, ensure_ascii=False, allow_nan=False, sort_keys=True)
     # SQLite and the Windows JSON transport cannot store unpaired surrogates.
     encoded.encode("utf-8")
