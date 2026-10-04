@@ -212,10 +212,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             # through a corrupted or retargeted member handoff. Unlike run,
             # cancellation does not depend on the current command's validity.
             if (
-                type(shared_task_id) is not str
-                or not shared_task_id
-                or shared_task_id != shared_task_id.strip()
-                or self._team_id(shared_task_id) != team_id
+                not self._matches_team(shared_task_id, team_id)
                 or (member_id == "checker" and stage != "checker")
                 or (member_id in {"worker-a", "worker-b"} and stage != "source_worker")
                 or member_id not in {"checker", "worker-a", "worker-b"}
@@ -704,12 +701,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         ):
             return None
         shared_task_id = handoff.get("shared_task_id")
-        if (
-            type(shared_task_id) is not str
-            or not shared_task_id
-            or shared_task_id != shared_task_id.strip()
-            or self._team_id(shared_task_id) != team_id
-        ):
+        if not self._matches_team(shared_task_id, team_id):
             return None
         # A source member's own stored goal is model input. It must not
         # silently diverge from the canonical queued/checker instruction.
@@ -731,6 +723,21 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             error="V0.1 packaged three-agent execution failed closed.",
             error_code=RuntimeErrorCode.INTERNAL,
         )
+
+    @classmethod
+    def _matches_team(cls, shared_task_id: object, team_id: str) -> bool:
+        # Persisted JSON may contain escaped lone Unicode surrogates. Reject
+        # them before hashing, without making run/resume/cancel raise to the UI.
+        if (
+            type(shared_task_id) is not str
+            or not shared_task_id
+            or shared_task_id != shared_task_id.strip()
+        ):
+            return False
+        try:
+            return cls._team_id(shared_task_id) == team_id
+        except UnicodeEncodeError:
+            return False
 
     @staticmethod
     def _team_id(task_id: str) -> str:
