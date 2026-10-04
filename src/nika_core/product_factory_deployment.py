@@ -170,6 +170,14 @@ class ExecutionNodeRegistry:
         if self._leases.pop(lease_id, None) is None:
             raise DeploymentFabricError("unknown work lease")
 
+    def release_if_current(self, lease: WorkLease) -> bool:
+        """Release only the exact incumbent lease, never a reassigned owner's lease."""
+
+        if self._leases.get(lease.lease_id) != lease:
+            return False
+        del self._leases[lease.lease_id]
+        return True
+
     def is_active_for(
         self,
         lease: WorkLease,
