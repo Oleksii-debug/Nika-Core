@@ -11,7 +11,7 @@ WORKFLOWS = (
 )
 RELEASE_WORKFLOWS = WORKFLOWS[1:]
 M12_WORKFLOW = WORKFLOWS[2]
-POST_ASSERTION_COUNT = {WORKFLOWS[0]: 0, WORKFLOWS[1]: 1, WORKFLOWS[2]: 3}
+POST_ASSERTION_COUNT = {WORKFLOWS[0]: 0, WORKFLOWS[1]: 2, WORKFLOWS[2]: 3}
 CANDIDATE_ENV = "NIKA_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
 CHECKOUT_ACTION = "uses: actions/checkout@"
 CHECKOUT_REF = "ref: ${{ env.NIKA_CANDIDATE_SHA }}"
@@ -119,7 +119,9 @@ def test_post_proof_identity_checks_follow_proofs_before_publication() -> None:
     assert (
         m11.index("- name: Verify packaged WebView2 UI Automation")
         < m11.index("- name: Reverify source after tests, build and packaged UIA")
-        < m11.index("- name: Create distributable ZIP")
+        < m11.index("- name: Create and verify the complete distributable ZIP")
+        < m11.index("- name: Reverify source after creating verified ZIP")
+        < m11.index("- name: Upload M11 release candidate")
     )
 
     m12 = M12_WORKFLOW.read_text(encoding="utf-8")
@@ -159,3 +161,21 @@ def test_final_windows_packages_include_local_voice_runtime_dependencies() -> No
     packaged, separator, _ = package_and_attestation.partition(ATTEST_MAIN_JOB)
     assert separator, "M12 trusted-main attestation job is missing"
     assert install_voice in packaged
+
+
+def test_both_release_workflows_publish_only_verified_hidden_safe_zip() -> None:
+    for path in RELEASE_WORKFLOWS:
+        workflow = path.read_text(encoding="utf-8")
+        assert "Compress-Archive" not in workflow, path
+        assert "- name: Create and verify the complete distributable ZIP" in workflow
+        assert "python scripts/package_release_zip.py" in workflow
+        assert "--bundle './dist/NikaCore'" in workflow
+        assert "--source-sha '${{ env.NIKA_CANDIDATE_SHA }}'" in workflow
+        assert "--product-version '${{ steps.release.outputs.version }}'" in workflow
+
+
+def test_zip_builder_changes_trigger_m11_release_qualification() -> None:
+    m11 = WORKFLOWS[1].read_text(encoding="utf-8")
+    assert m11.count('      - "scripts/package_release_zip.py"') == 2
+    m12 = M12_WORKFLOW.read_text(encoding="utf-8")
+    assert m12.count('      - "scripts/**"') == 2

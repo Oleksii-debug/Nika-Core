@@ -529,6 +529,64 @@ def _zip_member_has_invalid_type(member: zipfile.ZipInfo) -> bool:
     return member_type not in (0, expected_type)
 
 
+def _zip_extra_field_finding(extra: bytes) -> str | None:
+    """Reject alternate entry names and malformed ZIP extra-field framing."""
+    offset = 0
+    while offset < len(extra):
+        if len(extra) - offset < 4:
+            return "member-extra-format"
+        field_id = int.from_bytes(extra[offset : offset + 2], "little")
+        field_size = int.from_bytes(extra[offset + 2 : offset + 4], "little")
+        offset += 4
+        if field_size > len(extra) - offset:
+            return "member-extra-format"
+        # Info-ZIP 0x7075 supplies a second filename. ZIP extractors and
+        # Python versions differ on whether it overrides the normal name.
+        # The release format needs one unambiguous Windows path identity.
+        if field_id == 0x7075:
+            return "unicode-path-extra"
+        offset += field_size
+    return None
+
+
+def _zip_member_extra_finding(
+    archive: zipfile.ZipFile, member: zipfile.ZipInfo
+) -> str | None:
+    # ZipInfo.extra contains only central-directory fields. An alternate path
+    # in the local header is equally unsafe even if the central entry is clean.
+    central_finding = _zip_extra_field_finding(member.extra)
+    if central_finding is not None:
+        return central_finding
+    handle = archive.fp
+    if handle is None:
+        return "member-extra-format"
+    try:
+        handle.seek(member.header_offset)
+        header = handle.read(30)
+        if len(header) != 30 or header[:4] != b"PK\x03\x04":
+            return "member-extra-format"
+        if (
+            int.from_bytes(header[6:8], "little") != member.flag_bits
+            or int.from_bytes(header[8:10], "little") != member.compress_type
+        ):
+            return "member-header-mismatch"
+        filename_size = int.from_bytes(header[26:28], "little")
+        extra_size = int.from_bytes(header[28:30], "little")
+        local_name = handle.read(filename_size)
+        local_extra = handle.read(extra_size)
+    except (OSError, ValueError):
+        return "member-extra-format"
+    if len(local_name) != filename_size or len(local_extra) != extra_size:
+        return "member-extra-format"
+    try:
+        encoding = "utf-8" if member.flag_bits & 0x800 else "cp437"
+        if local_name.decode(encoding) != member.filename:
+            return "member-local-path"
+    except UnicodeError:
+        return "member-local-path"
+    return _zip_extra_field_finding(local_extra)
+
+
 def _zip_member_path(member: zipfile.ZipInfo) -> str:
     if member.is_dir() and member.filename.endswith("/"):
         return member.filename[:-1]
@@ -568,6 +626,10 @@ def verify_release_archive(
             windows_paths: set[str] = set()
             directory_paths: list[str] = []
             for index, member in enumerate(all_members):
+                extra_finding = _zip_member_extra_finding(archive, member)
+                if extra_finding is not None:
+                    findings.append(f"archive:{extra_finding}:{index}")
+                    continue
                 member_path = _zip_member_path(member)
                 if not _canonical_relative_path(member_path):
                     findings.append(f"archive:path:{index}")
@@ -668,6 +730,77 @@ def verify_release_archive(
             return tuple(findings)
     except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
         return ("archive:invalid-zip",)
+
+
+
+def build_release_archive(
+    bundle_dir: Path,
+    artifact_path: Path,
+    *,
+    source_sha: str,
+    expected_product_version: str,
+) -> Path:
+    """Publish an exact, verified ZIP including Windows-hidden bundle files.
+
+    Assemble into a sibling temporary file and publish only after verifying
+    every manifest-bound entry. Keep a previous artifact intact on failure.
+    """
+    if not isinstance(source_sha, str) or not _SOURCE_SHA_RE.fullmatch(source_sha):
+        raise ValueError("release archive requires an exact source SHA")
+    if not _valid_product_version(expected_product_version):
+        raise ValueError("release archive requires an exact product version")
+
+    root = bundle_dir.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("release bundle must be a directory")
+    if artifact_path.resolve(strict=False).is_relative_to(root):
+        raise ValueError("release ZIP output must be outside its input bundle")
+    files = _safe_files(root)
+    manifest_path = root / _RELEASE_MANIFEST_NAME
+    if manifest_path not in files:
+        raise ValueError("release bundle is missing its regular manifest")
+    with manifest_path.open("rb") as handle:
+        raw_manifest = handle.read(_MAX_RELEASE_MANIFEST_BYTES + 1)
+    if len(raw_manifest) > _MAX_RELEASE_MANIFEST_BYTES:
+        raise ValueError("release bundle manifest exceeds the maximum size")
+    manifest = _decode_release_manifest(raw_manifest)
+    if manifest is None:
+        raise ValueError("release bundle has an invalid manifest")
+    if manifest.source_sha != source_sha or manifest.version != expected_product_version:
+        raise ValueError("release bundle manifest does not match the requested identity")
+    findings = verify_release_manifest(root, manifest)
+    if findings:
+        raise ValueError(f"release bundle verification failed: {findings}")
+
+    destination = artifact_path.parent.resolve(strict=True) / artifact_path.name
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            dir=destination.parent,
+            prefix=".nika-release-",
+            suffix=".zip",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+        with zipfile.ZipFile(
+            temporary_path, "w", compression=zipfile.ZIP_DEFLATED, allowZip64=True
+        ) as archive:
+            # Direct enumeration includes hidden assets that Compress-Archive
+            # omits, and supports ZIP64 rather than its 2-GB file limit.
+            for path in files:
+                archive.write(path, path.relative_to(root).as_posix())
+        archive_findings = verify_release_archive(
+            temporary_path,
+            source_sha=source_sha,
+            expected_product_version=expected_product_version,
+        )
+        if archive_findings:
+            raise ValueError(f"release ZIP verification failed: {archive_findings}")
+        temporary_path.replace(destination)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return destination
 
 
 def verify_distributable_evidence(

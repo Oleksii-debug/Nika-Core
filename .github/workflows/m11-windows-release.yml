@@ -8,6 +8,7 @@ on:
       - "src/nika_core/ui/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
+      - "scripts/package_release_zip.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
@@ -24,6 +25,7 @@ on:
       - "src/nika_core/ui/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
+      - "scripts/package_release_zip.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
@@ -79,9 +81,16 @@ jobs:
         run: ./scripts/v01_autostart_uia_proof.ps1 -ExePath ./dist/NikaCore/NikaCore.exe -WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'
       - name: Reverify source after tests, build and packaged UIA
         run: python scripts/qa_assert_checkout_identity.py
-      - name: Create distributable ZIP
+      - name: Create and verify the complete distributable ZIP
         shell: pwsh
-        run: Compress-Archive -Path ./dist/NikaCore/* -DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip -Force
+        run: >-
+          python scripts/package_release_zip.py
+          --bundle './dist/NikaCore'
+          --artifact './dist/NikaCore-${{ steps.release.outputs.version }}-windows-x64.zip'
+          --source-sha '${{ env.NIKA_CANDIDATE_SHA }}'
+          --product-version '${{ steps.release.outputs.version }}'
+      - name: Reverify source after creating verified ZIP
+        run: python scripts/qa_assert_checkout_identity.py
       - name: Upload M11 release candidate
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
