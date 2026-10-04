@@ -338,6 +338,9 @@ class FoundryLocalProvider:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise TimeoutError
+            # Metadata getters or lock waits must not retarget the approved artifact.
+            self._validate_model_alias(model, authorization.model)
+            self._validate_model_identity(model, expected_model_id)
             worker = asyncio.create_task(
                 asyncio.to_thread(model.download, cancel_event=effective_cancel_event)
             )
@@ -631,7 +634,10 @@ class FoundryLocalProvider:
                 retryable=False,
             )
 
-        if not self._sdk_bool(model, "is_loaded"):
+        already_loaded = self._sdk_bool(model, "is_loaded")
+        self._validate_model_alias(model, model_alias)
+        self._validate_model_identity(model, operation_model_id)
+        if not already_loaded:
             try:
                 model.load()
                 if not self._sdk_bool(model, "is_loaded"):
