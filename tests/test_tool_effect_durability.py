@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -420,3 +421,40 @@ def test_legitimate_completed_effect_with_null_output_replays_once(
     assert first.ok and replay.ok
     assert first.output is None and replay.output is None
     assert calls == 1
+
+
+@pytest.mark.parametrize("after_race", [False, True])
+def test_strict_ledger_corruption_denies_effect_without_raw_exception(
+    after_race: bool,
+) -> None:
+    class StrictLedger:
+        calls = 0
+
+        def reserve_once(self, **_kwargs: object) -> object:
+            self.calls += 1
+            if after_race and self.calls == 1:
+                raise sqlite3.IntegrityError("simulated concurrent reservation")
+            raise RuntimeError("persisted idempotency result_json invalid")
+
+    ledger = StrictLedger()
+    effect_calls = 0
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        nonlocal effect_calls
+        effect_calls += 1
+        return "unsafe"
+
+    executor = ToolExecutor(
+        approval_policy=_approve,
+        effect_guard=ToolEffectGuard(ledger),  # type: ignore[arg-type]
+    )
+    executor.register(_external_spec(), handler)
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(call_id="strict", tool_id="publish", task_id="task", arguments={})
+        )
+    )
+
+    assert result.error == "tool effect not safe to execute"
+    assert ledger.calls == (2 if after_race else 1)
+    assert effect_calls == 0
