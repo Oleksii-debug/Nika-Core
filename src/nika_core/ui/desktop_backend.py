@@ -110,6 +110,8 @@ class DesktopBackend:
         self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.Lock()
+        self._accepting = True
+        self._closing = False
         self._active_threads: dict[str, str] = {}
         self._active_futures: dict[str, Future[Any]] = {}
         self._cancel_futures: dict[str, Future[bool]] = {}
@@ -333,9 +335,24 @@ class DesktopBackend:
         if not auto_resume:
             return self.startup_recovery_snapshot()
 
-        future = self._host().submit(recovery.resume_safe_crash_sessions())
-        with self._startup_recovery_lock:
-            self._startup_recovery_future = future
+        coroutine = recovery.resume_safe_crash_sessions()
+        with self._active_lock:
+            try:
+                if not self._accepting:
+                    raise RuntimeError("desktop runtime is shutting down")
+                future = self._host().submit(coroutine)
+            except BaseException:
+                self._discard_unsubmitted(coroutine)
+                self._set_startup_recovery_state(
+                    {
+                        **self.startup_recovery_snapshot(),
+                        "status": "attention",
+                        "resume_failed_count": 1,
+                    }
+                )
+                raise
+            with self._startup_recovery_lock:
+                self._startup_recovery_future = future
         future.add_done_callback(lambda done: self._startup_recovery_done(recovery, done))
 
         if startup_wait_seconds:
@@ -390,7 +407,13 @@ class DesktopBackend:
         """Run and track internal packaged async work on the single desktop host."""
 
         with self._active_lock:
-            future = self._host().submit(coroutine)
+            try:
+                if not self._accepting:
+                    raise RuntimeError("desktop runtime is shutting down")
+                future = self._host().submit(coroutine)
+            except BaseException:
+                self._discard_unsubmitted(coroutine)
+                raise
             self._packaged_futures.add(future)
         future.add_done_callback(self._packaged_done)
         return future
@@ -398,60 +421,72 @@ class DesktopBackend:
     def close(self) -> None:
         """Stop the private bridge event loop after all submitted runtime work has settled."""
         with self._active_lock:
+            if self._closing:
+                raise RuntimeError("desktop runtime shutdown already in progress")
+            if not self._accepting and self._runtime_loop is None:
+                return
+            self._closing = True
+            self._accepting = False
             futures = [
                 *self._active_futures.values(),
                 *self._cancel_futures.values(),
                 *self._packaged_futures,
             ]
-        with self._startup_recovery_lock:
-            if (
-                self._startup_recovery_future is not None
-                and self._startup_recovery_future not in futures
-            ):
-                futures.append(self._startup_recovery_future)
-        first_interrupt: BaseException | None = None
-        for future in futures:
-            try:
-                future.result(timeout=2)
-            except TimeoutError as exc:
-                if not future.done():
-                    # An active task cannot be abandoned merely to force the host loop closed.
-                    raise RuntimeError(
-                        "cannot close desktop runtime loop while tasks are active"
-                    ) from exc
-                # An already-completed task can itself fail with TimeoutError.
-                _LOGGER.warning(
-                    "Desktop runtime future failed before close; exception_type=%s",
-                    type(exc).__name__,
-                )
-            except BaseException as exc:
-                # A completed future may carry KeyboardInterrupt or SystemExit.
-                # Still settle the remaining futures and release the desktop host.
-                _LOGGER.warning(
-                    "Desktop runtime future failed before close; exception_type=%s",
-                    type(exc).__name__,
-                )
-                if not isinstance(exc, Exception) and first_interrupt is None:
-                    first_interrupt = exc
-        with self._active_lock:
-            self._active_threads.clear()
-            self._active_futures.clear()
-            self._cancel_futures.clear()
-            self._packaged_futures.clear()
-        if self._runtime_loop is not None:
-            try:
-                self._runtime_loop.close()
-            except BaseException as exc:
-                if first_interrupt is None:
-                    raise
-                _LOGGER.error(
-                    "Desktop runtime host cleanup failed; exception_type=%s",
-                    type(exc).__name__,
-                )
-            else:
-                self._runtime_loop = None
-        if first_interrupt is not None:
-            raise first_interrupt
+        try:
+            with self._startup_recovery_lock:
+                if (
+                    self._startup_recovery_future is not None
+                    and self._startup_recovery_future not in futures
+                ):
+                    futures.append(self._startup_recovery_future)
+            first_interrupt: BaseException | None = None
+            for future in futures:
+                try:
+                    future.result(timeout=2)
+                except TimeoutError as exc:
+                    if not future.done():
+                        # Preserve a later explicit cancel and close retry when work is still live.
+                        with self._active_lock:
+                            self._accepting = True
+                        raise RuntimeError(
+                            "cannot close desktop runtime loop while tasks are active"
+                        ) from exc
+                    # An already-completed task can itself fail with TimeoutError.
+                    _LOGGER.warning(
+                        "Desktop runtime future failed before close; exception_type=%s",
+                        type(exc).__name__,
+                    )
+                except BaseException as exc:
+                    # A completed future may carry KeyboardInterrupt or SystemExit.
+                    # Still settle the remaining futures and release the desktop host.
+                    _LOGGER.warning(
+                        "Desktop runtime future failed before close; exception_type=%s",
+                        type(exc).__name__,
+                    )
+                    if not isinstance(exc, Exception) and first_interrupt is None:
+                        first_interrupt = exc
+            with self._active_lock:
+                self._active_threads.clear()
+                self._active_futures.clear()
+                self._cancel_futures.clear()
+                self._packaged_futures.clear()
+            if self._runtime_loop is not None:
+                try:
+                    self._runtime_loop.close()
+                except BaseException as exc:
+                    if first_interrupt is None:
+                        raise
+                    _LOGGER.error(
+                        "Desktop runtime host cleanup failed; exception_type=%s",
+                        type(exc).__name__,
+                    )
+                else:
+                    self._runtime_loop = None
+            if first_interrupt is not None:
+                raise first_interrupt
+        finally:
+            with self._active_lock:
+                self._closing = False
 
     def _set_startup_recovery_state(self, state: Mapping[str, Any]) -> None:
         with self._startup_recovery_lock:
@@ -554,6 +589,17 @@ class DesktopBackend:
             self._runtime_loop = _DesktopRuntimeLoop()
         return self._runtime_loop
 
+    @staticmethod
+    def _discard_unsubmitted(coroutine: Coroutine[Any, Any, Any]) -> None:
+        try:
+            coroutine.close()
+        except BaseException as exc:
+            # Never replace the original submission failure with cleanup failure.
+            _LOGGER.warning(
+                "Desktop coroutine cleanup failed; exception_type=%s",
+                type(exc).__name__,
+            )
+
     def _schedule_start(self, task_id: str, command: str) -> None:
         thread_id = f"desktop-{task_id}"
         self._submit_runtime(
@@ -580,18 +626,23 @@ class DesktopBackend:
             raise
 
     def _schedule_cancel_locked(self, task_id: str, thread_id: str) -> Future[bool]:
+        if not self._accepting:
+            raise RuntimeError("desktop runtime is shutting down")
         if RuntimeCapability.CANCELLATION not in self._runtime.capabilities:
             raise ValueError("Поточний runtime не заявляє безпечне скасування.")
         existing = self._cancel_futures.get(task_id)
         if existing is not None and not existing.done():
             raise ValueError("Запит на зупинку цього завдання вже виконується.")
-        future = self._host().submit(
-            self._coordinator.cancel(
-                self._runtime,
-                task_id=task_id,
-                thread_id=thread_id,
-            )
+        coroutine = self._coordinator.cancel(
+            self._runtime,
+            task_id=task_id,
+            thread_id=thread_id,
         )
+        try:
+            future = self._host().submit(coroutine)
+        except BaseException:
+            self._discard_unsubmitted(coroutine)
+            raise
         self._cancel_futures[task_id] = future
         return future
 
@@ -602,11 +653,20 @@ class DesktopBackend:
         coroutine: Coroutine[Any, Any, Any],
     ) -> None:
         with self._active_lock:
+            if not self._accepting:
+                self._discard_unsubmitted(coroutine)
+                raise RuntimeError("desktop runtime is shutting down")
             existing = self._active_futures.get(task_id)
             if existing is not None and not existing.done():
+                self._discard_unsubmitted(coroutine)
                 raise ValueError("Завдання вже має активне runtime-виконання.")
             self._active_threads[task_id] = thread_id
-            future = self._host().submit(coroutine)
+            try:
+                future = self._host().submit(coroutine)
+            except BaseException:
+                self._active_threads.pop(task_id, None)
+                self._discard_unsubmitted(coroutine)
+                raise
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
 
@@ -640,9 +700,14 @@ class DesktopBackend:
             # Report the old failure without changing the replacement task's state.
             self._record_background_failure(task_id, "desktop.runtime_host_failed")
             return
-        current = self._queue.get(task_id)
-        if current.state == TaskState.RUNNING:
-            self._queue.transition(task_id, TaskState.FAILED)
+        # Another run may be registered after we release the first lock and
+        # inspect the completed future. Serialize the final state transition
+        # with runtime registration so an old failure cannot fail a replacement.
+        with self._active_lock:
+            if task_id not in self._active_futures:
+                current = self._queue.get(task_id)
+                if current.state == TaskState.RUNNING:
+                    self._queue.transition(task_id, TaskState.FAILED)
         self._record_background_failure(task_id, "desktop.runtime_host_failed")
 
     def _record_background_failure(self, task_id: str, event_type: str) -> None:

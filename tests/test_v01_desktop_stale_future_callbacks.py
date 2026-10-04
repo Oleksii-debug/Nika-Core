@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import Future
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -9,6 +10,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.agent_registry import AgentRegistry
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.ui.desktop_backend import DesktopBackend
 
@@ -111,3 +113,70 @@ def test_replacement_future_remains_visible_to_shutdown(tmp_path: Path) -> None:
     current.set_result(None)
     backend.close()
     assert backend._active_futures == {}
+
+
+def test_failed_runtime_cannot_fail_replacement_registered_after_slot_removal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _backend(tmp_path)
+    failures: list[tuple[str, str]] = []
+    transitions: list[tuple[str, TaskState]] = []
+    monkeypatch.setattr(
+        backend, "_record_background_failure", lambda task, event: failures.append((task, event))
+    )
+    monkeypatch.setattr(
+        backend._queue, "get", lambda _task: SimpleNamespace(state=TaskState.RUNNING)
+    )
+    monkeypatch.setattr(
+        backend._queue, "transition", lambda task, state: transitions.append((task, state))
+    )
+    finished: Future[object] = Future()
+    finished.set_exception(RuntimeError("previous execution failed"))
+    replacement: Future[object] = Future()
+    backend._active_threads["task"] = "old-thread"
+    backend._active_futures["task"] = finished
+    original_exception = finished.exception
+
+    def register_replacement(timeout: float | None = None) -> BaseException | None:
+        # The done callback already removed its slot before inspecting the failure.
+        backend._active_threads["task"] = "replacement-thread"
+        backend._active_futures["task"] = replacement
+        return original_exception(timeout=timeout)
+
+    monkeypatch.setattr(finished, "exception", register_replacement)
+    backend._runtime_done("task", finished)
+
+    assert backend._active_futures["task"] is replacement
+    assert backend._active_threads["task"] == "replacement-thread"
+    assert transitions == []
+    assert failures == [("task", "desktop.runtime_host_failed")]
+    replacement.set_result(None)
+    backend.close()
+
+
+def test_failed_current_runtime_still_fails_running_task_without_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    backend = _backend(tmp_path)
+    transitions: list[tuple[str, TaskState]] = []
+    failures: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        backend._queue, "get", lambda _task: SimpleNamespace(state=TaskState.RUNNING)
+    )
+    monkeypatch.setattr(
+        backend._queue, "transition", lambda task, state: transitions.append((task, state))
+    )
+    monkeypatch.setattr(
+        backend, "_record_background_failure", lambda task, event: failures.append((task, event))
+    )
+    finished: Future[object] = Future()
+    finished.set_exception(RuntimeError("current execution failed"))
+    backend._active_threads["task"] = "current-thread"
+    backend._active_futures["task"] = finished
+
+    backend._runtime_done("task", finished)
+
+    assert "task" not in backend._active_futures
+    assert transitions == [("task", TaskState.FAILED)]
+    assert failures == [("task", "desktop.runtime_host_failed")]
+    backend.close()
