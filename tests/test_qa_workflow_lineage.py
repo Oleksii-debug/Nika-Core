@@ -172,3 +172,10 @@ def test_both_release_workflows_publish_only_verified_hidden_safe_zip() -> None:
         assert "--bundle './dist/NikaCore'" in workflow
         assert "--source-sha '${{ env.NIKA_CANDIDATE_SHA }}'" in workflow
         assert "--product-version '${{ steps.release.outputs.version }}'" in workflow
+
+
+def test_zip_builder_changes_trigger_m11_release_qualification() -> None:
+    m11 = WORKFLOWS[1].read_text(encoding="utf-8")
+    assert m11.count('      - "scripts/package_release_zip.py"') == 2
+    m12 = M12_WORKFLOW.read_text(encoding="utf-8")
+    assert m12.count('      - "scripts/**"') == 2
