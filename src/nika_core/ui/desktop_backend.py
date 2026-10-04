@@ -409,26 +409,43 @@ class DesktopBackend:
                 and self._startup_recovery_future not in futures
             ):
                 futures.append(self._startup_recovery_future)
+        first_interrupt: BaseException | None = None
         for future in futures:
             try:
                 future.result(timeout=2)
             except TimeoutError as exc:
+                # An active task cannot be abandoned merely to force the host loop closed.
                 raise RuntimeError(
                     "cannot close desktop runtime loop while tasks are active"
                 ) from exc
-            except Exception as exc:  # noqa: BLE001 - callback already records bounded failure
+            except BaseException as exc:
+                # A completed future may carry KeyboardInterrupt or SystemExit.
+                # Still settle the remaining futures and release the desktop host.
                 _LOGGER.warning(
                     "Desktop runtime future failed before close; exception_type=%s",
                     type(exc).__name__,
                 )
+                if not isinstance(exc, Exception) and first_interrupt is None:
+                    first_interrupt = exc
         with self._active_lock:
             self._active_threads.clear()
             self._active_futures.clear()
             self._cancel_futures.clear()
             self._packaged_futures.clear()
         if self._runtime_loop is not None:
-            self._runtime_loop.close()
-            self._runtime_loop = None
+            try:
+                self._runtime_loop.close()
+            except BaseException as exc:
+                if first_interrupt is None:
+                    raise
+                _LOGGER.error(
+                    "Desktop runtime host cleanup failed; exception_type=%s",
+                    type(exc).__name__,
+                )
+            else:
+                self._runtime_loop = None
+        if first_interrupt is not None:
+            raise first_interrupt
 
     def _set_startup_recovery_state(self, state: Mapping[str, Any]) -> None:
         with self._startup_recovery_lock:
@@ -496,7 +513,7 @@ class DesktopBackend:
             return
         try:
             executions = future.result()
-        except Exception:  # noqa: BLE001 - future may carry any runtime/provider failure
+        except BaseException:  # future may carry an interrupted runtime/provider failure
             self._set_startup_recovery_state(
                 {
                     **self.startup_recovery_snapshot(),
