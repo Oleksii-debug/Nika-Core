@@ -18,8 +18,11 @@ from nika_core.model_gateway.contracts import (
     ModelGatewayError,
     ModelMessage,
     ModelRequest,
+    ModelResponse,
+    ProviderCapabilities,
     ProviderKind,
 )
+from nika_core.model_gateway.gateway import ModelGateway
 from nika_core.model_gateway.providers import OpenAICompatibleProvider
 
 _SECRET = "synthetic-secret-never-log"
@@ -208,3 +211,74 @@ def test_slow_provider_constructor_cannot_reset_credential_deadline(
     _assert_pretransport_timeout(caught.value)
     assert seen == []
     assert effects == []
+
+
+class _SlowCloudAuthorizer:
+    def __init__(self, delay: float) -> None:
+        self.delay = delay
+        self.calls = 0
+
+    def authorize_cloud_effect(
+        self, *, request: ModelRequest, provider: ProviderCapabilities
+    ) -> None:
+        assert provider.provider_id == "deadline-cloud"
+        self.calls += 1
+        time.sleep(self.delay)
+
+
+def test_gateway_charges_authorization_time_to_provider_http_budget() -> None:
+    effects: list[str] = []
+    seen: list[float] = []
+    resolver = _Resolver()
+    factory = _http_factory(seen, effects)
+
+    def blocked_factory(*, timeout: float) -> httpx.AsyncClient:
+        time.sleep(0.55)
+        return factory(timeout=timeout)
+
+    authorizer = _SlowCloudAuthorizer(delay=0.30)
+    gateway = ModelGateway(cloud_effect_authorizer=authorizer)
+    gateway.register(_credential_provider(resolver, blocked_factory))
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(gateway.complete(_request(0.80)))
+
+    assert caught.value.code is ModelErrorCode.TIMEOUT
+    assert authorizer.calls == 1
+    assert resolver.calls == 1
+    assert len(seen) == 1
+    assert effects == []
+
+
+def test_gateway_passes_current_post_authorization_budget_to_provider() -> None:
+    authorizer = _SlowCloudAuthorizer(delay=0.03)
+
+    class CapturingProvider:
+        def __init__(self) -> None:
+            self.received: list[float] = []
+            self.capabilities = ProviderCapabilities(
+                provider_id="deadline-cloud",
+                kind=ProviderKind.CLOUD,
+            )
+
+        async def complete(self, request: ModelRequest) -> ModelResponse:
+            self.received.append(request.timeout_seconds)
+            return ModelResponse(
+                request_id=request.request_id,
+                text="Готово",
+                provider_id="deadline-cloud",
+                provider_kind=ProviderKind.CLOUD,
+                model="model-a",
+            )
+
+    provider = CapturingProvider()
+    gateway = ModelGateway(cloud_effect_authorizer=authorizer)
+    gateway.register(provider)
+    request = _request(1.0)
+
+    response = asyncio.run(gateway.complete(request))
+
+    assert response.text == "Готово"
+    assert len(provider.received) == 1
+    assert 0 < provider.received[0] < request.timeout_seconds - 0.01
+    assert request.timeout_seconds == 1.0
