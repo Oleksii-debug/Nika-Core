@@ -115,6 +115,8 @@ def _snapshot_json_value(
             raise ValueError(
                 "idempotency result containers must use exact built-in types"
             )
+        if value_type is str and len(value) > _MAX_RESULT_BYTES:
+            raise ValueError("idempotency result string exceeds maximum UTF-8 byte length")
         return value
 
     active_containers = active_containers if active_containers is not None else set()
@@ -170,6 +172,9 @@ def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
     if not isinstance(result, Mapping):
         raise TypeError("idempotency result must be a mapping when provided")
     try:
+        # Avoid an unbounded preliminary dictionary copy for very wide outputs.
+        if type(result) is dict and len(result) >= _MAX_RESULT_NODES:
+            raise ValueError("idempotency result exceeds maximum node count")
         payload = _snapshot_json_value(dict(result))
         serialized = json.dumps(
             payload,
