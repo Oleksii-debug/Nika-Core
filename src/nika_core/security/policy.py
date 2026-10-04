@@ -348,6 +348,13 @@ class ExecutionBudgetLedger:
     _lock: RLock = field(default_factory=RLock, init=False, repr=False, compare=False)
 
     def _next_usage_unlocked(self, intent: ActionIntent) -> tuple[int, int, int]:
+        # The counters are intentionally mutable, so validate again under the
+        # reservation lock. NaN would otherwise bypass every maximum comparison.
+        if type(self.budget) is not ExecutionBudget:
+            raise ValueError("budget ledger requires a canonical ExecutionBudget")
+        counters = (self.write_bytes, self.network_calls, self.process_launches)
+        if any(type(value) is not int or value < 0 for value in counters):
+            raise ValueError("budget usage counters must be non-negative integers")
         next_write = self.write_bytes + intent.write_bytes
         next_network = self.network_calls + int(intent.network_host is not None)
         next_process = self.process_launches + int(intent.executable is not None)
