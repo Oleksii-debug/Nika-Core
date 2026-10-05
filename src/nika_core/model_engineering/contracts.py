@@ -512,8 +512,12 @@ def validate_candidate_benchmark_report(report: CandidateBenchmarkReport) -> Non
     if type(report) is not CandidateBenchmarkReport:
         raise TypeError("report must be an exact CandidateBenchmarkReport")
     results = report.case_results
+    if type(results) is not tuple:
+        raise TypeError("case_results must be a canonical tuple")
     for item in results:
-        item.__post_init__()
+        if type(item) is not CaseBenchmarkResult:
+            raise TypeError("case_results must use exact CaseBenchmarkResult values")
+        CaseBenchmarkResult.__post_init__(item)
     total_weight = sum(float(item.evaluation_weight) for item in results)
     expected_quality = sum(
         float(item.score) * float(item.evaluation_weight)
