@@ -41,6 +41,24 @@ class _ResourceObserver:
         )
 
 
+class _StaticResourceObserver:
+    def __init__(self, value: object) -> None:
+        self.value = value
+
+    def snapshot(self) -> ResourceSnapshot:
+        return self.value  # type: ignore[return-value]
+
+
+class _FailingResourceObserver:
+    def snapshot(self) -> ResourceSnapshot:
+        raise RuntimeError("provider-secret-must-not-escape")
+
+
+class _BehavioralDatetime(datetime):
+    def utcoffset(self) -> object:
+        raise AssertionError("datetime behavior must not run before exact-type admission")
+
+
 def _prepared_store(tmp_path) -> SQLiteStore:
     store = SQLiteStore(tmp_path / "nika.sqlite3")
     store.initialize()
@@ -142,6 +160,93 @@ def test_report_projects_canonical_truth_without_sensitive_payloads(tmp_path) ->
     assert "DOC_SECRET" not in rendered
     assert "Private title" not in rendered
     assert "ARCHIVED" not in rendered
+
+
+@pytest.mark.parametrize(
+    "observed",
+    [
+        object(),
+        ResourceSnapshot(float("nan"), 34.0, 4_000_000_000),
+        ResourceSnapshot(12.5, 101.0, 4_000_000_000),
+        ResourceSnapshot(12.5, 34.0, -1),
+        ResourceSnapshot(12.5, 34.0, 4_000_000_000, battery_percent=101.0),
+        ResourceSnapshot(12.5, 34.0, 4_000_000_000, power_plugged=1),
+    ],
+)
+def test_report_omits_invalid_resource_evidence(tmp_path, observed: object) -> None:
+    store = _prepared_store(tmp_path)
+    report = DailyActivityReportService(
+        store,
+        resource_observer=_StaticResourceObserver(observed),
+    ).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert report.resource_snapshot is None
+    assert "Ресурси: поточний знімок не надано." in report.render_text()
+
+
+def test_report_contains_resource_observer_failure_without_leaking_details(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    report = DailyActivityReportService(
+        store,
+        resource_observer=_FailingResourceObserver(),
+    ).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    rendered = report.render_text()
+    assert report.resource_snapshot is None
+    assert "поточний знімок не надано" in rendered
+    assert "provider-secret-must-not-escape" not in rendered
+
+
+def test_report_detaches_accepted_resource_snapshot(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    observed = ResourceSnapshot(
+        cpu_percent=12,
+        memory_percent=34,
+        available_memory_bytes=4_000_000_000,
+        logical_cpu_count=8,
+        total_memory_bytes=16_000_000_000,
+        process_rss_bytes=256_000_000,
+        battery_percent=77,
+        power_plugged=False,
+    )
+
+    report = DailyActivityReportService(
+        store,
+        resource_observer=_StaticResourceObserver(observed),
+    ).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert report.resource_snapshot == ResourceSnapshot(
+        cpu_percent=12.0,
+        memory_percent=34.0,
+        available_memory_bytes=4_000_000_000,
+        logical_cpu_count=8,
+        total_memory_bytes=16_000_000_000,
+        process_rss_bytes=256_000_000,
+        battery_percent=77.0,
+        power_plugged=False,
+    )
+    assert report.resource_snapshot is not observed
+
+
+def test_report_rejects_behavioral_datetime_before_timezone_hooks(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    service = DailyActivityReportService(store)
+    start = _BehavioralDatetime(2026, 9, 12, tzinfo=UTC)
+
+    with pytest.raises(TypeError, match="start must be a built-in datetime"):
+        service.build_window(
+            start=start,
+            end=datetime(2026, 9, 13, tzinfo=UTC),
+        )
 
 
 def test_report_counts_repeated_memory_upserts_from_durable_audit_history(tmp_path) -> None:

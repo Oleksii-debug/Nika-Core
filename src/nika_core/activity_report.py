@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import math
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
+
+_MAX_SIGNED_64 = (1 << 63) - 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +129,7 @@ class DailyActivityReportService:
 
         snapshot = None
         if self._resource_observer is not None:
-            snapshot = self._resource_observer.snapshot()
+            snapshot = _observe_resource_snapshot(self._resource_observer)
 
         return DailyActivityReport(
             window_start=start_utc,
@@ -156,9 +159,81 @@ class DailyActivityReportService:
 
 
 def _require_aware_utc(value: datetime, *, field: str) -> datetime:
+    if type(value) is not datetime:
+        raise TypeError(f"{field} must be a built-in datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field} must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def _observe_resource_snapshot(
+    observer: ResourceObserverPort,
+) -> ResourceSnapshot | None:
+    try:
+        observed = observer.snapshot()
+    except Exception:  # noqa: BLE001
+        return None
+    return _validated_resource_snapshot(observed)
+
+
+def _validated_resource_snapshot(value: object) -> ResourceSnapshot | None:
+    if type(value) is not ResourceSnapshot:
+        return None
+
+    cpu_percent = value.cpu_percent
+    memory_percent = value.memory_percent
+    available_memory_bytes = value.available_memory_bytes
+    logical_cpu_count = value.logical_cpu_count
+    total_memory_bytes = value.total_memory_bytes
+    process_rss_bytes = value.process_rss_bytes
+    battery_percent = value.battery_percent
+    power_plugged = value.power_plugged
+
+    if not _valid_percentage(cpu_percent):
+        return None
+    if not _valid_percentage(memory_percent):
+        return None
+    if not _valid_nonnegative_int(available_memory_bytes):
+        return None
+    if not _valid_optional_nonnegative_int(logical_cpu_count):
+        return None
+    if not _valid_optional_nonnegative_int(total_memory_bytes):
+        return None
+    if not _valid_optional_nonnegative_int(process_rss_bytes):
+        return None
+    if battery_percent is not None and not _valid_percentage(battery_percent):
+        return None
+    if power_plugged is not None and type(power_plugged) is not bool:
+        return None
+
+    return ResourceSnapshot(
+        cpu_percent=float(cpu_percent),
+        memory_percent=float(memory_percent),
+        available_memory_bytes=available_memory_bytes,
+        logical_cpu_count=logical_cpu_count,
+        total_memory_bytes=total_memory_bytes,
+        process_rss_bytes=process_rss_bytes,
+        battery_percent=None if battery_percent is None else float(battery_percent),
+        power_plugged=power_plugged,
+    )
+
+
+def _valid_percentage(value: object) -> bool:
+    if type(value) is not int and type(value) is not float:
+        return False
+    try:
+        number = float(value)
+    except OverflowError:
+        return False
+    return math.isfinite(number) and 0.0 <= number <= 100.0
+
+
+def _valid_nonnegative_int(value: object) -> bool:
+    return type(value) is int and 0 <= value <= _MAX_SIGNED_64
+
+
+def _valid_optional_nonnegative_int(value: object) -> bool:
+    return value is None or _valid_nonnegative_int(value)
 
 
 def _grouped_counts(rows: list[object]) -> tuple[ActivityCount, ...]:
