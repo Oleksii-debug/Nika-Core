@@ -2950,3 +2950,94 @@ def test_recovery_result_finalization_keeps_claim_when_operation_rebinds(
     assert durable.state is WorkState.RUNNING
     assert durable.result is None
 
+def test_dispatch_conflict_does_not_attribute_foreign_operation_status(
+    tmp_path: Path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+    IdempotencyLedger(store).reserve_once(
+        operation_key=operation_key,
+        task_id="foreign-task",
+        operation_type="foreign.effect",
+        input_fingerprint="f" * 64,
+    )
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(store, worker)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
+    assert outcomes[0].operation_status is None
+    assert worker.dispatch_calls == []
+    _assert_foreign_operation_remains_pending(store, operation_key)
+
+
+def test_recovery_ownership_collision_does_not_attribute_foreign_operation_status(
+    tmp_path: Path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.start("component-0")
+    operation_key = f"pf-worker:{request.work_id}"
+    seed_host = ProductFactoryProgramHost(
+        store,
+        FakeProgramWorker(),
+        owner_id="program-host:seed-running",
+    )
+    seed_lease = seed_host._acquire(request)
+    try:
+        seed_host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(seed_lease,),
+        )
+    finally:
+        seed_host._release_best_effort(seed_lease)
+
+    IdempotencyLedger(store).reserve_once(
+        operation_key=operation_key,
+        task_id="foreign-task",
+        operation_type="foreign.effect",
+        input_fingerprint="f" * 64,
+    )
+    ownership = ProductFactoryWorkOwnership(store)
+    external_lease = ownership.acquire(
+        project_id=request.project_id,
+        work_id=request.work_id,
+        owner_id="program-host:foreign-owner",
+        lease_seconds=300,
+    )
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        owner_id="program-host:recovery-reader",
+    )
+
+    outcomes = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+
+    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
+    assert outcomes[0].operation_status is None
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+    _assert_foreign_operation_remains_pending(store, operation_key)
+    assert ownership.current(
+        project_id=request.project_id,
+        work_id=request.work_id,
+    ) == external_lease
+
