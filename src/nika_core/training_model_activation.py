@@ -204,6 +204,14 @@ async def activate_attested_training_promotion(
             "durable model promotion evidence could not be read"
         ) from exc
     if existing is not None:
+        if (
+            existing.activation_request_sha256 is None
+            or existing.activation_attestation_sha256 is None
+        ):
+            raise TrainingModelActivationError(
+                "existing promotion predates fresh loaded-model attestation; "
+                "rollback or reevaluate before activation"
+            )
         return _apply_promotion(
             canonical=canonical,
             settings=settings,
