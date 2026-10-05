@@ -148,6 +148,7 @@ class TrainingJobSpec:
     base_artifact: ArtifactIdentity
     frozen_package_sha256: str
     training_material_sha256: str
+    scale_authorization_sha256: str
     candidate_artifact_ref: str
     max_steps: int
     resource_scope: str = "model_training"
@@ -166,6 +167,10 @@ class TrainingJobSpec:
             raise TypeError("base_artifact must be an exact ArtifactIdentity")
         _require_sha256(self.frozen_package_sha256, name="frozen_package_sha256")
         _require_sha256(self.training_material_sha256, name="training_material_sha256")
+        _require_sha256(
+            self.scale_authorization_sha256,
+            name="scale_authorization_sha256",
+        )
         if type(self.max_steps) is not int or not 1 <= self.max_steps <= _MAX_STEPS:
             raise ValueError(f"max_steps must be an integer from 1 through {_MAX_STEPS}")
         if self.candidate_artifact_ref == self.base_artifact.artifact_ref:
@@ -201,6 +206,7 @@ class TrainingRunEvidence:
     base_artifact: ArtifactIdentity
     frozen_package_sha256: str
     training_material_sha256: str
+    scale_authorization_sha256: str
     execution_plan_sha256: str
     job_fingerprint: str
     candidate_artifact_ref: str
