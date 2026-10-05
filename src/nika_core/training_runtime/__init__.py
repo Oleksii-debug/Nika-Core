@@ -9,7 +9,11 @@ from nika_core.training_runtime.contracts import (
     TrainingWorkerFailureEffect,
     TrainingWorkerPort,
 )
-from nika_core.training_runtime.runtime import TrainingCheckpointError, TrainingRuntime
+from nika_core.training_runtime.runtime import (
+    TrainingCheckpointError,
+    TrainingRuntime,
+    training_job_fingerprint,
+)
 
 __all__ = [
     "ArtifactIdentity",
@@ -23,4 +27,5 @@ __all__ = [
     "TrainingWorkerError",
     "TrainingWorkerFailureEffect",
     "TrainingWorkerPort",
+    "training_job_fingerprint",
 ]

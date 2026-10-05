@@ -30,6 +30,7 @@ from nika_core.training_runtime import (
     TrainingStepResult,
     TrainingWorkerError,
     TrainingWorkerFailureEffect,
+    training_job_fingerprint,
 )
 
 _WORKSPACE_ID = "runtime-training"
@@ -39,6 +40,9 @@ _VALIDATION_BODY = b'{"prompt":"validate","response":"ok"}\n'
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+_EXECUTION_PLAN_SHA256 = _sha256(b"runtime-test-execution-plan")
 
 
 def _frozen_package() -> FrozenLearningPackage:
@@ -115,6 +119,10 @@ class _Observer:
 @dataclass
 class _Worker:
     complete_at: int
+    execution_plan_sha256: str = field(
+        default=_EXECUTION_PLAN_SHA256,
+        kw_only=True,
+    )
     fail_once_at: int | None = None
     calls: list[int] = field(default_factory=list)
     seen_states: list[dict[str, object]] = field(default_factory=list)
@@ -147,6 +155,10 @@ class _Worker:
 @dataclass
 class _TypedFailureWorker:
     effect: TrainingWorkerFailureEffect
+    execution_plan_sha256: str = field(
+        default=_EXECUTION_PLAN_SHA256,
+        kw_only=True,
+    )
     calls: list[int] = field(default_factory=list)
 
     def step(
@@ -164,6 +176,10 @@ class _TypedFailureWorker:
 
 @dataclass
 class _InvalidResultWorker:
+    execution_plan_sha256: str = field(
+        default=_EXECUTION_PLAN_SHA256,
+        kw_only=True,
+    )
     calls: list[int] = field(default_factory=list)
 
     def step(
@@ -286,6 +302,11 @@ def test_pause_restart_resume_completes_from_durable_checkpoint(tmp_path: Path) 
 
     assert paused.state is TrainingRunState.PAUSED
     assert paused.next_step == 1
+    assert paused.execution_plan_sha256 == first_worker.execution_plan_sha256
+    assert paused.job_fingerprint == training_job_fingerprint(
+        spec,
+        execution_plan_sha256=first_worker.execution_plan_sha256,
+    )
     assert first_worker.calls == [0]
 
     restarted_store = SQLiteStore(store.path)
@@ -297,6 +318,44 @@ def test_pause_restart_resume_completes_from_durable_checkpoint(tmp_path: Path) 
     assert completed.candidate_sha256 == "b" * 64
     assert second_worker.calls == [1]
     assert second_worker.seen_states == [{"last_step": 0}]
+
+
+def test_restart_rejects_different_worker_execution_plan_before_effect(
+    tmp_path: Path,
+) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    first = _Worker(complete_at=3, execution_plan_sha256="a" * 64)
+    paused = _runtime(store).run(
+        spec,
+        first,
+        control=_scripted_control(
+            TrainingControl.CONTINUE,
+            TrainingControl.CONTINUE,
+            TrainingControl.PAUSE,
+        ),
+    )
+    assert paused.state is TrainingRunState.PAUSED
+
+    replacement = _Worker(complete_at=1, execution_plan_sha256="b" * 64)
+    with pytest.raises(TrainingCheckpointError, match="identity mismatch"):
+        _runtime(SQLiteStore(store.path)).run(spec, replacement)
+
+    assert replacement.calls == []
+
+
+def test_malformed_worker_execution_plan_fails_before_checkpoint_or_effect(
+    tmp_path: Path,
+) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    worker = _Worker(complete_at=0, execution_plan_sha256="A" * 64)
+
+    with pytest.raises(ValueError, match="execution plan"):
+        _runtime(store).run(spec, worker)
+
+    assert CheckpointService(store).latest(spec.task_id) is None
+    assert worker.calls == []
 
 
 def test_checkpoint_identity_mismatch_fails_closed(tmp_path: Path) -> None:
@@ -584,6 +643,10 @@ def test_wrong_workspace_material_identity_fails_before_worker_effect(
 
 @dataclass
 class _TamperingWorker:
+    execution_plan_sha256: str = field(
+        default=_EXECUTION_PLAN_SHA256,
+        kw_only=True,
+    )
     calls: list[int] = field(default_factory=list)
 
     def step(
