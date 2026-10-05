@@ -249,11 +249,11 @@ def test_committed_fill_and_account_are_exactly_once_after_restart(tmp_path) -> 
 
     restarted = TradingStateRepository(SQLiteStore(tmp_path / "nika.db"))
     restarted.initialize()
-    assert restarted.has_fill(fill.fill_id)
-    assert restarted.fill_count() == 1
+    assert restarted.has_fill("workspace", "run", fill.fill_id)
+    assert restarted.fill_count("workspace", "run") == 1
     assert restarted.commit_fill_and_account(fill, snapshot) is False
-    assert restarted.fill_count() == 1
-    payload = restarted.account_payload()
+    assert restarted.fill_count("workspace", "run") == 1
+    payload = restarted.account_payload("workspace", "run")
     assert payload is not None
     assert payload["cash"] == "799"
 
@@ -264,14 +264,14 @@ def test_failed_account_write_rolls_back_fill_insert_atomically(tmp_path) -> Non
     repo = TradingStateRepository(store)
     repo.initialize()
     with store.connection() as conn:
-        conn.execute("DROP TABLE trading_research_account_state")
+        conn.execute("DROP TABLE trading_research_run_account_state")
 
     fill = _fill("fill-rollback")
     with pytest.raises(sqlite3.OperationalError):
         repo.commit_fill_and_account(fill, _snapshot(fill))
 
-    assert repo.fill_count() == 0
-    assert repo.has_fill(fill.fill_id) is False
+    assert repo.fill_count("workspace", "run") == 0
+    assert repo.has_fill("workspace", "run", fill.fill_id) is False
 
 
 def test_crash_before_commit_leaves_no_partial_fill_or_account_state(tmp_path) -> None:
@@ -282,5 +282,5 @@ def test_crash_before_commit_leaves_no_partial_fill_or_account_state(tmp_path) -
 
     restarted = TradingStateRepository(SQLiteStore(tmp_path / "nika.db"))
     restarted.initialize()
-    assert restarted.fill_count() == 0
-    assert restarted.account_payload() is None
+    assert restarted.fill_count("workspace", "run") == 0
+    assert restarted.account_payload("workspace", "run") is None
