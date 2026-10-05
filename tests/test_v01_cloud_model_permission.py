@@ -1378,3 +1378,42 @@ def test_recovered_reconsent_rolls_back_if_model_binding_changes_during_prompt(
         assert conn.execute(
             "SELECT COUNT(*) FROM standing_permissions"
         ).fetchone()[0] == 1
+
+
+def test_injected_live_grant_cannot_bypass_private_data_setting(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store, private_data_allowed=False)
+    record = _task(store, settings)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+
+    selection = settings.for_task(record.task_id)
+    request = service._grant_request(record, selection)
+    permission_id = service._new_permission_id(record.task_id)
+    service._permissions.grant(
+        permission_id=permission_id,
+        scope=service._scope_for_request(
+            record,
+            request,
+            granted_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_bindings"
+            "(task_id, permission_id, updated_at) VALUES (?, ?, ?)",
+            (record.task_id, permission_id, NOW.isoformat()),
+        )
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+
+    assert service.execution_authority_for_task(record.task_id) is None

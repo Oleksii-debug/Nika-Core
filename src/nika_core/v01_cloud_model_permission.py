@@ -184,10 +184,10 @@ class V01CloudModelPermissionService:
         if record.state is not TaskState.RUNNING:
             return None
         try:
-            selection = self._settings.for_task(task_id)
-        except Exception:  # noqa: BLE001 - corrupt durable route fails closed
+            selection = self._cloud_selection(task_id)
+        except Exception:  # noqa: BLE001 - corrupt or disallowed durable route fails closed
             return None
-        if selection.route_kind != "openai_compatible":
+        if selection is None:
             return None
         try:
             permission = self._active_bound_permission(record, selection, now=self._utc_now())
@@ -313,7 +313,9 @@ class V01CloudModelPermissionService:
         if authority.context != expected_context:
             return None
         try:
-            selection = self._settings.for_task(record.task_id)
+            selection = self._cloud_selection(record.task_id)
+            if selection is None:
+                return None
             permission = self._active_bound_permission(
                 record,
                 selection,
