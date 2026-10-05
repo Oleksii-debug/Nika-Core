@@ -18,6 +18,7 @@ from nika_core.model_engineering import (
     ModelBenchmarkRunner,
     ModelCandidate,
     benchmark_accessible_report_json,
+    benchmark_configuration_sha256,
     benchmark_report_json,
     benchmark_report_sha256,
     render_text_report,
@@ -980,12 +981,16 @@ def test_execution_config_identity_binds_timeout_and_temperature() -> None:
 class _ConfigMetadataGateway:
     def __init__(self) -> None:
         self.config_sha256 = None
+        self.configuration_sha256 = None
+        self.run_id = None
         self.request_id = None
         self.timeout_seconds = None
         self.temperature = None
 
     async def complete(self, request):
         self.config_sha256 = request.metadata["benchmark_execution_config_sha256"]
+        self.configuration_sha256 = request.metadata["benchmark_configuration_sha256"]
+        self.run_id = request.metadata["benchmark_run_id"]
         self.request_id = request.request_id
         self.timeout_seconds = request.timeout_seconds
         self.temperature = request.temperature
@@ -1029,6 +1034,15 @@ def test_benchmark_binds_execution_config_to_request_and_report() -> None:
     assert gateway.timeout_seconds == config.timeout_seconds
     assert gateway.temperature == config.temperature
     assert report.execution_config_sha256 == config.evidence_sha256
+    assert gateway.run_id == report.run.run_id
+    assert gateway.configuration_sha256 == report.run.configuration_sha256
+    assert report.run.configuration_sha256 == benchmark_configuration_sha256(
+        candidate_evidence_sha256=report.candidate.evidence_sha256,
+        evaluation_set_id=report.evaluation_set_id,
+        evaluation_set_version=report.evaluation_set_version,
+        evaluation_set_sha256=report.evaluation_set_sha256,
+        execution_config_sha256=report.execution_config_sha256,
+    )
 
 
 def test_request_identity_changes_with_bound_execution_config() -> None:
@@ -1079,6 +1093,56 @@ def test_request_identity_changes_with_bound_execution_config() -> None:
     assert baseline_gateway.config_sha256 == baseline_report.execution_config_sha256
     assert changed_gateway.config_sha256 == changed_report.execution_config_sha256
     assert baseline_report.execution_config_sha256 != changed_report.execution_config_sha256
+    assert baseline_report.run.configuration_sha256 != changed_report.run.configuration_sha256
+
+
+def test_repeat_run_keeps_configuration_identity_but_changes_attempt_identity() -> None:
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+    run_ids = iter(("run-first", "run-second"))
+    gateway = _ConfigMetadataGateway()
+    runner = ModelBenchmarkRunner(
+        gateway,
+        clock=_Clock((1.0, 1.1, 2.0, 2.1)),
+        run_id_factory=lambda: next(run_ids),
+    )
+
+    first = asyncio.run(runner.benchmark(_candidate(), evaluation))
+    first_request_id = gateway.request_id
+    second = asyncio.run(runner.benchmark(_candidate(), evaluation))
+
+    assert first.run.run_id == "run-first"
+    assert second.run.run_id == "run-second"
+    assert first.run.configuration_sha256 == second.run.configuration_sha256
+    assert first_request_id != gateway.request_id
+    assert first.execution_config_sha256 == second.execution_config_sha256
+
+
+@pytest.mark.parametrize("bad_run_id", ["", " leading", "trailing ", "bad/run", "x" * 129])
+def test_run_id_factory_fails_closed_before_gateway_effect(bad_run_id: str) -> None:
+    gateway = _ConfigMetadataGateway()
+    runner = ModelBenchmarkRunner(
+        gateway,
+        run_id_factory=lambda: bad_run_id,
+    )
+
+    with pytest.raises((TypeError, ValueError), match="run_id"):
+        asyncio.run(runner.benchmark(_candidate(), _evaluation_set()))
+
+    assert gateway.request_id is None
 
 
 def test_custom_scorer_requires_stable_identity_before_execution() -> None:
