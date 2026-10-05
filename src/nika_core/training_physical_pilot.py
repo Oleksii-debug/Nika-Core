@@ -502,7 +502,6 @@ class PhysicalTrainingPilotReport:
         )
 
 
-
 def _is_reparse_point(snapshot: os.stat_result) -> bool:
     attributes = int(getattr(snapshot, "st_file_attributes", 0))
     reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
