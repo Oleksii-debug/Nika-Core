@@ -514,7 +514,12 @@ def test_restore_rejects_impossible_deployment_state_pairs_without_mutation(
     source, _, _, _ = _coordinator()
     source.submit(_spec("project-a", "source"), now=NOW)
     valid = source.snapshot().records[0]
-    corrupted = replace(valid, state=state, deployment_state=deployment_state)
+    corrupted = replace(
+        valid,
+        state=state,
+        deployment_state=deployment_state,
+        attempt=0 if state is OperationState.PENDING else 1,
+    )
 
     target, _, _, _ = _coordinator()
     target.submit(_spec("project-a", "existing"), now=NOW)
@@ -536,6 +541,48 @@ def test_restore_rejects_impossible_deployment_state_pairs_without_mutation(
         (OperationState.ROLLED_BACK, DeploymentState.ROLLED_BACK),
     ],
 )
+@pytest.mark.parametrize(
+    ("state", "attempt"),
+    [
+        (OperationState.PENDING, 1),
+        (OperationState.WAITING_FOR_NODE, 0),
+        (OperationState.BLOCKED_CREDENTIAL, 0),
+        (OperationState.RECOVERY_REQUIRED, 0),
+        (OperationState.RECONCILE_REQUIRED, 0),
+        (OperationState.SUCCEEDED, 0),
+        (OperationState.REJECTED, 0),
+        (OperationState.ROLLED_BACK, 0),
+    ],
+)
+def test_restore_rejects_impossible_state_attempt_pairs_without_mutation(
+    state: OperationState,
+    attempt: int,
+) -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    valid = source.snapshot().records[0]
+    deployment_state = {
+        OperationState.RECONCILE_REQUIRED: DeploymentState.UNCERTAIN,
+        OperationState.SUCCEEDED: DeploymentState.HEALTHY,
+        OperationState.REJECTED: DeploymentState.REJECTED,
+        OperationState.ROLLED_BACK: DeploymentState.ROLLED_BACK,
+    }.get(state)
+    corrupted = replace(
+        valid,
+        state=state,
+        attempt=attempt,
+        deployment_state=deployment_state,
+    )
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="attempt count"):
+        target.restore(DeploymentExecutionSnapshot((corrupted,)))
+    assert target.snapshot() == before
+
+
 def test_restore_preserves_valid_deployment_state_pairs(
     state: OperationState,
     deployment_state: DeploymentState | None,
@@ -544,7 +591,12 @@ def test_restore_preserves_valid_deployment_state_pairs(
     spec = _spec("project-a", "source")
     source.submit(spec, now=NOW)
     valid = source.snapshot().records[0]
-    record = replace(valid, state=state, deployment_state=deployment_state)
+    record = replace(
+        valid,
+        state=state,
+        deployment_state=deployment_state,
+        attempt=0 if state is OperationState.PENDING else 1,
+    )
 
     target, _, _, _ = _coordinator()
     target.restore(DeploymentExecutionSnapshot((record,)))
