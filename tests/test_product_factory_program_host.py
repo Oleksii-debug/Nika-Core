@@ -2669,3 +2669,45 @@ def test_recovery_worker_cannot_mutate_coordinator_request_authority(tmp_path) -
             (f"pf-worker:{original_work_id}",),
         ).fetchone()[0]
     assert claim_count == 0
+
+
+def test_dispatch_worker_scope_mutation_is_confined_to_effect_copy(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    original = coordinator.ready_requests()[0]
+    original_paths = original.allowed_paths
+    original_permissions = original.permission_ceiling
+
+    class MutatingScopeWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            object.__setattr__(request, "allowed_paths", ("src/foreign",))
+            object.__setattr__(
+                request,
+                "permission_ceiling",
+                frozenset({"foreign_admin"}),
+            )
+            return _envelope(request, 703)
+
+    worker = MutatingScopeWorker()
+    host = ProductFactoryProgramHost(store, worker)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    durable = _record(coordinator, original.component_id)
+    assert durable.request.allowed_paths == original_paths
+    assert durable.request.permission_ceiling == original_permissions
+    assert original.allowed_paths == original_paths
+    assert original.permission_ceiling == original_permissions
+    assert worker.dispatch_calls[0].allowed_paths == ("src/foreign",)
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    restored_request = _record(restored, original.component_id).request
+    assert restored_request.allowed_paths == original_paths
+    assert restored_request.permission_ceiling == original_permissions
