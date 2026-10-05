@@ -820,6 +820,29 @@ def test_trainer_deployment_identity_binds_exact_registry_digest(
         peft._verify_trainer_deployment_identity(request)
 
 
+def test_main_rejects_deployment_mismatch_before_config_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, _ = _request(tmp_path)
+    trainer_artifact = _trainer_artifact(tmp_path)
+    raw_request["trainer_artifact_id"] = trainer_artifact.artifact_id
+    raw_request["trainer_sha256"] = trainer_artifact.sha256
+    monkeypatch.setattr(peft, "_read_request", lambda: raw_request)
+    monkeypatch.setenv(
+        "NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID",
+        trainer_artifact.artifact_id,
+    )
+    monkeypatch.setenv("NIKA_TRAINER_DEPLOYMENT_SHA256", "0" * 64)
+
+    def config_effect_must_not_run() -> peft.TrainerConfig:
+        raise AssertionError("config effects must not run before deployment identity")
+
+    monkeypatch.setattr(peft, "_read_config", config_effect_must_not_run)
+
+    assert peft.main() == 2
+
+
 def test_environment_builder_rejects_invalid_torch_thread_count(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
