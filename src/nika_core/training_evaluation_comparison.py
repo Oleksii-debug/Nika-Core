@@ -393,7 +393,7 @@ def run_attested_old_vs_new_comparison(
     BenchmarkExecutionConfig.__post_init__(execution_config)
     training_binding = challenger.binding.revalidated()
     champion_binding = champion.binding.revalidated()
-    if champion_binding.training_binding_sha256 != training_binding.binding_sha256:
+    if champion.training_binding != training_binding:
         raise ValueError("champion and challenger do not share one training authority")
     if champion_binding.job_id != training_binding.job_id:
         raise ValueError("champion and challenger job identity differs")
