@@ -103,6 +103,11 @@ _TRAINING_RUNTIME_BINDINGS = (
     ("safetensors", "NIKA_TRAINER_SAFETENSORS_VERSION"),
 )
 _MAX_TRAINING_RUNTIME_VERSION_BYTES = 256
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
 class TrainingSubprocessError(TrainingWorkerError):
@@ -846,6 +851,96 @@ def _training_material_request(
     }
 
 
+def _open_windows_command_artifact_lock(path: str) -> int:
+    """Open one command artifact while denying concurrent write/delete replacement."""
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            path,
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "CreateFileW failed")
+        return int(handle)
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        raise _error(
+            "command_artifact_launch_lock_failed",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        ) from exc
+
+
+def _close_windows_command_artifact_lock(handle: int) -> None:
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(ctypes.c_void_p(handle))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return
+
+
+class _CommandArtifactLaunchGuard:
+    """Hold Registry-bound Windows command files immutable across process launch."""
+
+    def __init__(
+        self,
+        command: tuple[str, ...],
+        expected_records: Mapping[int, ArtifactRecord],
+    ) -> None:
+        self._command = command
+        self._indices = tuple(sorted(expected_records))
+        self._handles: list[int] = []
+
+    def __enter__(self) -> _CommandArtifactLaunchGuard:
+        if os.name != "nt":
+            return self
+        try:
+            for index in self._indices:
+                self._handles.append(
+                    _open_windows_command_artifact_lock(self._command[index])
+                )
+        except TrainingSubprocessError:
+            self._close()
+            raise
+        return self
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        while self._handles:
+            _close_windows_command_artifact_lock(self._handles.pop())
+
+
 class SubprocessTrainingWorker:
     """Shell-free TrainingWorkerPort adapter for one Registry-authorized trainer command.
 
@@ -854,7 +949,10 @@ class SubprocessTrainingWorker:
     command-file arguments must have Artifact Registry authority; relative path arguments are
     forbidden. Physical training paths remain transient request data only. Immediately before
     spawn, the canonical Registry verifies every bound command artifact and
-    ResolvedTrainingPackage re-binds all input bytes. Protocol v3 additionally requires the
+    ResolvedTrainingPackage re-binds all input bytes. On Windows, Registry-bound command
+    files are held read-only with write/delete sharing denied from the final canonical
+    verification through child completion, closing pathname replacement at process launch.
+    Protocol v3 additionally requires the
     exact Registry-bound trainer to attest the digest of the bytes it actually consumed. The
     trainer must only return that attestation after binding its own consumed byte streams to
     the requested material paths; echoing the requested digest without consumption verification
@@ -1273,52 +1371,57 @@ class SubprocessTrainingWorker:
     ) -> bytes:
         deadline = time.monotonic() + self._timeout_seconds
         creationflags, start_new_session = process_group_popen_options()
-        try:
-            process = subprocess.Popen(
-                self._command,
-                env=dict(self._environment),
-                shell=False,
-                stdin=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                creationflags=creationflags,
-                start_new_session=start_new_session,
-            )
-        except FileNotFoundError as exc:
-            raise _error(
-                "training_subprocess_executable_not_found",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            ) from exc
-        except PermissionError as exc:
-            raise _error(
-                "training_subprocess_executable_not_executable",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            ) from exc
-        except OSError as exc:
-            raise _error(
-                "training_subprocess_start_failed",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            ) from exc
+        with _CommandArtifactLaunchGuard(self._command, expected_command_records):
+            # Re-run the canonical Registry verifier only after Windows write/delete
+            # denial is held. This closes the verify -> pathname-spawn replacement
+            # window without creating a second artifact-integrity authority.
+            self._verify_command_artifacts(expected_command_records)
+            try:
+                process = subprocess.Popen(
+                    self._command,
+                    env=dict(self._environment),
+                    shell=False,
+                    stdin=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    creationflags=creationflags,
+                    start_new_session=start_new_session,
+                )
+            except FileNotFoundError as exc:
+                raise _error(
+                    "training_subprocess_executable_not_found",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                ) from exc
+            except PermissionError as exc:
+                raise _error(
+                    "training_subprocess_executable_not_executable",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                ) from exc
+            except OSError as exc:
+                raise _error(
+                    "training_subprocess_start_failed",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                ) from exc
 
-        with WindowsJob() as job:
-            if os.name == "nt":
-                try:
-                    job.assign(int(process._handle))  # type: ignore[attr-defined]
-                except ProcessContainmentError as exc:
-                    terminate_process_tree(process, job)
-                    self._reap_process(process)
-                    raise _error(
-                        "training_subprocess_containment_failed",
-                        effect=TrainingWorkerFailureEffect.UNKNOWN,
-                    ) from exc
-            return self._execute_started_process(
-                process,
-                job,
-                request_bytes,
-                deadline=deadline,
-                expected_command_records=expected_command_records,
-                expected_training_materials=expected_training_materials,
-            )
+            with WindowsJob() as job:
+                if os.name == "nt":
+                    try:
+                        job.assign(int(process._handle))  # type: ignore[attr-defined]
+                    except ProcessContainmentError as exc:
+                        terminate_process_tree(process, job)
+                        self._reap_process(process)
+                        raise _error(
+                            "training_subprocess_containment_failed",
+                            effect=TrainingWorkerFailureEffect.UNKNOWN,
+                        ) from exc
+                return self._execute_started_process(
+                    process,
+                    job,
+                    request_bytes,
+                    deadline=deadline,
+                    expected_command_records=expected_command_records,
+                    expected_training_materials=expected_training_materials,
+                )
 
     def _execute_started_process(
         self,
