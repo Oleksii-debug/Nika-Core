@@ -1007,10 +1007,17 @@ class SubprocessTrainingWorker:
             max_request_bytes=self._max_request_bytes,
             max_response_bytes=self._max_response_bytes,
         )
+        self._last_accepted_consumed_materials_sha256: str | None = None
 
     @property
     def execution_plan_sha256(self) -> str:
         return self._execution_plan_sha256
+
+    @property
+    def last_accepted_consumed_materials_sha256(self) -> str | None:
+        """Return the consumed-byte attestation from the most recent accepted step."""
+
+        return self._last_accepted_consumed_materials_sha256
 
     def protocol_job_fingerprint(self, spec: TrainingJobSpec) -> str:
         """Return the exact trainer-protocol job identity used for subprocess effects."""
@@ -1186,7 +1193,7 @@ class SubprocessTrainingWorker:
             effect=TrainingWorkerFailureEffect.UNKNOWN,
         )
         try:
-            return TrainingStepResult(
+            result = TrainingStepResult(
                 resume_state=wrapped_resume_state,
                 completed=completed,
                 candidate_sha256=candidate_sha256,
@@ -1196,6 +1203,8 @@ class SubprocessTrainingWorker:
                 "training_subprocess_invalid_result_evidence",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             ) from exc
+        self._last_accepted_consumed_materials_sha256 = consumed_materials_sha256
+        return result
 
     def _get_command_records(self) -> dict[int, ArtifactRecord]:
         records: dict[int, ArtifactRecord] = {}

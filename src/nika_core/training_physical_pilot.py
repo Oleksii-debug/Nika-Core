@@ -37,9 +37,11 @@ _MAX_TEXT_BYTES = 1024
 _MAX_STEPS = 1_000_000
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
 _WINDOWS_OPEN_EXISTING = 3
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _PLATFORM_PATH_TYPE = type(Path())
 _REQUIRED_REPORT_FIELDS = {
     "base_sha256",
@@ -245,12 +247,69 @@ def _close_windows_candidate_stability_lock(handle: int | None) -> None:
         pass
 
 
+def _open_windows_report_parent_stability_lock(
+    path: Path,
+    expected_snapshot: os.stat_result,
+) -> int | None:
+    """Deny parent-directory rename/delete while report publication is in flight."""
+
+    if os.name != "nt":
+        return None
+    handle_value: int | None = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            0,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS
+            | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "CreateFileW failed")
+        handle_value = int(handle)
+        current = os.lstat(path)
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or _is_reparse_point(current)
+            or not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino)
+            != (expected_snapshot.st_dev, expected_snapshot.st_ino)
+        ):
+            raise OSError("report parent changed while acquiring stability lock")
+        return handle_value
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        _close_windows_candidate_stability_lock(handle_value)
+        raise PhysicalTrainingPilotError(
+            "pilot report parent directory could not be locked for publication"
+        ) from exc
+
+
 def _candidate_manifest_evidence(
     *,
     candidate_path: Path,
     completed: TrainingRunEvidence,
     trainer_job_fingerprint: str,
     trainer_deployment_identity: ArtifactIdentity,
+    trainer_consumed_materials_sha256: str,
 ) -> _CandidateManifestEvidence:
     try:
         manifest = candidate_adapter_manifest(candidate_path)
@@ -292,6 +351,15 @@ def _candidate_manifest_evidence(
         manifest.get("consumed_materials_sha256"),
         name="candidate manifest consumed_materials_sha256",
     )
+    expected_consumed_materials_sha256 = _require_sha256(
+        trainer_consumed_materials_sha256,
+        name="worker accepted consumed_materials_sha256",
+    )
+    if not hmac.compare_digest(
+        consumed_materials_sha256,
+        expected_consumed_materials_sha256,
+    ):
+        _fail("PEFT candidate manifest changed consumed-material attestation")
     model_dir_manifest_sha256 = _require_sha256(
         manifest.get("model_dir_manifest_sha256"),
         name="candidate manifest model_dir_manifest_sha256",
@@ -572,6 +640,29 @@ def _canonical_report_output_path(value: object) -> tuple[Path, os.stat_result]:
     return path, parent_snapshot
 
 
+def _unlink_published_report_if_owned(
+    path: Path,
+    expected_identity: tuple[int, int] | None,
+) -> None:
+    if expected_identity is None:
+        return
+    try:
+        current = os.lstat(path)
+    except OSError:
+        return
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or _is_reparse_point(current)
+        or not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != expected_identity
+    ):
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def write_physical_training_pilot_report(
     report: PhysicalTrainingPilotReport,
     report_path: Path,
@@ -581,10 +672,14 @@ def write_physical_training_pilot_report(
     if type(report) is not PhysicalTrainingPilotReport:
         raise TypeError("report must be exact PhysicalTrainingPilotReport")
     destination, parent_before = _canonical_report_output_path(report_path)
+    parent_lock = _open_windows_report_parent_stability_lock(
+        destination.parent,
+        parent_before,
+    )
     payload = report.to_json().encode("utf-8")
     temporary: Path | None = None
     descriptor: int | None = None
-    published = False
+    published_identity: tuple[int, int] | None = None
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination.name}.",
@@ -597,6 +692,19 @@ def write_physical_training_pilot_report(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+
+        temporary_snapshot = os.lstat(temporary)
+        if (
+            stat.S_ISLNK(temporary_snapshot.st_mode)
+            or _is_reparse_point(temporary_snapshot)
+            or not stat.S_ISREG(temporary_snapshot.st_mode)
+            or int(getattr(temporary_snapshot, "st_nlink", 1)) != 1
+        ):
+            _fail("pilot report temporary file is not a canonical regular file")
+        published_identity = (
+            int(temporary_snapshot.st_dev),
+            int(temporary_snapshot.st_ino),
+        )
 
         parent_during = os.lstat(destination.parent)
         if (
@@ -614,48 +722,64 @@ def write_physical_training_pilot_report(
             raise PhysicalTrainingPilotError(
                 "pilot report destination already exists"
             ) from exc
-        published = True
+        linked_snapshot = os.lstat(destination)
+        if (
+            stat.S_ISLNK(linked_snapshot.st_mode)
+            or _is_reparse_point(linked_snapshot)
+            or not stat.S_ISREG(linked_snapshot.st_mode)
+            or (linked_snapshot.st_dev, linked_snapshot.st_ino)
+            != published_identity
+            or int(getattr(linked_snapshot, "st_nlink", 1)) != 2
+        ):
+            _fail("pilot report publication changed file identity")
         os.unlink(temporary)
         temporary = None
 
-        final_snapshot = os.lstat(destination)
-        if (
-            stat.S_ISLNK(final_snapshot.st_mode)
-            or _is_reparse_point(final_snapshot)
-            or not stat.S_ISREG(final_snapshot.st_mode)
-            or int(getattr(final_snapshot, "st_nlink", 1)) != 1
-        ):
-            _fail("published pilot report is not a canonical regular file")
+        destination_lock = _open_windows_candidate_stability_lock(destination)
         try:
-            published_payload = destination.read_bytes()
-        except OSError as exc:
-            raise PhysicalTrainingPilotError(
-                "published pilot report could not be reverified"
-            ) from exc
-        if not hmac.compare_digest(published_payload, payload):
-            _fail("published pilot report bytes changed during publication")
-        try:
-            published_text = published_payload.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as exc:
-            raise PhysicalTrainingPilotError(
-                "published pilot report is not valid UTF-8"
-            ) from exc
-        restored = PhysicalTrainingPilotReport.from_json(published_text)
-        if restored != report:
-            _fail("published pilot report changed during parse-back verification")
-    except PhysicalTrainingPilotError:
-        if published:
+            final_snapshot = os.lstat(destination)
+            if (
+                stat.S_ISLNK(final_snapshot.st_mode)
+                or _is_reparse_point(final_snapshot)
+                or not stat.S_ISREG(final_snapshot.st_mode)
+                or (final_snapshot.st_dev, final_snapshot.st_ino)
+                != published_identity
+                or int(getattr(final_snapshot, "st_nlink", 1)) != 1
+            ):
+                _fail("published pilot report is not a canonical regular file")
             try:
-                destination.unlink()
-            except OSError:
-                pass
+                published_payload = destination.read_bytes()
+            except OSError as exc:
+                raise PhysicalTrainingPilotError(
+                    "published pilot report could not be reverified"
+                ) from exc
+            if not hmac.compare_digest(published_payload, payload):
+                _fail("published pilot report bytes changed during publication")
+            try:
+                published_text = published_payload.decode("utf-8", errors="strict")
+            except UnicodeDecodeError as exc:
+                raise PhysicalTrainingPilotError(
+                    "published pilot report is not valid UTF-8"
+                ) from exc
+            restored = PhysicalTrainingPilotReport.from_json(published_text)
+            if restored != report:
+                _fail("published pilot report changed during parse-back verification")
+            parent_after = os.lstat(destination.parent)
+            if (
+                stat.S_ISLNK(parent_after.st_mode)
+                or _is_reparse_point(parent_after)
+                or not stat.S_ISDIR(parent_after.st_mode)
+                or (parent_after.st_dev, parent_after.st_ino)
+                != (parent_before.st_dev, parent_before.st_ino)
+            ):
+                _fail("pilot report parent directory changed during publication")
+        finally:
+            _close_windows_candidate_stability_lock(destination_lock)
+    except PhysicalTrainingPilotError:
+        _unlink_published_report_if_owned(destination, published_identity)
         raise
     except OSError as exc:
-        if published:
-            try:
-                destination.unlink()
-            except OSError:
-                pass
+        _unlink_published_report_if_owned(destination, published_identity)
         raise PhysicalTrainingPilotError(
             "pilot report could not be published atomically"
         ) from exc
@@ -670,6 +794,7 @@ def write_physical_training_pilot_report(
                 temporary.unlink()
             except OSError:
                 pass
+        _close_windows_candidate_stability_lock(parent_lock)
 
 
 def _snapshot_run_evidence(
@@ -762,6 +887,7 @@ def build_physical_training_pilot_report(
     completed: TrainingRunEvidence,
     trainer_job_fingerprint: str,
     trainer_deployment_identity: ArtifactIdentity,
+    trainer_consumed_materials_sha256: str,
     candidate_path: Path,
     candidate_descriptor: ModelArtifactDescriptor,
     candidate_root: Path | None = None,
@@ -841,6 +967,7 @@ def build_physical_training_pilot_report(
             completed=completed,
             trainer_job_fingerprint=trainer_job_fingerprint,
             trainer_deployment_identity=trainer_deployment_identity,
+            trainer_consumed_materials_sha256=trainer_consumed_materials_sha256,
         )
     finally:
         _close_windows_candidate_stability_lock(stability_lock)
@@ -955,6 +1082,8 @@ def run_physical_training_pilot(
         raise TypeError("candidate_descriptor_factory must be callable")
     if canonical_spec.max_steps < 2:
         _fail("physical pilot requires max_steps >= 2")
+    if worker.last_accepted_consumed_materials_sha256 is not None:
+        _fail("initial worker already carries accepted consumed-material evidence")
     initial_execution_plan_sha256 = _require_sha256(
         worker.execution_plan_sha256,
         name="initial worker execution_plan_sha256",
@@ -993,6 +1122,10 @@ def run_physical_training_pilot(
         _fail("trainer did not reach the required one-step durable pause boundary")
     if paused.reason != "paused":
         _fail("initial pilot pause did not come from the explicit pause control")
+    initial_consumed_materials_sha256 = _require_sha256(
+        worker.last_accepted_consumed_materials_sha256,
+        name="initial worker accepted consumed_materials_sha256",
+    )
 
     resumed_runtime = restart_runtime()
     resumed_worker = restart_worker()
@@ -1002,6 +1135,8 @@ def run_physical_training_pilot(
         raise TypeError("restart_worker must return canonical SubprocessTrainingWorker")
     if resumed_runtime is runtime or resumed_worker is worker:
         _fail("restart factories must construct new runtime and worker objects")
+    if resumed_worker.last_accepted_consumed_materials_sha256 is not None:
+        _fail("restarted worker already carries accepted consumed-material evidence")
     resumed_execution_plan_sha256 = _require_sha256(
         resumed_worker.execution_plan_sha256,
         name="resumed worker execution_plan_sha256",
@@ -1043,6 +1178,8 @@ def run_physical_training_pilot(
         _fail("restarted runtime did not reopen the one-step durable checkpoint")
     if restart_probe.reason != "paused_before_admission":
         _fail("restart probe did not pause before admission and trainer effects")
+    if resumed_worker.last_accepted_consumed_materials_sha256 is not None:
+        _fail("restart probe produced unexpected consumed-material evidence")
 
     completed = resumed_runtime.run(
         canonical_spec,
@@ -1054,6 +1191,15 @@ def run_physical_training_pilot(
         state=TrainingRunState.COMPLETED,
         label="completed run",
     )
+    resumed_consumed_materials_sha256 = _require_sha256(
+        resumed_worker.last_accepted_consumed_materials_sha256,
+        name="resumed worker accepted consumed_materials_sha256",
+    )
+    if not hmac.compare_digest(
+        resumed_consumed_materials_sha256,
+        initial_consumed_materials_sha256,
+    ):
+        _fail("accepted consumed-material attestation changed across restart")
     candidate_descriptor = _resolve_candidate_descriptor(
         candidate_descriptor_factory,
         completed,
@@ -1064,6 +1210,7 @@ def run_physical_training_pilot(
         completed=completed,
         trainer_job_fingerprint=resumed_trainer_job_fingerprint,
         trainer_deployment_identity=resumed_trainer_deployment_identity,
+        trainer_consumed_materials_sha256=resumed_consumed_materials_sha256,
         candidate_path=candidate_path,
         candidate_descriptor=candidate_descriptor,
         candidate_root=candidate_root,
