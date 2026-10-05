@@ -120,6 +120,22 @@ def test_pf11_rejects_boolean_spec_version(
         _run_installed_pf11(Path("NikaCore.exe"), output, env={})
 
 
+@pytest.mark.parametrize("state", ["failed", "archived", "completed"])
+def test_pf11_rejects_non_active_product_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    state: str,
+) -> None:
+    output = tmp_path / "pf11.json"
+    payload = _pf11_payload()
+    payload["state"] = state
+    output.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(release_evidence, "_run_checked", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="invalid state"):
+        _run_installed_pf11(Path("NikaCore.exe"), output, env={})
+
+
 def test_pf11_rejects_duplicate_identity_before_route_admission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

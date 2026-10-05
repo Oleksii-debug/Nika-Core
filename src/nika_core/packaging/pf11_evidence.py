@@ -108,7 +108,7 @@ def require_packaged_pf11_evidence(payload: object) -> dict[str, object]:
 
     route = _require_text(payload, "route")
     project_id = _require_text(payload, "project_id")
-    _require_text(payload, "state")
+    state = _require_text(payload, "state")
     _require_exact_int(payload, "spec_version", 1)
     bridge_project_id = _require_text(payload, "bridge_state_project_id")
     _require_exact_int(payload, "bridge_state_spec_version", 1)
@@ -118,6 +118,10 @@ def require_packaged_pf11_evidence(payload: object) -> dict[str, object]:
     if route != "product_project":
         raise PackagedPF11EvidenceError(
             "packaged PF11 ProductProject proof returned invalid route evidence"
+        )
+    if state != "active":
+        raise PackagedPF11EvidenceError(
+            "packaged PF11 proof returned invalid state"
         )
     if _PRODUCT_PROJECT_ID_RE.fullmatch(project_id) is None:
         raise PackagedPF11EvidenceError(
