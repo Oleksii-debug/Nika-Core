@@ -221,3 +221,42 @@ def test_tool_guard_rejects_truthy_non_text_reservation_identity_at_boundary(
 
     assert ledger.require(reservation.operation_key).status is IdempotencyStatus.PENDING
 
+@pytest.mark.parametrize("mutation_name", ["complete", "mark_uncertain"])
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "operation_key",
+        "task_id",
+        "operation_type",
+        "input_fingerprint",
+        "created_at",
+    ],
+)
+@pytest.mark.parametrize(
+    "invalid_text",
+    [
+        chr(0xD800),
+        "x" * 513,
+        " ",
+    ],
+)
+def test_tool_guard_rejects_invalid_text_reservation_identity_before_ledger(
+    tmp_path,
+    mutation_name: str,
+    field_name: str,
+    invalid_text: str,
+) -> None:
+    task, _store, ledger, guard = _guard_bundle(tmp_path)
+    reservation = guard.reserve(spec=_spec(), call=_call(task.task_id))
+    forged = replace(reservation, **{field_name: invalid_text})
+
+    with pytest.raises(
+        ToolEffectConflictError,
+        match="finalization lacks reservation authority",
+    ):
+        if mutation_name == "complete":
+            guard.complete(forged, {"published": True})
+        else:
+            guard.mark_uncertain(forged)
+
+    assert ledger.require(reservation.operation_key).status is IdempotencyStatus.PENDING
