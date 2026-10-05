@@ -8,6 +8,25 @@ from nika_core.data.sqlite import SQLiteStore
 _SQLITE_MAX_INT64 = (1 << 63) - 1
 
 
+def _text_value(value: object, field_name: str, *, allow_blank: bool) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{field_name} must be text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 text") from exc
+    if not allow_blank and not value.strip():
+        raise ValueError(f"{field_name} must not be empty")
+    return value
+
+
+def _stored_text(value: object, field_name: str, *, allow_blank: bool) -> str:
+    try:
+        return _text_value(value, field_name, allow_blank=allow_blank)
+    except ValueError as exc:
+        raise ValueError(f"invalid persisted workspace {field_name}") from exc
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceDefinition:
     workspace_id: str
@@ -17,12 +36,11 @@ class WorkspaceDefinition:
     enabled: bool = True
 
     def __post_init__(self) -> None:
-        if not self.workspace_id.strip():
-            raise ValueError("workspace_id must not be empty")
-        if not self.name.strip():
-            raise ValueError("name must not be empty")
+        _text_value(self.workspace_id, "workspace_id", allow_blank=False)
+        _text_value(self.name, "name", allow_blank=False)
         if type(self.version) is not int or not 1 <= self.version <= _SQLITE_MAX_INT64:
             raise ValueError("version must be a positive SQLite-sized integer")
+        _text_value(self.description, "description", allow_blank=True)
         if type(self.enabled) is not bool:
             raise ValueError("enabled must be a boolean")
 
@@ -69,9 +87,10 @@ class WorkspaceRegistry:
             )
 
     def get(self, workspace_id: str) -> WorkspaceDefinition:
-        current = self._latest(workspace_id)
+        normalized_id = _text_value(workspace_id, "workspace_id", allow_blank=False)
+        current = self._latest(normalized_id)
         if current is None:
-            raise KeyError(f"Unknown workspace: {workspace_id}")
+            raise KeyError(f"Unknown workspace: {normalized_id}")
         return current
 
     def list_latest(self) -> tuple[WorkspaceDefinition, ...]:
@@ -85,10 +104,14 @@ class WorkspaceRegistry:
             ).fetchall()
         return tuple(
             WorkspaceDefinition(
-                workspace_id=row["workspace_id"],
-                name=row["name"],
+                workspace_id=_stored_text(
+                    row["workspace_id"], "workspace_id", allow_blank=False
+                ),
+                name=_stored_text(row["name"], "name", allow_blank=False),
                 version=_stored_version(row["version"]),
-                description=row["description"],
+                description=_stored_text(
+                    row["description"], "description", allow_blank=True
+                ),
                 enabled=_stored_enabled(row["enabled"]),
             )
             for row in rows
@@ -104,10 +127,10 @@ class WorkspaceRegistry:
         if row is None:
             return None
         return WorkspaceDefinition(
-            workspace_id=row["workspace_id"],
-            name=row["name"],
+            workspace_id=_stored_text(row["workspace_id"], "workspace_id", allow_blank=False),
+            name=_stored_text(row["name"], "name", allow_blank=False),
             version=_stored_version(row["version"]),
-            description=row["description"],
+            description=_stored_text(row["description"], "description", allow_blank=True),
             enabled=_stored_enabled(row["enabled"]),
         )
 
