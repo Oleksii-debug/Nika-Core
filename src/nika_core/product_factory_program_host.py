@@ -26,7 +26,6 @@ from nika_core.product_factory_coordinator import (
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
 from nika_core.product_factory_work_ownership import (
     ProductFactoryWorkOwnership,
-    WorkOwnershipConflictError,
     WorkOwnershipError,
     WorkOwnershipLease,
 )
@@ -181,39 +180,18 @@ class ProductFactoryProgramHost:
             return ()
 
         leases: list[WorkOwnershipLease] = []
-        admitted: list[ComponentWorkRequest] = []
-        deferred: list[ProgramWorkOutcome] = []
         before_start = coordinator.snapshot()
         try:
             for request in ready:
-                lease = self._acquire_if_available(request)
-                if lease is None:
-                    deferred.append(
-                        _outcome(
-                            request,
-                            coordinator,
-                            ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                            None,
-                            (
-                                "active Product Factory ownership forbids duplicate dispatch; "
-                                "independent ready work may continue"
-                            ),
-                        )
-                    )
-                    continue
-                leases.append(lease)
-                admitted.append(request)
-            started = tuple(
-                coordinator.start(request.component_id) for request in admitted
+                leases.append(self._acquire(request))
+            started = tuple(coordinator.start(request.component_id) for request in ready)
+            self._checkpoint_running(
+                host_task_id=host_task_id,
+                binding=binding,
+                coordinator=coordinator,
+                requests=started,
+                leases=tuple(leases),
             )
-            if started:
-                self._checkpoint_running(
-                    host_task_id=host_task_id,
-                    binding=binding,
-                    coordinator=coordinator,
-                    requests=started,
-                    leases=tuple(leases),
-                )
         except Exception:
             coordinator.restore(before_start)
             for lease in leases:
@@ -235,9 +213,7 @@ class ProductFactoryProgramHost:
                 for request in started
             )
         )
-        return tuple(
-            sorted((*deferred, *outcomes), key=lambda item: item.component_id)
-        )
+        return tuple(sorted(outcomes, key=lambda item: item.component_id))
 
     async def recover_running(
         self,
@@ -301,9 +277,7 @@ class ProductFactoryProgramHost:
                 IdempotencyStatus.UNCERTAIN,
             }:
                 continue
-            lease = self._acquire_if_available(record.request)
-            if lease is None:
-                continue
+            lease = self._acquire(record.request)
             try:
                 result = _result_summary(record)
                 with self.store.connection() as connection:
@@ -542,18 +516,7 @@ class ProductFactoryProgramHost:
     ) -> ProgramWorkOutcome:
         request = record.request
         operation_key = _operation_key(request)
-        lease = self._acquire_if_available(request)
-        if lease is None:
-            return _outcome(
-                request,
-                coordinator,
-                ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                self._durable_operation_status(operation_key),
-                (
-                    "active Product Factory ownership forbids duplicate recovery; "
-                    "independent running work may continue"
-                ),
-            )
+        lease = self._acquire(request)
         try:
             operation = self._ledger.get(operation_key)
 
@@ -1181,24 +1144,6 @@ class ProductFactoryProgramHost:
         except Exception as exc:  # noqa: BLE001 - PENDING remains replay-blocking
             marker_detail = f"; uncertainty marker failed: {type(exc).__name__}"
         return self._durable_operation_status(operation_key), marker_detail
-
-    def _acquire_if_available(
-        self,
-        request: ComponentWorkRequest,
-    ) -> WorkOwnershipLease | None:
-        try:
-            return self._ownership.acquire(
-                project_id=request.project_id,
-                work_id=request.work_id,
-                owner_id=self.owner_id,
-                lease_seconds=self.lease_seconds,
-            )
-        except WorkOwnershipConflictError:
-            return None
-        except WorkOwnershipError as exc:
-            raise ProductFactoryProgramError(
-                f"Product Factory work ownership is unavailable for {request.work_id}: {exc}"
-            ) from exc
 
     def _acquire(self, request: ComponentWorkRequest) -> WorkOwnershipLease:
         try:
