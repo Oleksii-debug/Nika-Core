@@ -18,6 +18,7 @@ def _backend(
     tmp_path: Path,
     *,
     admit_created_task=None,
+    admit_resumed_task=None,
 ) -> tuple[DesktopBackend, TaskQueue, AuditLog]:
     store = SQLiteStore(tmp_path / "task-admission.sqlite3")
     store.initialize()
@@ -30,6 +31,7 @@ def _backend(
             workspaces=WorkspaceRegistry(store),
             audit=audit,
             admit_created_task=admit_created_task,
+            admit_resumed_task=admit_resumed_task,
         ),
         queue,
         audit,
@@ -120,4 +122,53 @@ def test_admission_audit_does_not_capture_callback_exception_text(tmp_path: Path
     task = queue.list_recent()[0]
     events = audit.list_for(entity_type="task", entity_id=task.task_id)
     assert "PRIVATE_CONFIRMATION_CANARY" not in repr(events)
+    backend.close()
+
+
+def _paused_never_started(queue: TaskQueue, command: str) -> TaskRecord:
+    record = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": command},
+    )
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    return queue.get(record.task_id)
+
+
+def test_rejected_resume_admission_leaves_paused_task_unsubmitted(tmp_path: Path) -> None:
+    seen: list[TaskRecord] = []
+
+    def reject(record: TaskRecord) -> None:
+        seen.append(record)
+        raise ValueError("Потрібне нове підтвердження.")
+
+    backend, queue, _audit = _backend(tmp_path, admit_resumed_task=reject)
+    paused = _paused_never_started(queue, "Resume only after consent")
+
+    with pytest.raises(ValueError, match="нове підтвердження"):
+        backend.resume_task({})
+
+    assert len(seen) == 1
+    assert seen[0] == paused
+    assert queue.get(paused.task_id).state is TaskState.PAUSED
+    assert backend._runtime_loop is None
+    assert backend._active_futures == {}
+    backend.close()
+
+
+def test_successful_resume_admission_preserves_existing_resume_path(tmp_path: Path) -> None:
+    seen: list[TaskRecord] = []
+    backend, queue, _audit = _backend(
+        tmp_path,
+        admit_resumed_task=lambda record: seen.append(record),
+    )
+    paused = _paused_never_started(queue, "Resume normal path")
+
+    result = backend.resume_task({})
+
+    assert result.status == "accepted"
+    assert len(seen) == 1
+    assert seen[0] == paused
+    _wait(queue, paused.task_id, TaskState.COMPLETED)
     backend.close()
