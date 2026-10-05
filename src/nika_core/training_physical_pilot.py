@@ -321,8 +321,19 @@ def _candidate_manifest_evidence(
         raise PhysicalTrainingPilotError(
             "canonical PEFT candidate manifest verification failed"
         ) from exc
-    if type(manifest) is not dict or manifest.get("schema") != "nika-peft-candidate-v2":
+    if type(manifest) is not dict:
         _fail("canonical PEFT candidate manifest returned invalid evidence")
+    manifest_schema = manifest.get("schema")
+    if manifest_schema not in {
+        "nika-peft-candidate-v2",
+        "nika-peft-candidate-v3",
+    }:
+        _fail("canonical PEFT candidate manifest returned invalid evidence")
+    if manifest_schema == "nika-peft-candidate-v3":
+        _require_sha256(
+            manifest.get("foundation_model_sha256"),
+            name="candidate manifest foundation_model_sha256",
+        )
 
     if manifest.get("base_artifact_ref") != completed.base_artifact.artifact_ref:
         _fail("PEFT candidate manifest changed base artifact reference")
