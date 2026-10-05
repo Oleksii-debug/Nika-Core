@@ -12,6 +12,7 @@ _SCHEMA_VERSION = 1
 _MAX_MANIFEST_BYTES = 1024 * 1024
 _MAX_SHARDS = 1024
 _MAX_SIGNED_64 = (1 << 63) - 1
+_MAX_JSON_NUMBER_CHARS = 1024
 _SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 _TOKEN_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}\Z")
 _ENVELOPE_KEYS = frozenset({"manifest", "manifest_sha256"})
@@ -96,6 +97,25 @@ def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise LearningPackageIntegrityError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
+
+
+def _parse_bounded_json_int(value: str) -> int:
+    if len(value) > _MAX_JSON_NUMBER_CHARS:
+        raise LearningPackageIntegrityError("JSON integer exceeds character limit")
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise LearningPackageIntegrityError("JSON integer is invalid") from exc
+
+
+def _reject_json_float(value: str) -> float:
+    raise LearningPackageIntegrityError(
+        f"floating-point JSON values are not supported: {value[:32]}"
+    )
+
+
+def _reject_json_constant(value: str) -> object:
+    raise LearningPackageIntegrityError(f"non-finite JSON value is not supported: {value}")
 
 
 def _canonical_shard_order(shards: Iterable[LearningShard]) -> tuple[LearningShard, ...]:
@@ -368,7 +388,13 @@ class FrozenLearningPackage:
             except UnicodeDecodeError as exc:
                 raise LearningPackageIntegrityError("serialized package is not valid UTF-8") from exc
         try:
-            parsed = json.loads(decoded, object_pairs_hook=_reject_duplicate_keys)
+            parsed = json.loads(
+                decoded,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_int=_parse_bounded_json_int,
+                parse_float=_reject_json_float,
+                parse_constant=_reject_json_constant,
+            )
         except json.JSONDecodeError as exc:
             raise LearningPackageIntegrityError("serialized package is not valid JSON") from exc
         except RecursionError as exc:

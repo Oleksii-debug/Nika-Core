@@ -398,3 +398,49 @@ def test_multibyte_string_enforces_post_encode_byte_bound() -> None:
 
     with pytest.raises(LearningPackageIntegrityError, match="size is invalid"):
         FrozenLearningPackage.from_json(oversized_utf8)
+
+
+@pytest.mark.parametrize("numeric_token", ("NaN", "Infinity", "-Infinity"))
+def test_serialized_manifest_rejects_nonfinite_numbers_before_digest(
+    numeric_token: str,
+) -> None:
+    raw = (
+        '{"manifest":{"candidate_dataset_sha256":'
+        + numeric_token
+        + '},"manifest_sha256":"'
+        + A
+        + '"}'
+    )
+
+    with pytest.raises(LearningPackageIntegrityError, match="non-finite JSON value"):
+        FrozenLearningPackage.from_json(raw)
+
+
+@pytest.mark.parametrize("numeric_token", ("1.0", "1e3", "-2.5"))
+def test_serialized_manifest_rejects_floating_point_numbers_before_digest(
+    numeric_token: str,
+) -> None:
+    raw = (
+        '{"manifest":{"schema_version":'
+        + numeric_token
+        + '},"manifest_sha256":"'
+        + A
+        + '"}'
+    )
+
+    with pytest.raises(LearningPackageIntegrityError, match="floating-point JSON values"):
+        FrozenLearningPackage.from_json(raw)
+
+
+def test_serialized_manifest_rejects_oversized_integer_token_before_conversion() -> None:
+    oversized = "9" * 1025
+    raw = (
+        '{"manifest":{"schema_version":'
+        + oversized
+        + '},"manifest_sha256":"'
+        + A
+        + '"}'
+    )
+
+    with pytest.raises(LearningPackageIntegrityError, match="integer exceeds character limit"):
+        FrozenLearningPackage.from_json(raw)
