@@ -24,6 +24,7 @@ const factory = new Function("context", `
   return {
     dispatch, mutateKeymap, getSourceDirty: () => sourceDirty,
     getActionsReady: () => actionsReady,
+    getStateReconciliationPending: () => stateReconciliationPending,
   };
 `);
 
@@ -32,6 +33,7 @@ async function main() {
   let bridge = null;
   let stateRead = async () => true;
   let stateReads = 0;
+  const stateReadOptions = [];
   let focusCount = 0;
   let keymapReads = 0;
   let keymapReady = true;
@@ -53,7 +55,11 @@ async function main() {
     requestId: () => `req-${++nextId}`,
     commandInput: {value: "  Створити завдання  "},
     sourceInputs: {root: {value: "C:\\\\Українська папка"}, source_a: {value: "а.txt"}, source_b: {value: "б.txt"}},
-    refreshState: async () => {stateReads += 1; return stateRead();},
+    refreshState: async (options = {}) => {
+      stateReadOptions.push(options);
+      stateReads += 1;
+      return stateRead();
+    },
     refreshKeymap: async () => {keymapReads += 1; return keymapReady;},
     reportStateUnavailable: () => messages.push(["Стан недоступний", true]),
     document: {documentElement: {dataset: {nikaReady: "true"}}},
@@ -120,11 +126,15 @@ async function main() {
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(requests.length, 6);
+  assert.equal(ui.getStateReconciliationPending(), true);
+  assert.equal(stateReadOptions.at(-1).allowDuringReconciliation, true);
   await ui.dispatch("task.pause", trigger);
-  assert.equal(requests.length, 6, "retry must stay blocked while reconciliation is pending");
-  assert(messages.at(-1)[0].includes("Попередню команду"));
+  await ui.dispatch("team.sources.configure", trigger);
+  assert.equal(requests.length, 6, "all command dispatch must stay blocked during reconciliation");
+  assert(messages.at(-1)[0].includes("Триває звірка стану"));
   finishStateReconcile(true);
   await uncertainDispatch;
+  assert.equal(ui.getStateReconciliationPending(), false);
   assert(messages.at(-1)[0].includes("Стан перечитано"));
   assert(!JSON.stringify(messages).includes("SECRET_CONNECTION_DETAIL"));
   assert(focusCount > 0, "keyboard focus restored after uncertain reconciliation");
@@ -214,6 +224,9 @@ async function main() {
     "    stateUnavailableReported = false;", source.indexOf("  async function refreshState("),
   );
   assert(recoveryReset > 0, "healthy state must rearm outage reporting");
+  assert(source.includes(
+    "if (stateReconciliationPending && !allowDuringReconciliation) return false;",
+  ), "normal state refresh must not supersede uncertain-effect reconciliation");
 
   const entries = [];
   let listLabel = "";

@@ -226,6 +226,7 @@
   const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
   const inFlightActions = new Set();
   let keymapMutationPending = false;
+  let stateReconciliationPending = false;
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let stateRefreshGeneration = 0;
@@ -1516,7 +1517,11 @@
     );
   });
 
-  async function refreshState({ announceTeamTransitions = true } = {}) {
+  async function refreshState({
+    announceTeamTransitions = true,
+    allowDuringReconciliation = false,
+  } = {}) {
+    if (stateReconciliationPending && !allowDuringReconciliation) return false;
     const stateReadGeneration = ++stateRefreshGeneration;
     const isCurrentStateRead = () => stateReadGeneration === stateRefreshGeneration;
     const autostartReadGeneration = autostartGeneration;
@@ -1606,6 +1611,10 @@
       announce("Міст Nika ще не готовий.", true);
       return;
     }
+    if (stateReconciliationPending) {
+      announce("Триває звірка стану після непідтвердженої дії. Дочекайтеся її завершення.", false);
+      return;
+    }
     if (["settings.autostart.configure", "settings.autostart.refresh"].includes(actionId)) {
       await dispatchAutostart(actionId, trigger);
       return;
@@ -1625,10 +1634,15 @@
       announce(message, true);
       appendLog(message);
       let stateReady = false;
+      stateReconciliationPending = true;
       try {
-        stateReady = await refreshState();
-      } catch {
-        reportStateUnavailable();
+        try {
+          stateReady = await refreshState({ allowDuringReconciliation: true });
+        } catch {
+          reportStateUnavailable();
+        }
+      } finally {
+        stateReconciliationPending = false;
       }
       document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
       if (stateReady) {
