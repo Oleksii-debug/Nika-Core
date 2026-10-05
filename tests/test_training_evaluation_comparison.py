@@ -28,6 +28,7 @@ from nika_core.model_engineering import (
     benchmark_observations,
     build_experiment_definition,
 )
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelResponse,
@@ -48,6 +49,12 @@ from nika_core.training_evaluation_attestation import (
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
 from nika_core.training_evaluation_comparison import run_attested_old_vs_new_comparison
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
+from nika_core.training_model_activation import (
+    TrainingModelActivationError,
+    activate_attested_training_promotion,
+    rollback_attested_training_promotion,
+)
+from nika_core.v01_model_settings import V01ModelSettings
 
 
 def _sha(value: bytes) -> str:
@@ -637,3 +644,218 @@ async def test_comparison_hash_properties_are_derived_from_nested_authorities(
     with pytest.raises(AttributeError):
         object.__setattr__(result, "training_binding_sha256", "0" * 64)
 
+
+
+
+def _configured_model_settings(tmp_path, *, model: str = "base-model"):
+    store = SQLiteStore(tmp_path / "activation-settings.db")
+    store.initialize()
+    settings = V01ModelSettings(store)
+    configured = settings.configure(
+        {
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": model,
+            "base_url": "http://localhost:11434",
+            "private_data_allowed": False,
+            "timeout_seconds": 30,
+            "revision": 0,
+        }
+    )
+    assert configured.status == "completed"
+    return store, settings
+
+
+async def _promoted_comparison(tmp_path):
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    return run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:activation",
+        experiment_id="training-job-1-activation",
+        repository=InMemoryExperimentRepository(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+
+    old_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload({"command": "keep old route"}),
+    )
+
+    receipt = activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+    )
+
+    assert receipt.decision_sha256 == result.evidence_sha256
+    assert (
+        receipt.binding_sha256
+        == result.challenger_benchmark.binding.binding_sha256
+    )
+    assert receipt.activated_revision == 2
+    assert receipt.rollback_revision is None
+    assert settings.snapshot()["model"] == "challenger-model"
+    assert settings.snapshot()["revision"] == 2
+
+    retried = activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+    )
+    assert retried == receipt
+    assert settings.snapshot()["revision"] == 2
+    assert settings.for_task(old_task.task_id).model == "base-model"
+
+    restarted = V01ModelSettings(SQLiteStore(store.path))
+    assert restarted.snapshot()["model"] == "challenger-model"
+    assert restarted.snapshot()["revision"] == 2
+
+    rolled_back = rollback_attested_training_promotion(
+        result=result,
+        settings=restarted,
+        expected_revision=2,
+    )
+    assert rolled_back.rollback_revision == 3
+    assert restarted.snapshot()["model"] == "base-model"
+    assert restarted.snapshot()["revision"] == 3
+
+    repeated = rollback_attested_training_promotion(
+        result=result,
+        settings=restarted,
+        expected_revision=2,
+    )
+    assert repeated == rolled_back
+
+    reopened = V01ModelSettings(SQLiteStore(store.path))
+    assert reopened.snapshot()["model"] == "base-model"
+    assert reopened.snapshot()["revision"] == 3
+
+    with store.connection() as conn:
+        events = [
+            row["event_type"]
+            for row in conn.execute(
+                "SELECT event_type FROM audit_events ORDER BY event_id"
+            )
+        ]
+    assert events.count("v01.model.promoted") == 1
+    assert events.count("v01.model.promotion_rolled_back") == 1
+
+
+@pytest.mark.asyncio
+async def test_non_promoted_attested_comparison_cannot_activate_model(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=PromotionPolicy(
+            primary_metric=QUALITY_METRIC,
+            minimum_improvement=2.0,
+            minimum_replays=2,
+        ),
+        permission_fingerprint="perm:no-promotion",
+        experiment_id="training-job-1-no-promotion",
+        repository=InMemoryExperimentRepository(),
+    )
+    _, settings = _configured_model_settings(tmp_path)
+
+    assert result.experiment_snapshot.status is ExperimentStatus.COMPLETED
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="requires a PROMOTED",
+    ):
+        activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=1,
+        )
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_activation_rejects_stale_current_champion_without_mutation(tmp_path) -> None:
+    result = await _promoted_comparison(tmp_path)
+    _, settings = _configured_model_settings(tmp_path, model="manual-current-model")
+
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="rejected by the active route authority",
+    ):
+        activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=1,
+        )
+
+    assert settings.snapshot()["model"] == "manual-current-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
+    result = await _promoted_comparison(tmp_path)
+    _, settings = _configured_model_settings(tmp_path)
+    activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+    )
+    manual = settings.configure(
+        {
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "owner-selected-model",
+            "base_url": "http://localhost:11434",
+            "private_data_allowed": False,
+            "timeout_seconds": 30,
+            "revision": 2,
+        }
+    )
+    assert manual.status == "completed"
+
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="rollback was rejected",
+    ):
+        rollback_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=3,
+        )
+
+    assert settings.snapshot()["model"] == "owner-selected-model"
+    assert settings.snapshot()["revision"] == 3
+
+
+def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path) -> None:
+    _, settings = _configured_model_settings(tmp_path)
+    decision_sha256 = _sha(b"decision")
+    binding_sha256 = _sha(b"binding")
+
+    with pytest.raises(Exception, match="постачальника"):
+        settings.activate_promoted_local_model(
+            expected_revision=1,
+            base_provider_id="ollama",
+            base_model_id="base-model",
+            challenger_provider_id="foundry-local",
+            challenger_model_id="challenger-model",
+            decision_sha256=decision_sha256,
+            binding_sha256=binding_sha256,
+        )
+
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
