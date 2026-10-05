@@ -1045,6 +1045,8 @@ class V01ModelSettings:
                     base_descriptor_digest=receipt.base_descriptor_digest,
                     challenger_artifact_sha256=receipt.challenger_artifact_sha256,
                     challenger_descriptor_digest=receipt.challenger_descriptor_digest,
+                    activation_request_sha256=receipt.activation_request_sha256,
+                    activation_attestation_sha256=receipt.activation_attestation_sha256,
                     previous_selection_id=receipt.previous_selection_id,
                     activated_selection_id=receipt.activated_selection_id,
                     activated_revision=receipt.activated_revision,
