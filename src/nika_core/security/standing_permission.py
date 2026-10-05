@@ -174,6 +174,22 @@ class StoredStandingPermission:
     _scope: _ScopeRecord
 
 
+class _StandingPermissionTransaction:
+    """Execute-only view of a store-owned authority transaction."""
+
+    __slots__ = ("__connection",)
+
+    def __init__(self, connection: sqlite3.Connection) -> None:
+        self.__connection = connection
+
+    def execute(
+        self,
+        sql: str,
+        parameters: tuple[object, ...] = (),
+    ) -> sqlite3.Cursor:
+        return self.__connection.execute(sql, parameters)
+
+
 class StandingPermissionStore:
     """Durable bounded authority; not a replacement for mandatory per-action approval."""
 
@@ -319,12 +335,12 @@ class StandingPermissionStore:
         *,
         permission_id: str,
         scope: StandingPermissionScope,
-    ) -> Iterator[tuple[sqlite3.Connection, StoredStandingPermission]]:
-        """Grant and expose the same serialized transaction for one dependent binding write.
+    ) -> Iterator[tuple[_StandingPermissionTransaction, StoredStandingPermission]]:
+        """Grant and expose one execute-only serialized dependent-write transaction.
 
         Any exception raised by the caller while the context is active rolls back both the
-        standing-permission grant/audit and the dependent write. The store, not the caller,
-        owns the SQLite connection so authority cannot be accidentally split across databases.
+        standing-permission grant/audit and the dependent write. The store retains transaction
+        control; callers cannot commit, roll back or close the underlying SQLite connection.
         """
 
         material = self._grant_material(permission_id=permission_id, scope=scope)
@@ -335,7 +351,7 @@ class StandingPermissionStore:
                 permission_id=permission_id,
                 material=material,
             )
-            yield conn, record
+            yield _StandingPermissionTransaction(conn), record
 
     @staticmethod
     def _grant_material(
