@@ -10,6 +10,14 @@ from nika_core.builder.spec import AgentDefinition, ToolGrant
 from nika_core.tools import ToolRisk, ToolSpec
 
 
+class _BehavioralJsonText(str):
+    def __len__(self) -> int:
+        raise AssertionError("behavioral JSON text length must not execute")
+
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        raise AssertionError("behavioral JSON text encoding must not execute")
+
+
 def _compiler(*tools: ToolSpec, permissions: dict[str, set[str]] | None = None) -> AgentCompiler:
     return AgentCompiler(
         tools=tools,
@@ -197,6 +205,12 @@ def test_imported_agent_rejects_duplicate_nested_and_authority_keys(
     after = before + ', "' + field + '": ' + duplicate
     with pytest.raises(ValueError, match="duplicate JSON object key"):
         AgentDefinition.import_json(raw.replace(before, after, 1))
+
+
+def test_imported_agent_rejects_behavioral_text_before_string_methods() -> None:
+    raw = _definition("web.read", RiskTier.R0_READ_ONLY).export_json()
+    with pytest.raises(ValueError, match="agent document JSON must be text"):
+        AgentDefinition.import_json(_BehavioralJsonText(raw))
 
 
 def test_imported_agent_rejects_oversized_text_before_parsing() -> None:

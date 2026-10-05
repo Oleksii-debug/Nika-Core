@@ -92,7 +92,7 @@ class AgentDefinition(BaseModel):
 
     @classmethod
     def import_json(cls, payload: str) -> AgentDefinition:
-        if not isinstance(payload, str):
+        if type(payload) is not str:
             raise ValueError("agent document JSON must be text")
         if len(payload) > _MAX_AGENT_JSON_BYTES:
             raise ValueError("agent document JSON exceeds the size limit")
