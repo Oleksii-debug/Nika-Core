@@ -191,6 +191,45 @@ def test_binding_failure_rolls_back_new_permission_and_audit(
     assert audit_count == 0
 
 
+def test_abrupt_exit_during_binding_rolls_back_permission_and_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+
+    def abort_binding(**_kwargs: object) -> None:
+        raise SystemExit("simulated process exit during binding")
+
+    monkeypatch.setattr(service, "_bind_permission", abort_binding)
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        service.admit_created_task(record)
+
+    with store.connection() as conn:
+        permission_count = conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0]
+        binding_count = conn.execute(
+            "SELECT COUNT(*) FROM v01_cloud_model_permission_bindings"
+        ).fetchone()[0]
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE entity_type = 'standing_permission'"
+        ).fetchone()[0]
+
+    assert permission_count == 0
+    assert binding_count == 0
+    assert audit_count == 0
+
+
 def test_task_change_during_confirmation_rolls_back_grant_and_binding(
     tmp_path: Path,
 ) -> None:
