@@ -610,3 +610,75 @@ def test_adapter_config_snapshot_removes_private_base_path_and_rejects_other_pat
     )
     with pytest.raises(peft.PeftTrainerError, match="adapter_config_private_path"):
         peft._adapter_config_snapshot(adapter_dir, request, config)
+
+def test_final_candidate_publish_race_never_overwrites(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_link = peft.os.link
+    raced = False
+
+    def _racing_link(source: object, target: object, *args: object, **kwargs: object) -> None:
+        nonlocal raced
+        target_path = Path(target)
+        if target_path == candidate and not raced:
+            raced = True
+            target_path.write_bytes(b"competitor")
+        real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "link", _racing_link)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_conflict"):
+        peft._train_one_step(request, config, consumed)
+
+    assert raced is True
+    assert candidate.read_bytes() == b"competitor"
+
+
+def test_final_candidate_immediate_post_link_substitution_is_detected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_link = peft.os.link
+    substituted = False
+
+    def _substituting_link(
+        source: object,
+        target: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal substituted
+        real_link(source, target, *args, **kwargs)
+        target_path = Path(target)
+        if target_path == candidate:
+            target_path.unlink()
+            target_path.write_bytes(b"substituted")
+            substituted = True
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "link", _substituting_link)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_digest_mismatch"):
+        peft._train_one_step(request, config, consumed)
+
+    assert substituted is True
+    assert candidate.read_bytes() == b"substituted"
+
