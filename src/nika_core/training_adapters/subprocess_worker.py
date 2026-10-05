@@ -193,6 +193,39 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
     return result
 
 
+def _reject_transient_material_paths(
+    value: object,
+    *,
+    forbidden_paths: tuple[str, ...],
+) -> None:
+    """Reject direct leakage of execution-only material paths into durable trainer state."""
+    normalized_paths = tuple(
+        os.path.normcase(path) for path in forbidden_paths if path
+    )
+    if not normalized_paths:
+        return
+
+    def visit(item: object) -> None:
+        if type(item) is str:
+            normalized = os.path.normcase(item)
+            if any(path in normalized for path in normalized_paths):
+                raise TrainingSubprocessError(
+                    "trainer resume state contains a transient material path",
+                    code="transient_material_path_in_resume",
+                )
+            return
+        if type(item) is list:
+            for child in item:
+                visit(child)
+            return
+        if type(item) is dict:
+            for key, child in item.items():
+                visit(key)
+                visit(child)
+
+    visit(value)
+
+
 def _job_identity(spec: TrainingJobSpec) -> dict[str, object]:
     return {
         "base_artifact": {
@@ -387,6 +420,9 @@ class SubprocessTrainingWorker:
 
         trainer_record = self._trainer_record()
         trainer_sha256 = trainer_record.sha256
+        transient_material_paths = tuple(
+            os.fspath(material.path) for material in training_materials.materials
+        )
         job_fingerprint = _job_fingerprint(spec)
         trainer_state, previous_step_id = self._unwrap_resume_state(
             resume_state=resume_state,
@@ -394,6 +430,7 @@ class SubprocessTrainingWorker:
             trainer_artifact_id=trainer_record.artifact_id,
             trainer_sha256=trainer_sha256,
             step_index=step_index,
+            forbidden_paths=transient_material_paths,
         )
         current_step_id = _step_id(
             job_fingerprint,
@@ -435,9 +472,16 @@ class SubprocessTrainingWorker:
                 code="training_material_reverify_failed",
             ) from exc
 
-        stdout = self._execute(request_bytes + b"\n")
+        stdout = self._execute(
+            request_bytes + b"\n",
+            expected_trainer_sha256=trainer_sha256,
+        )
         try:
-            response = self._parse_response(stdout, expected_step_id=current_step_id)
+            response = self._parse_response(
+                stdout,
+                expected_step_id=current_step_id,
+                forbidden_paths=transient_material_paths,
+            )
         except TrainingSubprocessError as exc:
             raise exc.with_effect(TrainingWorkerFailureEffect.UNKNOWN) from exc
         completed = response["completed"]
@@ -477,6 +521,7 @@ class SubprocessTrainingWorker:
         trainer_artifact_id: str,
         trainer_sha256: str,
         step_index: int,
+        forbidden_paths: tuple[str, ...],
     ) -> tuple[dict[str, object], str | None]:
         _canonical_json_bytes(
             resume_state,
@@ -531,6 +576,10 @@ class SubprocessTrainingWorker:
         trainer_state = envelope["trainer_state"]
         if type(trainer_state) is not dict:
             raise TrainingSubprocessError("trainer resume state must be a JSON object")
+        _reject_transient_material_paths(
+            trainer_state,
+            forbidden_paths=forbidden_paths,
+        )
         return trainer_state, expected_previous_step_id
 
     @staticmethod
@@ -549,7 +598,20 @@ class SubprocessTrainingWorker:
         except (OSError, ValueError):
             return
 
-    def _execute(self, request_bytes: bytes) -> bytes:
+    @classmethod
+    def _terminate_and_reap(cls, process: subprocess.Popen[bytes]) -> None:
+        cls._kill_process(process)
+        try:
+            process.wait(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+
+    def _execute(
+        self,
+        request_bytes: bytes,
+        *,
+        expected_trainer_sha256: str,
+    ) -> bytes:
         try:
             process = subprocess.Popen(
                 self._command,
@@ -565,6 +627,17 @@ class SubprocessTrainingWorker:
             raise TrainingSubprocessError("training subprocess executable is not executable") from exc
         except OSError as exc:
             raise TrainingSubprocessError("training subprocess could not be started") from exc
+
+        try:
+            observed_trainer_sha256 = self._verify_trainer()
+            if observed_trainer_sha256 != expected_trainer_sha256:
+                raise TrainingSubprocessError(
+                    "training executable artifact identity changed during process start",
+                    code="trainer_artifact_identity_changed",
+                )
+        except TrainingSubprocessError as exc:
+            self._terminate_and_reap(process)
+            raise exc.with_effect(TrainingWorkerFailureEffect.UNKNOWN) from exc
 
         if process.stdin is None or process.stdout is None:
             self._kill_process(process)
@@ -672,7 +745,11 @@ class SubprocessTrainingWorker:
         return bytes(captured)
 
     def _parse_response(
-        self, raw_response: bytes, *, expected_step_id: str
+        self,
+        raw_response: bytes,
+        *,
+        expected_step_id: str,
+        forbidden_paths: tuple[str, ...],
     ) -> dict[str, object]:
         try:
             text = raw_response.decode("utf-8", errors="strict")
@@ -681,7 +758,7 @@ class SubprocessTrainingWorker:
                 object_pairs_hook=_strict_object,
                 parse_constant=_reject_nonstandard_constant,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise TrainingSubprocessError("training subprocess returned an invalid JSON response") from exc
 
         if type(response) is not dict:
@@ -717,6 +794,10 @@ class SubprocessTrainingWorker:
             response["resume_state"],
             max_bytes=max(1024, self._max_request_bytes // 2),
             label="trainer resume state",
+        )
+        _reject_transient_material_paths(
+            response["resume_state"],
+            forbidden_paths=forbidden_paths,
         )
         try:
             TrainingStepResult(
