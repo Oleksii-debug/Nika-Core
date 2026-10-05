@@ -119,6 +119,8 @@ def test_route_text_rejects_noncanonical_endpoint_and_invisible_model_identities
         "local-model:\u200b1",
         "local-model:\u20281",
         "local-model:\ud800",
+        "local-model:\u00a01",
+        "local-model:\ue0001",
         "m" * 513,
     ):
         _assert_rejected(model_id=model_id)
