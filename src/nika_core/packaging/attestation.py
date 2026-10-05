@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import tempfile
@@ -12,6 +13,7 @@ from typing import Any
 from nika_core.packaging.release import verify_distributable_evidence
 
 _SLSA_PROVENANCE_V1 = "https://slsa.dev/provenance/v1"
+_MAX_VERIFICATION_JSON_BYTES = 2 * 1024 * 1024
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -45,17 +47,45 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _finite_json_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _reject_json_constant(_raw: str) -> None:
+    raise ValueError("non-JSON numeric constant")
+
+
 def _read_verification(path: Path) -> list[dict[str, Any]]:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise ValueError("attestation verification output is invalid JSON") from exc
+        with path.open("rb") as handle:
+            content = handle.read(_MAX_VERIFICATION_JSON_BYTES + 1)
+        if len(content) > _MAX_VERIFICATION_JSON_BYTES:
+            raise ValueError("attestation verification output exceeds the byte limit")
+        payload = json.loads(
+            content.decode("utf-8-sig"),
+            object_pairs_hook=_unique_json_object,
+            parse_float=_finite_json_float,
+            parse_constant=_reject_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        raise ValueError("attestation verification output is invalid or oversized JSON") from exc
     if not isinstance(payload, list) or not payload:
         raise ValueError("attestation verification output must contain at least one result")
     if not all(isinstance(item, dict) for item in payload):
         raise ValueError("attestation verification result entries must be objects")
     return payload
-
 
 def _has_matching_slsa_subject(
     verification: list[dict[str, Any]],
