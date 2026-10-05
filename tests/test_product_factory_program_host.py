@@ -2187,6 +2187,62 @@ def test_fenced_host_reservation_collision_does_not_cancel_sibling(
     assert [item.work_id for item in worker.dispatch_calls] == [independent.work_id]
 
 
+def test_fenced_host_active_ownership_collision_does_not_cancel_sibling(
+    tmp_path: Path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+    )
+    worker = FakeProgramWorker()
+    collided, independent = coordinator.ready_requests()
+    authority = ProductFactoryWorkOwnership(store)
+    external_lease = authority.acquire(
+        project_id=collided.project_id,
+        work_id=collided.work_id,
+        owner_id="program-host:other-active-generation",
+        lease_seconds=300,
+    )
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        owner_id="program-host:independent-sibling",
+    )
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_parallel=2,
+            max_count=2,
+        )
+    )
+    by_component = {item.component_id: item for item in outcomes}
+
+    assert by_component[collided.component_id].disposition is (
+        ProgramWorkDisposition.NEEDS_RECONCILIATION
+    )
+    assert by_component[collided.component_id].state is WorkState.READY
+    assert by_component[collided.component_id].operation_status is None
+    assert by_component[independent.component_id].disposition is (
+        ProgramWorkDisposition.REVIEW_REQUIRED
+    )
+    assert [item.work_id for item in worker.dispatch_calls] == [independent.work_id]
+    assert authority.current(
+        project_id=collided.project_id,
+        work_id=collided.work_id,
+    ) == external_lease
+    assert authority.current(
+        project_id=independent.project_id,
+        work_id=independent.work_id,
+    ) is None
+
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    assert _record(restored, collided.component_id).state is WorkState.READY
+    assert _record(restored, independent.component_id).state is WorkState.REVIEW_REQUIRED
+
+
 @pytest.mark.parametrize(
     "malformed",
     (
