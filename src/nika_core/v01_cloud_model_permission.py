@@ -105,14 +105,19 @@ class V01CloudModelPermissionService:
             raise CloudModelPermissionDenied(
                 "Неможливо безпечно підтвердити зовнішню модель для зміненого завдання."
             )
-        if self._bound_permission_id(current.task_id, strict=True) is not None:
+        previous_id = self._bound_permission_id(current.task_id, strict=True)
+        if previous_id is not None:
             raise CloudModelPermissionDenied(
                 "Для нового завдання вже існує неочікуваний дозвіл зовнішньої моделі."
             )
         selection = self._cloud_selection(current.task_id)
         if selection is None:
             return
-        self._confirm_and_grant(current, selection)
+        self._confirm_and_grant(
+            current,
+            selection,
+            expected_previous_id=previous_id,
+        )
 
     def admit_resumed_task(self, record: TaskRecord) -> None:
         """Refresh finite authority before a PAUSED task is submitted for resume."""
@@ -125,11 +130,16 @@ class V01CloudModelPermissionService:
         selection = self._cloud_selection(current.task_id)
         if selection is None:
             return
-        self._bound_permission_id(current.task_id, strict=True)
+        previous_id = self._bound_permission_id(current.task_id, strict=True)
         now = self._utc_now()
         if self._active_bound_permission(current.task_id, now=now) is not None:
             return
-        self._confirm_and_grant(current, selection, now=now)
+        self._confirm_and_grant(
+            current,
+            selection,
+            now=now,
+            expected_previous_id=previous_id,
+        )
 
     def execution_authority_for_task(
         self,
@@ -191,6 +201,7 @@ class V01CloudModelPermissionService:
         record: TaskRecord,
         selection: ModelSelection,
         *,
+        expected_previous_id: str | None,
         now: datetime | None = None,
     ) -> None:
         request = self._grant_request(record, selection)
@@ -218,7 +229,6 @@ class V01CloudModelPermissionService:
             )
 
         instant = self._utc_now() if now is None else now
-        previous_id = self._bound_permission_id(record.task_id, strict=True)
         permission_id = self._new_permission_id(record.task_id)
         try:
             with self._permissions.grant_transaction(
@@ -239,7 +249,7 @@ class V01CloudModelPermissionService:
                     task_id=record.task_id,
                     permission_id=permission_id,
                     updated_at=instant,
-                    expected_previous_id=previous_id,
+                    expected_previous_id=expected_previous_id,
                     expected_record=record,
                     connection=conn,
                 )
