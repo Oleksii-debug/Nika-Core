@@ -504,7 +504,7 @@ class ProductFactoryProgramHost:
                         request,
                         coordinator,
                         ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                        operation.status,
+                        None,
                         (
                             "existing worker operation has a different host "
                             "or request identity"
@@ -627,7 +627,7 @@ class ProductFactoryProgramHost:
                                 request,
                                 coordinator,
                                 ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                                operation.status,
+                                None,
                                 (
                                     "existing worker operation has a different host "
                                     "or request identity"
@@ -684,7 +684,7 @@ class ProductFactoryProgramHost:
                     request,
                     coordinator,
                     ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                    operation.status,
+                    None,
                     "worker operation belongs to a different Product Factory host task",
                 )
             if operation.input_fingerprint != _request_fingerprint(request):
@@ -692,7 +692,7 @@ class ProductFactoryProgramHost:
                     request,
                     coordinator,
                     ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                    operation.status,
+                    None,
                     "worker operation fingerprint does not match durable request",
                 )
             if operation.status is IdempotencyStatus.COMPLETED:
