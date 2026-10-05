@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+from urllib.parse import unquote_plus
 
 _MAX_EVIDENCE_REFERENCE_BYTES = 512
+_MAX_SENSITIVE_DECODE_ROUNDS = 4
 _SENSITIVE_REFERENCE_MARKERS = (
     "credential://",
     "credential-use:",
@@ -27,6 +29,16 @@ def _strict_utf8(reference: str) -> bytes:
         raise ValueError("evidence reference must be valid UTF-8 text") from exc
 
 
+def _sensitivity_view(reference: str) -> str:
+    normalized = reference.strip().casefold()
+    for _ in range(_MAX_SENSITIVE_DECODE_ROUNDS):
+        decoded = unquote_plus(normalized)
+        if decoded == normalized:
+            break
+        normalized = decoded
+    return normalized
+
+
 def safe_evidence_reference(reference: str) -> str:
     """Return a bounded user-facing evidence reference without credential material.
 
@@ -37,9 +49,13 @@ def safe_evidence_reference(reference: str) -> str:
     """
 
     encoded = _strict_utf8(reference)
-    normalized = reference.strip().casefold()
+    if len(encoded) > _MAX_EVIDENCE_REFERENCE_BYTES:
+        digest = hashlib.sha256(encoded).hexdigest()
+        return f"evidence-sha256:{digest}"
+
+    normalized = _sensitivity_view(reference)
     sensitive = any(marker in normalized for marker in _SENSITIVE_REFERENCE_MARKERS)
-    if sensitive or len(encoded) > _MAX_EVIDENCE_REFERENCE_BYTES:
+    if sensitive:
         digest = hashlib.sha256(encoded).hexdigest()
         return f"evidence-sha256:{digest}"
     return reference
