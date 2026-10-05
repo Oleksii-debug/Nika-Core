@@ -73,11 +73,7 @@ class ProductFactoryWorkOwnership:
         _lease_seconds(lease_seconds)
         with self._store.connection() as connection:
             _begin_immediate(connection)
-            row = connection.execute(
-                "SELECT owner_id, fence, issued_at, expires_at FROM product_factory_work_ownership "
-                "WHERE project_id = ? AND work_id = ?",
-                (project_id, work_id),
-            ).fetchone()
+            row = _select_ownership_row(connection, project_id, work_id)
             instant = self._instant()
             expires_at = _expiry(instant, lease_seconds)
             if row is None:
@@ -237,11 +233,7 @@ def _load(
     project_id: str,
     work_id: str,
 ) -> WorkOwnershipLease | None:
-    row = connection.execute(
-        "SELECT owner_id, fence, issued_at, expires_at FROM product_factory_work_ownership "
-        "WHERE project_id = ? AND work_id = ?",
-        (project_id, work_id),
-    ).fetchone()
+    row = _select_ownership_row(connection, project_id, work_id)
     if row is None or row[0] is None:
         return None
     owner_id = _persisted_owner(row[0])
@@ -257,6 +249,23 @@ def _load(
         issued_at,
         expires_at,
     )
+
+
+def _select_ownership_row(
+    connection: sqlite3.Connection,
+    project_id: str,
+    work_id: str,
+):
+    try:
+        return connection.execute(
+            "SELECT owner_id, fence, issued_at, expires_at "
+            "FROM product_factory_work_ownership WHERE project_id = ? AND work_id = ?",
+            (project_id, work_id),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "Could not decode to UTF-8 column" in str(exc):
+            raise WorkOwnershipError("corrupt work ownership record") from exc
+        raise
 
 
 def _validate_observation_time(current: WorkOwnershipLease, now: datetime) -> None:
