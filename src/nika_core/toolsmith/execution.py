@@ -295,6 +295,15 @@ def run_typed_process(
     cancellation_event: threading.Event | None = None,
     workspace_root: pathlib.Path | None = None,
 ) -> ProcessExecutionResult:
+    if type(resource_budget) is not toolsmith_contracts.ResourceBudget:
+        raise ProcessExecutionError("resource budget carrier is invalid")
+    try:
+        resource_budget.__post_init__()
+        deadline = time.monotonic() + resource_budget.timeout_seconds
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ProcessExecutionError("resource budget is invalid") from exc
+    limit = resource_budget.max_output_bytes
+
     typed_argv = _pinned_runtime_argv(argv, process_policy.allowed_executables)
     raw_cwd = pathlib.Path(cwd)
     raw_workspace_root = raw_cwd if workspace_root is None else pathlib.Path(workspace_root)
@@ -315,7 +324,6 @@ def run_typed_process(
     if cancellation_event is not None and cancellation_event.is_set():
         return _cancelled_before_launch(typed_argv)
 
-    limit = resource_budget.max_output_bytes
     output = {"stdout": bytearray(), "stderr": bytearray()}
     total_output = 0
     overflow = threading.Event()
@@ -371,7 +379,6 @@ def run_typed_process(
         stdout_thread.start()
         stderr_thread.start()
 
-        deadline = time.monotonic() + resource_budget.timeout_seconds
         timed_out = False
         cancelled = False
         while process.poll() is None:
