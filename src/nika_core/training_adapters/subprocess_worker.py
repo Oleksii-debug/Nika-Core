@@ -19,6 +19,12 @@ from nika_core.artifacts import (
     ArtifactRegistryError,
     ArtifactVerificationState,
 )
+from nika_core.process_containment import (
+    ProcessContainmentError,
+    WindowsJob,
+    process_group_popen_options,
+    terminate_process_tree,
+)
 from nika_core.training_materials import (
     ResolvedTrainingMaterial,
     ResolvedTrainingPackage,
@@ -1019,15 +1025,6 @@ class SubprocessTrainingWorker:
         return trainer_state, expected_previous_step_id
 
     @staticmethod
-    def _kill_process(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
-        try:
-            process.kill()
-        except OSError:
-            return
-
-    @staticmethod
     def _close_pipe(pipe: object) -> None:
         try:
             pipe.close()  # type: ignore[attr-defined]
@@ -1049,6 +1046,7 @@ class SubprocessTrainingWorker:
         expected_training_materials: ResolvedTrainingPackage,
     ) -> bytes:
         deadline = time.monotonic() + self._timeout_seconds
+        creationflags, start_new_session = process_group_popen_options()
         try:
             process = subprocess.Popen(
                 self._command,
@@ -1057,6 +1055,8 @@ class SubprocessTrainingWorker:
                 stdin=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
+                creationflags=creationflags,
+                start_new_session=start_new_session,
             )
         except FileNotFoundError as exc:
             raise _error(
@@ -1074,8 +1074,38 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             ) from exc
 
+        with WindowsJob() as job:
+            if os.name == "nt":
+                try:
+                    job.assign(int(process._handle))  # type: ignore[attr-defined]
+                except ProcessContainmentError as exc:
+                    terminate_process_tree(process, job)
+                    self._reap_process(process)
+                    raise _error(
+                        "training_subprocess_containment_failed",
+                        effect=TrainingWorkerFailureEffect.UNKNOWN,
+                    ) from exc
+            return self._execute_started_process(
+                process,
+                job,
+                request_bytes,
+                deadline=deadline,
+                expected_command_records=expected_command_records,
+                expected_training_materials=expected_training_materials,
+            )
+
+    def _execute_started_process(
+        self,
+        process: subprocess.Popen[bytes],
+        job: WindowsJob,
+        request_bytes: bytes,
+        *,
+        deadline: float,
+        expected_command_records: Mapping[int, ArtifactRecord],
+        expected_training_materials: ResolvedTrainingPackage,
+    ) -> bytes:
         if process.stdin is None or process.stdout is None:
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             self._reap_process(process)
             raise _error(
                 "training_subprocess_streams_unavailable",
@@ -1087,7 +1117,7 @@ class SubprocessTrainingWorker:
         except TrainingSubprocessError as exc:
             self._close_pipe(process.stdin)
             self._close_pipe(process.stdout)
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             self._reap_process(process)
             raise _error(
                 "command_artifact_changed_after_process_start",
@@ -1099,7 +1129,7 @@ class SubprocessTrainingWorker:
         except TrainingMaterialResolutionError as exc:
             self._close_pipe(process.stdin)
             self._close_pipe(process.stdout)
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             self._reap_process(process)
             raise _error(
                 "training_material_changed_after_process_start",
@@ -1110,7 +1140,7 @@ class SubprocessTrainingWorker:
         if remaining_timeout <= 0:
             self._close_pipe(process.stdin)
             self._close_pipe(process.stdout)
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             self._reap_process(process)
             raise _error(
                 "training_subprocess_timeout",
@@ -1130,7 +1160,7 @@ class SubprocessTrainingWorker:
                     remaining = self._max_response_bytes + 1 - len(captured)
                     if remaining <= 0:
                         overflow.set()
-                        self._kill_process(process)
+                        terminate_process_tree(process, job)
                         return
                     chunk = stdout.read(min(_READ_CHUNK_BYTES, remaining))
                     if not chunk:
@@ -1138,11 +1168,11 @@ class SubprocessTrainingWorker:
                     captured.extend(chunk)
                     if len(captured) > self._max_response_bytes:
                         overflow.set()
-                        self._kill_process(process)
+                        terminate_process_tree(process, job)
                         return
             except (OSError, ValueError):
                 read_failed.set()
-                self._kill_process(process)
+                terminate_process_tree(process, job)
 
         def write_stdin() -> None:
             try:
@@ -1163,7 +1193,7 @@ class SubprocessTrainingWorker:
             returncode = process.wait(timeout=remaining_timeout)
         except subprocess.TimeoutExpired as exc:
             timed_out = exc
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             try:
                 returncode = process.wait(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
@@ -1182,36 +1212,44 @@ class SubprocessTrainingWorker:
         self._close_pipe(stdout)
 
         if timed_out is not None:
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_timeout",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             ) from timed_out
         if reader.is_alive() or writer.is_alive():
-            self._kill_process(process)
+            terminate_process_tree(process, job)
+            self._reap_process(process)
             raise _error(
                 "training_subprocess_streams_stuck",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if overflow.is_set():
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_response_too_large",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if read_failed.is_set():
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_response_read_failed",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if returncode != 0:
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_nonzero_exit",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if write_failed.is_set():
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_request_write_failed",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
+
+        terminate_process_tree(process, job)
         return bytes(captured)
 
     def _parse_response(
