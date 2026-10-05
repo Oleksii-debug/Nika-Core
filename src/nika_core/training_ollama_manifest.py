@@ -121,6 +121,17 @@ class OllamaPreparedModelBinding:
             (self.preparation_sha256, "preparation_sha256"),
         ):
             _require_sha256(value, name=name)
+        expected_create_request = _canonical_json_sha256(
+            {
+                "model": self.route_model_id,
+                "files": {"model.gguf": "sha256:" + self.artifact_sha256},
+                "stream": False,
+            }
+        )
+        if self.create_request_sha256 != expected_create_request:
+            raise ValueError(
+                "create_request_sha256 does not match the physical artifact binding"
+            )
         expected = _canonical_json_sha256(self._payload_without_digest())
         if self.preparation_sha256 != expected:
             raise ValueError("preparation_sha256 does not match the binding payload")
@@ -564,14 +575,24 @@ class OllamaManifestAuthority:
                 raise OllamaManifestAuthorityError(
                     "Ollama model inventory contains an invalid item"
                 )
-            names = []
-            for key in ("model", "name"):
-                value = item.get(key)
-                if type(value) is str:
-                    names.append(value)
-            matching_names = sorted(set(names).intersection(aliases))
+            name = item.get("name")
+            model = item.get("model")
+            matching_names = {
+                value
+                for value in (name, model)
+                if type(value) is str and value in aliases
+            }
             if not matching_names:
                 continue
+            if (
+                type(name) is not str
+                or type(model) is not str
+                or name != model
+                or name not in aliases
+            ):
+                raise OllamaManifestAuthorityError(
+                    "Ollama model inventory contains an ambiguous identity"
+                )
             digest = item.get("digest")
             try:
                 manifest_sha256 = _require_sha256(
@@ -582,8 +603,7 @@ class OllamaManifestAuthority:
                 raise OllamaManifestAuthorityError(
                     "Ollama model inventory has an invalid manifest digest"
                 ) from exc
-            manifest_name = matching_names[0]
-            matches.append((manifest_name, manifest_sha256))
+            matches.append((name, manifest_sha256))
         if not matches:
             raise OllamaManifestAuthorityError(
                 "Ollama model manifest is not available"

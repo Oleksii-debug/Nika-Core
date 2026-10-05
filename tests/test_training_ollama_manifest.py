@@ -118,6 +118,17 @@ def test_binding_rejects_mutated_preparation_digest() -> None:
         replace(binding, preparation_sha256="0" * 64)
 
 
+def test_binding_rejects_forged_create_request_digest() -> None:
+    binding = _binding()
+
+    with pytest.raises(ValueError, match="create_request_sha256"):
+        replace(
+            binding,
+            create_request_sha256=_sha(b"forged-create-request"),
+            preparation_sha256=_sha(b"also-forged-preparation"),
+        )
+
+
 @pytest.mark.asyncio
 async def test_prepare_existing_blob_binds_exact_blob_create_and_manifest() -> None:
     seen: list[tuple[str, str, object]] = []
@@ -217,6 +228,38 @@ async def test_control_response_byte_limit_fails_closed() -> None:
     with pytest.raises(OllamaManifestAuthorityError, match="byte limit"):
         await authority.prepare_existing_gguf_blob(
             model_id="candidate:latest",
+            artifact_sha256=ARTIFACT_SHA,
+            descriptor_digest=DESCRIPTOR_SHA,
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepare_rejects_ambiguous_catalog_identity() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD":
+            return httpx.Response(200)
+        if request.url.path == "/api/create":
+            return httpx.Response(200, json={"status": "success"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "candidate:latest",
+                            "model": "other:latest",
+                            "digest": MANIFEST_SHA,
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(request.url)
+
+    authority = OllamaManifestAuthority(client_factory=_client_factory(handler))
+
+    with pytest.raises(OllamaManifestAuthorityError, match="ambiguous identity"):
+        await authority.prepare_existing_gguf_blob(
+            model_id="candidate",
             artifact_sha256=ARTIFACT_SHA,
             descriptor_digest=DESCRIPTOR_SHA,
         )
