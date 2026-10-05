@@ -5,12 +5,13 @@ from pathlib import Path
 
 from nika_core.model_artifacts import (
     ModelArtifactDescriptor,
+    ModelArtifactKind,
     ModelArtifactResources,
     ModelIntegrityBasis,
 )
 from nika_core.model_engineering.contracts import ModelCandidate, validate_model_candidate
 from nika_core.model_engineering.runner import ModelCompletionPort
-from nika_core.model_gateway.contracts import ModelRequest, ModelResponse
+from nika_core.model_gateway.contracts import ModelRequest, ModelResponse, ProviderKind
 from nika_core.training_artifacts import verify_candidate_artifact
 
 
@@ -25,6 +26,13 @@ def _validate_descriptor(descriptor: ModelArtifactDescriptor) -> None:
     if type(descriptor.resources) is not ModelArtifactResources:
         raise TypeError("descriptor resources must be exact ModelArtifactResources")
     ModelArtifactResources.__post_init__(descriptor.resources)
+    if descriptor.kind not in {
+        ModelArtifactKind.EMBEDDED,
+        ModelArtifactKind.EXTERNAL_LOCAL,
+    }:
+        raise PhysicalCandidateEvaluationError(
+            "physical candidate evaluation requires a local model artifact"
+        )
     if descriptor.integrity_basis is not ModelIntegrityBasis.SHA256:
         raise PhysicalCandidateEvaluationError(
             "physical candidate evaluation requires SHA-256 artifact integrity"
@@ -41,6 +49,10 @@ def _validate_candidate_binding(
 ) -> None:
     validate_model_candidate(candidate)
     _validate_descriptor(descriptor)
+    if candidate.provider_kind is not ProviderKind.LOCAL:
+        raise PhysicalCandidateEvaluationError(
+            "physical candidate evaluation requires a local provider"
+        )
     if candidate.model_sha256 is None:
         raise PhysicalCandidateEvaluationError(
             "physical candidate evaluation requires candidate model_sha256"
