@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from nika_core.builder.repository import AgentDefinitionRepository
@@ -54,6 +56,11 @@ from nika_core.training_model_activation import (
     TrainingModelActivationError,
     activate_attested_training_promotion,
     rollback_attested_training_promotion,
+)
+from nika_core.training_ollama_manifest import (
+    OllamaManifestAuthority,
+    OllamaPreparedModelBinding,
+    OllamaPromotionManifestStore,
 )
 from nika_core.v01_model_settings import (
     ModelSetupError,
@@ -690,6 +697,106 @@ def _downgrade_task_binding_schema_without_artifact_pin(conn) -> None:
         "FROM v01_task_model_bindings_v4"
     )
     conn.execute("DROP TABLE v01_task_model_bindings_v4")
+
+
+def _prepared_ollama_binding(
+    *,
+    model_id: str,
+    artifact_sha256: str,
+    descriptor_digest: str,
+    manifest_sha256: str,
+    base_url: str = "http://localhost:11434",
+) -> OllamaPreparedModelBinding:
+    create_request = {
+        "model": model_id,
+        "files": {"model.gguf": "sha256:" + artifact_sha256},
+        "stream": False,
+    }
+    create_request_sha256 = _sha(
+        json.dumps(
+            create_request,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    payload = {
+        "schema": "nika.training.ollama-prepared-model.v1",
+        "provider_id": "ollama",
+        "route_model_id": model_id,
+        "manifest_model_id": model_id,
+        "artifact_sha256": artifact_sha256,
+        "descriptor_digest": descriptor_digest,
+        "provider_manifest_sha256": manifest_sha256,
+        "endpoint_sha256": _sha(base_url.encode("utf-8")),
+        "create_request_sha256": create_request_sha256,
+    }
+    return OllamaPreparedModelBinding(
+        route_model_id=model_id,
+        manifest_model_id=model_id,
+        artifact_sha256=artifact_sha256,
+        descriptor_digest=descriptor_digest,
+        provider_manifest_sha256=manifest_sha256,
+        endpoint_sha256=payload["endpoint_sha256"],
+        create_request_sha256=create_request_sha256,
+        preparation_sha256=_sha(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ),
+    )
+
+
+def _promotion_manifest_args(result, store: SQLiteStore) -> dict[str, object]:
+    training = result.challenger_benchmark.binding.revalidated()
+    base = _prepared_ollama_binding(
+        model_id=training.base_model_id,
+        artifact_sha256=training.base_sha256,
+        descriptor_digest=training.base_descriptor_digest,
+        manifest_sha256=_sha(b"base-provider-manifest"),
+    )
+    challenger = _prepared_ollama_binding(
+        model_id=training.challenger_model_id,
+        artifact_sha256=training.challenger_sha256,
+        descriptor_digest=training.descriptor_digest,
+        manifest_sha256=_sha(b"challenger-provider-manifest"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/api/tags":
+            raise AssertionError(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "name": base.route_model_id,
+                        "model": base.route_model_id,
+                        "digest": base.provider_manifest_sha256,
+                    },
+                    {
+                        "name": challenger.route_model_id,
+                        "model": challenger.route_model_id,
+                        "digest": challenger.provider_manifest_sha256,
+                    },
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs):
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    return {
+        "manifest_store": OllamaPromotionManifestStore(store),
+        "manifest_authority": OllamaManifestAuthority(client_factory=client_factory),
+        "base_prepared_model": base,
+        "challenger_prepared_model": challenger,
+    }
 
 
 async def _promoted_comparison(tmp_path):
