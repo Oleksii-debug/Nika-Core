@@ -6,7 +6,7 @@ from pathlib import Path
 
 from platformdirs import user_data_path
 from pydantic import AliasChoices, Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import BaseSettings, SettingsConfigDict, SettingsError
 
 
 class AppConfig(BaseSettings):
@@ -75,7 +75,7 @@ class AppConfig(BaseSettings):
             if name.casefold() in aliases
         ]
         if overrides and any(path != overrides[0] for path in overrides[1:]):
-            raise ValueError("Суперечливі змінні середовища для шляху бази даних Nika")
+            raise SettingsError("Суперечливі змінні середовища для шляху бази даних Nika")
         config = cls()
         if getattr(sys, "frozen", False) and "database_path" not in config.model_fields_set:
             from nika_core.reliability.legacy_database import (
