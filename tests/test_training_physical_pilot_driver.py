@@ -54,6 +54,14 @@ def _payload(tmp_path: Path) -> dict[str, object]:
     }
 
 
+def _write_minimal_pe(path: Path) -> None:
+    payload = bytearray(132)
+    payload[:2] = b"MZ"
+    payload[60:64] = (128).to_bytes(4, "little")
+    payload[128:132] = b"PE\0\0"
+    path.write_bytes(payload)
+
+
 def _config(tmp_path: Path) -> driver.PhysicalPilotConfig:
     raw = json.dumps(_payload(tmp_path), ensure_ascii=False, sort_keys=True)
     return driver.PhysicalPilotConfig.from_json(raw)
@@ -193,6 +201,34 @@ def test_config_rejects_nonpublic_candidate_reference(tmp_path: Path) -> None:
         driver.PhysicalPilotConfig.from_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"MZ",
+        b"not-a-pe",
+        b"MZ" + b"\0" * 58 + (17_000_000).to_bytes(4, "little"),
+    ),
+)
+def test_invalid_trainer_pe_fails_before_durable_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+    config.blob_store_root.mkdir()
+    config.frozen_package_path.write_text("{}", encoding="utf-8")
+    config.trainer_executable.write_bytes(payload)
+    config.base_gguf_path.write_bytes(b"GGUF")
+    config.model_dir.mkdir()
+    (config.model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="Windows PE"):
+        driver.run_physical_pilot_from_config(config)
+
+    assert not config.output_root.exists()
+
+
 def test_non_windows_gate_precedes_filesystem_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -214,7 +250,7 @@ def test_invalid_model_directory_fails_before_durable_output(
     monkeypatch.setattr(driver, "_is_windows", lambda: True)
     config.blob_store_root.mkdir()
     config.frozen_package_path.write_text("{}", encoding="utf-8")
-    config.trainer_executable.write_bytes(b"MZ")
+    _write_minimal_pe(config.trainer_executable)
     config.base_gguf_path.write_bytes(b"GGUF")
     config.model_dir.mkdir()
 

@@ -458,6 +458,25 @@ def _is_reparse(value: os.stat_result) -> bool:
     return bool(attributes & flag)
 
 
+def _require_windows_pe_executable(path: Path) -> None:
+    try:
+        with path.open("rb") as handle:
+            dos_header = handle.read(64)
+            if len(dos_header) != 64 or dos_header[:2] != b"MZ":
+                _fail("trainer_executable is not a valid Windows PE executable")
+            pe_offset = int.from_bytes(dos_header[60:64], "little")
+            if not 64 <= pe_offset <= 16 * 1024 * 1024:
+                _fail("trainer_executable has an invalid Windows PE header offset")
+            handle.seek(pe_offset)
+            signature = handle.read(4)
+    except OSError as exc:
+        raise PhysicalPilotDriverError(
+            "trainer_executable Windows PE header could not be read"
+        ) from exc
+    if signature != b"PE\0\0":
+        _fail("trainer_executable is not a valid Windows PE executable")
+
+
 def _require_existing_file(path: Path, *, name: str) -> Path:
     try:
         resolved = path.resolve(strict=True)
@@ -718,6 +737,7 @@ def run_physical_pilot_from_config(
     )
     if trainer_executable.suffix.casefold() != ".exe":
         _fail("trainer_executable must be a Windows executable")
+    _require_windows_pe_executable(trainer_executable)
     base_gguf_path = _require_existing_file(config.base_gguf_path, name="base_gguf_path")
     if base_gguf_path.suffix.casefold() != ".gguf":
         _fail("base_gguf_path must use the .gguf suffix")
