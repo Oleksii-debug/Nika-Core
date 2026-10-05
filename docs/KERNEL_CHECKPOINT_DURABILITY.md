@@ -13,7 +13,7 @@ This contract reuses the existing SQLite `checkpoints` table and public `Checkpo
 3. Durable `payload_json` and `checksum_sha256` carriers must be real SQLite TEXT values. SQLite affinity does not prevent a corrupt row from storing BLOB or other storage classes, so restart reads reject those carriers before hashing or parsing.
 4. A durable read verifies the SHA-256 checksum before parsing payload bytes.
 5. A durable read fails closed when payload bytes are malformed JSON, recurse beyond the JSON decoder/encoder safety boundary, decode to a non-object value, contain a non-finite number, or do not match the canonical representation produced by the service.
-6. Checkpoint payloads are bounded before serialization to at most 10,000 JSON value nodes, depth 64, 4,096-bit integers, and 1 MiB canonical UTF-8 JSON. Invalid Unicode fails before SQLite mutation.
+6. Checkpoint payloads are bounded before serialization to at most 10,000 JSON value nodes, depth 64, 4,096-bit integers, and 1 MiB canonical UTF-8 JSON. Container admission requires exact built-in `dict`, `list`, or `tuple` carriers before length/iteration hooks run, and invalid Unicode fails before SQLite mutation.
 7. Restart reads fetch at most the admitted payload prefix and 65 checksum bytes through SQLite BLOB projections, verify the underlying storage classes and byte lengths, then strictly decode UTF-8/ASCII. Oversized durable payloads or checksums therefore fail closed without returning their full TEXT values to Python.
 8. Public `task_id` and `stage` inputs are exact strings with valid UTF-8 and a 4 KiB byte ceiling. Restart selection considers byte-identical non-TEXT `task_id` aliases in insertion order, so a corrupted newest identity cannot disappear from lookup and expose an older checkpoint. Bounded SQLite projections then reject non-TEXT durable `checkpoint_id`, `task_id`, and `stage` carriers and bind the persisted task identity to the requested task before exposing a `Checkpoint`.
 9. Existing finite object payloads written by the prior service remain byte-compatible because the prior writer already used sorted keys, UTF-8 Unicode, and compact separators.
@@ -43,6 +43,7 @@ The focused regression family is `tests/test_kernel_checkpoint_durability.py` an
 - BLOB `payload_json` and BLOB checksum storage-class rejection;
 - controlled rejection of excessive JSON nesting on both write and restart read;
 - pre-serialization node/depth/integer/UTF-8 resource admission with exact positive boundary cases;
+- behavioral container subclasses rejected before their length/iteration hooks can bypass admission;
 - oversized durable payload/checksum rejection through bounded SQLite BLOB projections;
 - durable node-overflow rejection even when checksum and canonical JSON bytes otherwise match;
 - exact-string and UTF-8/byte-bounded task/stage ingress;
