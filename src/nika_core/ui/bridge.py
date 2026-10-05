@@ -38,7 +38,7 @@ class UIActionBridge:
     def dispatch(self, raw: object) -> dict[str, Any]:
         try:
             command = UICommand.model_validate(raw)
-        except ValidationError as exc:
+        except ValidationError:
             return UIResult(
                 request_id=self._rejected_request_id(raw),
                 status="rejected",
