@@ -199,6 +199,8 @@ def test_completed_training_binds_exact_old_new_and_held_out_identity(
     assert isinstance(descriptor, ModelArtifactDescriptor)
     assert isinstance(evaluation_set, EvaluationSet)
     assert binding.job_id == "job-1"
+    assert binding.challenger_provider_id == "ollama"
+    assert binding.challenger_model_id == "candidate-model"
     assert binding.challenger_sha256 == evidence.candidate_sha256
     assert binding.descriptor_digest == descriptor.descriptor_digest
     assert binding.evaluation_set_sha256 == evaluation_set.content_sha256
@@ -361,4 +363,13 @@ def test_binding_digest_revalidates_constructor_bypass_mutation(tmp_path: Path) 
     object.__setattr__(binding, "challenger_sha256", "not-a-digest")
 
     with pytest.raises(ValueError, match="challenger_sha256"):
+        _ = binding.binding_sha256
+
+
+def test_binding_digest_revalidates_route_identity_mutation(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    binding = _bind(values, allowed_root=tmp_path)
+    object.__setattr__(binding, "challenger_provider_id", "")
+
+    with pytest.raises(ValueError, match="challenger_provider_id"):
         _ = binding.binding_sha256
