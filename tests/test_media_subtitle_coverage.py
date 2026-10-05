@@ -184,3 +184,50 @@ def test_subtitle_normalization_strips_formatting_without_losing_literal_text(
     raw: str, expected: str
 ) -> None:
     assert _normalize_text(raw) == expected
+
+@pytest.mark.parametrize("atomic_replace", (False, True))
+def test_subtitle_source_swap_during_parse_is_not_published(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, atomic_replace: bool
+) -> None:
+    source = tmp_path / "вхідні субтитри.vtt"
+    source.write_text("original evidence", encoding="utf-8")
+
+    def changing_load(_source: str, *, encoding: str):
+        assert encoding == "utf-8"
+        assert _source == str(source)
+        if atomic_replace:
+            replacement = tmp_path / "інша версія.vtt"
+            replacement.write_text("changed evidence", encoding="utf-8")
+            replacement.replace(source)
+        else:
+            source.write_text("changed evidence", encoding="utf-8")
+        return [SimpleNamespace(start=0, end=1000, text="старий текст")]
+
+    monkeypatch.setitem(sys.modules, "pysubs2", SimpleNamespace(load=changing_load))
+    with pytest.raises(MediaError) as caught:
+        normalize_subtitle_file(
+            source,
+            track=SubtitleTrack(
+                track_id="manual", language="uk", kind=SubtitleKind.MANUAL
+            ),
+            version_id="video-1",
+            media_duration_seconds=10,
+        )
+    assert caught.value.code is MediaErrorCode.INVALID_SUBTITLE
+
+
+def test_missing_subtitle_file_is_rejected_before_parser(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def must_not_parse(_path: str, *, encoding: str):
+        raise AssertionError("missing source must never be parsed")
+
+    monkeypatch.setitem(sys.modules, "pysubs2", SimpleNamespace(load=must_not_parse))
+    with pytest.raises(MediaError) as caught:
+        normalize_subtitle_file(
+            tmp_path / "відсутній.vtt",
+            track=SubtitleTrack(track_id="manual", language="uk", kind=SubtitleKind.MANUAL),
+            version_id="video-1",
+            media_duration_seconds=10,
+        )
+    assert caught.value.code is MediaErrorCode.INVALID_SUBTITLE
