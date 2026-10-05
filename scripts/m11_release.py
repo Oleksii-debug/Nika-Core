@@ -16,6 +16,10 @@ from contextlib import closing
 from pathlib import Path
 
 from nika_core.packaging.notices import build_third_party_notices, verify_third_party_notices
+from nika_core.packaging.pf11_evidence import (
+    PACKAGED_PF11_EVIDENCE_KEYS,
+    require_packaged_pf11_evidence,
+)
 from nika_core.packaging.release import (
     build_release_manifest,
     verify_release_manifest,
@@ -29,27 +33,6 @@ _PACKAGED_INSTALLER_NAME = "install_nika_core.ps1"
 _DATA_ADOPTION_EVIDENCE_NAME = "packaged-data-adoption-proof.json"
 _RECOVERY_DIALOG_TITLE = "Nika Core — відновлення даних"
 _PF11_MAX_EVIDENCE_BYTES = 64 * 1024
-_PF11_PROJECT_ID_RE = re.compile(r"^product-[0-9a-f]{64}$")
-_PF11_REQUIRED_RAW_KEYS = frozenset(
-    {
-        "route",
-        "project_id",
-        "spec_version",
-        "state",
-        "command_center_state_proven",
-        "current_command_proven",
-        "current_command_focus_proven",
-        "bridge_state_project_id",
-        "bridge_state_spec_version",
-        "bridge_state_status_count",
-        "bridge_state_decision_count",
-        "restart_selection_integrity_proven",
-        "bounded_projection_proven",
-        "human_tested",
-        "nvda_verified",
-        "production_release_ready",
-    }
-)
 
 
 def project_version(project_root: Path) -> str:
@@ -84,13 +67,6 @@ def resolve_source_sha(requested: str | None) -> str:
             "NIKA_SOURCE_SHA or GITHUB_SHA"
         )
     return candidate
-
-
-def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> int:
-    value = payload.get(field)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
-    return value
 
 
 def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -188,32 +164,14 @@ def _read_pf11_evidence(path: Path) -> dict[str, object]:
     if type(payload) is not dict:
         raise TypeError("packaged PF11 proof evidence must be a JSON object")
     keys = frozenset(payload)
-    if keys != _PF11_REQUIRED_RAW_KEYS:
-        missing = sorted(_PF11_REQUIRED_RAW_KEYS - keys)
-        unexpected = sorted(keys - _PF11_REQUIRED_RAW_KEYS)
+    if keys != PACKAGED_PF11_EVIDENCE_KEYS:
+        missing = sorted(PACKAGED_PF11_EVIDENCE_KEYS - keys)
+        unexpected = sorted(keys - PACKAGED_PF11_EVIDENCE_KEYS)
         raise RuntimeError(
             "packaged PF11 proof evidence schema mismatch: "
             f"missing={missing!r}, unexpected={unexpected!r}"
         )
     return payload
-
-
-def _require_exact_pf11_text(payload: dict[str, object], field: str) -> str:
-    value = payload.get(field)
-    if type(value) is not str or not value or value != value.strip():
-        raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
-    try:
-        value.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise RuntimeError(f"packaged PF11 proof returned invalid {field}") from exc
-    return value
-
-
-def _require_exact_pf11_int(payload: dict[str, object], field: str, expected: int) -> int:
-    value = payload.get(field)
-    if type(value) is not int or value != expected:
-        raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
-    return value
 
 
 def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
@@ -325,38 +283,10 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
     first, second = outputs
     if first != second:
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
-    route = _require_exact_pf11_text(first, "route")
-    project_id = _require_exact_pf11_text(first, "project_id")
-    state = _require_exact_pf11_text(first, "state")
-    _require_exact_pf11_int(first, "spec_version", 1)
-    bridge_project_id = _require_exact_pf11_text(first, "bridge_state_project_id")
-    _require_exact_pf11_int(first, "bridge_state_spec_version", 1)
-    if route != "product_project":
-        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
-    if _PF11_PROJECT_ID_RE.fullmatch(project_id) is None:
-        raise RuntimeError("packaged PF11 proof returned a non-canonical ProductProject id")
-    if bridge_project_id != project_id:
-        raise RuntimeError("packaged PF11 proof returned inconsistent ProductProject identity")
-    if not state:
-        raise RuntimeError("packaged PF11 proof returned invalid state")
-    for required_true in (
-        "command_center_state_proven",
-        "current_command_proven",
-        "current_command_focus_proven",
-        "restart_selection_integrity_proven",
-        "bounded_projection_proven",
-    ):
-        if first.get(required_true) is not True:
-            raise RuntimeError(f"packaged PF11 proof must set {required_true}=true")
-    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
-    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
-    for forbidden_true in (
-        "human_tested",
-        "nvda_verified",
-        "production_release_ready",
-    ):
-        if first.get(forbidden_true) is not False:
-            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
+    first = require_packaged_pf11_evidence(first)
+    project_id = first["project_id"]
+    status_count = first["bridge_state_status_count"]
+    decision_count = first["bridge_state_decision_count"]
 
     target = bundle_dir / _PF11_EVIDENCE_NAME
     evidence = {
@@ -438,10 +368,7 @@ def _run_packaged_pf11(
     )
     if completed.returncode != 0:
         raise RuntimeError("packaged data-adoption proof executable exited unsuccessfully")
-    payload = _read_pf11_evidence(output)
-    if payload["route"] != "product_project":
-        raise RuntimeError("packaged data-adoption proof returned invalid PF11 evidence")
-    return payload
+    return require_packaged_pf11_evidence(_read_pf11_evidence(output))
 
 
 def _close_packaged_recovery_dialog(
