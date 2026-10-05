@@ -5,8 +5,10 @@ import hmac
 import json
 import math
 import os
+import re
 import subprocess
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from typing import NoReturn
 
@@ -19,6 +21,7 @@ from nika_core.artifacts import (
 )
 from nika_core.training_materials import ResolvedTrainingPackage, TrainingMaterialResolutionError
 from nika_core.training_runtime import (
+    ArtifactIdentity,
     TrainingJobSpec,
     TrainingStepResult,
     TrainingWorkerError,
@@ -40,6 +43,39 @@ _MAX_JSON_NODES = 4096
 _STREAM_JOIN_TIMEOUT_SECONDS = 1.0
 _READ_CHUNK_BYTES = 64 * 1024
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_FORBIDDEN_ENVIRONMENT_KEYS = frozenset(
+    {
+        "classpath",
+        "comspec",
+        "dotnet_additional_deps",
+        "dotnet_startup_hooks",
+        "dyld_framework_path",
+        "dyld_insert_libraries",
+        "dyld_library_path",
+        "java_tool_options",
+        "ld_library_path",
+        "ld_preload",
+        "node_options",
+        "path",
+        "pathext",
+        "perl5lib",
+        "perl5opt",
+        "rubyopt",
+        "_java_options",
+    }
+)
+_SECRET_ENVIRONMENT_TOKENS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "credential",
+        "credentials",
+        "passwd",
+        "password",
+        "secret",
+        "token",
+    }
+)
 
 
 class TrainingSubprocessError(TrainingWorkerError):
@@ -163,9 +199,16 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
 
     total_bytes = 0
     for index, argument in enumerate(normalized):
-        if type(argument) is not str or "\x00" in argument:
-            raise ValueError("command arguments must be NUL-free strings")
-        encoded_length = len(argument.encode("utf-8"))
+        if (
+            type(argument) is not str
+            or "\x00" in argument
+            or any(not character.isprintable() for character in argument)
+        ):
+            raise ValueError("command arguments must be printable NUL-free strings")
+        try:
+            encoded_length = len(argument.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError as exc:
+            raise ValueError("command arguments must be valid UTF-8 text") from exc
         if encoded_length > _MAX_ARGUMENT_BYTES:
             raise ValueError("command argument exceeds the configured byte limit")
         total_bytes += encoded_length
@@ -231,6 +274,8 @@ def _validate_command_artifact_ids(
 def _command_sha256(
     command: tuple[str, ...],
     command_artifact_ids: Mapping[int, str],
+    *,
+    environment: Mapping[str, str],
 ) -> str:
     payload = {
         "argv": list(command),
@@ -238,6 +283,7 @@ def _command_sha256(
             str(index): command_artifact_ids[index]
             for index in sorted(command_artifact_ids)
         },
+        "environment": {key: environment[key] for key in sorted(environment)},
     }
     encoded = json.dumps(
         payload,
@@ -246,7 +292,22 @@ def _command_sha256(
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(b"nika-training-command-v1\x00" + encoded).hexdigest()
+    return hashlib.sha256(b"nika-training-command-v2\x00" + encoded).hexdigest()
+
+
+def _environment_key_contains_credential_name(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+    if not normalized:
+        return False
+    parts = tuple(part for part in normalized.split("_") if part)
+    if "apikey" in parts:
+        return True
+    if any(part in _SECRET_ENVIRONMENT_TOKENS for part in parts):
+        return True
+    return any(
+        left == "api" and right == "key"
+        for left, right in zip(parts, parts[1:], strict=False)
+    )
 
 
 def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
@@ -256,14 +317,40 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
         raise ValueError("environment contains too many entries")
 
     result: dict[str, str] = {}
+    normalized_keys: set[str] = set()
     for key, value in environment.items():
         if type(key) is not str or type(value) is not str:
             raise ValueError("environment keys and values must be strings")
-        if not key or "=" in key or "\x00" in key or "\x00" in value:
+        if (
+            not key
+            or "=" in key
+            or "\x00" in key
+            or "\x00" in value
+            or any(not character.isprintable() for character in key)
+            or any(not character.isprintable() for character in value)
+        ):
             raise ValueError("environment contains an invalid key or value")
-        if len(key.encode("utf-8")) > _MAX_ENVIRONMENT_FIELD_BYTES:
+        normalized_key = key.casefold()
+        if normalized_key in normalized_keys:
+            raise ValueError("environment keys must be unique ignoring case")
+        normalized_keys.add(normalized_key)
+        if (
+            normalized_key in _FORBIDDEN_ENVIRONMENT_KEYS
+            or normalized_key.startswith("python")
+            or normalized_key.startswith("ld_")
+            or normalized_key.startswith("dyld_")
+        ):
+            raise ValueError("environment may not alter runtime or loader authority")
+        if _environment_key_contains_credential_name(key):
+            raise ValueError("training environment must not contain credential material")
+        try:
+            key_bytes = key.encode("utf-8", errors="strict")
+            value_bytes = value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("environment must use valid UTF-8 text") from exc
+        if len(key_bytes) > _MAX_ENVIRONMENT_FIELD_BYTES:
             raise ValueError("environment key exceeds the configured byte limit")
-        if len(value.encode("utf-8")) > _MAX_ENVIRONMENT_FIELD_BYTES:
+        if len(value_bytes) > _MAX_ENVIRONMENT_FIELD_BYTES:
             raise ValueError("environment value exceeds the configured byte limit")
         result[key] = value
     return result
@@ -313,6 +400,38 @@ def _normalized_executable_path(value: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(value)))
 
 
+def _snapshot_spec(spec: TrainingJobSpec) -> TrainingJobSpec:
+    if type(spec) is not TrainingJobSpec:
+        raise _error(
+            "training_spec_invalid_type",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        )
+    try:
+        base = spec.base_artifact
+        if type(base) is not ArtifactIdentity:
+            raise TypeError("base_artifact must be an exact ArtifactIdentity")
+        return TrainingJobSpec(
+            job_id=spec.job_id,
+            task_id=spec.task_id,
+            project_id=spec.project_id,
+            owner_id=spec.owner_id,
+            base_artifact=ArtifactIdentity(
+                artifact_ref=base.artifact_ref,
+                sha256=base.sha256,
+            ),
+            frozen_package_sha256=spec.frozen_package_sha256,
+            training_material_sha256=spec.training_material_sha256,
+            candidate_artifact_ref=spec.candidate_artifact_ref,
+            max_steps=spec.max_steps,
+            resource_scope=spec.resource_scope,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise _error(
+            "training_spec_invalid",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        ) from exc
+
+
 def _materials_match_spec(
     spec: TrainingJobSpec,
     training_materials: ResolvedTrainingPackage,
@@ -359,8 +478,9 @@ class SubprocessTrainingWorker:
     """Shell-free TrainingWorkerPort adapter for one Registry-authorized trainer command.
 
     Durable resume state binds the exact command vector, Registry-bound command artifacts,
-    trainer digest and frozen/material job identities. Absolute command-file arguments must
-    have Artifact Registry authority; relative path arguments are forbidden. Physical training
+    explicit sterile environment, trainer digest and frozen/material job identities. Absolute
+    command-file arguments must have Artifact Registry authority; relative path arguments are
+    forbidden. Physical training
     paths remain transient request data only. Immediately before spawn, the canonical Registry
     verifies every bound command artifact and ResolvedTrainingPackage re-binds all input bytes.
     """
@@ -387,12 +507,13 @@ class SubprocessTrainingWorker:
             command_artifact_ids=command_artifact_ids,
         )
         self._trainer_artifact_id = self._command_artifact_ids[0]
+        self._environment = _validate_environment(environment)
         self._command_sha256 = _command_sha256(
             self._command,
             self._command_artifact_ids,
+            environment=self._environment,
         )
         self._timeout_seconds = _validate_timeout(timeout_seconds)
-        self._environment = _validate_environment(environment)
         self._max_request_bytes = _validate_positive_byte_limit(
             max_request_bytes, name="max_request_bytes"
         )
@@ -408,7 +529,12 @@ class SubprocessTrainingWorker:
         resume_state: dict[str, object],
         training_materials: ResolvedTrainingPackage,
     ) -> TrainingStepResult:
-        if type(step_index) is not int or step_index < 0 or step_index >= spec.max_steps:
+        canonical_spec = _snapshot_spec(spec)
+        if (
+            type(step_index) is not int
+            or step_index < 0
+            or step_index >= canonical_spec.max_steps
+        ):
             raise _error("step_index_out_of_bounds", effect=TrainingWorkerFailureEffect.NO_EFFECT)
         if type(resume_state) is not dict:
             raise _error("resume_state_invalid_type", effect=TrainingWorkerFailureEffect.NO_EFFECT)
@@ -417,7 +543,7 @@ class SubprocessTrainingWorker:
                 "training_materials_invalid_type",
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             )
-        if not _materials_match_spec(spec, training_materials):
+        if not _materials_match_spec(canonical_spec, training_materials):
             raise _error(
                 "training_material_identity_mismatch",
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
@@ -427,7 +553,7 @@ class SubprocessTrainingWorker:
         trainer_record = command_records[0]
         trainer_sha256 = trainer_record.sha256
         job_fingerprint = _job_fingerprint(
-            spec,
+            canonical_spec,
             command_sha256=self._command_sha256,
         )
         trainer_state, previous_step_id = self._unwrap_resume_state(
@@ -448,7 +574,7 @@ class SubprocessTrainingWorker:
                 for index, record in sorted(command_records.items())
             ],
             "command_sha256": self._command_sha256,
-            "job": _job_identity(spec, command_sha256=self._command_sha256),
+            "job": _job_identity(canonical_spec, command_sha256=self._command_sha256),
             "job_fingerprint": job_fingerprint,
             "previous_step_id": previous_step_id,
             "protocol_version": _PROTOCOL_VERSION,
@@ -475,7 +601,11 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             ) from exc
 
-        stdout = self._execute(request_bytes + b"\n")
+        stdout = self._execute(
+            request_bytes + b"\n",
+            expected_command_records=command_records,
+            expected_training_materials=training_materials,
+        )
         response = self._parse_response(stdout, expected_step_id=current_step_id)
         completed = response["completed"]
         candidate_sha256 = response["candidate_sha256"]
@@ -690,7 +820,21 @@ class SubprocessTrainingWorker:
         except (OSError, ValueError):
             return
 
-    def _execute(self, request_bytes: bytes) -> bytes:
+    @staticmethod
+    def _reap_process(process: subprocess.Popen[bytes]) -> None:
+        try:
+            process.wait(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+
+    def _execute(
+        self,
+        request_bytes: bytes,
+        *,
+        expected_command_records: Mapping[int, ArtifactRecord],
+        expected_training_materials: ResolvedTrainingPackage,
+    ) -> bytes:
+        deadline = time.monotonic() + self._timeout_seconds
         try:
             process = subprocess.Popen(
                 self._command,
@@ -718,8 +862,44 @@ class SubprocessTrainingWorker:
 
         if process.stdin is None or process.stdout is None:
             self._kill_process(process)
+            self._reap_process(process)
             raise _error(
                 "training_subprocess_streams_unavailable",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
+
+        try:
+            self._verify_command_artifacts(expected_command_records)
+        except TrainingSubprocessError as exc:
+            self._close_pipe(process.stdin)
+            self._close_pipe(process.stdout)
+            self._kill_process(process)
+            self._reap_process(process)
+            raise _error(
+                "command_artifact_changed_after_process_start",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            ) from exc
+
+        try:
+            expected_training_materials.reverify()
+        except TrainingMaterialResolutionError as exc:
+            self._close_pipe(process.stdin)
+            self._close_pipe(process.stdout)
+            self._kill_process(process)
+            self._reap_process(process)
+            raise _error(
+                "training_material_changed_after_process_start",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            ) from exc
+
+        remaining_timeout = deadline - time.monotonic()
+        if remaining_timeout <= 0:
+            self._close_pipe(process.stdin)
+            self._close_pipe(process.stdout)
+            self._kill_process(process)
+            self._reap_process(process)
+            raise _error(
+                "training_subprocess_timeout",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
 
@@ -766,7 +946,7 @@ class SubprocessTrainingWorker:
 
         timed_out: subprocess.TimeoutExpired | None = None
         try:
-            returncode = process.wait(timeout=self._timeout_seconds)
+            returncode = process.wait(timeout=remaining_timeout)
         except subprocess.TimeoutExpired as exc:
             timed_out = exc
             self._kill_process(process)

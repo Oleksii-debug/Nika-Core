@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -359,6 +361,40 @@ sys.stdout.write(json.dumps(response))
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("mode", ["spec", "base"])
+def test_mutated_job_spec_is_revalidated_before_process_effect(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    marker = tmp_path / "invalid-spec-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials, max_steps=1)
+    if mode == "spec":
+        object.__setattr__(spec, "training_material_sha256", "invalid")
+    else:
+        object.__setattr__(spec.base_artifact, "sha256", "invalid")
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=spec,
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_spec_invalid"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
 def test_material_digest_mismatch_fails_before_process_effect(tmp_path: Path) -> None:
     marker = tmp_path / "started"
     trainer = _script(
@@ -423,6 +459,58 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
 
     assert exc_info.value.code == "training_material_verification_failed"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_material_tamper_during_spawn_is_unknown_and_process_is_reaped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "material-spawn-effect"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+Path({str(marker)!r}).write_text("effect", encoding="utf-8")
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    material_path = materials.materials[0].path
+    byte_count = materials.materials[0].evidence.byte_count
+    real_popen = subprocess.Popen
+
+    def mutating_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        material_path.write_bytes(b"x" * byte_count)
+        return real_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "nika_core.training_adapters.subprocess_worker.subprocess.Popen",
+        mutating_popen,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_material_changed_after_process_start"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
     assert not marker.exists()
 
 
@@ -494,6 +582,115 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
 
     assert exc_info.value.code == "command_artifact_not_verified"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_command_tamper_during_spawn_is_unknown_and_process_is_reaped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "spawn-race-effect"
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    real_popen = subprocess.Popen
+
+    def mutating_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        trainer.write_text(
+            f"""
+import time
+from pathlib import Path
+
+time.sleep(2)
+Path({str(marker)!r}).write_text("effect", encoding="utf-8")
+""".strip(),
+            encoding="utf-8",
+        )
+        return real_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "nika_core.training_adapters.subprocess_worker.subprocess.Popen",
+        mutating_popen,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "command_artifact_changed_after_process_start"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert not marker.exists()
+
+
+def test_post_spawn_verification_consumes_process_timeout_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "deadline-effect"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+Path({str(marker)!r}).write_text("effect", encoding="utf-8")
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer, timeout_seconds=0.05)
+    original_verify = worker._verify_command_artifacts
+    calls = 0
+
+    def delayed_verify(expected_records: object) -> None:
+        nonlocal calls
+        calls += 1
+        original_verify(expected_records)  # type: ignore[arg-type]
+        if calls == 2:
+            time.sleep(0.08)
+
+    monkeypatch.setattr(worker, "_verify_command_artifacts", delayed_verify)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert calls == 2
+    assert exc_info.value.code == "training_subprocess_timeout"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
     assert not marker.exists()
 
 
@@ -819,6 +1016,101 @@ sys.stdout.write(json.dumps(response))
     assert trainer_state["allowed"] == "yes"
 
 
+def test_resume_identity_binds_explicit_environment(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {"step": request["step_index"]},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials)
+    registry, artifact_id, executable, script_artifact_id = _registry_for_python(
+        tmp_path,
+        trainer,
+    )
+    assert script_artifact_id is not None
+    first_worker = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=artifact_id,
+        command_artifact_ids={1: script_artifact_id},
+        environment={"NIKA_TRAINING_MODE": "first"},
+    )
+    replacement_worker = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=artifact_id,
+        command_artifact_ids={1: script_artifact_id},
+        environment={"NIKA_TRAINING_MODE": "second"},
+    )
+
+    first = first_worker.step(
+        spec=spec,
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        replacement_worker.step(
+            spec=spec,
+            step_index=1,
+            resume_state=first.resume_state,
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "resume_state_command_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "PYTHONPATH",
+        "pythonhome",
+        "LD_PRELOAD",
+        "dyld_insert_libraries",
+        "PATH",
+        "Node_Options",
+        "DOTNET_STARTUP_HOOKS",
+    ],
+)
+def test_environment_rejects_runtime_loader_authority(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError, match="runtime or loader authority"):
+        _worker(tmp_path, trainer, environment={key: "untrusted"})
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["NIKA_API_KEY", "ACCESS_TOKEN", "DB_PASSWORD", "SERVICE_CREDENTIAL"],
+)
+def test_environment_rejects_credential_named_fields(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError, match="credential material"):
+        _worker(tmp_path, trainer, environment={key: "sensitive"})
+
+
 def test_wrong_step_identity_is_unknown_effect(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
@@ -1033,3 +1325,60 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
     assert exc_info.value.code == "command_artifact_kind_mismatch"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
     assert not marker.exists()
+
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["NIKA_AUTHOR_MODE", "TOKENIZER_MODE", "AUTHORITY_MODE"],
+)
+def test_environment_allows_noncredential_substring_names(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    worker, _, _ = _worker(tmp_path, trainer, environment={key: "enabled"})
+
+    assert worker is not None
+
+
+def test_environment_rejects_case_insensitive_duplicate_keys(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError, match="unique ignoring case"):
+        _worker(
+            tmp_path,
+            trainer,
+            environment={"NIKA_MODE": "one", "nika_mode": "two"},
+        )
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"NIKA_\ud800": "value"},
+        {"NIKA_MODE": "\ud800"},
+        {"NIKA\nMODE": "value"},
+        {"NIKA_MODE": "line\nbreak"},
+    ],
+)
+def test_environment_rejects_noncanonical_text(
+    tmp_path: Path,
+    environment: dict[str, str],
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError):
+        _worker(tmp_path, trainer, environment=environment)
+
+
+def test_command_rejects_noncanonical_text_before_registry_access(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError):
+        SubprocessTrainingWorker(
+            (str(tmp_path / "trainer"), "\ud800"),
+            artifact_registry=object(),  # type: ignore[arg-type]
+            trainer_artifact_id="0" * 64,
+        )
