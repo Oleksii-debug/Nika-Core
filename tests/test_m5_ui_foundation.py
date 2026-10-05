@@ -23,7 +23,9 @@ def build_bridge(tmp_path: Path) -> UIActionBridge:
         handlers={
             "nav.tasks": lambda _payload: "Tasks opened.",
             "task.create": lambda payload: (
-                "Task accepted." if str(payload.get("command", "")).strip() else (_raise("Command is empty."))
+                "Task accepted."
+                if str(payload.get("command", "")).strip()
+                else (_raise("Command is empty."))
             ),
         },
     )
@@ -187,7 +189,11 @@ def test_shell_forces_edgechromium_and_supported_local_path(monkeypatch, tmp_pat
     def start(**kwargs):
         calls["start"] = kwargs
 
-    monkeypatch.setitem(sys.modules, "webview", SimpleNamespace(create_window=create_window, start=start))
+    monkeypatch.setitem(
+        sys.modules,
+        "webview",
+        SimpleNamespace(create_window=create_window, start=start),
+    )
     window = launch_windows_shell(bridge)
     assert window is fake_window
     assert calls["title"] == "Nika Core"
