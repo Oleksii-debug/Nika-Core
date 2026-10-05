@@ -596,6 +596,7 @@
       return;
     }
     // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
+    const durableMutation = taskMutationActions.has(actionId) || actionId === "team.sources.configure";
     const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
     if (inFlightActions.has(lockKey)) {
       announce("Попередню команду ще обробляють. Дочекайтеся підтвердження.", false);
@@ -613,8 +614,11 @@
         reportStateUnavailable();
       }
       document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (durableMutation) keepLocked = true;
       if (stateReady) {
-        const reconciled = "Стан перечитано після непідтвердженої дії. Перевірте результат перед повтором.";
+        const reconciled = durableMutation
+          ? "Стан перечитано після непідтвердженої дії. Повтор заблоковано до перезапуску вікна; перевірте результат."
+          : "Стан перечитано після непідтвердженої дії. Перевірте результат перед повтором.";
         announce(reconciled, true);
         appendLog(reconciled);
       } else {
@@ -670,12 +674,17 @@
       }
       document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
       if (!stateReady) {
+        if (!failed && durableMutation) keepLocked = true;
         announce(
           failed
             ? "Не вдалося оновити стан після відхиленої дії. Причина є в журналі."
             : (result.status === "accepted"
-              ? "Дію прийнято, але оновлений стан недоступний. Не повторюйте її без перевірки."
-              : "Дію підтверджено, але оновлений стан недоступний. Перечитайте стан."),
+              ? (durableMutation
+                ? "Дію прийнято, але оновлений стан недоступний. Повтор заблоковано до перезапуску вікна."
+                : "Дію прийнято, але оновлений стан недоступний. Не повторюйте її без перевірки.")
+              : (durableMutation
+                ? "Дію підтверджено, але оновлений стан недоступний. Повтор заблоковано до перезапуску вікна."
+                : "Дію підтверджено, але оновлений стан недоступний. Перечитайте стан.")),
           true,
         );
       }
