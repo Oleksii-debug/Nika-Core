@@ -342,13 +342,14 @@ def test_dispatch_transport_failure_is_bounded_reconciled_and_not_retried() -> N
     validator_end = script.index("async function reportDispatchBridgeFailure", validator_start)
     validator = script[validator_start:validator_end]
     assert "response.request_id === expectedRequestId" in validator
-    assert '["completed", "failed", "rejected"].includes(response.status)' in validator
+    assert '["accepted", "completed", "rejected", "failed"].includes(response.status)' in validator
     assert 'typeof response.message === "string"' in validator
     assert 'typeof response.focus_id === "string"' in validator
 
     helper_start = script.index("async function reportDispatchBridgeFailure(focusTarget)")
     helper_end = script.index("function requestId()", helper_start)
     helper = script[helper_start:helper_end]
+    assert "dispatchOutcomeUnconfirmed = true;" in helper
     assert 'dataset.nikaReady = "false"' in helper
     assert (
         "Немає підтвердження виконання дії. Перечитую поточний стан; "
@@ -356,6 +357,7 @@ def test_dispatch_transport_failure_is_bounded_reconciled_and_not_retried() -> N
     ) in helper
     assert "await refreshState({ announceTeamTransitions: false })" in helper
     assert "reportStateUnavailable();" in helper
+    assert "if (stateReady) dispatchOutcomeUnconfirmed = false;" in helper
     assert 'dataset.nikaReady = stateReady ? "true" : "false"' in helper
     assert "globalThis.pywebview.api.dispatch" not in helper
     assert "focusTarget?.focus?.();" in helper
@@ -363,12 +365,22 @@ def test_dispatch_transport_failure_is_bounded_reconciled_and_not_retried() -> N
     dispatch_start = script.index("async function dispatch(actionId, trigger = null)")
     dispatch_end = script.index("async function refreshKeymap()", dispatch_start)
     dispatch = script[dispatch_start:dispatch_end]
-    assert 'dataset.nikaReady !== "true"' in dispatch
+    autostart_branch = dispatch.index(
+        '["settings.autostart.configure", "settings.autostart.refresh"].includes(actionId)'
+    )
+    uncertainty_guard = dispatch.index("if (dispatchOutcomeUnconfirmed)")
+    assert autostart_branch < uncertainty_guard
+    assert "Попередню дію не підтверджено." in dispatch
     assert "const dispatchRequestId = requestId();" in dispatch
     assert dispatch.count("globalThis.pywebview.api.dispatch") == 1
     assert "validDispatchResponse(result, dispatchRequestId)" in dispatch
     assert "await reportDispatchBridgeFailure(trigger);" in dispatch
     assert "return;" in dispatch
+
+    poll_start = script.index("function startStatePolling()")
+    poll_end = script.index("async function initializeBridge()", poll_start)
+    poll = script[poll_start:poll_end]
+    assert "if (ready) dispatchOutcomeUnconfirmed = false;" in poll
 
 
 def test_packaged_uia_gate_waits_for_bridge_readiness_before_hotkeys() -> None:
