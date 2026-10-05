@@ -256,8 +256,9 @@ class Keymap:
             now = datetime.now(UTC).isoformat()
             for action_id, binding in proposed.items():
                 conn.execute(
-                    "INSERT INTO keymap_overrides(action_id, binding, updated_at) VALUES (?, ?, ?) "
-                    "ON CONFLICT(action_id) DO UPDATE SET binding=excluded.binding, updated_at=excluded.updated_at",
+                    "INSERT INTO keymap_overrides(action_id, binding, updated_at) "
+                    "VALUES (?, ?, ?) ON CONFLICT(action_id) DO UPDATE SET "
+                    "binding=excluded.binding, updated_at=excluded.updated_at",
                     (action_id, binding, now),
                 )
 
