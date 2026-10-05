@@ -13,7 +13,6 @@ from nika_core.artifacts.contracts import (
 )
 from nika_core.data.sqlite import SQLiteStore
 
-
 _MAX_DURABLE_JSON_BYTES = 1_048_576
 _MAX_QUERY_TEXT_BYTES = 4096
 
