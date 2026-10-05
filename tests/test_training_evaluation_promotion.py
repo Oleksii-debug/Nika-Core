@@ -499,6 +499,7 @@ def test_direct_attested_old_new_decision_construction_is_disabled() -> None:
             permission_fingerprint="permissions:v1",
         )
 
+
 def _promotion_policy() -> PromotionPolicy:
     return PromotionPolicy(
         primary_metric=QUALITY_METRIC,
@@ -657,6 +658,129 @@ async def test_conflicting_partial_observation_fails_closed() -> None:
     persisted = repository.get(definition.experiment_id)
     assert persisted.observations == (conflicting,)
     assert persisted.status is ExperimentStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_non_prefix_partial_evidence_fails_before_recovery_writes() -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    repository = InMemoryExperimentRepository()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    definition, observations = _definition_and_observations(
+        experiment_id="loop-c-non-prefix-partial",
+        champion=champion,
+        challenger=challenger,
+        evaluation=evaluation,
+        config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+    )
+    engine = ExperimentEngine(repository)
+    engine.create(definition)
+    engine.start(definition.experiment_id)
+    engine.record(definition.experiment_id, observations[1])
+
+    with pytest.raises(
+        AttestedOldVsNewDecisionError,
+        match="canonical append-only prefix",
+    ):
+        evaluate_attested_old_vs_new(
+            experiment_id=definition.experiment_id,
+            champion_benchmark=champion,
+            challenger_benchmark=challenger,
+            evaluation_set=evaluation,
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="permissions:v1",
+            repository=repository,
+        )
+
+    persisted = repository.get(definition.experiment_id)
+    assert persisted.status is ExperimentStatus.RUNNING
+    assert persisted.observations == (observations[1],)
+
+
+@pytest.mark.asyncio
+async def test_gapped_partial_evidence_fails_before_recovery_writes() -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    repository = InMemoryExperimentRepository()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    definition, observations = _definition_and_observations(
+        experiment_id="loop-c-gapped-partial",
+        champion=champion,
+        challenger=challenger,
+        evaluation=evaluation,
+        config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+    )
+    engine = ExperimentEngine(repository)
+    engine.create(definition)
+    engine.start(definition.experiment_id)
+    engine.record(definition.experiment_id, observations[0])
+    engine.record(definition.experiment_id, observations[2])
+
+    with pytest.raises(
+        AttestedOldVsNewDecisionError,
+        match="canonical append-only prefix",
+    ):
+        evaluate_attested_old_vs_new(
+            experiment_id=definition.experiment_id,
+            champion_benchmark=champion,
+            challenger_benchmark=challenger,
+            evaluation_set=evaluation,
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="permissions:v1",
+            repository=repository,
+        )
+
+    persisted = repository.get(definition.experiment_id)
+    assert persisted.status is ExperimentStatus.RUNNING
+    assert persisted.observations == (observations[0], observations[2])
+
+
+@pytest.mark.asyncio
+async def test_running_terminal_fields_fail_before_recovery_writes() -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    repository = InMemoryExperimentRepository()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    definition, _ = _definition_and_observations(
+        experiment_id="loop-c-running-terminal-fields",
+        champion=champion,
+        challenger=challenger,
+        evaluation=evaluation,
+        config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+    )
+    engine = ExperimentEngine(repository)
+    engine.create(definition)
+    running = engine.start(definition.experiment_id)
+    forged = replace(
+        running,
+        selected_candidate_id=challenger.report.candidate.candidate_id,
+    )
+    repository.save(forged)
+
+    with pytest.raises(
+        AttestedOldVsNewDecisionError,
+        match="terminal decision fields",
+    ):
+        evaluate_attested_old_vs_new(
+            experiment_id=definition.experiment_id,
+            champion_benchmark=champion,
+            challenger_benchmark=challenger,
+            evaluation_set=evaluation,
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="permissions:v1",
+            repository=repository,
+        )
+
+    assert repository.get(definition.experiment_id) == forged
 
 
 @pytest.mark.asyncio
