@@ -722,6 +722,29 @@ def test_ansible_runner_client_rejects_ambiguous_return_code_types(
         )
 
 
+def test_runner_execution_rejects_whitespace_only_status_and_evidence() -> None:
+    with pytest.raises(
+        StagingAdapterError,
+        match="status must be bounded non-empty text",
+    ):
+        RunnerExecution(
+            "   ",
+            0,
+            {"applied": True},
+            "ansible-runner:evidence-deploy",
+        )
+    with pytest.raises(
+        StagingAdapterError,
+        match="evidence_ref must be bounded non-empty text",
+    ):
+        RunnerExecution(
+            "successful",
+            0,
+            {"applied": True},
+            "   ",
+        )
+
+
 def test_ansible_runner_client_rejects_non_text_status() -> None:
     def run(**kwargs: object) -> object:
         return SimpleNamespace(
@@ -897,6 +920,19 @@ def test_runner_execution_rejects_non_json_or_nonfinite_contracts(
             "successful",
             0,
             contract,
+            "ansible-runner:evidence-deploy",
+        )
+
+
+def test_runner_execution_rejects_invalid_unicode_contract_text() -> None:
+    with pytest.raises(
+        StagingAdapterError,
+        match="JSON-compatible finite values",
+    ):
+        RunnerExecution(
+            "successful",
+            0,
+            {"detail": "\ud800"},
             "ansible-runner:evidence-deploy",
         )
 
