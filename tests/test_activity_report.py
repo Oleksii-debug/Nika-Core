@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -57,6 +57,10 @@ class _FailingResourceObserver:
 class _BehavioralDatetime(datetime):
     def utcoffset(self) -> object:
         raise AssertionError("datetime behavior must not run before exact-type admission")
+
+
+class _DateSubclass(date):
+    pass
 
 
 def _prepared_store(tmp_path) -> SQLiteStore:
@@ -275,6 +279,21 @@ def test_report_rejects_behavioral_datetime_before_timezone_hooks(tmp_path) -> N
             start=start,
             end=datetime(2026, 9, 13, tzinfo=UTC),
         )
+
+
+@pytest.mark.parametrize(
+    "day",
+    (
+        datetime(2026, 9, 12, tzinfo=UTC),
+        _DateSubclass(2026, 9, 12),
+    ),
+)
+def test_report_rejects_non_exact_utc_day_carriers(day, tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    service = DailyActivityReportService(store)
+
+    with pytest.raises(TypeError, match="day must be a built-in date"):
+        service.build_utc_day(day)
 
 
 def test_report_counts_repeated_memory_upserts_from_durable_audit_history(tmp_path) -> None:
