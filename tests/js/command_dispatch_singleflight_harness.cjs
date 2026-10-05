@@ -24,7 +24,7 @@ const factory = new Function("context", `
   return {
     dispatch, mutateKeymap, getSourceDirty: () => sourceDirty,
     getActionsReady: () => actionsReady,
-    getStateReconciliationPending: () => stateReconciliationPending,
+    getStateReconciliationPending: () => stateReconciliationPending > 0,
   };
 `);
 
@@ -214,6 +214,46 @@ async function main() {
   assert.equal(postFailureMutationCalled, false);
   console.log("PASS: confirmed keymap write with failed reread disables hotkeys and retains lock");
 
+  const concurrentRequestStart = requests.length;
+  const concurrentBridge = [];
+  const concurrentStateReads = [];
+  bridge = () => new Promise((resolve, reject) => {concurrentBridge.push({resolve, reject});});
+  stateRead = () => new Promise((resolve) => {concurrentStateReads.push(resolve);});
+  const uncertainSource = ui.dispatch("team.sources.configure", trigger);
+  const uncertainVoice = ui.dispatch("voice.start", trigger);
+  await Promise.resolve();
+  assert.equal(requests.length, concurrentRequestStart + 2);
+  concurrentBridge[0].reject(Error("SOURCE_TRANSPORT_PRIVATE"));
+  concurrentBridge[1].reject(Error("VOICE_TRANSPORT_PRIVATE"));
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(ui.getStateReconciliationPending(), true);
+  assert.equal(concurrentStateReads.length, 1, "uncertain state rereads must serialize");
+  concurrentStateReads[0](true);
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(
+    ui.getStateReconciliationPending(),
+    true,
+    "second queued reconciliation must keep the global command gate closed",
+  );
+  assert.equal(concurrentStateReads.length, 2, "second uncertain action must get its own later reread");
+  await ui.dispatch("task.create", trigger);
+  assert.equal(
+    requests.length,
+    concurrentRequestStart + 2,
+    "new durable command must stay blocked until every uncertain reconciliation completes",
+  );
+  assert(messages.at(-1)[0].includes("Триває звірка стану"));
+  concurrentStateReads[1](true);
+  await Promise.all([uncertainSource, uncertainVoice]);
+  assert.equal(ui.getStateReconciliationPending(), false);
+  assert(!JSON.stringify(messages).includes("SOURCE_TRANSPORT_PRIVATE"));
+  assert(!JSON.stringify(messages).includes("VOICE_TRANSPORT_PRIVATE"));
+  console.log("PASS: concurrent uncertain actions serialize rereads and keep the global gate closed");
+
   const logFunctionsStart = source.indexOf("  function announce(message, assertive = false) {");
   const logFunctionsEnd = source.indexOf("  function requestId() {", logFunctionsStart);
   const reportStart = source.indexOf("  function reportStateUnavailable() {");
@@ -225,7 +265,7 @@ async function main() {
   );
   assert(recoveryReset > 0, "healthy state must rearm outage reporting");
   assert(source.includes(
-    "if (stateReconciliationPending && !allowDuringReconciliation) return false;",
+    "if (stateReconciliationPending > 0 && !allowDuringReconciliation) return false;",
   ), "normal state refresh must not supersede uncertain-effect reconciliation");
 
   const entries = [];

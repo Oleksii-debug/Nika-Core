@@ -226,7 +226,8 @@
   const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
   const inFlightActions = new Set();
   let keymapMutationPending = false;
-  let stateReconciliationPending = false;
+  let stateReconciliationPending = 0;
+  let stateReconciliationTail = Promise.resolve();
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let stateRefreshGeneration = 0;
@@ -1521,7 +1522,7 @@
     announceTeamTransitions = true,
     allowDuringReconciliation = false,
   } = {}) {
-    if (stateReconciliationPending && !allowDuringReconciliation) return false;
+    if (stateReconciliationPending > 0 && !allowDuringReconciliation) return false;
     const stateReadGeneration = ++stateRefreshGeneration;
     const isCurrentStateRead = () => stateReadGeneration === stateRefreshGeneration;
     const autostartReadGeneration = autostartGeneration;
@@ -1611,7 +1612,7 @@
       announce("Міст Nika ще не готовий.", true);
       return;
     }
-    if (stateReconciliationPending) {
+    if (stateReconciliationPending > 0) {
       announce("Триває звірка стану після непідтвердженої дії. Дочекайтеся її завершення.", false);
       return;
     }
@@ -1634,15 +1635,19 @@
       announce(message, true);
       appendLog(message);
       let stateReady = false;
-      stateReconciliationPending = true;
+      stateReconciliationPending += 1;
+      const queuedReconciliation = stateReconciliationTail
+        .catch(() => false)
+        .then(() => refreshState({ allowDuringReconciliation: true }));
+      stateReconciliationTail = queuedReconciliation;
       try {
         try {
-          stateReady = await refreshState({ allowDuringReconciliation: true });
+          stateReady = await queuedReconciliation;
         } catch {
           reportStateUnavailable();
         }
       } finally {
-        stateReconciliationPending = false;
+        stateReconciliationPending -= 1;
       }
       document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
       if (stateReady) {

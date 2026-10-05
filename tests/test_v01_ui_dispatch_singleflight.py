@@ -34,4 +34,4 @@ def test_windows_ui_command_singleflight_and_uncertain_effects() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
-    assert result.stdout.count("PASS:") == 16, result.stdout
+    assert result.stdout.count("PASS:") == 17, result.stdout
