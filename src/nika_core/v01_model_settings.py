@@ -444,6 +444,10 @@ class V01ModelSettings:
                 ).fetchone()
                 if existing is not None:
                     receipt = self._promotion_receipt(existing)
+                    if receipt.rollback_revision is not None:
+                        raise ModelSetupError(
+                            "Це просування вже було відкотило і не може бути повторно застосоване."
+                        )
                     if receipt.binding_sha256 != binding_digest:
                         raise ModelSetupError(
                             "Це рішення вже прив'язане до іншого навчального доказу."
