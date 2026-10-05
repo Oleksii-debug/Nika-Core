@@ -514,6 +514,18 @@ def _release_file_snapshot_is_stable(
     )
 
 
+def _open_release_file_for_snapshot(path: Path) -> Any:
+    flags = os.O_RDONLY
+    for flag_name in ("O_BINARY", "O_CLOEXEC", "O_NOINHERIT", "O_NONBLOCK"):
+        flags |= getattr(os, flag_name, 0)
+    descriptor = os.open(path, flags)
+    try:
+        return os.fdopen(descriptor, "rb", closefd=True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
 def _stable_release_file_snapshot(
     path: Path,
     *,
@@ -521,7 +533,7 @@ def _stable_release_file_snapshot(
     root: Path | None = None,
 ) -> _ReleaseFileSnapshot | None:
     try:
-        with path.open("rb") as handle:
+        with _open_release_file_for_snapshot(path) as handle:
             before = os.fstat(handle.fileno())
             snapshot = _stream_release_file_snapshot(handle, scan_secrets=scan_secrets)
             after = os.fstat(handle.fileno())
