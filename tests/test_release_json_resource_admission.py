@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import zipfile
 from pathlib import Path
 
@@ -167,3 +168,40 @@ def test_public_release_archive_maps_deep_manifest_to_invalid_manifest(
         source_sha=SOURCE_SHA,
         expected_product_version=PRODUCT_VERSION,
     ) == ("archive:invalid-manifest",)
+
+
+@pytest.mark.parametrize(
+    "member_path",
+    (
+        "safe\u202efile.txt",
+        "Cafe\u0301.txt",
+        "safe\u0085file.txt",
+        "\ud800.txt",
+    ),
+)
+def test_public_release_archive_rejects_noncanonical_unicode_path(
+    tmp_path: Path,
+    member_path: str,
+) -> None:
+    artifact = tmp_path / "NikaCore.zip"
+    manifest = {
+        "manifest_version": 2,
+        "product": "Nika Core",
+        "version": PRODUCT_VERSION,
+        "source_sha": SOURCE_SHA,
+        "files": [
+            {
+                "path": member_path,
+                "size": 0,
+                "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            }
+        ],
+    }
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("release-manifest.json", json.dumps(manifest, ensure_ascii=True))
+
+    assert verify_release_archive(
+        artifact,
+        source_sha=SOURCE_SHA,
+        expected_product_version=PRODUCT_VERSION,
+    ) == ("archive:manifest:path:0",)
