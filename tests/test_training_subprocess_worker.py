@@ -605,3 +605,31 @@ def test_huge_integer_timeout_is_rejected_without_overflow(tmp_path: Path) -> No
             trainer_artifact_id=artifact_id,
             timeout_seconds=10**10000,  # type: ignore[arg-type]
         )
+
+
+def test_deeply_nested_response_stays_typed_unknown_effect(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import sys
+
+sys.stdin.buffer.read()
+sys.stdout.write("[" * 5000 + "0" + "]" * 5000)
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert exc_info.value.code in {
+        "training_subprocess_invalid_json_response",
+        "training_subprocess_response_not_object",
+    }
