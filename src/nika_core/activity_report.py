@@ -75,6 +75,8 @@ class DailyActivityReportService:
         self._resource_observer = resource_observer
 
     def build_utc_day(self, day: date) -> DailyActivityReport:
+        if type(day) is not date:
+            raise TypeError("day must be a built-in date")
         start = datetime.combine(day, time.min, tzinfo=UTC)
         return self.build_window(start=start, end=start + timedelta(days=1))
 
