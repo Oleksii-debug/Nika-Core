@@ -195,7 +195,11 @@ async def test_complete_attested_challenger_benchmark_emits_bound_evidence() -> 
     )
     assert result.binding.binding_sha256 == result.evidence_payload()["binding_sha256"]
     assert result.evidence_payload()["case_count"] == 2
-    assert len(result.evidence_payload()["case_receipts"]) == 2
+    receipts = result.evidence_payload()["case_receipts"]
+    assert len(receipts) == 2
+    assert receipts[0]["schema"] == "nika-attested-challenger-case-v1"
+    assert receipts[0]["artifact_sha256"] == _CHALLENGER_SHA256
+    assert len(receipts[0]["receipt_sha256"]) == 64
     assert len(result.evidence_sha256) == 64
     assert result.revalidated().evidence_sha256 == result.evidence_sha256
 
@@ -400,6 +404,15 @@ async def test_result_revalidation_rejects_missing_case_receipt() -> None:
     object.__setattr__(result, "case_receipts", result.case_receipts[:1])
 
     with pytest.raises(ValueError, match="receipt coverage"):
+        result.evidence_payload()
+
+
+@pytest.mark.asyncio
+async def test_result_revalidation_binds_receipts_to_benchmark_run_id() -> None:
+    result = await _run(_AttestedEffectPort())
+    object.__setattr__(result.report.run, "run_id", "run-substituted")
+
+    with pytest.raises(ValueError, match="request identity is inconsistent"):
         result.evidence_payload()
 
 
