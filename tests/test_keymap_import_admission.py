@@ -58,7 +58,7 @@ def test_nontext_import_is_rejected_without_database_effect(
 
 def test_unicode_invalid_import_is_rejected_without_database_effect(keymap: Keymap) -> None:
     with pytest.raises(ValueError, match="valid UTF-8"):
-        keymap.import_json('{"format_version":1,"bindings":{},"note":"\\ud800"}')
+        keymap.import_json('{"format_version":1,"bindings":{},"note":"' + chr(0xD800) + '"}')
     assert keymap.resolve("test.first") == "Ctrl+1"
 
 
