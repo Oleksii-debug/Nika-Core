@@ -71,6 +71,34 @@ def _expected_verification_id(verification: ArtifactVerification) -> str:
     return _sha256_text(material)
 
 
+def _validated_record_for_write(record: ArtifactRecord) -> ArtifactRecord:
+    try:
+        validated = ArtifactRecord.model_validate(record.model_dump(round_trip=True))
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ArtifactRegistryError("artifact record input is invalid") from exc
+    if validated.artifact_id != _expected_artifact_id(validated):
+        raise ArtifactRegistryError(
+            "artifact record deterministic identity does not match record input"
+        )
+    return validated
+
+
+def _validated_verification_for_write(
+    verification: ArtifactVerification,
+) -> ArtifactVerification:
+    try:
+        validated = ArtifactVerification.model_validate(
+            verification.model_dump(round_trip=True)
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ArtifactRegistryError("artifact verification input is invalid") from exc
+    if validated.verification_id != _expected_verification_id(validated):
+        raise ArtifactRegistryError(
+            "artifact verification deterministic identity does not match evidence input"
+        )
+    return validated
+
+
 def _same_registration(left: ArtifactRecord, right: ArtifactRecord) -> bool:
     left_data = left.model_dump(exclude={"created_at"})
     right_data = right.model_dump(exclude={"created_at"})
@@ -198,6 +226,7 @@ class SQLiteArtifactRepository:
         self._store = store
 
     def put_record(self, record: ArtifactRecord) -> ArtifactRecord:
+        record = _validated_record_for_write(record)
         record_json = _bounded_durable_json_text(
             record.model_dump_json(),
             field="artifact registry record payload",
@@ -351,6 +380,20 @@ class SQLiteArtifactRepository:
         return records
 
     def put_verification(self, verification: ArtifactVerification) -> ArtifactVerification:
+        verification = _validated_verification_for_write(verification)
+        try:
+            record = self.get(verification.artifact_id)
+        except KeyError as exc:
+            raise ArtifactRegistryError(
+                "artifact verification references an unknown artifact"
+            ) from exc
+        if (
+            verification.expected_sha256 != record.sha256
+            or verification.expected_size_bytes != record.size_bytes
+        ):
+            raise ArtifactRegistryError(
+                "artifact verification expected metadata does not match immutable artifact"
+            )
         verification_json = _bounded_durable_json_text(
             verification.model_dump_json(),
             field="artifact verification payload",

@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from urllib.parse import unquote, urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class FrozenModel(BaseModel):
@@ -200,6 +200,43 @@ class ArtifactVerification(FrozenModel):
     @classmethod
     def normalize_checked_at(cls, value: datetime) -> datetime:
         return _validate_utc(value, "checked_at")
+
+    @model_validator(mode="after")
+    def validate_evidence_truth(self) -> ArtifactVerification:
+        has_digest = self.actual_sha256 is not None
+        has_size = self.actual_size_bytes is not None
+        if has_digest != has_size:
+            raise ValueError(
+                "artifact verification actual digest and size must be provided together"
+            )
+        has_actual = has_digest and has_size
+        if self.state == ArtifactVerificationState.VERIFIED:
+            if (
+                not has_actual
+                or self.actual_sha256 != self.expected_sha256
+                or self.actual_size_bytes != self.expected_size_bytes
+            ):
+                raise ValueError(
+                    "verified artifact evidence must match expected digest and size"
+                )
+        elif self.state in {
+            ArtifactVerificationState.MISSING,
+            ArtifactVerificationState.UNAVAILABLE,
+        }:
+            if has_actual:
+                raise ValueError(
+                    f"{self.state.value} artifact evidence must not contain actual digest or size"
+                )
+        elif (
+            self.state == ArtifactVerificationState.MISMATCH
+            and has_actual
+            and self.actual_sha256 == self.expected_sha256
+            and self.actual_size_bytes == self.expected_size_bytes
+        ):
+            raise ValueError(
+                "mismatch artifact evidence must differ from expected digest or size"
+            )
+        return self
 
 
 class ArtifactRegistryError(RuntimeError):

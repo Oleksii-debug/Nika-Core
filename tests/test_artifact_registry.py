@@ -18,6 +18,7 @@ from nika_core.artifacts import (
     ArtifactRegistryError,
     ArtifactVerification,
     ArtifactVerificationState,
+    SQLiteArtifactRepository,
     initialize_artifact_registry_schema,
 )
 from nika_core.data.sqlite import SQLiteStore
@@ -1017,4 +1018,100 @@ def test_read_queries_reject_oversized_text_before_sql(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="4096-byte query limit"):
         registry.list(workspace_id=oversized)
+
+@pytest.mark.parametrize(
+    ("state", "actual_sha256", "actual_size_bytes"),
+    (
+        (ArtifactVerificationState.VERIFIED, None, None),
+        (ArtifactVerificationState.VERIFIED, "d" * 64, 4),
+        (ArtifactVerificationState.MISSING, "c" * 64, 4),
+        (ArtifactVerificationState.UNAVAILABLE, "c" * 64, 4),
+        (ArtifactVerificationState.MISMATCH, "c" * 64, 4),
+        (ArtifactVerificationState.MISMATCH, "c" * 64, None),
+    ),
+)
+def test_verification_contract_rejects_false_or_partial_evidence(
+    state: ArtifactVerificationState,
+    actual_sha256: str | None,
+    actual_size_bytes: int | None,
+) -> None:
+    with pytest.raises(ValidationError):
+        ArtifactVerification(
+            verification_id="a" * 64,
+            artifact_id="b" * 64,
+            state=state,
+            expected_sha256="c" * 64,
+            actual_sha256=actual_sha256,
+            expected_size_bytes=4,
+            actual_size_bytes=actual_size_bytes,
+        )
+
+
+def test_repository_rejects_forged_record_identity_before_write(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    initialize_artifact_registry_schema(store)
+    repository = SQLiteArtifactRepository(store)
+    record = ArtifactRecord(
+        artifact_id="f" * 64,
+        idempotency_key="artifact-a",
+        workspace_id="workspace-a",
+        kind="evidence",
+        location_kind=ArtifactLocationKind.OPAQUE_REFERENCE,
+        locator="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+    )
+
+    with pytest.raises(ArtifactRegistryError, match="deterministic identity"):
+        repository.put_record(record)
+
+    with store.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM artifact_registry_records").fetchone()[0]
+    assert count == 0
+
+
+def test_repository_revalidates_verification_model_copies_before_write(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    registry = ArtifactRegistry.from_store(store)
+    record = registry.register_reference(
+        workspace_id="workspace-a",
+        idempotency_key="artifact-a",
+        reference="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+        kind="evidence",
+    )
+    verification = registry.verify(record.artifact_id)
+    repository = SQLiteArtifactRepository(store)
+    forged = verification.model_copy(
+        update={"state": ArtifactVerificationState.VERIFIED}
+    )
+
+    with pytest.raises(ArtifactRegistryError, match="verification input is invalid"):
+        repository.put_verification(forged)
+
+    assert registry.verification_history(record.artifact_id) == (verification,)
+
+
+def test_repository_rejects_verification_expected_metadata_drift_before_write(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    registry = ArtifactRegistry.from_store(store)
+    record = registry.register_reference(
+        workspace_id="workspace-a",
+        idempotency_key="artifact-a",
+        reference="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+        kind="evidence",
+    )
+    verification = registry.verify(record.artifact_id)
+    repository = SQLiteArtifactRepository(store)
+    forged = verification.model_copy(update={"expected_sha256": "f" * 64})
+
+    with pytest.raises(ArtifactRegistryError, match="expected metadata"):
+        repository.put_verification(forged)
+
+    assert registry.verification_history(record.artifact_id) == (verification,)
 
