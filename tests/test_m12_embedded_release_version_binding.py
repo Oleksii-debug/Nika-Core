@@ -52,6 +52,7 @@ def test_m12_cli_propagates_trusted_version_to_archive_verifier(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     artifact = tmp_path / "candidate.zip"
+    artifact.write_bytes(b"candidate")
     evidence = tmp_path / "evidence.json"
     captured: dict[str, str | None] = {}
 
@@ -67,7 +68,9 @@ def test_m12_cli_propagates_trusted_version_to_archive_verifier(
         source_sha: str,
         expected_product_version: str | None = None,
     ) -> tuple[str, ...]:
-        assert path == artifact
+        assert path != artifact
+        assert path.name == "verified-distributable.zip"
+        assert path.read_bytes() == b"candidate"
         assert source_sha == SOURCE_SHA
         captured["product_version"] = expected_product_version
         return ()
