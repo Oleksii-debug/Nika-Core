@@ -361,6 +361,40 @@ sys.stdout.write(json.dumps(response))
     assert not marker.exists()
 
 
+@pytest.mark.parametrize("mode", ["spec", "base"])
+def test_mutated_job_spec_is_revalidated_before_process_effect(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    marker = tmp_path / "invalid-spec-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials, max_steps=1)
+    if mode == "spec":
+        object.__setattr__(spec, "training_material_sha256", "invalid")
+    else:
+        object.__setattr__(spec.base_artifact, "sha256", "invalid")
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=spec,
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_spec_invalid"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
 def test_material_digest_mismatch_fails_before_process_effect(tmp_path: Path) -> None:
     marker = tmp_path / "started"
     trainer = _script(
