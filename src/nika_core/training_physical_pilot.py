@@ -37,9 +37,11 @@ _MAX_TEXT_BYTES = 1024
 _MAX_STEPS = 1_000_000
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
 _WINDOWS_OPEN_EXISTING = 3
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
 _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _PLATFORM_PATH_TYPE = type(Path())
 _REQUIRED_REPORT_FIELDS = {
     "base_sha256",
@@ -243,6 +245,62 @@ def _close_windows_candidate_stability_lock(handle: int | None) -> None:
         close_handle(ctypes.c_void_p(handle))
     except (AttributeError, ImportError, OSError, TypeError, ValueError):
         pass
+
+
+def _open_windows_report_parent_stability_lock(
+    path: Path,
+    expected_snapshot: os.stat_result,
+) -> int | None:
+    """Deny parent-directory rename/delete while report publication is in flight."""
+
+    if os.name != "nt":
+        return None
+    handle_value: int | None = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            0,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS
+            | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "CreateFileW failed")
+        handle_value = int(handle)
+        current = os.lstat(path)
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or _is_reparse_point(current)
+            or not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino)
+            != (expected_snapshot.st_dev, expected_snapshot.st_ino)
+        ):
+            raise OSError("report parent changed while acquiring stability lock")
+        return handle_value
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        _close_windows_candidate_stability_lock(handle_value)
+        raise PhysicalTrainingPilotError(
+            "pilot report parent directory could not be locked for publication"
+        ) from exc
 
 
 def _candidate_manifest_evidence(
@@ -572,6 +630,29 @@ def _canonical_report_output_path(value: object) -> tuple[Path, os.stat_result]:
     return path, parent_snapshot
 
 
+def _unlink_published_report_if_owned(
+    path: Path,
+    expected_identity: tuple[int, int] | None,
+) -> None:
+    if expected_identity is None:
+        return
+    try:
+        current = os.lstat(path)
+    except OSError:
+        return
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or _is_reparse_point(current)
+        or not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != expected_identity
+    ):
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def write_physical_training_pilot_report(
     report: PhysicalTrainingPilotReport,
     report_path: Path,
@@ -581,10 +662,14 @@ def write_physical_training_pilot_report(
     if type(report) is not PhysicalTrainingPilotReport:
         raise TypeError("report must be exact PhysicalTrainingPilotReport")
     destination, parent_before = _canonical_report_output_path(report_path)
+    parent_lock = _open_windows_report_parent_stability_lock(
+        destination.parent,
+        parent_before,
+    )
     payload = report.to_json().encode("utf-8")
     temporary: Path | None = None
     descriptor: int | None = None
-    published = False
+    published_identity: tuple[int, int] | None = None
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=f".{destination.name}.",
@@ -597,6 +682,19 @@ def write_physical_training_pilot_report(
             handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
+
+        temporary_snapshot = os.lstat(temporary)
+        if (
+            stat.S_ISLNK(temporary_snapshot.st_mode)
+            or _is_reparse_point(temporary_snapshot)
+            or not stat.S_ISREG(temporary_snapshot.st_mode)
+            or int(getattr(temporary_snapshot, "st_nlink", 1)) != 1
+        ):
+            _fail("pilot report temporary file is not a canonical regular file")
+        published_identity = (
+            int(temporary_snapshot.st_dev),
+            int(temporary_snapshot.st_ino),
+        )
 
         parent_during = os.lstat(destination.parent)
         if (
@@ -614,7 +712,16 @@ def write_physical_training_pilot_report(
             raise PhysicalTrainingPilotError(
                 "pilot report destination already exists"
             ) from exc
-        published = True
+        linked_snapshot = os.lstat(destination)
+        if (
+            stat.S_ISLNK(linked_snapshot.st_mode)
+            or _is_reparse_point(linked_snapshot)
+            or not stat.S_ISREG(linked_snapshot.st_mode)
+            or (linked_snapshot.st_dev, linked_snapshot.st_ino)
+            != published_identity
+            or int(getattr(linked_snapshot, "st_nlink", 1)) != 2
+        ):
+            _fail("pilot report publication changed file identity")
         os.unlink(temporary)
         temporary = None
 
@@ -623,6 +730,8 @@ def write_physical_training_pilot_report(
             stat.S_ISLNK(final_snapshot.st_mode)
             or _is_reparse_point(final_snapshot)
             or not stat.S_ISREG(final_snapshot.st_mode)
+            or (final_snapshot.st_dev, final_snapshot.st_ino)
+            != published_identity
             or int(getattr(final_snapshot, "st_nlink", 1)) != 1
         ):
             _fail("published pilot report is not a canonical regular file")
@@ -643,19 +752,20 @@ def write_physical_training_pilot_report(
         restored = PhysicalTrainingPilotReport.from_json(published_text)
         if restored != report:
             _fail("published pilot report changed during parse-back verification")
+        parent_after = os.lstat(destination.parent)
+        if (
+            stat.S_ISLNK(parent_after.st_mode)
+            or _is_reparse_point(parent_after)
+            or not stat.S_ISDIR(parent_after.st_mode)
+            or (parent_after.st_dev, parent_after.st_ino)
+            != (parent_before.st_dev, parent_before.st_ino)
+        ):
+            _fail("pilot report parent directory changed during publication")
     except PhysicalTrainingPilotError:
-        if published:
-            try:
-                destination.unlink()
-            except OSError:
-                pass
+        _unlink_published_report_if_owned(destination, published_identity)
         raise
     except OSError as exc:
-        if published:
-            try:
-                destination.unlink()
-            except OSError:
-                pass
+        _unlink_published_report_if_owned(destination, published_identity)
         raise PhysicalTrainingPilotError(
             "pilot report could not be published atomically"
         ) from exc
@@ -670,6 +780,7 @@ def write_physical_training_pilot_report(
                 temporary.unlink()
             except OSError:
                 pass
+        _close_windows_candidate_stability_lock(parent_lock)
 
 
 def _snapshot_run_evidence(

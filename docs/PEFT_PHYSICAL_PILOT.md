@@ -86,9 +86,12 @@ manifest evidence from different candidate bytes.
 
 Keep generated report JSON outside Git when it contains run-specific operational identifiers.
 Persist it with `write_physical_training_pilot_report`, which writes a flushed temporary file
-in the destination directory, atomically links it into place without replacing an existing
-report, re-verifies the exact canonical bytes, and removes temporary state on failure. A report
-can be shared as evidence after reviewing it for the intended run.
+in the destination directory, holds the Windows parent directory against rename/delete while
+publication is in flight, atomically links the temporary file into place without replacing an
+existing report, verifies that the linked destination retains the exact staged file identity,
+re-verifies the canonical bytes, and removes a failed destination only when it still has the
+writer-owned file identity. A concurrent replacement is never deleted as rollback. A report can
+be shared as evidence after reviewing it for the intended run.
 
 ## Example control flow
 
