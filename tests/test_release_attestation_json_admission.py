@@ -90,7 +90,7 @@ def test_attestation_verification_accepts_exact_nesting_limit(
 ) -> None:
     path = tmp_path / "verification.json"
     nested: object = {}
-    for _ in range(62):
+    for _ in range(61):
         nested = [nested]
     evidence = [{"meta": nested}]
     path.write_text(json.dumps(evidence), encoding="utf-8")
@@ -102,7 +102,7 @@ def test_attestation_verification_rejects_excess_nesting(
 ) -> None:
     path = tmp_path / "verification.json"
     nested: object = {}
-    for _ in range(63):
+    for _ in range(62):
         nested = [nested]
     path.write_text(json.dumps([{"meta": nested}]), encoding="utf-8")
     with pytest.raises(ValueError, match="invalid or oversized JSON"):
