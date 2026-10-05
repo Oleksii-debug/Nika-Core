@@ -101,6 +101,31 @@ The accounting cases cover long/short open, add, partial close, full close, reve
 
 Focused reservation regressions additionally cover deterministic fee-induced leverage rejection, exact leverage boundary acceptance, cash reservation, fail-closed aggregate pending costs, exact pending-order costs, partial-order remaining quantity and once-per-order fixed fees across multiple fills.
 
+
+A second fixture, `trading_research_end_to_end_oracles.json`, contains exactly 32
+literal full-path scenarios: 20 single-order cases and 12 multi-step cases. Each case
+travels through host order authority, pre-trade risk approval, Quote execution,
+deterministic costs, PortfolioLedger accounting, post-fill risk and final marked account
+state. It includes long/short opens, adds, partial/full closes, reversals, market/limit
+orders, partial liquidity, fees and slippage.
+
+The fixture stores expected Decimal strings rather than deriving them from production
+helpers. Its hand-check equations are intentionally elementary:
+
+- executable side quote = ask for BUY, bid for SELL;
+- market slipped price = side quote * (1 + side_sign * slippage_bps / 10000);
+- final limit price = min(slipped, limit) for BUY and max(slipped, limit) for SELL;
+- fill quantity = min(order quantity, side liquidity * max_fill_fraction);
+- fee = fixed_fee + fill_quantity * fill_price * fee_bps / 10000;
+- BUY cash delta = -(notional + fee); SELL cash delta = notional - fee;
+- same-direction basis is quantity-weighted; closes realize
+  `(fill_price - basis) * closed_quantity * prior_position_sign`;
+- final unrealized P&L = `(mark - basis) * open_quantity`;
+- equity = cash + open_quantity * mark; gross/net exposure are absolute/signed market value.
+
+Those equations plus each fixture row are sufficient for independent manual
+recalculation without importing Trader implementation functions.
+
 ## REUSE / ADAPT / CUSTOM
 
 - REUSE canonical `SQLiteStore`, `ExecutionPolicy`, `fee_for`, `apply_slippage`, `RiskApprovedOrder`, `AccountSnapshot` and Python `Decimal`/datetime primitives.
