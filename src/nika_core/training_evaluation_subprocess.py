@@ -895,6 +895,10 @@ class RegistrySubprocessLoadedModelAttestor:
                         )
                     if os.name == "nt":
                         job.close()
+                    elif not terminate_process_group(process.pid):
+                        raise ProcessContainmentError(
+                            "POSIX evaluation process-group cleanup could not be established"
+                        )
                     if reader not in done:
                         raw_response = await reader
             except TimeoutError as exc:
@@ -908,6 +912,14 @@ class RegistrySubprocessLoadedModelAttestor:
             except asyncio.CancelledError:
                 await self._terminate(process, job)
                 raise
+            except ProcessContainmentError as exc:
+                await self._terminate(process, job)
+                raise _error(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "evaluation subprocess containment cleanup failed",
+                    provider_id=provider_id,
+                    effect=ModelFailureEffect.UNKNOWN,
+                ) from exc
             except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
                 await self._terminate(process, job)
                 raise _error(
