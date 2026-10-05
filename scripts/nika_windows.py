@@ -4,10 +4,12 @@ import argparse
 import json
 import logging
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
+from nika_core.activity_report import DailyActivityReportService
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
@@ -94,13 +96,45 @@ def _confirm_cloud_model_on_windows(request: CloudModelGrantRequest) -> bool:
     return result == 6
 
 
+def _daily_activity_report_result(
+    service: DailyActivityReportService,
+    *,
+    day_provider: Callable[[], date] | None = None,
+) -> UIResult:
+    try:
+        day = datetime.now(UTC).date() if day_provider is None else day_provider()
+        if type(day) is not date:
+            raise TypeError("activity report day must be an exact date")
+        report = service.build_utc_day(day)
+        message = report.render_text()
+    except Exception as exc:  # noqa: BLE001 - packaged boundary must fail closed
+        logging.getLogger(__name__).error(
+            "Daily activity report failed: exception_type=%s",
+            type(exc).__name__,
+        )
+        return UIResult(
+            request_id="desktop-handler",
+            status="failed",
+            message="Не вдалося сформувати щоденний звіт активності.",
+            focus_id="logs-heading",
+        )
+    return UIResult(
+        request_id="desktop-handler",
+        status="completed",
+        message=message,
+        focus_id="logs-heading",
+    )
+
+
 def build_windows_bridge(
     config: AppConfig,
     *,
     cloud_permission_confirm: CloudModelPermissionConfirm | None = None,
+    activity_report_day: Callable[[], date] | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     store = SQLiteStore(config.database_path)
     store.initialize()
+    activity_reports = DailyActivityReportService(store)
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
@@ -178,6 +212,10 @@ def build_windows_bridge(
     product_router = PackagedProductCommandRouter(
         products=products,
         ordinary_handler=create_ordinary_task,
+        activity_report_handler=lambda: _daily_activity_report_result(
+            activity_reports,
+            day_provider=activity_report_day,
+        ),
         selection_store=PackagedProductSelectionStore(store),
     )
     command_center = ProductCommandCenter(products)
