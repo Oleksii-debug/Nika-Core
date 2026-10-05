@@ -25,6 +25,7 @@ from nika_core.product_factory_coordinator import (
     WorkState,
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
+from nika_core.product_factory_review_authority import ProductFactoryReviewAuthorityPort
 from nika_core.product_factory_work_ownership import (
     ProductFactoryWorkOwnership,
     WorkOwnershipConflictError,
@@ -110,6 +111,10 @@ class ProductFactoryProgramHost:
         repr=False,
     )
     lease_seconds: int = 300
+    review_evidence_authority: ProductFactoryReviewAuthorityPort | None = field(
+        default=None,
+        repr=False,
+    )
     _checkpoints: ProductFactoryCheckpointHost = field(init=False, repr=False)
     _ledger: IdempotencyLedger = field(init=False, repr=False)
     _ownership: ProductFactoryWorkOwnership = field(init=False, repr=False)
@@ -147,6 +152,7 @@ class ProductFactoryProgramHost:
         host_task_id: str,
         binding: ProductProjectCoordinatorBinding,
     ) -> ProductFactoryCoordinator:
+        self._require_host_owned_review_authority(binding)
         candidate = self._checkpoints.inspect_latest(
             host_task_id=host_task_id,
             binding=binding,
@@ -181,6 +187,7 @@ class ProductFactoryProgramHost:
             or max_count <= 0
         ):
             raise ValueError("max_parallel and max_count must be exact positive integers")
+        self._require_host_owned_review_authority(binding)
 
         ready = tuple(
             _snapshot_component_work_request(request)
@@ -266,6 +273,7 @@ class ProductFactoryProgramHost:
     ) -> tuple[ProgramWorkOutcome, ...]:
         if type(max_parallel) is not int or max_parallel <= 0:
             raise ValueError("max_parallel must be an exact positive integer")
+        self._require_host_owned_review_authority(binding)
 
         self.reconcile_durable_results(host_task_id=host_task_id, coordinator=coordinator)
         running = tuple(
@@ -394,6 +402,7 @@ class ProductFactoryProgramHost:
         component_id: str,
         decision: ReviewDecision,
     ) -> WorkRecord:
+        self._require_host_owned_review_authority(binding)
         request = _request_for_component(coordinator, component_id)
         lease = self._acquire(request)
         before = coordinator.snapshot()
@@ -424,6 +433,7 @@ class ProductFactoryProgramHost:
         base_sha: str,
         reason: str,
     ) -> ComponentWorkRequest:
+        self._require_host_owned_review_authority(binding)
         prior_request = _request_for_component(coordinator, component_id)
         lease = self._acquire(prior_request)
         before = coordinator.snapshot()
@@ -453,6 +463,7 @@ class ProductFactoryProgramHost:
         component_id: str,
         reason: str,
     ) -> WorkRecord:
+        self._require_host_owned_review_authority(binding)
         before = coordinator.snapshot()
         prior_record = _record_for_component_snapshot(before, component_id)
         if prior_record.state is WorkState.RUNNING:
@@ -1577,6 +1588,25 @@ class ProductFactoryProgramHost:
         except WorkOwnershipError:
             return
 
+
+    def _require_host_owned_review_authority(
+        self,
+        binding: ProductProjectCoordinatorBinding,
+    ) -> None:
+        if binding.team_plan is None:
+            if binding.review_evidence_authority is not None:
+                raise ProductFactoryProgramError(
+                    "review evidence authority requires persisted TeamPlan composition"
+                )
+            return
+        if self.review_evidence_authority is None:
+            raise ProductFactoryProgramError(
+                "trusted TeamPlan requires ProgramHost-owned review evidence authority"
+            )
+        if binding.review_evidence_authority is not self.review_evidence_authority:
+            raise ProductFactoryProgramError(
+                "binding review evidence authority is not the ProgramHost-owned authority"
+            )
 
 async def _settle_work_batch(
     operations: tuple[Awaitable[ProgramWorkOutcome], ...],

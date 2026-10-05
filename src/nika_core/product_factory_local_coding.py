@@ -16,7 +16,9 @@ from nika_core.product_factory_coding_worker_adapter import (
     RepositoryPathIdentity,
 )
 from nika_core.product_factory_coordinator import ComponentWorkRequest
+from nika_core.product_factory_orchestration import OwnershipLease
 from nika_core.product_factory_program_host import ProductFactoryProgramHost
+from nika_core.product_factory_review_authority import ProductFactoryReviewAuthorityPort
 from nika_core.runtime.idempotency import IdempotencyLedger
 from nika_core.toolsmith.contracts import (
     IsolationClass,
@@ -38,6 +40,7 @@ class ContainedLocalCodingPolicy:
     allowed_executables: tuple[str, ...]
     resource_budget: ResourceBudget
     lease_seconds: int = 3600
+    producer_actor_id: str = "contained-local-coding-worker"
 
     def __post_init__(self) -> None:
         if type(self.allowed_executables) is not tuple or not self.allowed_executables:
@@ -65,6 +68,14 @@ class ContainedLocalCodingPolicy:
         self.resource_budget.__post_init__()
         if type(self.lease_seconds) is not int or not 1 <= self.lease_seconds <= 3600:
             raise ValueError("contained local lease duration must be 1..3600 seconds")
+        if (
+            type(self.producer_actor_id) is not str
+            or not self.producer_actor_id
+            or self.producer_actor_id != self.producer_actor_id.strip()
+            or len(self.producer_actor_id.encode("utf-8")) > 256
+            or any(ord(character) < 32 or ord(character) == 127 for character in self.producer_actor_id)
+        ):
+            raise ValueError("contained local producer actor id must be canonical bounded text")
 
 
 @dataclass(slots=True)
@@ -87,6 +98,12 @@ class ContainedLocalProductFactoryPorts:
         expiry = datetime.now(UTC) + timedelta(seconds=self.policy.lease_seconds)
         return CodingWorkerDispatchContext(
             repository_tree_digest=tree_digest,
+            ownership_lease=OwnershipLease(
+                lease_id=f"contained-local-assignment:{request.work_id}",
+                worker_id=self.policy.producer_actor_id,
+                component_ids=(request.component_id,),
+                allowed_paths=request.allowed_paths,
+            ),
             lease=WorkspaceLease(
                 lease_id=f"contained-local:{request.work_id}",
                 workspace_root=root,
@@ -148,6 +165,7 @@ def build_contained_local_coding_program(
     planner: LocalCodingPlanPort,
     policy: ContainedLocalCodingPolicy,
     idempotency: IdempotencyLedger | None = None,
+    review_evidence_authority: ProductFactoryReviewAuthorityPort | None = None,
     git_executable: str = "git",
 ) -> ContainedLocalCodingProgram:
     """Compose Product Factory with the contained local CodingWorker.
@@ -170,5 +188,6 @@ def build_contained_local_coding_program(
         contexts=ports,
         evidence=ports,
         idempotency=idempotency,
+        review_evidence_authority=review_evidence_authority,
     )
     return ContainedLocalCodingProgram(host=host, worker=worker, ports=ports)
