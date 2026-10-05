@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -31,6 +32,15 @@ _CHECKPOINT_MARKER = "nika_checkpoint.json"
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
+_MAX_RUNTIME_VERSION_BYTES = 256
+_TRAINING_RUNTIME_DISTRIBUTIONS = (
+    ("torch", "NIKA_TRAINER_TORCH_VERSION"),
+    ("transformers", "NIKA_TRAINER_TRANSFORMERS_VERSION"),
+    ("peft", "NIKA_TRAINER_PEFT_VERSION"),
+    ("accelerate", "NIKA_TRAINER_ACCELERATE_VERSION"),
+    ("gguf", "NIKA_TRAINER_GGUF_VERSION"),
+    ("safetensors", "NIKA_TRAINER_SAFETENSORS_VERSION"),
+)
 
 
 class PeftTrainerError(RuntimeError):
@@ -405,6 +415,44 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
     return hashlib.sha256(b"nika-peft-model-dir-v1\x00" + encoded).hexdigest()
 
 
+def _installed_training_runtime_versions() -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        try:
+            observed = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise ValueError(
+                f"training dependency is unavailable: {distribution}"
+            ) from exc
+        if (
+            type(observed) is not str
+            or not observed
+            or observed != observed.strip()
+            or len(observed.encode("utf-8", errors="strict")) > _MAX_RUNTIME_VERSION_BYTES
+            or any(ord(character) < 32 or ord(character) == 127 for character in observed)
+        ):
+            raise ValueError(
+                f"training dependency has invalid version metadata: {distribution}"
+            )
+        versions[distribution] = observed
+    return versions
+
+
+def _verify_training_runtime_versions() -> None:
+    try:
+        observed = _installed_training_runtime_versions()
+    except (UnicodeEncodeError, ValueError):
+        _fail("nika_trainer_runtime_versions_unavailable")
+    for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        expected = _require_bounded_text(
+            os.environ.get(environment_key),
+            field=environment_key.lower(),
+            max_bytes=_MAX_RUNTIME_VERSION_BYTES,
+        )
+        if observed[distribution] != expected:
+            _fail("nika_trainer_runtime_version_mismatch")
+
+
 def build_trainer_environment(
     *,
     base_gguf: Path,
@@ -462,6 +510,10 @@ def build_trainer_environment(
         )
     ):
         raise ValueError("lora_target_modules is invalid")
+    try:
+        runtime_versions = _installed_training_runtime_versions()
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise ValueError("training runtime dependencies are unavailable or invalid") from exc
     output.mkdir(parents=True, exist_ok=True)
     try:
         output_stat = os.lstat(output)
@@ -473,7 +525,7 @@ def build_trainer_environment(
         or not stat.S_ISDIR(output_stat.st_mode)
     ):
         raise ValueError("output_root must be a non-linked directory")
-    return {
+    environment = {
         "NIKA_TRAINER_BASE_GGUF": os.fspath(base),
         "NIKA_TRAINER_IMPLEMENTATION_SHA256": trainer_implementation_sha256(),
         "NIKA_TRAINER_LEARNING_RATE": format(learning_rate, ".17g"),
@@ -488,6 +540,9 @@ def build_trainer_environment(
         "NIKA_TRAINER_OUTPUT_ROOT": os.fspath(output),
         "NIKA_TRAINER_SEED": str(seed),
     }
+    for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        environment[environment_key] = runtime_versions[distribution]
+    return environment
 
 
 def _require_regular_unlinked(path: Path, *, code: str) -> os.stat_result:
@@ -731,6 +786,7 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
 
 
 def _read_config() -> TrainerConfig:
+    _verify_training_runtime_versions()
     expected_implementation_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_IMPLEMENTATION_SHA256"),
         field="nika_trainer_implementation_sha256",
