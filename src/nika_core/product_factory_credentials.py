@@ -217,6 +217,8 @@ class CredentialBroker:
         now: datetime | None = None,
         ttl_seconds: int = 300,
     ) -> CredentialLease:
+        if isinstance(ttl_seconds, bool) or not isinstance(ttl_seconds, int):
+            raise CredentialBrokerError("credential lease ttl must be an integer")
         if ttl_seconds <= 0:
             raise CredentialBrokerError("credential lease ttl must be positive")
         if ttl_seconds > _MAX_CREDENTIAL_LEASE_TTL_SECONDS:
@@ -270,6 +272,8 @@ class CredentialBroker:
             raise CredentialBrokerError("unknown or invalidated credential lease")
         if lease.project_id != project_id:
             raise CredentialBrokerError("credential lease belongs to another project")
+        if instant < lease.issued_at:
+            raise CredentialBrokerError("credential lease cannot be used before issuance")
         if lease.expires_at <= instant:
             del self._leases[lease_id]
             raise CredentialBrokerError("credential lease has expired")
