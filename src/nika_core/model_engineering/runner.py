@@ -288,6 +288,7 @@ class ModelBenchmarkRunner:
             resource_after=resource_after,
             accelerator_before=accelerator_before,
             accelerator_after=accelerator_after,
+            loaded_artifact_sha256=response.loaded_artifact_sha256,
         )
 
     def _elapsed_ms(self, started: float) -> float:
@@ -356,6 +357,29 @@ class ModelBenchmarkRunner:
             raise ModelBenchmarkIdentityError("response provider kind mismatch")
         if response.model != candidate.expected_response_model:
             raise ModelBenchmarkIdentityError("response model identity mismatch")
+        loaded_artifact_sha256 = response.loaded_artifact_sha256
+        if loaded_artifact_sha256 is not None:
+            if (
+                type(loaded_artifact_sha256) is not str
+                or len(loaded_artifact_sha256) != 64
+                or any(char not in "0123456789abcdef" for char in loaded_artifact_sha256)
+            ):
+                raise ModelBenchmarkError(
+                    "response loaded artifact attestation is not canonical"
+                )
+        if candidate.model_sha256 is None:
+            if loaded_artifact_sha256 is not None:
+                raise ModelBenchmarkIdentityError(
+                    "loaded artifact attestation is not bound to candidate evidence"
+                )
+        elif loaded_artifact_sha256 is None:
+            raise ModelBenchmarkIdentityError(
+                "digest-pinned candidate requires loaded artifact attestation"
+            )
+        elif loaded_artifact_sha256 != candidate.model_sha256:
+            raise ModelBenchmarkIdentityError(
+                "loaded artifact attestation does not match candidate digest"
+            )
         if not response.text:
             raise ModelBenchmarkError("successful benchmark response text must not be empty")
 
