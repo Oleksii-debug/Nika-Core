@@ -53,6 +53,8 @@ class TrainingEvaluationBinding:
     job_id: str
     base_candidate_id: str
     challenger_candidate_id: str
+    challenger_provider_id: str
+    challenger_model_id: str
     base_sha256: str
     challenger_sha256: str
     candidate_artifact_ref: str
@@ -67,6 +69,8 @@ class TrainingEvaluationBinding:
             (self.job_id, "job_id"),
             (self.base_candidate_id, "base_candidate_id"),
             (self.challenger_candidate_id, "challenger_candidate_id"),
+            (self.challenger_provider_id, "challenger_provider_id"),
+            (self.challenger_model_id, "challenger_model_id"),
             (self.candidate_artifact_ref, "candidate_artifact_ref"),
         ):
             if type(value) is not str or not value or value != value.strip():
@@ -97,6 +101,8 @@ class TrainingEvaluationBinding:
                 job_id=self.job_id,
                 base_candidate_id=self.base_candidate_id,
                 challenger_candidate_id=self.challenger_candidate_id,
+                challenger_provider_id=self.challenger_provider_id,
+                challenger_model_id=self.challenger_model_id,
                 base_sha256=self.base_sha256,
                 challenger_sha256=self.challenger_sha256,
                 candidate_artifact_ref=self.candidate_artifact_ref,
@@ -115,6 +121,8 @@ class TrainingEvaluationBinding:
             "job_id": self.job_id,
             "base_candidate_id": self.base_candidate_id,
             "challenger_candidate_id": self.challenger_candidate_id,
+            "challenger_provider_id": self.challenger_provider_id,
+            "challenger_model_id": self.challenger_model_id,
             "base_sha256": self.base_sha256,
             "challenger_sha256": self.challenger_sha256,
             "candidate_artifact_ref": self.candidate_artifact_ref,
@@ -430,6 +438,8 @@ def bind_training_result_for_evaluation(
         job_id=canonical_spec.job_id,
         base_candidate_id=champion.candidate_id,
         challenger_candidate_id=challenger.candidate_id,
+        challenger_provider_id=challenger.provider_id,
+        challenger_model_id=challenger.request_model,
         base_sha256=canonical_spec.base_artifact.sha256,
         challenger_sha256=candidate_sha256,
         candidate_artifact_ref=canonical_spec.candidate_artifact_ref,
