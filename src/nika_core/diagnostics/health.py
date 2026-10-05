@@ -19,6 +19,7 @@ from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VER
 from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
@@ -273,6 +274,18 @@ class HealthService:
                         ),
                         supported_version=EXPERIENCE_LEDGER_SCHEMA_VERSION,
                         check_id="database.schema.experience-ledger",
+                    )
+                )
+                checks.append(
+                    self._check_migration_history(
+                        conn,
+                        query=(
+                            "SELECT version, typeof(version) "
+                            "FROM model_artifact_schema_migrations "
+                            "ORDER BY version LIMIT ?"
+                        ),
+                        supported_version=MODEL_ARTIFACT_SCHEMA_VERSION,
+                        check_id="database.schema.model-artifact",
                     )
                 )
                 checks.append(
