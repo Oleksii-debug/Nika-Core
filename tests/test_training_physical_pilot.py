@@ -105,7 +105,6 @@ def _descriptor(path: Path, *, payload: bytes | None = None) -> ModelArtifactDes
     )
 
 
-
 def _job_spec() -> TrainingJobSpec:
     return TrainingJobSpec(
         job_id="pilot-job",
@@ -188,7 +187,6 @@ def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrai
         candidate_descriptor=_descriptor(candidate),
         candidate_root=tmp_path,
     )
-
 
 
 def test_job_spec_snapshot_rejects_boolean_step_carrier() -> None:
@@ -457,9 +455,6 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
             candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,
         )
-
-
-
 
 
 def test_build_report_rejects_candidate_manifest_identity_drift(
