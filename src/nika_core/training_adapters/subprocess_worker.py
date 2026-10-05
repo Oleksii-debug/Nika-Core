@@ -210,9 +210,20 @@ def _validate_command_artifact_ids(
         )
         if any(separator in argument for separator in separators):
             raise ValueError("relative path command arguments are forbidden")
-        if not argument.startswith("-"):
+        if (
+            len(argument) < 2
+            or not argument.startswith("-")
+            or any(
+                not (
+                    ord(character) < 128
+                    and (character.isalnum() or character in "-_")
+                )
+                for character in argument[1:]
+            )
+        ):
             raise ValueError(
-                "unbound command arguments must be option switches; use stdin for trainer data"
+                "unbound command arguments must be simple option switches; "
+                "use stdin for trainer data"
             )
     return result
 
@@ -520,6 +531,12 @@ class SubprocessTrainingWorker:
             if record.location_kind is not ArtifactLocationKind.LOCAL_FILE:
                 raise _error(
                     "command_artifact_not_local_file",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                )
+            expected_kind = "training_executable" if index == 0 else "training_command_file"
+            if record.kind != expected_kind:
+                raise _error(
+                    "command_artifact_kind_mismatch",
                     effect=TrainingWorkerFailureEffect.NO_EFFECT,
                 )
             if _normalized_executable_path(self._command[index]) != _normalized_executable_path(
