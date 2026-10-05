@@ -30,7 +30,7 @@ class AgentDefinition(BaseModel):
 
     format_version: Literal[1] = 1
     agent_id: Annotated[str, Field(min_length=3, pattern=r"^[a-z0-9][a-z0-9_.-]+$")]
-    version: Annotated[int, Field(ge=1)] = 1
+    version: Annotated[StrictInt, Field(ge=1)] = 1
     name: Annotated[str, Field(min_length=1, max_length=120)]
     goal: Annotated[str, Field(min_length=1, max_length=4000)]
     instructions: Annotated[str, Field(min_length=1, max_length=40_000)]
@@ -38,8 +38,16 @@ class AgentDefinition(BaseModel):
     schedule_id: Annotated[str | None, Field(max_length=160)] = None
     resource_budget_ref: Annotated[str | None, Field(max_length=160)] = None
     tool_grants: tuple[ToolGrant, ...] = ()
-    max_steps: Annotated[int, Field(ge=1, le=100_000)] = 100
+    max_steps: Annotated[StrictInt, Field(ge=1, le=100_000)] = 100
     enabled: bool = True
+
+    @field_validator("format_version", mode="before")
+    @classmethod
+    def reject_ambiguous_format_version(cls, value: object) -> object:
+        # Literal[1] otherwise accepts True and 1.0 as the format identity.
+        if type(value) is not int:
+            raise ValueError("format version must be an integer")
+        return value
 
     @field_validator("model_profile", "schedule_id", "resource_budget_ref")
     @classmethod
