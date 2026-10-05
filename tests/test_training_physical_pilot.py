@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.training_physical_pilot as pilot
 from nika_core.model_artifacts import (
     ModelArtifactDescriptor,
     ModelArtifactKind,
@@ -19,6 +20,7 @@ from nika_core.training_physical_pilot import (
 )
 from nika_core.training_runtime import (
     ArtifactIdentity,
+    TrainingJobSpec,
     TrainingRunEvidence,
     TrainingRunState,
 )
@@ -49,6 +51,22 @@ def _descriptor(path: Path, *, payload: bytes | None = None) -> ModelArtifactDes
         sha256=_sha256(body),
         size_bytes=len(body),
         capabilities=("text",),
+    )
+
+
+
+def _job_spec() -> TrainingJobSpec:
+    return TrainingJobSpec(
+        job_id="pilot-job",
+        task_id="pilot-task",
+        project_id="pilot-project",
+        owner_id="pilot-owner",
+        base_artifact=ArtifactIdentity("models/base", "a" * 64),
+        frozen_package_sha256="b" * 64,
+        training_material_sha256="c" * 64,
+        scale_authorization_sha256="d" * 64,
+        candidate_artifact_ref="models/candidate/pilot",
+        max_steps=2,
     )
 
 
@@ -104,6 +122,15 @@ def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrai
         candidate_descriptor=_descriptor(candidate),
         candidate_root=tmp_path,
     )
+
+
+
+def test_job_spec_snapshot_rejects_boolean_step_carrier() -> None:
+    spec = _job_spec()
+    object.__setattr__(spec, "max_steps", True)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="not canonical"):
+        pilot._snapshot_job_spec(spec)
 
 
 def test_build_report_binds_restart_and_canonical_candidate_receipt(

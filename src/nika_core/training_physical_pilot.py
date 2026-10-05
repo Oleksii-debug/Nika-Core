@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import os
 from collections.abc import Callable
@@ -452,6 +453,36 @@ def build_physical_training_pilot_report(
     )
 
 
+
+def _snapshot_job_spec(spec: object) -> TrainingJobSpec:
+    if type(spec) is not TrainingJobSpec:
+        raise TypeError("spec must be an exact TrainingJobSpec")
+    try:
+        base = spec.base_artifact
+        if type(base) is not ArtifactIdentity:
+            raise TypeError("base_artifact must be exact ArtifactIdentity")
+        return TrainingJobSpec(
+            job_id=spec.job_id,
+            task_id=spec.task_id,
+            project_id=spec.project_id,
+            owner_id=spec.owner_id,
+            base_artifact=ArtifactIdentity(
+                artifact_ref=base.artifact_ref,
+                sha256=base.sha256,
+            ),
+            frozen_package_sha256=spec.frozen_package_sha256,
+            training_material_sha256=spec.training_material_sha256,
+            scale_authorization_sha256=spec.scale_authorization_sha256,
+            candidate_artifact_ref=spec.candidate_artifact_ref,
+            max_steps=spec.max_steps,
+            resource_scope=spec.resource_scope,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PhysicalTrainingPilotError(
+            "physical pilot job specification is not canonical"
+        ) from exc
+
+
 def run_physical_training_pilot(
     *,
     runtime: TrainingRuntime,
@@ -470,8 +501,7 @@ def run_physical_training_pilot(
         _fail("physical PEFT pilot must execute on Windows")
     if type(runtime) is not TrainingRuntime:
         raise TypeError("runtime must be the canonical TrainingRuntime")
-    if type(spec) is not TrainingJobSpec:
-        raise TypeError("spec must be an exact TrainingJobSpec")
+    canonical_spec = _snapshot_job_spec(spec)
     if type(worker) is not SubprocessTrainingWorker:
         raise TypeError("worker must be the canonical SubprocessTrainingWorker")
     if type(scale_authorization) is not TrainingScaleAuthorization:
@@ -480,8 +510,12 @@ def run_physical_training_pilot(
         raise TypeError("candidate_descriptor must be exact ModelArtifactDescriptor")
     if not callable(restart_runtime) or not callable(restart_worker):
         raise TypeError("restart factories must be callable")
-    if spec.max_steps < 2:
+    if canonical_spec.max_steps < 2:
         _fail("physical pilot requires max_steps >= 2")
+    initial_execution_plan_sha256 = _require_sha256(
+        worker.execution_plan_sha256,
+        name="initial worker execution_plan_sha256",
+    )
 
     control_reads = 0
 
@@ -493,7 +527,7 @@ def run_physical_training_pilot(
         return TrainingControl.PAUSE
 
     paused = runtime.run(
-        spec,
+        canonical_spec,
         worker,
         scale_authorization=scale_authorization,
         control=one_step_then_pause,
@@ -514,11 +548,18 @@ def run_physical_training_pilot(
         raise TypeError("restart_worker must return canonical SubprocessTrainingWorker")
     if resumed_runtime is runtime or resumed_worker is worker:
         _fail("restart factories must construct new runtime and worker objects")
-    if resumed_worker.execution_plan_sha256 != worker.execution_plan_sha256:
+    resumed_execution_plan_sha256 = _require_sha256(
+        resumed_worker.execution_plan_sha256,
+        name="resumed worker execution_plan_sha256",
+    )
+    if not hmac.compare_digest(
+        resumed_execution_plan_sha256,
+        initial_execution_plan_sha256,
+    ):
         _fail("trainer execution plan changed across restart")
 
     completed = resumed_runtime.run(
-        spec,
+        canonical_spec,
         resumed_worker,
         scale_authorization=scale_authorization,
     )
