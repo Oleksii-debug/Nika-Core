@@ -227,6 +227,33 @@ def test_integrity_rejects_nontext_research_evidence_identity(
     "service_type",
     (ProductProjectIntegrityService, ProductProjectHistoricalIntegrityService),
 )
+def test_integrity_rejects_object_shaped_option_evidence_refs(
+    tmp_path,
+    service_type,
+) -> None:
+    store, projects = _project(tmp_path)
+    _research(projects)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM product_research_handoffs "
+            "WHERE project_id='project-1' AND package_id='research-1'"
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload["options"][0]["evidence_package_ids"] = {"research-1": True}
+        conn.execute(
+            "UPDATE product_research_handoffs SET payload_json=? "
+            "WHERE project_id='project-1' AND package_id='research-1'",
+            (json.dumps(payload),),
+        )
+
+    with pytest.raises(ProductProjectError, match="incomplete product option"):
+        service_type(store).validate("project-1")
+
+
+@pytest.mark.parametrize(
+    "service_type",
+    (ProductProjectIntegrityService, ProductProjectHistoricalIntegrityService),
+)
 def test_integrity_rejects_object_shaped_decision_evidence_json(
     tmp_path,
     service_type,
