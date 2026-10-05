@@ -9,8 +9,8 @@ evaluation engine, or promotion authority.
 `nika_core.training_physical_pilot.run_physical_training_pilot` is intentionally
 Windows-only. A successful call must:
 
-1. run the canonical `TrainingRuntime` with the canonical
-   `SubprocessTrainingWorker`;
+1. run the canonical `TrainingRuntime` with a canonical
+   `SubprocessTrainingWorker` that starts without prior accepted consumed-material evidence;
 2. execute one trainer step, persist a `PAUSED` checkpoint at `next_step == 1`, and
    capture the consumed-byte attestation accepted by the canonical subprocess worker;
 3. construct new runtime and worker objects through the supplied restart factories;
