@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 from typing import Any
@@ -14,6 +15,31 @@ from nika_core.data.sqlite import SQLiteStore
 
 
 _MAX_DURABLE_JSON_BYTES = 1_048_576
+
+
+def _sha256_text(value: str) -> str:
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ArtifactRegistryError("artifact identity material is invalid UTF-8 text") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _expected_artifact_id(record: ArtifactRecord) -> str:
+    return _sha256_text(f"{record.workspace_id}\\0{record.idempotency_key}")
+
+
+def _expected_verification_id(verification: ArtifactVerification) -> str:
+    material = "\\0".join(
+        (
+            verification.artifact_id,
+            verification.checked_at.isoformat(),
+            verification.state.value,
+            verification.actual_sha256 or "",
+            "" if verification.actual_size_bytes is None else str(verification.actual_size_bytes),
+        )
+    )
+    return _sha256_text(material)
 
 
 def _same_registration(left: ArtifactRecord, right: ArtifactRecord) -> bool:
@@ -95,6 +121,10 @@ def _record_from_row(row: Any) -> ArtifactRecord:
         raise ArtifactRegistryError(
             "artifact registry indexed metadata does not match immutable record payload"
         )
+    if record.artifact_id != _expected_artifact_id(record):
+        raise ArtifactRegistryError(
+            "artifact registry deterministic identity does not match immutable record payload"
+        )
     return record
 
 
@@ -117,6 +147,10 @@ def _verification_from_row(row: Any) -> ArtifactVerification:
     if any(left != right for left, right in bindings):
         raise ArtifactRegistryError(
             "artifact verification indexed metadata does not match evidence payload"
+        )
+    if verification.verification_id != _expected_verification_id(verification):
+        raise ArtifactRegistryError(
+            "artifact verification deterministic identity does not match evidence payload"
         )
     return verification
 
@@ -318,6 +352,7 @@ class SQLiteArtifactRepository:
             return existing
 
     def list_verifications(self, artifact_id: str) -> tuple[ArtifactVerification, ...]:
+        record = self.get(artifact_id)
         with self._store.connection() as conn:
             rows = conn.execute(
                 f"SELECT {_VERIFICATION_COLUMNS} FROM artifact_registry_verifications "
@@ -327,4 +362,12 @@ class SQLiteArtifactRepository:
         verifications = tuple(_verification_from_row(row) for row in rows)
         if any(item.artifact_id != artifact_id for item in verifications):
             raise ArtifactRegistryError("artifact verification index is inconsistent")
+        if any(
+            item.expected_sha256 != record.sha256
+            or item.expected_size_bytes != record.size_bytes
+            for item in verifications
+        ):
+            raise ArtifactRegistryError(
+                "artifact verification expected metadata does not match immutable artifact"
+            )
         return verifications
