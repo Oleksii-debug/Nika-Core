@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import unicodedata
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -57,7 +58,7 @@ def _require_run_identity(value: object, *, name: str) -> None:
     """Reject ambiguous or non-UTF-8 task/call identities before durable effects."""
     if type(value) is not str or not value or len(value) > 512 or value != value.strip():
         raise ValueError(f"{name} must be canonical bounded UTF-8 text")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+    if any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value):
         raise ValueError(f"{name} must be canonical bounded UTF-8 text")
     try:
         encoded = value.encode("utf-8")
@@ -113,6 +114,8 @@ class DeterministicBrain:
         observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
         _require_run_identity(run_id, name="run_id")
+        if task_id is not None:
+            _require_run_identity(task_id, name="task_id")
         if type(max_steps) is not int or max_steps <= 0:
             raise ValueError("max_steps must be a positive integer")
         if type(max_replans) is not int or max_replans < 0:
@@ -126,7 +129,6 @@ class DeterministicBrain:
         if self._effect_journal is not None:
             if task_id is None:
                 raise ValueError("task_id is required when effect_journal is configured")
-            _require_run_identity(task_id, name="task_id")
 
         # Kept for source compatibility only. A planner-selected action ID is not approval
         # evidence and must never turn into ToolCall.approved=True.
