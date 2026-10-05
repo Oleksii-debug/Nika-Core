@@ -577,6 +577,58 @@ def test_mcp_argument_budget_allows_reasonable_unicode_and_repeated_aliases() ->
     assert snapshot["left"] is not snapshot["right"]
 
 
+def test_mcp_discovery_rejects_cumulative_metadata_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _listed_tool("first")
+    second = _listed_tool("second")
+    first.description = "x" * 70
+    second.description = "y" * 70
+    fake_client = _list_tools_client(
+        {None: ([first, second], None)}
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    monkeypatch.setattr("nika_core.mcp_boundary._MAX_MCP_DISCOVERY_BYTES", 100)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+    with pytest.raises(ValueError, match="safe metadata limit"):
+        asyncio.run(adapter.list_tools())
+
+
+def test_mcp_discovery_rejects_oversized_nested_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _listed_tool("first")
+    tool.input_schema = {
+        "properties": {"value": {"description": "x" * 1_048_576}}
+    }
+    fake_client = _list_tools_client({None: ([tool], None)})
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+    with pytest.raises(ValueError, match="safe JSON byte limit"):
+        asyncio.run(adapter.list_tools())
+
+
+def test_mcp_discovery_snapshots_nested_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _listed_tool("first")
+    tool.input_schema = {"properties": {"value": {"type": "string"}}}
+    fake_client = _list_tools_client({None: ([tool], None)})
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+    specs = asyncio.run(adapter.list_tools())
+    tool.input_schema["properties"]["value"]["type"] = "integer"
+    assert specs[0].input_schema == {
+        "properties": {"value": {"type": "string"}}
+    }
+
+
 def test_mcp_discovery_caps_tools_across_pages_before_materialization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
