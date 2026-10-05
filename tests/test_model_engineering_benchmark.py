@@ -243,6 +243,7 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
         "synthetic provider failure with secret detail",
     ):
         assert secret not in machine
+        assert secret not in accessible_machine
         assert secret not in accessible
     assert len(benchmark_report_sha256(report)) == 64
     assert report.execution_config_sha256 in machine
