@@ -10,6 +10,9 @@ from pathlib import Path, PurePath
 from types import ModuleType
 from typing import Any, Protocol
 
+_MAX_RUNNER_EVENTS = 10_000
+
+
 from nika_core.product_factory_deployment import (
     DeploymentFabricError,
     DeploymentIntent,
@@ -75,6 +78,13 @@ class RunnerExecution:
     contract: Mapping[str, object] | None
     evidence_ref: str
 
+    def __post_init__(self) -> None:
+        _validate_runner_status_rc(self.status, self.rc)
+        if type(self.evidence_ref) is not str or not self.evidence_ref:
+            raise StagingAdapterError("runner evidence_ref must be non-empty text")
+        if self.contract is not None:
+            object.__setattr__(self, "contract", _snapshot_contract(self.contract))
+
 
 class RunnerExecutionPort(Protocol):
     def execute(
@@ -121,11 +131,7 @@ class AnsibleRunnerClient:
                 "ansible-runner returned a malformed execution result"
             ) from exc
 
-        if type(status) is not str or not status:
-            raise StagingAdapterError("ansible-runner status must be non-empty text")
-        if rc is not None and type(rc) is not int:
-            raise StagingAdapterError("ansible-runner rc must be an integer or null")
-
+        _validate_runner_status_rc(status, rc)
         contract = _extract_contract(events)
         evidence_ref = _evidence_ref(ident, status, rc, contract)
         return RunnerExecution(status, rc, contract, evidence_ref)
@@ -250,12 +256,20 @@ class AuthorizedAnsibleStagingAdapter:
             extravars["nika_previous_release_sha"] = previous_release_sha
         _reject_secret_values(extravars)
         ident = _runner_ident(operation, intent.intent_id, intent.release.source_sha)
-        return self.runner.execute(
+        execution = self.runner.execute(
             private_data_dir=self.config.private_data_dir,
             playbook=playbook,
             inventory=self.target.inventory,
             ident=ident,
             extravars=extravars,
+        )
+        if type(execution) is not RunnerExecution:
+            raise StagingAdapterError("runner returned an invalid execution carrier")
+        return RunnerExecution(
+            execution.status,
+            execution.rc,
+            execution.contract,
+            execution.evidence_ref,
         )
 
 
@@ -272,6 +286,24 @@ def _load_ansible_runner() -> ModuleType:
         ) from exc
 
 
+def _validate_runner_status_rc(status: object, rc: object) -> None:
+    if type(status) is not str or not status:
+        raise StagingAdapterError("ansible-runner status must be non-empty text")
+    if rc is not None and type(rc) is not int:
+        raise StagingAdapterError("ansible-runner rc must be an integer or null")
+
+
+def _snapshot_contract(candidate: Mapping[object, object]) -> dict[str, object]:
+    snapshot: dict[str, object] = {}
+    for key, value in candidate.items():
+        if type(key) is not str or not key:
+            raise StagingAdapterError("ansible-runner contract keys must be non-empty text")
+        if key in snapshot:
+            raise StagingAdapterError("ansible-runner contract contains duplicate keys")
+        snapshot[key] = value
+    return snapshot
+
+
 def _extract_contract(events: Any) -> Mapping[str, object] | None:
     try:
         iterator = iter(events)
@@ -279,7 +311,9 @@ def _extract_contract(events: Any) -> Mapping[str, object] | None:
         raise StagingAdapterError("ansible-runner events must be iterable") from exc
 
     contract: dict[str, object] | None = None
-    for event in iterator:
+    for index, event in enumerate(iterator, start=1):
+        if index > _MAX_RUNNER_EVENTS:
+            raise StagingAdapterError("ansible-runner emitted too many events")
         if not isinstance(event, Mapping) or event.get("event") != "runner_on_ok":
             continue
         event_data = event.get("event_data")
@@ -295,15 +329,7 @@ def _extract_contract(events: Any) -> Mapping[str, object] | None:
             raise StagingAdapterError(
                 "ansible-runner emitted multiple nika_pf3 result contracts"
             )
-
-        snapshot: dict[str, object] = {}
-        for key, value in candidate.items():
-            if type(key) is not str or not key:
-                raise StagingAdapterError("ansible-runner contract keys must be non-empty text")
-            if key in snapshot:
-                raise StagingAdapterError("ansible-runner contract contains duplicate keys")
-            snapshot[key] = value
-        contract = snapshot
+        contract = _snapshot_contract(candidate)
     return contract
 
 
