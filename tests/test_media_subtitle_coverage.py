@@ -107,7 +107,7 @@ def test_manual_and_unknown_duration_do_not_invent_coverage_requirement(
     assert len(_normalize(tmp_path, monkeypatch, sparse, duration=None).segments) == 3
 
 
-@pytest.mark.parametrize("duration", (float("nan"), float("inf"), -1.0, True, "10"))
+@pytest.mark.parametrize("duration", (float("nan"), float("inf"), -1.0, True, "10", 10**1000))
 def test_invalid_automatic_media_duration_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, duration: object
 ) -> None:
@@ -143,6 +143,7 @@ def test_negative_subtitle_timestamp_is_never_published(
         ({"automatic_min_coverage_ratio": float("inf")}, "automatic_min_coverage_ratio"),
         ({"automatic_min_coverage_ratio": True}, "automatic_min_coverage_ratio"),
         ({"automatic_min_coverage_ratio": 1.1}, "automatic_min_coverage_ratio"),
+        ({"automatic_min_coverage_ratio": 10**1000}, "automatic_min_coverage_ratio"),
         ({"automatic_max_malformed_ratio": -0.1}, "automatic_max_malformed_ratio"),
         ({"automatic_max_malformed_ratio": float("nan")}, "automatic_max_malformed_ratio"),
     ),
