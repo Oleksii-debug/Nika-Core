@@ -153,6 +153,18 @@ def _require_sha256(value: object, *, name: str) -> str:
     return value
 
 
+def _require_identity_text(value: object, *, name: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise TrainingEvaluationBindingError(
+            f"{name} must be non-empty canonical text"
+        )
+    if any(not character.isprintable() for character in value):
+        raise TrainingEvaluationBindingError(
+            f"{name} must not contain control characters"
+        )
+    return value
+
+
 def _snapshot_spec(spec: TrainingJobSpec) -> TrainingJobSpec:
     if type(spec) is not TrainingJobSpec:
         raise TypeError("spec must be an exact TrainingJobSpec")
@@ -241,16 +253,30 @@ def _validate_completed_run(
         raise TrainingEvaluationBindingError(
             "completed training carries an invalid next-step boundary"
         )
+
+    observed_job_id = _require_identity_text(evidence.job_id, name="training run job_id")
+    observed_package_sha256 = _require_sha256(
+        evidence.frozen_package_sha256,
+        name="training run frozen package SHA-256",
+    )
+    observed_material_sha256 = _require_sha256(
+        evidence.training_material_sha256,
+        name="training run material SHA-256",
+    )
+    observed_candidate_ref = _require_identity_text(
+        evidence.candidate_artifact_ref,
+        name="training run candidate artifact ref",
+    )
     candidate_sha256 = _require_sha256(
         evidence.candidate_sha256,
         name="training candidate SHA-256",
     )
     if (
-        evidence.job_id != spec.job_id
+        observed_job_id != spec.job_id
         or observed_base != spec.base_artifact
-        or evidence.frozen_package_sha256 != spec.frozen_package_sha256
-        or evidence.training_material_sha256 != spec.training_material_sha256
-        or evidence.candidate_artifact_ref != spec.candidate_artifact_ref
+        or observed_package_sha256 != spec.frozen_package_sha256
+        or observed_material_sha256 != spec.training_material_sha256
+        or observed_candidate_ref != spec.candidate_artifact_ref
     ):
         raise TrainingEvaluationBindingError(
             "training run evidence does not match the exact training job"

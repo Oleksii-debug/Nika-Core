@@ -373,3 +373,39 @@ def test_binding_digest_revalidates_route_identity_mutation(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="challenger_provider_id"):
         _ = binding.binding_sha256
+
+
+def test_run_identity_rejects_text_subclass_before_equality(tmp_path: Path) -> None:
+    class HostileText(str):
+        def __eq__(self, other: object) -> bool:
+            raise AssertionError("hostile equality must not execute")
+
+    values = _fixture(tmp_path)
+    evidence = values["evidence"]
+    assert isinstance(evidence, TrainingRunEvidence)
+    values["evidence"] = replace(evidence, job_id=HostileText("job-1"))
+
+    with pytest.raises(
+        TrainingEvaluationBindingError,
+        match="training run job_id",
+    ):
+        _bind(values, allowed_root=tmp_path)
+
+
+def test_run_digest_rejects_text_subclass_before_identity_use(tmp_path: Path) -> None:
+    class HostileDigest(str):
+        pass
+
+    values = _fixture(tmp_path)
+    evidence = values["evidence"]
+    assert isinstance(evidence, TrainingRunEvidence)
+    values["evidence"] = replace(
+        evidence,
+        frozen_package_sha256=HostileDigest(evidence.frozen_package_sha256),
+    )
+
+    with pytest.raises(
+        TrainingEvaluationBindingError,
+        match="training run frozen package",
+    ):
+        _bind(values, allowed_root=tmp_path)
