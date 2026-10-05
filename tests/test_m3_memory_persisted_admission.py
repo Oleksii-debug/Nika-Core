@@ -285,7 +285,6 @@ def test_invalid_write_identity_preserves_existing_record(
     ).value == {"safe": True}
 
 
-
 def test_public_identity_admission_is_consistent_across_crud(tmp_path: Path) -> None:
     _store, memory = _memory(tmp_path)
     memory.put(
