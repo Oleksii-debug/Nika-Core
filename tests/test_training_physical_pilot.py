@@ -679,6 +679,102 @@ def test_report_publication_cleans_temporary_file_on_publish_failure(
     assert not tuple(tmp_path.glob(".evidence.json.*.tmp"))
 
 
+def test_report_publication_preserves_replacement_after_verification_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _build_report(tmp_path)
+    output = (tmp_path / "evidence.json").resolve()
+    competitor = b"competitor-evidence"
+    original_read_bytes = Path.read_bytes
+
+    def replace_before_read(path: Path) -> bytes:
+        if path == output:
+            path.unlink()
+            path.write_bytes(competitor)
+            return competitor
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", replace_before_read)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="bytes changed"):
+        write_physical_training_pilot_report(report, output)
+
+    monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
+    assert output.read_bytes() == competitor
+    assert not tuple(tmp_path.glob(".evidence.json.*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory sharing semantics required")
+def test_report_publication_holds_parent_stable_on_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _build_report(tmp_path)
+    parent = (tmp_path / "reports").resolve()
+    parent.mkdir()
+    output = parent / "evidence.json"
+    moved_parent = (tmp_path / "reports-moved").resolve()
+    original_link = os.link
+    blocked: list[int | None] = []
+
+    def racing_link(source: object, destination: object) -> None:
+        try:
+            os.replace(parent, moved_parent)
+        except OSError as exc:
+            blocked.append(getattr(exc, "winerror", None))
+        else:
+            raise AssertionError("report parent rename must be blocked during publication")
+        original_link(source, destination)
+
+    monkeypatch.setattr(os, "link", racing_link)
+
+    write_physical_training_pilot_report(report, output)
+
+    assert blocked
+    os.replace(parent, moved_parent)
+    assert (moved_parent / "evidence.json").read_text(encoding="utf-8") == report.to_json()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows file sharing semantics required")
+def test_report_publication_holds_destination_stable_during_parse_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _build_report(tmp_path)
+    output = (tmp_path / "evidence.json").resolve()
+    competitor = (tmp_path / "competitor.json").resolve()
+    competitor.write_bytes(b"competitor-evidence")
+    original_from_json = PhysicalTrainingPilotReport.from_json
+    blocked: list[int | None] = []
+
+    def racing_parse_back(
+        cls: type[PhysicalTrainingPilotReport],
+        raw: str,
+    ) -> PhysicalTrainingPilotReport:
+        del cls
+        try:
+            os.replace(competitor, output)
+        except OSError as exc:
+            blocked.append(getattr(exc, "winerror", None))
+        else:
+            raise AssertionError("report replacement must be blocked during parse-back")
+        return original_from_json(raw)
+
+    monkeypatch.setattr(
+        PhysicalTrainingPilotReport,
+        "from_json",
+        classmethod(racing_parse_back),
+    )
+
+    write_physical_training_pilot_report(report, output)
+
+    assert blocked
+    assert competitor.exists()
+    os.replace(competitor, output)
+    assert output.read_bytes() == b"competitor-evidence"
+
+
 def test_report_publication_removes_destination_if_parse_back_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
