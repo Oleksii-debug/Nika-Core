@@ -1012,6 +1012,16 @@ class SubprocessTrainingWorker:
     def execution_plan_sha256(self) -> str:
         return self._execution_plan_sha256
 
+    def protocol_job_fingerprint(self, spec: TrainingJobSpec) -> str:
+        """Return the exact trainer-protocol job identity used for subprocess effects."""
+
+        canonical_spec = _snapshot_spec(spec)
+        return _job_fingerprint(
+            canonical_spec,
+            command_sha256=self._command_sha256,
+            execution_plan_sha256=self._execution_plan_sha256,
+        )
+
     def step(
         self,
         *,
@@ -1074,11 +1084,7 @@ class SubprocessTrainingWorker:
             )
         trainer_record = command_records[0]
         trainer_sha256 = trainer_record.sha256
-        job_fingerprint = _job_fingerprint(
-            canonical_spec,
-            command_sha256=self._command_sha256,
-            execution_plan_sha256=self._execution_plan_sha256,
-        )
+        job_fingerprint = self.protocol_job_fingerprint(canonical_spec)
         required_consumed_materials_sha256 = _consumed_materials_sha256(
             canonical_materials
         )
