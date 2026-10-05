@@ -220,6 +220,7 @@ def test_compare_disable_rejects_stale_snapshot(tmp_path: Path) -> None:
         (True, 1),
         (False, 0),
         (1, 1.0),
+        (0.0, -0.0),
         ({"nested": [True, {"weight": 1.0}]}, {"nested": [1, {"weight": 1}]}),
     ),
 )
@@ -251,6 +252,33 @@ def test_typed_payload_replacement_rejects_stale_dispatch_and_disable(
     assert jobs.get(stale.job_id) == replacement
     assert jobs.get(stale.job_id).enabled is True
     assert jobs.authorize_dispatch(replacement) == replacement
+
+
+
+def test_typed_trigger_replacement_rejects_stale_occurrence(
+    tmp_path: Path,
+) -> None:
+    jobs = ScheduledJobStore(_sqlite(tmp_path))
+    stale = replace(
+        _job(),
+        trigger_kind=TriggerKind.INTERVAL,
+        trigger={"seconds": 1},
+    )
+    replacement = replace(stale, trigger={"seconds": 1.0})
+    assert stale == replacement
+    jobs.upsert(stale)
+    jobs.upsert(replacement)
+    resolver_calls: list[str] = []
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda action: resolver_calls.append(action) or (lambda _payload: None),
+    )
+
+    assert jobs.authorize_dispatch(stale) is None
+    assert jobs.disable_if_current(stale) is False
+    adapter._dispatch(stale.job_id, stale)
+    assert resolver_calls == []
+    assert jobs.get(stale.job_id) == replacement
 
 
 def test_same_typed_reordered_unicode_payload_keeps_valid_authority(
