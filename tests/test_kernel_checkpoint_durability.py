@@ -26,9 +26,12 @@ def _insert_raw_checkpoint(
     *,
     task_id: str,
     checkpoint_id: str,
-    payload_json: str,
+    payload_json: str | bytes,
 ) -> None:
-    checksum = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+    payload_bytes = (
+        payload_json.encode("utf-8") if isinstance(payload_json, str) else payload_json
+    )
+    checksum = hashlib.sha256(payload_bytes).hexdigest()
     with store.connection() as conn:
         conn.execute(
             """
@@ -202,3 +205,65 @@ def test_save_return_matches_durable_canonical_payload_and_detaches_caller(
     assert loaded is not None
     assert loaded.payload == saved.payload
     assert loaded.checksum_sha256 == saved.checksum_sha256
+
+
+def test_latest_rejects_blob_payload_storage_class(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    _insert_raw_checkpoint(
+        store,
+        task_id=task_id,
+        checkpoint_id="blob-payload",
+        payload_json=b'{"revision":1}',
+    )
+
+    with pytest.raises(TypeError, match="payload storage must be SQLite TEXT"):
+        checkpoints.latest(task_id)
+
+
+def test_latest_rejects_blob_checksum_storage_class(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    saved = checkpoints.save(task_id=task_id, stage="valid", payload={"revision": 1})
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET checksum_sha256 = ? WHERE checkpoint_id = ?",
+            (saved.checksum_sha256.encode("ascii"), saved.checkpoint_id),
+        )
+
+    with pytest.raises(TypeError, match="checksum storage must be SQLite TEXT"):
+        checkpoints.latest(task_id)
+
+
+def test_save_rejects_excessive_nesting_with_controlled_validation_error(
+    tmp_path: Path,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    nested: object = 0
+    for _ in range(1200):
+        nested = [nested]
+
+    with pytest.raises(ValueError, match="JSON object with finite values"):
+        checkpoints.save(task_id=task_id, stage="too-deep", payload={"value": nested})
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_latest_rejects_excessive_nested_json_with_controlled_validation_error(
+    tmp_path: Path,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    payload_json = '{"value":' + ("[" * 1200) + "0" + ("]" * 1200) + "}"
+    _insert_raw_checkpoint(
+        store,
+        task_id=task_id,
+        checkpoint_id="too-deep",
+        payload_json=payload_json,
+    )
+
+    with pytest.raises(ValueError, match="invalid JSON"):
+        checkpoints.latest(task_id)
