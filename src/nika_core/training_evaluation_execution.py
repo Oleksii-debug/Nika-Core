@@ -300,9 +300,8 @@ class AttestedChallengerBenchmarkResult:
             "case_count": len(result.report.case_results),
             "case_receipts": [
                 {
-                    "case_id": receipt.case_id,
-                    "request_id": receipt.request_id,
-                    "attestation_sha256": receipt.evidence_sha256,
+                    **receipt.evidence_payload(),
+                    "receipt_sha256": receipt.evidence_sha256,
                 }
                 for receipt in result.case_receipts
             ],
