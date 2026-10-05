@@ -36,8 +36,10 @@ def test_incident_json_unicode_round_trip_and_canonical_stability() -> None:
     "payload",
     (
         '{"schema":"a","schema":"b","project_id":"p","incidents":[],"fingerprint_index":[]}',
-        '{"schema":"a","project_id":"p","incidents":'
-        '[{"incident_id":"first","incident_id":"second"}],"fingerprint_index":[]}',
+        (
+            '{"schema":"a","project_id":"p","incidents":'
+            '[{"incident_id":"first","incident_id":"second"}],"fingerprint_index":[]}'
+        ),
     ),
 )
 def test_duplicate_keys_fail_before_snapshot_or_incident_admission(payload: str) -> None:
