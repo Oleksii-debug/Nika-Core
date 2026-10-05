@@ -54,10 +54,11 @@ from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
 _MAX_STORED_SELECTION_BYTES = 64 * 1024
-_SCHEMA_VERSION = 4
+_SCHEMA_VERSION = 5
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _TASK_ARTIFACT_PIN_FIELD = "v01_model_artifact_pin"
-_TASK_ARTIFACT_PIN_SCHEMA = "nika.v01.model-artifact-pin.v1"
+_TASK_ARTIFACT_PIN_SCHEMA_V1 = "nika.v01.model-artifact-pin.v1"
+_TASK_ARTIFACT_PIN_SCHEMA_V2 = "nika.v01.model-artifact-pin.v2"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
 _ENV_CREDENTIAL_REF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")
 _FORBIDDEN_IDENTITY_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
@@ -102,6 +103,17 @@ _MIGRATIONS = {
         (
             "ALTER TABLE v01_task_model_bindings "
             "ADD COLUMN artifact_pin_sha256 TEXT"
+        ),
+    ),
+    5: (
+        (
+            "CREATE TABLE v01_model_promotion_manifests ("
+            "decision_sha256 TEXT PRIMARY KEY, "
+            "binding_sha256 TEXT NOT NULL, "
+            "base_provider_manifest_sha256 TEXT NOT NULL, "
+            "base_preparation_sha256 TEXT NOT NULL, "
+            "challenger_provider_manifest_sha256 TEXT NOT NULL, "
+            "challenger_preparation_sha256 TEXT NOT NULL)"
         ),
     ),
 }
@@ -169,8 +181,35 @@ class ModelPromotionReceipt:
 
 
 @dataclass(frozen=True, slots=True)
+class ModelPromotionManifestReceipt:
+    """Durable provider-manifest evidence for one Ollama promotion."""
+
+    decision_sha256: str
+    binding_sha256: str
+    base_provider_manifest_sha256: str
+    base_preparation_sha256: str
+    challenger_provider_manifest_sha256: str
+    challenger_preparation_sha256: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.decision_sha256, "decision_sha256"),
+            (self.binding_sha256, "binding_sha256"),
+            (self.base_provider_manifest_sha256, "base_provider_manifest_sha256"),
+            (self.base_preparation_sha256, "base_preparation_sha256"),
+            (
+                self.challenger_provider_manifest_sha256,
+                "challenger_provider_manifest_sha256",
+            ),
+            (self.challenger_preparation_sha256, "challenger_preparation_sha256"),
+        ):
+            if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+
+
+@dataclass(frozen=True, slots=True)
 class TaskModelArtifactPin:
-    """Digest-only artifact authority frozen into one accepted task."""
+    """Digest-only artifact and provider-manifest authority frozen into one task."""
 
     decision_sha256: str
     binding_sha256: str
@@ -178,6 +217,8 @@ class TaskModelArtifactPin:
     route_revision: int
     artifact_sha256: str
     descriptor_digest: str
+    provider_manifest_sha256: str | None = None
+    preparation_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -188,6 +229,20 @@ class TaskModelArtifactPin:
         ):
             if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
                 raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        provider_evidence = (
+            self.provider_manifest_sha256,
+            self.preparation_sha256,
+        )
+        if (provider_evidence[0] is None) != (provider_evidence[1] is None):
+            raise ValueError("provider manifest evidence must be complete")
+        for value, name in (
+            (self.provider_manifest_sha256, "provider_manifest_sha256"),
+            (self.preparation_sha256, "preparation_sha256"),
+        ):
+            if value is not None and (
+                type(value) is not str or _SELECTION_ID.fullmatch(value) is None
+            ):
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
         if self.role not in {"challenger", "rollback"}:
             raise ValueError("role must be challenger or rollback")
         if (
@@ -197,8 +252,12 @@ class TaskModelArtifactPin:
             raise ValueError("route_revision is invalid")
 
     def to_payload(self) -> dict[str, object]:
-        return {
-            "schema": _TASK_ARTIFACT_PIN_SCHEMA,
+        payload: dict[str, object] = {
+            "schema": (
+                _TASK_ARTIFACT_PIN_SCHEMA_V2
+                if self.provider_manifest_sha256 is not None
+                else _TASK_ARTIFACT_PIN_SCHEMA_V1
+            ),
             "decision_sha256": self.decision_sha256,
             "binding_sha256": self.binding_sha256,
             "role": self.role,
@@ -206,6 +265,10 @@ class TaskModelArtifactPin:
             "artifact_sha256": self.artifact_sha256,
             "descriptor_digest": self.descriptor_digest,
         }
+        if self.provider_manifest_sha256 is not None:
+            payload["provider_manifest_sha256"] = self.provider_manifest_sha256
+            payload["preparation_sha256"] = self.preparation_sha256
+        return payload
 
     @property
     def pin_sha256(self) -> str:
@@ -221,7 +284,8 @@ class TaskModelArtifactPin:
     def from_payload(cls, payload: object) -> TaskModelArtifactPin:
         if type(payload) is not dict:
             raise ValueError("artifact pin must be an exact object")
-        expected = {
+        schema = payload.get("schema")
+        common = {
             "schema",
             "decision_sha256",
             "binding_sha256",
@@ -230,16 +294,34 @@ class TaskModelArtifactPin:
             "artifact_sha256",
             "descriptor_digest",
         }
-        if set(payload) != expected or payload.get("schema") != _TASK_ARTIFACT_PIN_SCHEMA:
-            raise ValueError("artifact pin schema does not match")
-        return cls(
-            decision_sha256=payload["decision_sha256"],
-            binding_sha256=payload["binding_sha256"],
-            role=payload["role"],
-            route_revision=payload["route_revision"],
-            artifact_sha256=payload["artifact_sha256"],
-            descriptor_digest=payload["descriptor_digest"],
-        )
+        if schema == _TASK_ARTIFACT_PIN_SCHEMA_V1:
+            if set(payload) != common:
+                raise ValueError("artifact pin schema does not match")
+            return cls(
+                decision_sha256=payload["decision_sha256"],
+                binding_sha256=payload["binding_sha256"],
+                role=payload["role"],
+                route_revision=payload["route_revision"],
+                artifact_sha256=payload["artifact_sha256"],
+                descriptor_digest=payload["descriptor_digest"],
+            )
+        if schema == _TASK_ARTIFACT_PIN_SCHEMA_V2:
+            if set(payload) != common | {
+                "provider_manifest_sha256",
+                "preparation_sha256",
+            }:
+                raise ValueError("artifact pin schema does not match")
+            return cls(
+                decision_sha256=payload["decision_sha256"],
+                binding_sha256=payload["binding_sha256"],
+                role=payload["role"],
+                route_revision=payload["route_revision"],
+                artifact_sha256=payload["artifact_sha256"],
+                descriptor_digest=payload["descriptor_digest"],
+                provider_manifest_sha256=payload["provider_manifest_sha256"],
+                preparation_sha256=payload["preparation_sha256"],
+            )
+        raise ValueError("artifact pin schema does not match")
 
 
 class ModelSelection(BaseModel):
@@ -513,10 +595,67 @@ class V01ModelSettings:
             ) from exc
 
     @staticmethod
+    def _promotion_manifest_receipt(
+        row: sqlite3.Row,
+    ) -> ModelPromotionManifestReceipt:
+        try:
+            return ModelPromotionManifestReceipt(
+                decision_sha256=row["decision_sha256"],
+                binding_sha256=row["binding_sha256"],
+                base_provider_manifest_sha256=row["base_provider_manifest_sha256"],
+                base_preparation_sha256=row["base_preparation_sha256"],
+                challenger_provider_manifest_sha256=row[
+                    "challenger_provider_manifest_sha256"
+                ],
+                challenger_preparation_sha256=row["challenger_preparation_sha256"],
+            )
+        except (IndexError, TypeError, ValueError) as exc:
+            raise ModelSetupError(
+                "Збережений доказ manifest Ollama пошкоджений."
+            ) from exc
+
+    @staticmethod
     def _require_promotion_digest(value: object, *, field: str) -> str:
         if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
             raise ModelSetupError(f"{field} має бути точним SHA-256.")
         return value
+
+    def _validated_manifest_inputs(
+        self,
+        *,
+        base_provider_manifest_sha256: str | None,
+        base_preparation_sha256: str | None,
+        challenger_provider_manifest_sha256: str | None,
+        challenger_preparation_sha256: str | None,
+    ) -> tuple[str, str, str, str]:
+        values = (
+            base_provider_manifest_sha256,
+            base_preparation_sha256,
+            challenger_provider_manifest_sha256,
+            challenger_preparation_sha256,
+        )
+        if any(value is None for value in values):
+            raise ModelSetupError(
+                "Просування Ollama потребує повного доказу provider manifest."
+            )
+        return (
+            self._require_promotion_digest(
+                base_provider_manifest_sha256,
+                field="SHA-256 manifest базової моделі",
+            ),
+            self._require_promotion_digest(
+                base_preparation_sha256,
+                field="SHA-256 підготовки базової моделі",
+            ),
+            self._require_promotion_digest(
+                challenger_provider_manifest_sha256,
+                field="SHA-256 manifest моделі-кандидата",
+            ),
+            self._require_promotion_digest(
+                challenger_preparation_sha256,
+                field="SHA-256 підготовки моделі-кандидата",
+            ),
+        )
 
     def _promotion_pin_for_revision(
         self,
@@ -538,6 +677,20 @@ class V01ModelSettings:
         if not rows:
             return None
         receipt = self._promotion_receipt(rows[0])
+        manifest_row = conn.execute(
+            "SELECT * FROM v01_model_promotion_manifests "
+            "WHERE decision_sha256 = ?",
+            (receipt.decision_sha256,),
+        ).fetchone()
+        if manifest_row is None:
+            raise ModelSetupError(
+                "Просунута модель не має надійного доказу provider manifest Ollama."
+            )
+        manifest = self._promotion_manifest_receipt(manifest_row)
+        if manifest.binding_sha256 != receipt.binding_sha256:
+            raise ModelSetupError(
+                "Доказ provider manifest не збігається з навчальним доказом."
+            )
         if (
             receipt.activated_revision == revision
             and receipt.activated_selection_id == selection_id
@@ -549,6 +702,8 @@ class V01ModelSettings:
                 route_revision=revision,
                 artifact_sha256=receipt.challenger_artifact_sha256,
                 descriptor_digest=receipt.challenger_descriptor_digest,
+                provider_manifest_sha256=manifest.challenger_provider_manifest_sha256,
+                preparation_sha256=manifest.challenger_preparation_sha256,
             )
         if (
             receipt.rollback_revision == revision
@@ -561,6 +716,8 @@ class V01ModelSettings:
                 route_revision=revision,
                 artifact_sha256=receipt.base_artifact_sha256,
                 descriptor_digest=receipt.base_descriptor_digest,
+                provider_manifest_sha256=manifest.base_provider_manifest_sha256,
+                preparation_sha256=manifest.base_preparation_sha256,
             )
         raise ModelSetupError(
             "Збережений запис просування не відповідає поточному маршруту."
@@ -595,12 +752,40 @@ class V01ModelSettings:
             raise ModelSetupError(
                 "Артефакт моделі не збігається з навчальним доказом."
             )
+        manifest_row = conn.execute(
+            "SELECT * FROM v01_model_promotion_manifests "
+            "WHERE decision_sha256 = ?",
+            (pin.decision_sha256,),
+        ).fetchone()
+        manifest = (
+            self._promotion_manifest_receipt(manifest_row)
+            if manifest_row is not None
+            else None
+        )
+        if pin.provider_manifest_sha256 is None:
+            manifest_valid = manifest is None
+        elif manifest is None or manifest.binding_sha256 != pin.binding_sha256:
+            manifest_valid = False
+        elif pin.role == "challenger":
+            manifest_valid = (
+                pin.provider_manifest_sha256
+                == manifest.challenger_provider_manifest_sha256
+                and pin.preparation_sha256
+                == manifest.challenger_preparation_sha256
+            )
+        else:
+            manifest_valid = (
+                pin.provider_manifest_sha256
+                == manifest.base_provider_manifest_sha256
+                and pin.preparation_sha256 == manifest.base_preparation_sha256
+            )
         if pin.role == "challenger":
             valid = (
                 selection_id == receipt.activated_selection_id
                 and pin.route_revision == receipt.activated_revision
                 and pin.artifact_sha256 == receipt.challenger_artifact_sha256
                 and pin.descriptor_digest == receipt.challenger_descriptor_digest
+                and manifest_valid
             )
         else:
             valid = (
@@ -608,6 +793,7 @@ class V01ModelSettings:
                 and pin.route_revision == receipt.rollback_revision
                 and pin.artifact_sha256 == receipt.base_artifact_sha256
                 and pin.descriptor_digest == receipt.base_descriptor_digest
+                and manifest_valid
             )
         if not valid:
             raise ModelSetupError(
@@ -639,6 +825,31 @@ class V01ModelSettings:
             return None
         return self._promotion_receipt(row)
 
+    def promotion_manifest_receipt(
+        self,
+        decision_sha256: str,
+    ) -> ModelPromotionManifestReceipt | None:
+        """Read durable physical-artifact -> Ollama-manifest mapping evidence."""
+
+        decision_digest = self._require_promotion_digest(
+            decision_sha256,
+            field="SHA-256 рішення",
+        )
+        try:
+            with self._store.connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM v01_model_promotion_manifests "
+                    "WHERE decision_sha256 = ?",
+                    (decision_digest,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise ModelSetupError(
+                "Не вдалося надійно прочитати доказ provider manifest."
+            ) from exc
+        if row is None:
+            return None
+        return self._promotion_manifest_receipt(row)
+
     def activate_promoted_local_model(
         self,
         *,
@@ -655,6 +866,10 @@ class V01ModelSettings:
         challenger_descriptor_digest: str,
         activation_request_sha256: str,
         activation_attestation_sha256: str,
+        base_provider_manifest_sha256: str | None = None,
+        base_preparation_sha256: str | None = None,
+        challenger_provider_manifest_sha256: str | None = None,
+        challenger_preparation_sha256: str | None = None,
     ) -> ModelPromotionReceipt:
         """Atomically activate an attested local challenger for future tasks only.
 
@@ -717,6 +932,51 @@ class V01ModelSettings:
                 ).fetchone()
                 if existing is not None:
                     receipt = self._promotion_receipt(existing)
+                    manifest_row = conn.execute(
+                        "SELECT * FROM v01_model_promotion_manifests "
+                        "WHERE decision_sha256 = ?",
+                        (decision_digest,),
+                    ).fetchone()
+                    if manifest_row is None:
+                        raise ModelSetupError(
+                            "Це просування не має надійного доказу provider manifest."
+                        )
+                    manifest_receipt = self._promotion_manifest_receipt(manifest_row)
+                    if manifest_receipt.binding_sha256 != binding_digest:
+                        raise ModelSetupError(
+                            "Доказ provider manifest належить іншому навчальному доказу."
+                        )
+                    supplied_manifest_values = (
+                        base_provider_manifest_sha256,
+                        base_preparation_sha256,
+                        challenger_provider_manifest_sha256,
+                        challenger_preparation_sha256,
+                    )
+                    if any(value is not None for value in supplied_manifest_values):
+                        (
+                            base_manifest_digest,
+                            base_preparation_digest,
+                            challenger_manifest_digest,
+                            challenger_preparation_digest,
+                        ) = self._validated_manifest_inputs(
+                            base_provider_manifest_sha256=base_provider_manifest_sha256,
+                            base_preparation_sha256=base_preparation_sha256,
+                            challenger_provider_manifest_sha256=challenger_provider_manifest_sha256,
+                            challenger_preparation_sha256=challenger_preparation_sha256,
+                        )
+                        if (
+                            manifest_receipt.base_provider_manifest_sha256
+                            != base_manifest_digest
+                            or manifest_receipt.base_preparation_sha256
+                            != base_preparation_digest
+                            or manifest_receipt.challenger_provider_manifest_sha256
+                            != challenger_manifest_digest
+                            or manifest_receipt.challenger_preparation_sha256
+                            != challenger_preparation_digest
+                        ):
+                            raise ModelSetupError(
+                                "Повтор просування не збігається з доказом provider manifest."
+                            )
                     if receipt.rollback_revision is not None:
                         raise ModelSetupError(
                             "Це просування вже було відкотило і не може бути повторно застосоване."
@@ -805,6 +1065,17 @@ class V01ModelSettings:
                     raise ModelSetupError(
                         "Модель-кандидат не відрізняється від поточного чемпіона."
                     )
+                (
+                    base_manifest_digest,
+                    base_preparation_digest,
+                    challenger_manifest_digest,
+                    challenger_preparation_digest,
+                ) = self._validated_manifest_inputs(
+                    base_provider_manifest_sha256=base_provider_manifest_sha256,
+                    base_preparation_sha256=base_preparation_sha256,
+                    challenger_provider_manifest_sha256=challenger_provider_manifest_sha256,
+                    challenger_preparation_sha256=challenger_preparation_sha256,
+                )
                 try:
                     replacement = ModelSelection.model_validate(
                         {
@@ -869,6 +1140,21 @@ class V01ModelSettings:
                         next_revision,
                     ),
                 )
+                conn.execute(
+                    "INSERT INTO v01_model_promotion_manifests ("
+                    "decision_sha256, binding_sha256, "
+                    "base_provider_manifest_sha256, base_preparation_sha256, "
+                    "challenger_provider_manifest_sha256, challenger_preparation_sha256"
+                    ") VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        decision_digest,
+                        binding_digest,
+                        base_manifest_digest,
+                        base_preparation_digest,
+                        challenger_manifest_digest,
+                        challenger_preparation_digest,
+                    ),
+                )
                 self._audit.append_with_connection(
                     conn,
                     event_type="v01.model.promoted",
@@ -889,6 +1175,10 @@ class V01ModelSettings:
                         "base_descriptor_digest": base_descriptor,
                         "challenger_artifact_sha256": challenger_artifact_digest,
                         "challenger_descriptor_digest": challenger_descriptor,
+                        "base_provider_manifest_sha256": base_manifest_digest,
+                        "base_preparation_sha256": base_preparation_digest,
+                        "challenger_provider_manifest_sha256": challenger_manifest_digest,
+                        "challenger_preparation_sha256": challenger_preparation_digest,
                         "activation_request_sha256": activation_request_digest,
                         "activation_attestation_sha256": activation_attestation_digest,
                         "rollback_selection_id": previous_id,
@@ -1482,6 +1772,13 @@ class V01BoundModelRuntimeFactory:
             raise ModelSetupError(
                 "Прив'язаний артефакт моделі підтримується лише для Ollama."
             )
+        if (
+            artifact_pin is not None
+            and artifact_pin.provider_manifest_sha256 is None
+        ):
+            raise ModelSetupError(
+                "Прив'язаний Ollama-артефакт не має доказу provider manifest."
+            )
 
         cloud_effect_authorizer = (
             self._task_cloud_authorizer(task_id=task_id)
@@ -1531,6 +1828,11 @@ class V01BoundModelRuntimeFactory:
                     default_model=model,
                     base_url=base_url,
                     think=False,
+                    expected_manifest_sha256=(
+                        artifact_pin.provider_manifest_sha256
+                        if artifact_pin is not None
+                        else None
+                    ),
                     client_factory=self._client_factory,
                 ),
                 default=True,
