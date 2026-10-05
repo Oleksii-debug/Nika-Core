@@ -165,16 +165,26 @@ def terminate_process_group(pid: int) -> bool:
         return False
 
 
-def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) -> None:
-    """Terminate the contained process tree without raising cleanup-only failures."""
-    if os.name == "nt" and job.active:
-        job.close()
-        return
-    if process.poll() is not None:
-        return
+def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) -> bool:
+    """Terminate the contained process tree and report whether full-tree cleanup was established."""
+    if os.name == "nt":
+        if job.active:
+            job.close()
+            return True
+        if process.poll() is not None:
+            return True
+        try:
+            process.kill()
+        except OSError:
+            return False
+        return False
+
     if terminate_process_group(process.pid):
-        return
+        return True
+    if process.poll() is not None:
+        return False
     try:
         process.kill()
     except OSError:
-        return
+        return False
+    return False
