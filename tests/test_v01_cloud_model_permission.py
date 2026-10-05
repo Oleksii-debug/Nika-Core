@@ -18,6 +18,7 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
+from nika_core.security.standing_permission import StandingPermissionScope
 from nika_core.v01_cloud_model_permission import (
     CloudModelGrantRequest,
     CloudModelPermissionDenied,
