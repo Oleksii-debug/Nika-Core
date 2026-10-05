@@ -43,10 +43,16 @@ from nika_core.training_runtime import (
     TrainingRunEvidence,
     TrainingRuntime,
 )
-from nika_core.training_scale import TrainingScalePlan, TrainingScaleTier, authorize_training_scale
+from nika_core.training_scale import (
+    TrainingScaleError,
+    TrainingScalePlan,
+    TrainingScaleTier,
+    authorize_training_scale,
+)
 
 _LOG = logging.getLogger(__name__)
-_CONFIG_SCHEMA_VERSION = 1
+_LEGACY_CONFIG_SCHEMA_VERSION = 1
+_CONFIG_SCHEMA_VERSION = 2
 _CONFIG_MAX_BYTES = 64 * 1024
 _FROZEN_PACKAGE_MAX_BYTES = 1024 * 1024
 _TRAINER_MAX_RECORDS = 1_000_000
@@ -55,7 +61,7 @@ _TARGET_MODULE_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
 _RUNTIME_VERSION_KEYS = frozenset(
     {"torch", "transformers", "peft", "accelerate", "gguf", "safetensors"}
 )
-_TOP_LEVEL_KEYS = frozenset(
+_TOP_LEVEL_KEYS_V1 = frozenset(
     {
         "schema_version",
         "workspace_id",
@@ -77,7 +83,20 @@ _TOP_LEVEL_KEYS = frozenset(
         "trainer_parameters",
     }
 )
+_TOP_LEVEL_KEYS_V2 = _TOP_LEVEL_KEYS_V1 | {"scale_plan"}
 _DESCRIPTOR_KEYS = frozenset({"model_id", "source_reference", "license_reference"})
+_SCALE_PLAN_KEYS = frozenset({"plan_id", "tiers"})
+_SCALE_TIER_KEYS = frozenset(
+    {
+        "tier_id",
+        "max_training_records",
+        "max_training_bytes",
+        "max_validation_records",
+        "max_validation_bytes",
+        "max_steps",
+    }
+)
+_MAX_SCALE_VALUE = (1 << 63) - 1
 _RESOURCE_KEYS = frozenset({"max_cpu_percent", "max_memory_percent"})
 _TRAINER_KEYS = frozenset(
     {
@@ -342,6 +361,75 @@ class TrainerParameters:
 
 
 @dataclass(frozen=True, slots=True)
+class ScalePlanConfig:
+    plan_id: str
+    tiers: tuple[TrainingScaleTier, ...]
+
+    @classmethod
+    def from_value(cls, value: object) -> ScalePlanConfig:
+        if type(value) is not dict or frozenset(value) != _SCALE_PLAN_KEYS:
+            _fail("scale_plan fields are invalid")
+        raw_tiers = value["tiers"]
+        if type(raw_tiers) is not list:
+            _fail("scale_plan.tiers must be a bounded list")
+        tiers: list[TrainingScaleTier] = []
+        for index, raw_tier in enumerate(raw_tiers):
+            if type(raw_tier) is not dict or frozenset(raw_tier) != _SCALE_TIER_KEYS:
+                _fail(f"scale_plan.tiers[{index}] fields are invalid")
+            try:
+                tier = TrainingScaleTier(
+                    tier_id=_require_text(
+                        raw_tier["tier_id"],
+                        name=f"scale_plan.tiers[{index}].tier_id",
+                    ),
+                    max_training_records=_require_int(
+                        raw_tier["max_training_records"],
+                        name=f"scale_plan.tiers[{index}].max_training_records",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                    max_training_bytes=_require_int(
+                        raw_tier["max_training_bytes"],
+                        name=f"scale_plan.tiers[{index}].max_training_bytes",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                    max_validation_records=_require_int(
+                        raw_tier["max_validation_records"],
+                        name=f"scale_plan.tiers[{index}].max_validation_records",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                    max_validation_bytes=_require_int(
+                        raw_tier["max_validation_bytes"],
+                        name=f"scale_plan.tiers[{index}].max_validation_bytes",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                    max_steps=_require_int(
+                        raw_tier["max_steps"],
+                        name=f"scale_plan.tiers[{index}].max_steps",
+                        minimum=1,
+                        maximum=_MAX_SCALE_VALUE,
+                    ),
+                )
+            except TrainingScaleError as exc:
+                raise PhysicalPilotDriverError(
+                    f"scale_plan.tiers[{index}] is invalid"
+                ) from exc
+            tiers.append(tier)
+        try:
+            canonical = TrainingScalePlan(
+                plan_id=_require_text(value["plan_id"], name="scale_plan.plan_id"),
+                evaluation_set_sha256="0" * 64,
+                tiers=tuple(tiers),
+            )
+        except TrainingScaleError as exc:
+            raise PhysicalPilotDriverError("scale_plan is invalid") from exc
+        return cls(plan_id=canonical.plan_id, tiers=canonical.tiers)
+
+
+@dataclass(frozen=True, slots=True)
 class PhysicalPilotConfig:
     workspace_id: str
     project_id: str
@@ -360,6 +448,7 @@ class PhysicalPilotConfig:
     runtime_versions: tuple[tuple[str, str], ...]
     resource_budget: ResourceBudgetConfig
     trainer_parameters: TrainerParameters
+    scale_plan: ScalePlanConfig | None = None
 
     @classmethod
     def from_json(cls, raw: str | bytes) -> PhysicalPilotConfig:
@@ -377,10 +466,21 @@ class PhysicalPilotConfig:
             )
         except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
             raise PhysicalPilotDriverError("physical pilot config is invalid JSON") from exc
-        if type(value) is not dict or frozenset(value) != _TOP_LEVEL_KEYS:
+        if type(value) is not dict:
             _fail("physical pilot config fields are invalid")
-        if value["schema_version"] != _CONFIG_SCHEMA_VERSION:
+        schema_version = value.get("schema_version")
+        if schema_version == _LEGACY_CONFIG_SCHEMA_VERSION:
+            expected_keys = _TOP_LEVEL_KEYS_V1
+            scale_plan = None
+        elif schema_version == _CONFIG_SCHEMA_VERSION:
+            expected_keys = _TOP_LEVEL_KEYS_V2
+            if frozenset(value) != expected_keys:
+                _fail("physical pilot config fields are invalid")
+            scale_plan = ScalePlanConfig.from_value(value["scale_plan"])
+        else:
             _fail("unsupported physical pilot config schema")
+        if frozenset(value) != expected_keys:
+            _fail("physical pilot config fields are invalid")
 
         raw_versions = value["runtime_versions"]
         if type(raw_versions) is not dict or frozenset(raw_versions) != _RUNTIME_VERSION_KEYS:
@@ -426,6 +526,7 @@ class PhysicalPilotConfig:
             runtime_versions=runtime_versions,
             resource_budget=ResourceBudgetConfig.from_value(value["resource_budget"]),
             trainer_parameters=TrainerParameters.from_value(value["trainer_parameters"]),
+            scale_plan=scale_plan,
         )
         try:
             TrainingJobSpec(
@@ -662,6 +763,42 @@ def _candidate_descriptor(
     )
 
 
+def _scale_plan_for_physical_pilot(
+    config: PhysicalPilotConfig,
+    *,
+    evaluation_set_sha256: str,
+    training_records: int,
+    training_bytes: int,
+    validation_records: int,
+    validation_bytes: int,
+) -> TrainingScalePlan:
+    if config.scale_plan is None:
+        return TrainingScalePlan(
+            plan_id="physical-pilot",
+            evaluation_set_sha256=evaluation_set_sha256,
+            tiers=(
+                TrainingScaleTier(
+                    tier_id="pilot",
+                    max_training_records=training_records,
+                    max_training_bytes=training_bytes,
+                    max_validation_records=validation_records,
+                    max_validation_bytes=validation_bytes,
+                    max_steps=2,
+                ),
+            ),
+        )
+    try:
+        return TrainingScalePlan(
+            plan_id=config.scale_plan.plan_id,
+            evaluation_set_sha256=evaluation_set_sha256,
+            tiers=config.scale_plan.tiers,
+        )
+    except TrainingScaleError as exc:
+        raise PhysicalPilotDriverError(
+            "configured training scale plan is invalid for the frozen package"
+        ) from exc
+
+
 def run_physical_pilot_from_config(
     config: PhysicalPilotConfig,
 ) -> PhysicalTrainingPilotReport:
@@ -757,34 +894,39 @@ def run_physical_pilot_from_config(
         config.base_artifact_ref,
         materials.evidence.base_artifact_sha256,
     )
-    scale_plan = TrainingScalePlan(
-        plan_id="physical-pilot",
+    scale_plan = _scale_plan_for_physical_pilot(
+        config,
         evaluation_set_sha256=materials.evidence.evaluation_set_sha256,
-        tiers=(
-            TrainingScaleTier(
-                tier_id="pilot",
-                max_training_records=training_records,
-                max_training_bytes=training_bytes,
-                max_validation_records=validation_records,
-                max_validation_bytes=validation_bytes,
-                max_steps=2,
-            ),
-        ),
+        training_records=training_records,
+        training_bytes=training_bytes,
+        validation_records=validation_records,
+        validation_bytes=validation_bytes,
     )
-    scale_authorization = authorize_training_scale(
-        plan=scale_plan,
-        tier_id="pilot",
-        job_id=config.job_id,
-        base_artifact=base_artifact,
-        candidate_artifact_ref=config.candidate_artifact_ref,
-        material_evidence=materials.evidence,
-        execution_plan_sha256=initial_worker.execution_plan_sha256,
-        max_steps=2,
-    )
+    pilot_tier = scale_plan.tiers[0]
+    try:
+        scale_authorization = authorize_training_scale(
+            plan=scale_plan,
+            tier_id=pilot_tier.tier_id,
+            job_id=config.job_id,
+            base_artifact=base_artifact,
+            candidate_artifact_ref=config.candidate_artifact_ref,
+            material_evidence=materials.evidence,
+            execution_plan_sha256=initial_worker.execution_plan_sha256,
+            max_steps=2,
+        )
+    except TrainingScaleError as exc:
+        raise PhysicalPilotDriverError(
+            "pilot training data exceeds the configured first scale tier"
+        ) from exc
     task = TaskQueue(store).create(
         workspace_id=config.workspace_id,
         agent_id="physical-peft-pilot",
-        payload={"job_id": config.job_id, "kind": "physical_peft_pilot"},
+        payload={
+            "job_id": config.job_id,
+            "kind": "physical_peft_pilot",
+            "scale_plan_sha256": scale_plan.plan_sha256,
+            "scale_tier_id": pilot_tier.tier_id,
+        },
     )
     spec = TrainingJobSpec(
         job_id=config.job_id,
