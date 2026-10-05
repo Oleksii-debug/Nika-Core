@@ -32,10 +32,38 @@ def _windows_report_builder(monkeypatch: pytest.MonkeyPatch) -> None:
         "nika_core.training_physical_pilot._is_windows",
         lambda: True,
     )
+    monkeypatch.setattr(
+        "nika_core.training_physical_pilot.candidate_adapter_manifest",
+        lambda _: _candidate_manifest(),
+    )
 
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _candidate_manifest(
+    *,
+    job_fingerprint: str = "f" * 64,
+    previous_adapter_sha256: str = "3" * 64,
+    trained_adapter_sha256: str = "4" * 64,
+) -> dict[str, object]:
+    return {
+        "base_artifact_ref": "models/base",
+        "base_artifact_sha256": "a" * 64,
+        "candidate_artifact_ref": "models/candidate/pilot",
+        "consumed_materials_sha256": "1" * 64,
+        "job_fingerprint": job_fingerprint,
+        "model_dir_manifest_sha256": "2" * 64,
+        "previous_adapter_sha256": previous_adapter_sha256,
+        "schema": "nika-peft-candidate-v2",
+        "step_number": 2,
+        "trained_adapter_sha256": trained_adapter_sha256,
+        "trainer_artifact_id": "5" * 64,
+        "trainer_implementation_sha256": "6" * 64,
+        "trainer_sha256": "7" * 64,
+        "training_runtime_manifest_sha256": "8" * 64,
+    }
 
 
 def _descriptor(path: Path, *, payload: bytes | None = None) -> ModelArtifactDescriptor:
@@ -202,8 +230,16 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     )
 
     assert report.platform == "windows"
-    assert report.schema_version == 2
+    assert report.schema_version == 3
     assert report.completed_steps == 2
+    assert report.consumed_materials_sha256 == "1" * 64
+    assert report.model_dir_manifest_sha256 == "2" * 64
+    assert report.previous_adapter_sha256 == "3" * 64
+    assert report.trained_adapter_sha256 == "4" * 64
+    assert report.trainer_artifact_id == "5" * 64
+    assert report.trainer_implementation_sha256 == "6" * 64
+    assert report.trainer_sha256 == "7" * 64
+    assert report.training_runtime_manifest_sha256 == "8" * 64
     assert report.candidate_sha256 == _sha256(payload)
     assert report.candidate_byte_count == len(payload)
     assert report.candidate_descriptor_sha256 == descriptor.descriptor_digest
@@ -211,6 +247,64 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     assert report.paused_checkpoint_id == "checkpoint-paused"
     assert report.restart_checkpoint_id == "checkpoint-restart"
     assert report.completed_checkpoint_id == "checkpoint-completed"
+
+
+def test_build_report_rejects_manifest_without_weight_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    monkeypatch.setattr(
+        pilot,
+        "candidate_adapter_manifest",
+        lambda _: _candidate_manifest(
+            trained_adapter_sha256="3" * 64,
+        ),
+    )
+
+    with pytest.raises(PhysicalTrainingPilotError, match="weight mutation"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+def test_build_report_rejects_manifest_runtime_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    monkeypatch.setattr(
+        pilot,
+        "candidate_adapter_manifest",
+        lambda _: _candidate_manifest(job_fingerprint="0" * 64),
+    )
+
+    with pytest.raises(PhysicalTrainingPilotError, match="runtime identity"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
 
 
 def test_report_round_trip_is_canonical_and_digest_stable(tmp_path: Path) -> None:
@@ -462,6 +556,14 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             scale_authorization_sha256=report.scale_authorization_sha256,
             execution_plan_sha256=report.execution_plan_sha256,
             job_fingerprint=report.job_fingerprint,
+            consumed_materials_sha256=report.consumed_materials_sha256,
+            model_dir_manifest_sha256=report.model_dir_manifest_sha256,
+            previous_adapter_sha256=report.previous_adapter_sha256,
+            trained_adapter_sha256=report.trained_adapter_sha256,
+            trainer_artifact_id=report.trainer_artifact_id,
+            trainer_implementation_sha256=report.trainer_implementation_sha256,
+            trainer_sha256=report.trainer_sha256,
+            training_runtime_manifest_sha256=report.training_runtime_manifest_sha256,
             paused_checkpoint_id=report.paused_checkpoint_id,
             restart_checkpoint_id=report.restart_checkpoint_id,
             completed_checkpoint_id=report.completed_checkpoint_id,
