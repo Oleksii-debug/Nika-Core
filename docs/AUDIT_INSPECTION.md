@@ -81,6 +81,15 @@ Inspection fails closed with
 `AuditIntegrityError` if a selected row has malformed JSON or a non-object payload instead of
 silently skipping, coercing or partially presenting corrupted evidence.
 
+Audit event identities and inspection filters are exact, non-empty, edge-trimmed UTF-8 text with no
+ASCII control/DEL characters and at most 4096 UTF-8 bytes. Payloads are exact JSON-native objects:
+string keys plus dict/list/string/integer/finite-float/bool/null values only. Before persistence and
+again after durable decode, each payload is bounded to 1 MiB encoded JSON, 10,000 value nodes,
+32 levels of nesting and 4096-bit integers. Recursive containers, behavioral subclasses, invalid
+UTF-8, non-TEXT persisted carriers and oversized/deep evidence fail closed before SQLite effects or
+user-facing redaction. These bounds make the per-page row limit a real resource bound rather than
+allowing one pathological event to dominate inspection.
+
 No migration is needed because the existing `audit_events(event_id, event_type, entity_type,
 entity_id, payload_json, created_at)` schema already contains the required ordering/filter data.
 

@@ -435,3 +435,244 @@ def test_encoded_signed_url_authority_never_reaches_inspection(tmp_path, url, se
     safe = log.inspect()[0].payload["url"]
     assert secret not in safe
     assert "REDACTED" in safe
+
+
+class _AuditTextSubclass(str):
+    pass
+
+
+class _AuditDictSubclass(dict):
+    pass
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        _AuditTextSubclass("task.created"),
+        " task.created",
+        "task.created ",
+        "task\x00created",
+        "x" * 4097,
+        "\ud800",
+    ],
+)
+def test_append_rejects_noncanonical_identity_before_sqlite(tmp_path, identity):
+    _, log = _make_log(tmp_path)
+    with pytest.raises((TypeError, ValueError)):
+        log.append(
+            event_type=identity,
+            entity_type="task",
+            entity_id="identity-admission",
+        )
+    assert log.inspect() == ()
+
+
+def test_audit_identity_accepts_exact_4096_utf8_byte_boundary(tmp_path):
+    _, log = _make_log(tmp_path)
+    identity = "а" * 2048
+    log.append(event_type="task.created", entity_type="task", entity_id=identity)
+    rows = log.list_for(entity_type="task", entity_id=identity)
+    assert rows[0].entity_id == identity
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"entity_id": _AuditTextSubclass("task-1")},
+        {"entity_id": "bad\x7f"},
+        {"entity_id": "x" * 4097},
+        {"entity_id": "\ud800"},
+    ],
+)
+def test_inspection_query_rejects_noncanonical_identity(kwargs):
+    with pytest.raises((TypeError, ValueError)):
+        AuditInspectionQuery(**kwargs)
+
+
+def test_inspect_revalidates_tampered_frozen_query(tmp_path):
+    _, log = _make_log(tmp_path)
+    log.append(event_type="task.created", entity_type="task", entity_id="task-1")
+    query = AuditInspectionQuery(entity_id="task-1")
+    object.__setattr__(query, "entity_id", "bad\x00id")
+    with pytest.raises(ValueError, match="control"):
+        log.inspect(query)
+
+
+def test_inspect_rejects_query_subclass(tmp_path):
+    _, log = _make_log(tmp_path)
+
+    class QuerySubclass(AuditInspectionQuery):
+        pass
+
+    with pytest.raises(TypeError, match="exact AuditInspectionQuery"):
+        log.inspect(QuerySubclass())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _AuditDictSubclass({"ok": True}),
+        {"tuple": (1, 2)},
+        {_AuditTextSubclass("key"): "value"},
+        {"value": _AuditTextSubclass("text")},
+        {"key": "\ud800"},
+        {"\ud800": "value"},
+        {"integer": 1 << 4096},
+    ],
+)
+def test_append_rejects_noncanonical_payload_carriers(tmp_path, payload):
+    _, log = _make_log(tmp_path)
+    with pytest.raises((TypeError, ValueError)):
+        log.append(
+            event_type="task.created",
+            entity_type="task",
+            entity_id="payload-admission",
+            payload=payload,
+        )
+    assert log.inspect() == ()
+
+
+def test_append_rejects_recursive_payload_before_persistence(tmp_path):
+    _, log = _make_log(tmp_path)
+    payload = {}
+    payload["self"] = payload
+    with pytest.raises(ValueError, match="recursive"):
+        log.append(
+            event_type="task.created",
+            entity_type="task",
+            entity_id="cycle",
+            payload=payload,
+        )
+
+
+def test_append_rejects_payload_beyond_depth_budget(tmp_path):
+    _, log = _make_log(tmp_path)
+    root = current = {}
+    for index in range(33):
+        child = {}
+        current[str(index)] = child
+        current = child
+    with pytest.raises(ValueError, match="nesting depth"):
+        log.append(
+            event_type="task.created",
+            entity_type="task",
+            entity_id="depth",
+            payload=root,
+        )
+
+
+def test_append_rejects_payload_beyond_node_budget(tmp_path):
+    _, log = _make_log(tmp_path)
+    with pytest.raises(ValueError, match="node limit"):
+        log.append(
+            event_type="task.created",
+            entity_type="task",
+            entity_id="nodes",
+            payload={"items": [None] * 10_000},
+        )
+
+
+def test_append_rejects_payload_beyond_encoded_byte_budget(tmp_path):
+    _, log = _make_log(tmp_path)
+    with pytest.raises(ValueError, match="encoded byte limit"):
+        log.append(
+            event_type="task.created",
+            entity_type="task",
+            entity_id="bytes",
+            payload={"blob": "\x00" * 200_000},
+        )
+
+
+def test_valid_bounded_payload_round_trips_and_is_detached(tmp_path):
+    _, log = _make_log(tmp_path)
+    payload = {
+        "items": [{"value": "українська"}],
+        "integer": 1 << 4095,
+    }
+    log.append(
+        event_type="task.created",
+        entity_type="task",
+        entity_id="bounded",
+        payload=payload,
+    )
+    payload["items"][0]["value"] = "mutated"
+    event = log.list_for(entity_type="task", entity_id="bounded")[0]
+    assert event.payload["items"][0]["value"] == "українська"
+    assert event.payload["integer"] == 1 << 4095
+
+
+def test_persisted_payload_requires_sqlite_text_storage(tmp_path):
+    store, log = _make_log(tmp_path)
+    event_id = log.append(
+        event_type="task.created",
+        entity_type="task",
+        entity_id="blob-payload",
+        payload={"ok": True},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
+            (b'{"ok":true}', event_id),
+        )
+    with pytest.raises(AuditIntegrityError, match="invalid durable evidence"):
+        log.inspect()
+
+
+def test_persisted_identity_requires_exact_text_storage(tmp_path):
+    store, log = _make_log(tmp_path)
+    event_id = log.append(
+        event_type="task.created",
+        entity_type="task",
+        entity_id="blob-identity",
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET entity_id = ? WHERE event_id = ?",
+            (b"blob-identity", event_id),
+        )
+    with pytest.raises(AuditIntegrityError, match="invalid durable evidence"):
+        log.inspect()
+
+
+def test_persisted_payload_depth_is_revalidated_before_presentation(tmp_path):
+    store, log = _make_log(tmp_path)
+    event_id = log.append(
+        event_type="task.created",
+        entity_type="task",
+        entity_id="persisted-depth",
+    )
+    value = "{}"
+    for _ in range(33):
+        value = '{"k":' + value + "}"
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET payload_json = ? WHERE event_id = ?",
+            (value, event_id),
+        )
+    with pytest.raises(AuditIntegrityError, match="invalid durable evidence"):
+        log.inspect()
+
+
+def test_bounded_admission_preserves_secret_minimized_projection(tmp_path):
+    _, log = _make_log(tmp_path)
+    log.append(
+        event_type="provider.failed",
+        entity_type="task",
+        entity_id="bounded-redaction",
+        payload={
+            "credential_id": "safe-ref",
+            "token": "secret",
+            "endpoint": (
+                "https://user:pass@example.test/path?sig=secret&mode=safe"
+            ),
+        },
+    )
+    raw = log.list_for(entity_type="task", entity_id="bounded-redaction")[0]
+    safe = log.inspect(
+        AuditInspectionQuery(entity_id="bounded-redaction")
+    )[0]
+    assert raw.payload["token"] == "secret"
+    assert safe.payload["token"] == "[REDACTED]"
+    assert safe.payload["credential_id"] == "safe-ref"
+    assert "secret" not in safe.payload["endpoint"]
+    assert "mode=safe" in safe.payload["endpoint"]

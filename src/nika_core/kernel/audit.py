@@ -12,6 +12,11 @@ from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 from nika_core.data.sqlite import SQLiteStore
 
 _MAX_INSPECTION_LIMIT: Final = 500
+_MAX_IDENTITY_UTF8_BYTES: Final = 4096
+_MAX_PAYLOAD_BYTES: Final = 1_048_576
+_MAX_PAYLOAD_NODES: Final = 10_000
+_MAX_PAYLOAD_DEPTH: Final = 32
+_MAX_INTEGER_BITS: Final = 4096
 _REDACTED: Final = "[REDACTED]"
 _REDACTED_URL: Final = "[REDACTED_URL]"
 _SENSITIVE_KEYS: Final = frozenset(
@@ -120,10 +125,8 @@ class AuditInspectionQuery:
     def __post_init__(self) -> None:
         for field_name in ("event_type", "entity_type", "entity_id"):
             value = getattr(self, field_name)
-            if value is not None and not isinstance(value, str):
-                raise TypeError(f"{field_name} must be a string when supplied")
-            if value is not None and not value.strip():
-                raise ValueError(f"{field_name} must not be blank")
+            if value is not None:
+                _audit_identity(value, field=field_name)
         if type(self.after_event_id) is not int:
             raise TypeError("after_event_id must be an integer")
         if self.after_event_id < 0:
@@ -177,28 +180,33 @@ class AuditLog:
         payload: dict[str, object] | None = None,
     ) -> int:
         """Append audit evidence inside a caller-owned SQLite transaction."""
-        if not event_type.strip() or not entity_type.strip() or not entity_id.strip():
-            raise ValueError("audit event identifiers must not be empty")
-        if payload is not None and not isinstance(payload, dict):
-            raise TypeError("audit payload must be a JSON object")
-        body = json.dumps(
-            {} if payload is None else payload, ensure_ascii=False, sort_keys=True,
-            separators=(",", ":"), allow_nan=False,
-        )
+        clean_event_type = _audit_identity(event_type, field="event_type")
+        clean_entity_type = _audit_identity(entity_type, field="entity_type")
+        clean_entity_id = _audit_identity(entity_id, field="entity_id")
+        clean_payload = _snapshot_audit_payload(payload)
+        body = _canonical_payload_json(clean_payload)
         cursor = conn.execute(
             "INSERT INTO audit_events(event_type, entity_type, entity_id, "
             "payload_json, created_at) "
             "VALUES (?, ?, ?, ?, ?)",
-            (event_type, entity_type, entity_id, body, datetime.now(UTC).isoformat()),
+            (
+                clean_event_type,
+                clean_entity_type,
+                clean_entity_id,
+                body,
+                datetime.now(UTC).isoformat(),
+            ),
         )
         return int(cursor.lastrowid)
 
     def list_for(self, *, entity_type: str, entity_id: str) -> tuple[AuditEvent, ...]:
+        clean_entity_type = _audit_identity(entity_type, field="entity_type")
+        clean_entity_id = _audit_identity(entity_id, field="entity_id")
         with self._store.connection() as conn:
             rows = conn.execute(
                 "SELECT event_id, event_type, entity_type, entity_id, payload_json, created_at "
                 "FROM audit_events WHERE entity_type = ? AND entity_id = ? ORDER BY event_id",
-                (entity_type, entity_id),
+                (clean_entity_type, clean_entity_id),
             ).fetchall()
         return tuple(self._event_from_row(row) for row in rows)
 
@@ -207,7 +215,18 @@ class AuditLog:
         query: AuditInspectionQuery | None = None,
     ) -> tuple[AuditInspectionEvent, ...]:
         """Return a bounded, stable, secret-minimized forward page of audit evidence."""
-        request = query or AuditInspectionQuery()
+        if query is None:
+            request = AuditInspectionQuery()
+        else:
+            if type(query) is not AuditInspectionQuery:
+                raise TypeError("query must be an exact AuditInspectionQuery")
+            request = AuditInspectionQuery(
+                event_type=query.event_type,
+                entity_type=query.entity_type,
+                entity_id=query.entity_id,
+                after_event_id=query.after_event_id,
+                limit=query.limit,
+            )
         clauses = ["event_id > ?"]
         parameters: list[object] = [request.after_event_id]
 
@@ -244,29 +263,179 @@ class AuditLog:
 
     @staticmethod
     def _event_from_row(row: sqlite3.Row) -> AuditEvent:
+        event_id = row["event_id"]
+        if type(event_id) is not int or event_id < 1:
+            raise AuditIntegrityError("audit row contains invalid event identity")
         try:
+            event_type = _audit_identity(row["event_type"], field="event_type")
+            entity_type = _audit_identity(row["entity_type"], field="entity_type")
+            entity_id = _audit_identity(row["entity_id"], field="entity_id")
+            created_at = _persisted_text(
+                row["created_at"], field="created_at", max_bytes=128
+            )
+            payload_json = _persisted_text(
+                row["payload_json"], field="payload_json", max_bytes=_MAX_PAYLOAD_BYTES
+            )
             payload = json.loads(
-                row["payload_json"],
+                payload_json,
                 object_pairs_hook=_reject_duplicate_json_keys,
                 parse_constant=_reject_nonfinite_json_constant,
                 parse_float=_reject_overflow_json_float,
             )
+            payload = _snapshot_audit_payload(payload)
         except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
             raise AuditIntegrityError(
-                f"audit event {int(row['event_id'])} contains invalid payload JSON"
+                f"audit event {event_id} contains invalid durable evidence"
             ) from exc
-        if not isinstance(payload, dict):
-            raise AuditIntegrityError(
-                f"audit event {int(row['event_id'])} payload must be a JSON object"
-            )
         return AuditEvent(
-            event_id=int(row["event_id"]),
-            event_type=str(row["event_type"]),
-            entity_type=str(row["entity_type"]),
-            entity_id=str(row["entity_id"]),
+            event_id=event_id,
+            event_type=event_type,
+            entity_type=entity_type,
+            entity_id=entity_id,
             payload=payload,
-            created_at=str(row["created_at"]),
+            created_at=created_at,
         )
+
+
+def _audit_identity(value: object, *, field: str) -> str:
+    message = f"{field} must be exact canonical non-empty text"
+    if type(value) is not str:
+        raise TypeError(message)
+    if not value or value != value.strip():
+        raise ValueError(message)
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8 text") from exc
+    if len(encoded) > _MAX_IDENTITY_UTF8_BYTES:
+        raise ValueError(f"{field} exceeds the UTF-8 byte limit")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field} must not contain control characters")
+    return value
+
+
+def _persisted_text(value: object, *, field: str, max_bytes: int) -> str:
+    if type(value) is not str:
+        raise ValueError(f"persisted {field} must use SQLite TEXT storage")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"persisted {field} must be valid UTF-8") from exc
+    if len(encoded) > max_bytes:
+        raise ValueError(f"persisted {field} exceeds the byte limit")
+    return value
+
+
+def _snapshot_audit_payload(value: object | None) -> dict[str, object]:
+    if value is None:
+        return {}
+    if type(value) is not dict:
+        raise TypeError("audit payload must be an exact JSON object")
+    budget = [_MAX_PAYLOAD_NODES, _MAX_PAYLOAD_BYTES]
+    snapshot = _snapshot_json_value(
+        value,
+        path="audit payload",
+        depth=0,
+        active=set(),
+        budget=budget,
+    )
+    assert type(snapshot) is dict
+    return snapshot
+
+
+def _snapshot_json_value(
+    value: object,
+    *,
+    path: str,
+    depth: int,
+    active: set[int],
+    budget: list[int],
+) -> object:
+    if depth > _MAX_PAYLOAD_DEPTH:
+        raise ValueError("audit payload exceeds safe nesting depth")
+    if budget[0] < 1:
+        raise ValueError("audit payload exceeds safe node limit")
+    budget[0] -= 1
+
+    if value is None or type(value) is bool:
+        return value
+    if type(value) is int:
+        if value.bit_length() > _MAX_INTEGER_BITS:
+            raise ValueError("audit payload integer exceeds safe bit limit")
+        return value
+    if type(value) is float:
+        if not math.isfinite(value):
+            raise ValueError("Out of range float values are not JSON compliant")
+        return value
+    if type(value) is str:
+        return _snapshot_payload_text(value, field=path, budget=budget)
+    if type(value) is not dict and type(value) is not list:
+        raise TypeError("audit payload must contain only exact JSON-native values")
+
+    identity = id(value)
+    if identity in active:
+        raise ValueError("audit payload must not contain recursive containers")
+    active.add(identity)
+    try:
+        if type(value) is list:
+            return [
+                _snapshot_json_value(
+                    item,
+                    path=f"{path}[{index}]",
+                    depth=depth + 1,
+                    active=active,
+                    budget=budget,
+                )
+                for index, item in enumerate(value)
+            ]
+
+        snapshot: dict[str, object] = {}
+        for index, (raw_key, item) in enumerate(value.items()):
+            if type(raw_key) is not str:
+                raise TypeError("audit payload JSON object keys must be exact text")
+            key = _snapshot_payload_text(
+                raw_key,
+                field=f"{path} key {index}",
+                budget=budget,
+            )
+            snapshot[key] = _snapshot_json_value(
+                item,
+                path=f"{path}[{index}]",
+                depth=depth + 1,
+                active=active,
+                budget=budget,
+            )
+        return snapshot
+    finally:
+        active.remove(identity)
+
+
+def _snapshot_payload_text(value: str, *, field: str, budget: list[int]) -> str:
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8 text") from exc
+    if len(encoded) > budget[1]:
+        raise ValueError("audit payload exceeds safe UTF-8 byte limit")
+    budget[1] -= len(encoded)
+    return value
+
+
+def _canonical_payload_json(payload: dict[str, object]) -> str:
+    body = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    try:
+        encoded = body.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("audit payload must be valid UTF-8 JSON") from exc
+    if len(encoded) > _MAX_PAYLOAD_BYTES:
+        raise ValueError("audit payload exceeds safe encoded byte limit")
+    return body
 
 
 def _reject_nonfinite_json_constant(_value: str) -> None:
