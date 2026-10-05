@@ -48,7 +48,16 @@ def _runtime_environment(
     versions: dict[str, str] | None = None,
 ) -> dict[str, str]:
     selected = dict(_RUNTIME_VERSIONS if versions is None else versions)
-    metadata = training_runtime_registry_metadata(selected)
+    encoded = json.dumps(
+        selected,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    manifest_sha256 = hashlib.sha256(
+        b"nika-peft-runtime-manifest-v1\x00" + encoded
+    ).hexdigest()
     return {
         "NIKA_TRAINER_TORCH_VERSION": selected["torch"],
         "NIKA_TRAINER_TRANSFORMERS_VERSION": selected["transformers"],
@@ -56,9 +65,7 @@ def _runtime_environment(
         "NIKA_TRAINER_ACCELERATE_VERSION": selected["accelerate"],
         "NIKA_TRAINER_GGUF_VERSION": selected["gguf"],
         "NIKA_TRAINER_SAFETENSORS_VERSION": selected["safetensors"],
-        "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256": metadata[
-            "nika.training.runtime.manifest_sha256"
-        ],
+        "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256": manifest_sha256,
     }
 
 
@@ -1525,8 +1532,8 @@ sys.stdout.write(json.dumps(response))
     assert isinstance(trainer_state, dict)
     assert trainer_state["torch"] == _RUNTIME_VERSIONS["torch"]
     assert trainer_state["transformers"] == _RUNTIME_VERSIONS["transformers"]
-    assert trainer_state["manifest"] == metadata[
-        "nika.training.runtime.manifest_sha256"
+    assert trainer_state["manifest"] == _runtime_environment()[
+        "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"
     ]
     assert trainer_state["allowed"] == "yes"
 
@@ -1549,7 +1556,7 @@ def test_runtime_environment_must_match_registry_authority(tmp_path: Path) -> No
 def test_runtime_registry_metadata_must_be_complete(tmp_path: Path) -> None:
     trainer = _script(tmp_path, "raise SystemExit(0)")
     metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
-    del metadata["nika.training.runtime.torch"]
+    del metadata["nika.training.runtime.torch.version"]
 
     with pytest.raises(ValueError, match="incomplete or ambiguous"):
         _worker(
@@ -1559,16 +1566,18 @@ def test_runtime_registry_metadata_must_be_complete(tmp_path: Path) -> None:
         )
 
 
-def test_runtime_registry_manifest_digest_must_match_versions(tmp_path: Path) -> None:
+def test_runtime_environment_manifest_digest_must_match_versions(tmp_path: Path) -> None:
     trainer = _script(tmp_path, "raise SystemExit(0)")
     metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
-    metadata["nika.training.runtime.manifest_sha256"] = "0" * 64
+    environment = _runtime_environment()
+    environment["NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"] = "0" * 64
 
-    with pytest.raises(ValueError, match="manifest digest is inconsistent"):
+    with pytest.raises(ValueError, match="environment manifest digest is inconsistent"):
         _worker(
             tmp_path,
             trainer,
             trainer_metadata=metadata,
+            environment=environment,
         )
 
 
