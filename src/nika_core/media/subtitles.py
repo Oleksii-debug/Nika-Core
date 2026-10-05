@@ -38,8 +38,8 @@ class SubtitlePolicy:
             if (
                 isinstance(value, bool)
                 or not isinstance(value, (int, float))
-                or not math.isfinite(value)
                 or not 0 <= value <= 1
+                or not math.isfinite(value)
             ):
                 raise ValueError(f"{name} must be a finite ratio in [0, 1]")
 
@@ -147,12 +147,7 @@ def normalize_subtitle_file(
                 "automatic subtitle has too many malformed segments",
             )
         if media_duration_seconds is not None:
-            if (
-                isinstance(media_duration_seconds, bool)
-                or not isinstance(media_duration_seconds, (int, float))
-                or not math.isfinite(media_duration_seconds)
-                or media_duration_seconds < 0
-            ):
+            if not _finite_nonnegative_duration(media_duration_seconds):
                 raise MediaError(
                     MediaErrorCode.INVALID_SUBTITLE,
                     "media duration must be a finite nonnegative number",
@@ -177,6 +172,15 @@ def normalize_subtitle_file(
         segments=tuple(segments),
         source_track_id=track.track_id,
     )
+
+
+def _finite_nonnegative_duration(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def _covered_duration_ms(segments: list[Segment], *, duration_ms: float) -> float:
