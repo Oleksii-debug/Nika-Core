@@ -24,6 +24,21 @@
     timeout_seconds: document.getElementById("model-timeout"),
   });
   const modelStatus = document.getElementById("model-settings-status");
+  const modelArtifactPanel = document.getElementById("model-artifact-panel");
+  const modelArtifactStatus = document.getElementById("model-artifact-status");
+  const modelArtifactSummary = document.getElementById("model-artifact-summary");
+  const modelArtifactFields = Object.freeze({
+    kind: document.getElementById("model-artifact-kind"),
+    version: document.getElementById("model-artifact-version"),
+    integrity: document.getElementById("model-artifact-integrity"),
+    sha256: document.getElementById("model-artifact-sha256"),
+    descriptor_digest: document.getElementById("model-artifact-descriptor-digest"),
+    source: document.getElementById("model-artifact-source"),
+    license: document.getElementById("model-artifact-license"),
+    size: document.getElementById("model-artifact-size"),
+    capabilities: document.getElementById("model-artifact-capabilities"),
+    resources: document.getElementById("model-artifact-resources"),
+  });
   const modelSave = document.getElementById("model-save");
   let modelRevision = 0;
   let modelDirty = false;
@@ -865,6 +880,129 @@
     }
   }
 
+  function clearModelArtifactSummary() {
+    for (const node of Object.values(modelArtifactFields)) {
+      if (node) node.textContent = "";
+    }
+    if (modelArtifactSummary) modelArtifactSummary.hidden = true;
+  }
+
+  function validModelArtifactSnapshot(artifact, routeKind) {
+    if (!artifact || typeof artifact !== "object" || Array.isArray(artifact)) return false;
+    const keys = Object.keys(artifact);
+    if (routeKind === "deterministic") {
+      return keys.length === 1 && artifact.status === "not_applicable";
+    }
+    if (artifact.status === "unregistered" || artifact.status === "invalid") {
+      return keys.length === 1;
+    }
+    if (artifact.status !== "registered") return false;
+
+    const text = (value) => typeof value === "string" && Boolean(value.trim());
+    const optionalText = (value) => value === null || text(value);
+    const sha256 = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
+    const decimalBytes = (value) => value === null
+      || (typeof value === "string" && /^[1-9][0-9]{0,18}$/.test(value));
+    const boundedTextList = (value) => Array.isArray(value)
+      && value.length <= 128
+      && value.every((item) => text(item));
+
+    if (!["embedded", "external_local", "cloud"].includes(artifact.kind)) return false;
+    if (!optionalText(artifact.model_version)) return false;
+    if (!text(artifact.source_reference) || !text(artifact.license_reference)) return false;
+    if (!["provider_identity", "sha256"].includes(artifact.integrity_basis)) return false;
+    if (!sha256(artifact.descriptor_digest)) return false;
+    if (!decimalBytes(artifact.size_bytes)) return false;
+    if (!boundedTextList(artifact.capabilities)) return false;
+    if (artifact.integrity_basis === "sha256") {
+      if (!sha256(artifact.sha256)) return false;
+    } else if (artifact.sha256 !== null) {
+      return false;
+    }
+
+    const resources = artifact.resources;
+    if (!resources || typeof resources !== "object" || Array.isArray(resources)) return false;
+    for (const field of [
+      "min_system_memory_bytes",
+      "min_available_memory_bytes",
+      "min_vram_bytes",
+      "recommended_memory_bytes",
+    ]) {
+      if (!decimalBytes(resources[field])) return false;
+    }
+    if (!boundedTextList(resources.cpu_architectures)) return false;
+    return true;
+  }
+
+  function renderModelArtifact(artifact) {
+    if (!modelArtifactPanel || !modelArtifactStatus) return;
+    clearModelArtifactSummary();
+    if (!artifact || artifact.status === "not_applicable") {
+      modelArtifactPanel.hidden = true;
+      modelArtifactStatus.textContent = "";
+      return;
+    }
+
+    modelArtifactPanel.hidden = false;
+    if (artifact.status === "unregistered") {
+      modelArtifactStatus.textContent =
+        "Для вибраної моделі немає зареєстрованих відомостей про походження артефакту.";
+      return;
+    }
+    if (artifact.status === "invalid") {
+      modelArtifactStatus.textContent =
+        "Зареєстровані відомості про походження моделі пошкоджені або несумісні. Не використовуйте їх як доказ цілісності.";
+      return;
+    }
+
+    const kindLabels = {
+      embedded: "вбудований",
+      external_local: "зовнішній локальний",
+      cloud: "хмарний",
+    };
+    const integrityLabels = {
+      provider_identity: "ідентичність постачальника",
+      sha256: "записаний SHA-256",
+    };
+    const resources = artifact.resources;
+    const resourceParts = [];
+    if (resources.min_system_memory_bytes !== null) {
+      resourceParts.push("мінімальна системна пам'ять: " + resources.min_system_memory_bytes + " байт");
+    }
+    if (resources.min_available_memory_bytes !== null) {
+      resourceParts.push("мінімальна вільна пам'ять: " + resources.min_available_memory_bytes + " байт");
+    }
+    if (resources.min_vram_bytes !== null) {
+      resourceParts.push("мінімальна відеопам'ять: " + resources.min_vram_bytes + " байт");
+    }
+    if (resources.recommended_memory_bytes !== null) {
+      resourceParts.push("рекомендована пам'ять: " + resources.recommended_memory_bytes + " байт");
+    }
+    if (resources.cpu_architectures.length > 0) {
+      resourceParts.push("архітектури CPU: " + resources.cpu_architectures.join(", "));
+    }
+
+    modelArtifactStatus.textContent =
+      "Реєстр містить валідний запис provenance для точного постачальника й моделі. Це не є доказом фактичного завантаження або запуску цих байтів.";
+    modelArtifactFields.kind.textContent = kindLabels[artifact.kind];
+    modelArtifactFields.version.textContent = artifact.model_version ?? "не вказано";
+    modelArtifactFields.integrity.textContent = integrityLabels[artifact.integrity_basis];
+    modelArtifactFields.sha256.textContent = artifact.sha256 ?? "не записано";
+    modelArtifactFields.descriptor_digest.textContent = artifact.descriptor_digest;
+    modelArtifactFields.source.textContent = artifact.source_reference;
+    modelArtifactFields.license.textContent = artifact.license_reference;
+    modelArtifactFields.size.textContent = artifact.size_bytes === null
+      ? "не вказано"
+      : artifact.size_bytes + " байт";
+    modelArtifactFields.capabilities.textContent = artifact.capabilities.length === 0
+      ? "не вказано"
+      : artifact.capabilities.join(", ");
+    modelArtifactFields.resources.textContent = resourceParts.length === 0
+      ? "не вказано"
+      : resourceParts.join("; ");
+    if (modelArtifactSummary) modelArtifactSummary.hidden = false;
+  }
+
   function validModelSnapshot(snapshot) {
     if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return false;
     if (snapshot.status === "invalid") return true;
@@ -884,6 +1022,7 @@
     ) return false;
     if (typeof snapshot.private_data_allowed !== "boolean") return false;
     if (typeof snapshot.credential_configured !== "boolean") return false;
+    if (!validModelArtifactSnapshot(snapshot.artifact, snapshot.route_kind)) return false;
     const text = (value) => typeof value === "string" && Boolean(value.trim());
     if (snapshot.route_kind === "deterministic") {
       return snapshot.provider_id === null
@@ -933,6 +1072,7 @@
     const valid = validModelSnapshot(snapshot);
     if (!valid || snapshot?.status === "invalid") {
       if (!modelDirty) modelRevision = 0;
+      renderModelArtifact(null);
       setModelControlsDisabled(true);
       modelStatus.textContent = snapshot?.status === "invalid"
         ? "Збережені налаштування моделі пошкоджені або несумісні. Нові завдання з моделлю заблоковано."
@@ -941,6 +1081,7 @@
     }
 
     if (snapshot.status === "missing") {
+      renderModelArtifact(null);
       if (!modelDirty) {
         modelRevision = 0;
         defaultModelDraft();
@@ -953,6 +1094,7 @@
     }
 
     if (modelDirty && snapshot.revision !== modelRevision) {
+      renderModelArtifact(null);
       setModelControlsDisabled(false);
       applyModelRouteControls(false);
       if (modelSave) modelSave.disabled = true;
@@ -971,6 +1113,7 @@
       modelInputs.timeout_seconds.value = String(snapshot.timeout_seconds);
     }
     applyModelRouteControls(false);
+    renderModelArtifact(modelDirty ? null : snapshot.artifact);
     const credentialNote = snapshot.route_kind === "openai_compatible"
       ? " Посилання на змінну середовища налаштовано, але навмисно не показується; для зміни API-маршруту введіть env:НАЗВА знову."
       : "";
@@ -1020,6 +1163,7 @@
   function markModelDirty() {
     if (modelPending) return;
     modelDirty = true;
+    renderModelArtifact(null);
     updateModelRouteDraft();
     if (modelStatus) {
       modelStatus.textContent = "Модель змінено, але ще не збережено.";
