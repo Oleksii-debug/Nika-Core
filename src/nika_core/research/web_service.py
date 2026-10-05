@@ -74,6 +74,16 @@ class HttpResearchService:
         document_limits: DocumentLimits | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
+        try:
+            repository_path = repository._store.path.resolve(strict=False)
+            network_path = network_repository._store.path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                "research repositories must use the same SQLite store"
+            ) from exc
+        if repository_path != network_path:
+            raise ValueError("research repositories must use the same SQLite store")
+
         self._repository = repository
         self._network = network_repository
         self._blobs = blob_store
@@ -437,6 +447,20 @@ class HttpResearchService:
                     disposition=RefreshDisposition.FAILED,
                     error_code="unexpected_not_modified",
                     message="HTTP 304 without a validated cached source",
+                )
+            elif (
+                result.disposition is RefreshDisposition.NOT_MODIFIED
+                and not self._cached_blob_is_verified(state)
+            ):
+                # Revalidate after the network round trip. A valid cached blob can
+                # disappear or be replaced after conditional-request preflight but
+                # before a 304 response arrives; that response must not promote
+                # unverifiable bytes to CURRENT.
+                result = replace(
+                    result,
+                    disposition=RefreshDisposition.FAILED,
+                    error_code="cached_blob_changed_during_refresh",
+                    message="cached HTTP content changed during conditional refresh",
                 )
             if result.retryable and attempt < self._policy.max_attempts:
                 self._record_fetch_attempt(
