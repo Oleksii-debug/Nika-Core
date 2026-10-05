@@ -8,6 +8,7 @@ from enum import IntEnum
 from .accounting import PortfolioLedger
 from .contracts import Bar, MarketEvent, Quote, TradingResearchError, require_aware_utc
 from .dataset import event_sort_key
+from .identity import instrument_identity, instrument_identity_sha256
 from .orders import (
     OrderState,
     OrderType,
@@ -107,11 +108,15 @@ class SimulationExecutionEngine:
                 quantity,
                 reason="no modeled liquidity",
             )
-        fill_price = apply_slippage(price, order.intent.side, order.policy.slippage_bps)
+        fill_price = _legal_fill_price(order, price)
         notional = fill_quantity * fill_price
         first_fill = quantity == order.intent.quantity
         fill = SimulatedFill(
-            fill_id=f"fill:{order.approval_id}:{time_slice.index}:{fill_quantity}",
+            fill_id=(
+                f"fill:{order.approval_id}:"
+                f"{instrument_identity_sha256(order.intent.instrument)}:"
+                f"{time_slice.index}:{fill_quantity}"
+            ),
             approval_id=order.approval_id,
             intent_id=order.intent.intent_id,
             instrument=order.intent.instrument,
@@ -129,11 +134,11 @@ class SimulationExecutionEngine:
     def _market_for(
         self, order: RiskApprovedOrder, time_slice: TimeSlice
     ) -> tuple[Decimal, Decimal] | None:
-        instrument_id = order.intent.instrument.instrument_id
+        identity = instrument_identity(order.intent.instrument)
         candidates = [
             event
             for event in time_slice.events
-            if event.instrument.instrument_id == instrument_id
+            if instrument_identity(event.instrument) == identity
         ]
         if not candidates:
             return None
@@ -169,6 +174,18 @@ class SimulationExecutionEngine:
         if order.intent.side is Side.BUY:
             return market_price <= limit
         return market_price >= limit
+
+
+def _legal_fill_price(order: RiskApprovedOrder, market_price: Decimal) -> Decimal:
+    slipped = apply_slippage(market_price, order.intent.side, order.policy.slippage_bps)
+    if order.intent.order_type is OrderType.MARKET:
+        return slipped
+    limit = order.intent.limit_price
+    if limit is None:
+        raise TradingResearchError("limit order missing limit_price")
+    if order.intent.side is Side.BUY:
+        return min(slipped, limit)
+    return max(slipped, limit)
 
 
 @dataclass(slots=True)
