@@ -276,3 +276,24 @@ async def test_untyped_champion_provider_failure_is_unknown_and_secret_minimized
     assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
     assert "secret raw provider detail" not in str(exc_info.value)
     assert port.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_champion_wrapper_rejects_forged_effect_binding_even_if_inner_receipts_match(
+    tmp_path,
+) -> None:
+    result = await _run(tmp_path, _ChampionEffectPort())
+    forged_binding = replace(
+        result.benchmark.binding,
+        frozen_package_sha256=_sha(b"forged-package"),
+    )
+    forged_receipts = tuple(
+        replace(receipt, binding_sha256=forged_binding.binding_sha256)
+        for receipt in result.benchmark.case_receipts
+    )
+    object.__setattr__(result.benchmark, "binding", forged_binding)
+    object.__setattr__(result.benchmark, "case_receipts", forged_receipts)
+
+    assert result.benchmark.revalidated().binding == forged_binding
+    with pytest.raises(ValueError, match="champion effect binding evidence changed"):
+        result.revalidated()
