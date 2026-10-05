@@ -672,7 +672,8 @@ class DesktopBackend:
 
     def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:
-            self._cancel_futures.pop(task_id, None)
+            if self._cancel_futures.get(task_id) is future:
+                self._cancel_futures.pop(task_id, None)
         if future.cancelled():
             self._record_background_failure(task_id, "desktop.runtime_cancel_interrupted")
             return
