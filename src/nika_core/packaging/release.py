@@ -724,6 +724,9 @@ def verify_distributable_evidence(
         return ("distributable:expected-product-version-format",)
     if not artifact_path.is_file():
         return ("distributable:missing-artifact",)
+    artifact_snapshot = _stable_release_file_snapshot(artifact_path, scan_secrets=False)
+    if artifact_snapshot is None:
+        return ("distributable:unstable-artifact",)
 
     payload = _read_evidence_object(evidence_path)
     if payload is None:
@@ -760,12 +763,12 @@ def verify_distributable_evidence(
     expected_size = payload.get("distributable_zip_size")
     if type(expected_size) is not int or expected_size < 0:
         findings.append("distributable:size-format")
-    elif artifact_path.stat().st_size != expected_size:
+    elif artifact_snapshot.size != expected_size:
         findings.append("distributable:size")
 
     expected_sha256 = payload.get("distributable_zip_sha256")
     if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256):
         findings.append("distributable:sha256-format")
-    elif _sha256(artifact_path) != expected_sha256:
+    elif artifact_snapshot.sha256 != expected_sha256:
         findings.append("distributable:sha256")
     return tuple(findings)
