@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 
 from nika_core.product_factory_incident_contracts import (
     INCIDENT_LIFECYCLE_SCHEMA,
-    IncidentLifecycleSnapshot,
     IncidentKind,
+    IncidentLifecycleSnapshot,
     IncidentSeverity,
     IncidentTrigger,
     ProductIncidentError,
@@ -158,8 +159,6 @@ def test_invalid_structure_is_rejected_before_record_hydration(payload: str) -> 
     ),
 )
 def test_direct_incident_trigger_rejects_utc_overflow(observed_at: str) -> None:
-    from datetime import datetime
-
     with pytest.raises(ProductIncidentError, match="representable in UTC"):
         IncidentTrigger(
             "project-a",
