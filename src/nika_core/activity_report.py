@@ -10,6 +10,7 @@ from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
 _MAX_SIGNED_64 = (1 << 63) - 1
 _MAX_GROUPED_ACTIVITY_ITEMS = 20
+_MAX_GROUP_LABEL_UTF8_BYTES = 4096
 _GROUPED_QUERY_LIMIT = _MAX_GROUPED_ACTIVITY_ITEMS + 1
 
 
@@ -96,6 +97,36 @@ class DailyActivityReportService:
             # Pin every projection below to one snapshot so concurrent durable writes cannot
             # produce a report assembled from different database states.
             conn.execute("BEGIN")
+            _validate_group_label_storage(
+                conn.execute(
+                    "SELECT typeof(new_state) AS storage_type, "
+                    "length(CAST(new_state AS BLOB)) AS byte_count "
+                    "FROM task_events WHERE created_at >= ? AND created_at < ? "
+                    "AND (typeof(new_state) <> 'text' "
+                    "OR length(CAST(new_state AS BLOB)) > ?) LIMIT 1",
+                    (start_iso, end_iso, _MAX_GROUP_LABEL_UTF8_BYTES),
+                ).fetchone()
+            )
+            _validate_group_label_storage(
+                conn.execute(
+                    "SELECT typeof(event_type) AS storage_type, "
+                    "length(CAST(event_type AS BLOB)) AS byte_count "
+                    "FROM audit_events WHERE created_at >= ? AND created_at < ? "
+                    "AND (typeof(event_type) <> 'text' "
+                    "OR length(CAST(event_type AS BLOB)) > ?) LIMIT 1",
+                    (start_iso, end_iso, _MAX_GROUP_LABEL_UTF8_BYTES),
+                ).fetchone()
+            )
+            _validate_group_label_storage(
+                conn.execute(
+                    "SELECT typeof(new_status) AS storage_type, "
+                    "length(CAST(new_status AS BLOB)) AS byte_count "
+                    "FROM experiment_events WHERE created_at >= ? AND created_at < ? "
+                    "AND (typeof(new_status) <> 'text' "
+                    "OR length(CAST(new_status AS BLOB)) > ?) LIMIT 1",
+                    (start_iso, end_iso, _MAX_GROUP_LABEL_UTF8_BYTES),
+                ).fetchone()
+            )
             task_transitions, task_transitions_truncated = _grouped_counts(
                 conn.execute(
                     "SELECT new_state AS value, COUNT(*) AS count "
@@ -261,6 +292,21 @@ def _valid_nonnegative_int(value: object) -> bool:
 
 def _valid_optional_nonnegative_int(value: object) -> bool:
     return value is None or _valid_nonnegative_int(value)
+
+
+def _validate_group_label_storage(row: object | None) -> None:
+    if row is None:
+        return
+    storage_type = row["storage_type"]  # type: ignore[index]
+    byte_count = row["byte_count"]  # type: ignore[index]
+    if storage_type != "text":
+        raise ValueError("grouped activity label must use SQLite TEXT storage")
+    if (
+        type(byte_count) is not int
+        or byte_count < 0
+        or byte_count > _MAX_GROUP_LABEL_UTF8_BYTES
+    ):
+        raise ValueError("grouped activity label exceeds safe UTF-8 storage bound")
 
 
 def _grouped_counts(
