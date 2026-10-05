@@ -139,3 +139,32 @@ def test_same_store_explicit_work_ownership_remains_supported(tmp_path: Path) ->
     assert host.ownership is ownership
     assert host._ownership is ownership
     assert host._ownership._store is store
+
+class _TruthinessForbiddenLedger(IdempotencyLedger):
+    def __bool__(self) -> bool:
+        raise AssertionError("idempotency truthiness must not execute")
+
+
+class _TruthinessForbiddenOwnership(ProductFactoryWorkOwnership):
+    def __bool__(self) -> bool:
+        raise AssertionError("ownership truthiness must not execute")
+
+
+def test_explicit_durable_authorities_are_selected_without_truthiness(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "factory.db")
+    store.initialize()
+    ledger = _TruthinessForbiddenLedger(store)
+    ownership = _TruthinessForbiddenOwnership(store)
+
+    host = ProductFactoryProgramHost(
+        store=store,
+        worker=_UnusedWorker(),
+        idempotency=ledger,
+        ownership=ownership,
+    )
+
+    assert host.idempotency is ledger
+    assert host._ledger is ledger
+    assert host.ownership is ownership
+    assert host._ownership is ownership
+
