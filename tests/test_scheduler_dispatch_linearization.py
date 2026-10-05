@@ -301,6 +301,40 @@ def test_same_typed_reordered_unicode_payload_keeps_valid_authority(
     assert jobs.get(installed.job_id).enabled is False
 
 
+
+def test_runtime_sync_retries_type_changed_definition_on_final_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs = ScheduledJobStore(_sqlite(tmp_path))
+    stale = _job(payload={"value": True})
+    replacement = replace(stale, payload={"value": 1})
+    jobs.upsert(stale)
+    original_get = jobs.get
+    read_count = 0
+
+    def replace_on_final_read(job_id: str) -> ScheduledJob | None:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 3:
+            jobs.upsert(replacement)
+        return original_get(job_id)
+
+    monkeypatch.setattr(jobs, "get", replace_on_final_read)
+    adapter = APSchedulerAdapter(jobs, lambda _action: lambda _payload: None)
+    installed: list[ScheduledJob] = []
+    monkeypatch.setattr(adapter, "_install", installed.append)
+
+    synced = adapter._sync_runtime_job(stale.job_id)
+
+    assert read_count >= 6
+    assert synced is not None
+    assert type(synced.payload["value"]) is int
+    assert len(installed) == 1
+    assert type(installed[0].payload["value"]) is int
+    assert jobs.get(stale.job_id) == replacement
+
+
 def test_runtime_sync_preserves_replacement_when_stale_suppression_loses_cas(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
