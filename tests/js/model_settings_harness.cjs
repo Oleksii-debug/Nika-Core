@@ -103,6 +103,11 @@ let dispatchMode = "success";
 let failRead = false;
 let deferredStateRead = null;
 const calls = [];
+const ack = (command, response) => ({
+  request_id: command.request_id,
+  focus_id: null,
+  ...response,
+});
 
 function safeModelSnapshot(payload) {
   const providerKind = payload.route_kind === "deterministic"
@@ -171,16 +176,32 @@ global.pywebview = { api: {
     calls.push(command);
     if (dispatchMode === "disconnect") throw new Error("PRIVATE_MODEL_CANARY");
     if (command.action_id === "settings.model.refresh") {
-      return { status: "completed", message: "Збережені налаштування моделі перечитано.", focus_id: "model-route-kind" };
+      return ack(command, {
+        status: "completed",
+        message: "Збережені налаштування моделі перечитано.",
+        focus_id: "model-route-kind",
+      });
     }
     if (command.action_id === "settings.model.configure" && dispatchMode === "reject-provider") {
-      return { status: "rejected", message: "Перевірте постачальника моделі.", focus_id: "model-provider" };
+      return ack(command, {
+        status: "rejected",
+        message: "Перевірте постачальника моделі.",
+        focus_id: "model-provider",
+      });
     }
     if (command.action_id === "settings.model.configure") {
       currentModel = safeModelSnapshot(command.payload);
-      return { status: "completed", message: "Модель збережено для нових завдань.", focus_id: "command-input" };
+      const response = ack(command, {
+        status: "completed",
+        message: "Модель збережено для нових завдань.",
+        focus_id: "command-input",
+      });
+      if (dispatchMode === "wrong-request-id") {
+        return {...response, request_id: "wrong-model-request"};
+      }
+      return response;
     }
-    return { status: "completed", message: "ok" };
+    return ack(command, { status: "completed", message: "ok" });
   },
   export_keymap: async () => ({ ok: true, data: "{}", message: "ok" }),
   import_keymap: async () => ({ ok: true, message: "ok" }),
@@ -561,5 +582,16 @@ const status = element("model-settings-status");
   assert.match(element("app-status").textContent, /Немає підтвердження зміни моделі/);
   assert.equal(JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_MODEL_CANARY"), false);
 
-  console.log("PASS: model settings + startup recovery renderer, Ctrl+Space keymap, draft/race, keyboard focus, safe credential reference, no blind retry");
+  dispatchMode = "wrong-request-id";
+  const beforeWrongRequest = calls.length;
+  click(save);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.length, beforeWrongRequest + 1, "Wrong model ACK identity must not trigger retry");
+  assert.match(element("app-status").textContent, /Немає підтвердження зміни моделі/);
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("wrong-model-request"),
+    false,
+  );
+
+  console.log("PASS: model settings + startup recovery renderer, Ctrl+Space keymap, draft/race, keyboard focus, safe credential reference, no blind retry, exact ACK identity");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
