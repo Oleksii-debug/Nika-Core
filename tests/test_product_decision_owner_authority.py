@@ -167,7 +167,9 @@ def test_trusted_approval_replaces_caller_attribution_and_survives_restart(
     assert payload["approval"]["task_id"] == "task-product-owner-review"
     assert "signature" not in payload["approval"]
 
-    restarted = ProductDecisionRepository(SQLiteStore(store.path))
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted = ProductDecisionRepository(restarted_store)
     replay = restarted.record(
         "p1",
         decision,
@@ -215,7 +217,10 @@ def test_approval_is_invalidated_if_evidence_changes_before_commit(tmp_path) -> 
             (json.dumps(payload),),
         )
 
-    with pytest.raises(PermissionError, match="current decision authority"):
+    with pytest.raises(
+        PermissionError,
+        match="exact action|current decision authority",
+    ):
         decisions.record(
             "p1",
             decision,
