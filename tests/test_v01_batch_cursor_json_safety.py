@@ -66,6 +66,7 @@ def _deep(depth: int) -> object:
         {"wide": [None] * 10_001},
         {"too_deep": _deep(33)},
         {"oversized": "я" * (_MAX_VALUE_BYTES // 2 + 1)},
+        {"k" * (_MAX_VALUE_BYTES + 1): 1},
         {"integer": 1 << 4_097},
     ],
 )
