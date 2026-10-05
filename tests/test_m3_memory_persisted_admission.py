@@ -555,3 +555,24 @@ def test_list_does_not_delete_expired_record_with_corrupt_persisted_key(
 
     with store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 1
+
+
+def test_purge_does_not_delete_expired_record_before_full_carrier_validation(
+    tmp_path: Path,
+) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ?, value_json = 'NaN' "
+            "WHERE memory_key = 'entry'",
+            (datetime(2035, 1, 1, tzinfo=UTC).isoformat(),),
+        )
+
+    with pytest.raises(ValueError, match="invalid stored memory JSON constant"):
+        memory.purge_expired(now=datetime(2036, 1, 1, tzinfo=UTC))
+
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_records WHERE memory_key = 'entry'"
+        ).fetchone()[0] == 1
