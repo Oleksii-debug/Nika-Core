@@ -307,11 +307,13 @@ class _FakeModel:
         target.mkdir(parents=True, exist_ok=True)
         (target / "adapter_model.safetensors").write_bytes(b"real-adapter-weights")
         (target / "adapter_config.json").write_text(
-            '{"base_model_name_or_path":"C:/private/model","r":4}',
+            (
+                '{"base_model_name_or_path":"C:/private/model","bias":"none",'
+                '"lora_alpha":8,"lora_dropout":0.0,"r":4,'
+                '"target_modules":["q_proj","v_proj"],"task_type":"CAUSAL_LM"}'
+            ),
             encoding="utf-8",
         )
-
-
 
 
 class _FakeSafeTensorReader:
@@ -547,3 +549,64 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     ]
     assert loaded.lora_r == 16
     assert loaded.seed == 99
+
+
+def test_adapter_config_snapshot_rejects_training_plan_mismatch(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    adapter_dir = tmp_path / "adapter-mismatch"
+    adapter_dir.mkdir()
+    (adapter_dir / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": "C:/private/model",
+                "bias": "none",
+                "lora_alpha": 8,
+                "lora_dropout": 0.0,
+                "r": 99,
+                "target_modules": ["q_proj", "v_proj"],
+                "task_type": "CAUSAL_LM",
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="adapter_config_training_plan_mismatch"):
+        peft._adapter_config_snapshot(adapter_dir, request, config)
+
+
+def test_adapter_config_snapshot_removes_private_base_path_and_rejects_other_paths(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    adapter_dir = tmp_path / "adapter-private"
+    adapter_dir.mkdir()
+    payload = {
+        "base_model_name_or_path": "C:/private/model",
+        "bias": "none",
+        "lora_alpha": 8,
+        "lora_dropout": 0.0,
+        "r": 4,
+        "target_modules": ["q_proj", "v_proj"],
+        "task_type": "CAUSAL_LM",
+    }
+    path = adapter_dir / "adapter_config.json"
+    path.write_text(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+
+    snapshot = peft._adapter_config_snapshot(adapter_dir, request, config)
+    assert snapshot["base_model_name_or_path"] == request.base_artifact_ref
+    assert "C:/private/model" not in json.dumps(snapshot)
+
+    payload["modules_to_save"] = ["C:/private/other"]
+    path.write_text(
+        json.dumps(payload, separators=(",", ":"), sort_keys=True),
+        encoding="utf-8",
+    )
+    with pytest.raises(peft.PeftTrainerError, match="adapter_config_private_path"):
+        peft._adapter_config_snapshot(adapter_dir, request, config)
