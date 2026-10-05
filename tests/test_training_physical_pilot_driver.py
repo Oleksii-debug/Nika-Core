@@ -59,6 +59,29 @@ def _config(tmp_path: Path) -> driver.PhysicalPilotConfig:
     return driver.PhysicalPilotConfig.from_json(raw)
 
 
+def test_bounded_reader_rejects_oversized_file(tmp_path: Path) -> None:
+    path = tmp_path / "bounded.bin"
+    path.write_bytes(b"x" * 9)
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="size is invalid"):
+        driver._read_bounded_file(path, max_bytes=8, name="test input")
+
+
+def test_bounded_reader_accepts_exact_limit(tmp_path: Path) -> None:
+    path = tmp_path / "bounded.bin"
+    path.write_bytes(b"x" * 8)
+
+    assert driver._read_bounded_file(path, max_bytes=8, name="test input") == b"x" * 8
+
+
+def test_config_file_rejects_oversized_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "physical-pilot.json"
+    path.write_bytes(b"x" * (driver._CONFIG_MAX_BYTES + 1))
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="config size is invalid"):
+        driver._read_config(path)
+
+
 def test_config_parses_exact_runtime_and_resource_authority(tmp_path: Path) -> None:
     config = _config(tmp_path)
 

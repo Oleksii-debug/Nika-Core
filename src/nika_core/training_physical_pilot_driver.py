@@ -49,6 +49,7 @@ from nika_core.training_scale import TrainingScalePlan, TrainingScaleTier, autho
 _LOG = logging.getLogger(__name__)
 _CONFIG_SCHEMA_VERSION = 1
 _CONFIG_MAX_BYTES = 64 * 1024
+_FROZEN_PACKAGE_MAX_BYTES = 1024 * 1024
 _MAX_TEXT_BYTES = 4096
 _MAX_REPORT_BYTES = 64 * 1024
 _TARGET_MODULE_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
@@ -99,6 +100,17 @@ class PhysicalPilotDriverError(RuntimeError):
 
 def _fail(message: str) -> NoReturn:
     raise PhysicalPilotDriverError(message)
+
+
+def _read_bounded_file(path: Path, *, max_bytes: int, name: str) -> bytes:
+    try:
+        with path.open("rb") as handle:
+            payload = handle.read(max_bytes + 1)
+    except OSError as exc:
+        raise PhysicalPilotDriverError(f"{name} could not be read") from exc
+    if not payload or len(payload) > max_bytes:
+        _fail(f"{name} size is invalid")
+    return payload
 
 
 def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -710,10 +722,11 @@ def run_physical_pilot_from_config(
         protected_roots=(blob_store_root, model_dir),
     )
 
-    try:
-        package_bytes = frozen_package_path.read_bytes()
-    except OSError as exc:
-        raise PhysicalPilotDriverError("frozen learning package could not be read") from exc
+    package_bytes = _read_bounded_file(
+        frozen_package_path,
+        max_bytes=_FROZEN_PACKAGE_MAX_BYTES,
+        name="frozen learning package",
+    )
     package = FrozenLearningPackage.from_json(
         package_bytes,
         expected_manifest_sha256=config.frozen_package_sha256,
@@ -880,10 +893,11 @@ def run_physical_pilot_from_config(
 
 
 def _read_config(path: Path) -> PhysicalPilotConfig:
-    try:
-        raw = path.read_bytes()
-    except OSError as exc:
-        raise PhysicalPilotDriverError("physical pilot config could not be read") from exc
+    raw = _read_bounded_file(
+        path,
+        max_bytes=_CONFIG_MAX_BYTES,
+        name="physical pilot config",
+    )
     return PhysicalPilotConfig.from_json(raw)
 
 
