@@ -5,11 +5,13 @@ from dataclasses import replace
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ExperimentEngine,
     ExperimentStatus,
     InMemoryExperimentRepository,
     PromotionPolicy,
+    SQLiteExperimentRepository,
 )
 from nika_core.model_artifacts import (
     ModelArtifactDescriptor,
@@ -443,3 +445,58 @@ async def test_comparison_rejects_altered_held_out_set_before_persistence(tmp_pa
 
     with pytest.raises(KeyError):
         repository.get("training-job-1-old-vs-new")
+
+
+@pytest.mark.asyncio
+async def test_comparison_resumes_partial_evidence_after_sqlite_restart(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    config = _config()
+    policy = _policy()
+    definition = build_experiment_definition(
+        experiment_id="training-job-1-old-vs-new",
+        champion=champion_result.report.candidate,
+        challengers=(challenger_result.report.candidate,),
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint="perm:test",
+    )
+    observations = (
+        *benchmark_observations(
+            champion_result.report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ),
+        *benchmark_observations(
+            challenger_result.report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ),
+    )
+    database = tmp_path / "nika.db"
+    first_store = SQLiteStore(database)
+    first_store.initialize()
+    first_repository = SQLiteExperimentRepository(first_store)
+    first_engine = ExperimentEngine(first_repository)
+    first_engine.create(definition)
+    first_engine.start(definition.experiment_id)
+    first_engine.record(definition.experiment_id, observations[0])
+
+    reopened_store = SQLiteStore(database)
+    reopened_store.initialize()
+    reopened_repository = SQLiteExperimentRepository(reopened_store)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint="perm:test",
+        experiment_id=definition.experiment_id,
+        repository=reopened_repository,
+    )
+
+    assert result.experiment_snapshot.status is ExperimentStatus.PROMOTED
+    assert len(result.experiment_snapshot.observations) == 4
+    recovered = reopened_repository.get(definition.experiment_id)
+    assert recovered == result.experiment_snapshot
