@@ -378,6 +378,18 @@ class HttpxResearchFetcher:
                         headers.pop("If-Modified-Since", None)
                         continue
                     if status == 304:
+                        if not (
+                            headers.get("If-None-Match")
+                            or headers.get("If-Modified-Since")
+                        ):
+                            return HttpFetchResult(
+                                RefreshDisposition.FAILED,
+                                requested_url,
+                                current_url,
+                                status,
+                                error_code="unexpected_not_modified",
+                                message="HTTP 304 without conditional request headers",
+                            )
                         return HttpFetchResult(
                             RefreshDisposition.NOT_MODIFIED,
                             requested_url,
