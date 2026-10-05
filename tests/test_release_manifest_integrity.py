@@ -559,3 +559,38 @@ def test_snapshot_open_uses_nonblocking_descriptor_flag(
     if nonblock:
         assert observed_flags[0] & nonblock
 
+def test_snapshot_rejects_nonregular_descriptor_before_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    read_fd, write_fd = release_module.os.pipe()
+
+    class NonRegularHandle:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, _exc_type, _exc, _tb):
+            release_module.os.close(read_fd)
+            release_module.os.close(write_fd)
+            return False
+
+        def fileno(self) -> int:
+            return read_fd
+
+        def read(self, _size: int = -1) -> bytes:
+            raise AssertionError("non-regular descriptor must be rejected before read")
+
+    monkeypatch.setattr(
+        release_module,
+        "_open_release_file_for_snapshot",
+        lambda _path: NonRegularHandle(),
+    )
+
+    assert (
+        release_module._stable_release_file_snapshot(
+            tmp_path / "substituted-entry",
+            scan_secrets=True,
+        )
+        is None
+    )
+
