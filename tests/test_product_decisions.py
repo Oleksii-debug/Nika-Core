@@ -423,12 +423,18 @@ def test_non_lock_commit_operational_error_is_not_reclassified(
     class CommitFailureConnection:
         def __init__(self, conn: sqlite3.Connection) -> None:
             self._conn = conn
+            self._fail_commit = False
 
         def execute(self, *args, **kwargs):
-            return self._conn.execute(*args, **kwargs)
+            result = self._conn.execute(*args, **kwargs)
+            if args and args[0] == "BEGIN IMMEDIATE":
+                self._fail_commit = True
+            return result
 
         def commit(self) -> None:
-            raise sqlite3.OperationalError("synthetic non-lock commit failure")
+            if self._fail_commit:
+                raise sqlite3.OperationalError("synthetic non-lock commit failure")
+            self._conn.commit()
 
         def rollback(self) -> None:
             self._conn.rollback()
