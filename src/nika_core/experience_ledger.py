@@ -192,6 +192,42 @@ class ExperienceLedger:
         delay_seconds: float | None = None,
         clock_jump_seconds: float | None = None,
     ) -> ExperienceEvent:
+        with self._store.connection() as conn:
+            return self.record_with_connection(
+                conn,
+                event_key=event_key,
+                kind=kind,
+                outcome=outcome,
+                reason_code=reason_code,
+                task_id=task_id,
+                occurred_at=occurred_at,
+                attempt=attempt,
+                delay_seconds=delay_seconds,
+                clock_jump_seconds=clock_jump_seconds,
+            )
+
+    def record_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        event_key: str,
+        kind: ContinuityKind,
+        outcome: ContinuityOutcome,
+        reason_code: str,
+        task_id: str | None = None,
+        occurred_at: datetime | None = None,
+        attempt: int | None = None,
+        delay_seconds: float | None = None,
+        clock_jump_seconds: float | None = None,
+    ) -> ExperienceEvent:
+        """Record one event inside the caller's existing SQLite transaction.
+
+        This method never commits or rolls back. Runtime producers can therefore make
+        continuity evidence atomic with the task/job/audit state that the evidence describes.
+        """
+
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
         if type(kind) is not ContinuityKind:
             raise TypeError("kind must be a ContinuityKind")
         if type(outcome) is not ContinuityOutcome:
@@ -223,50 +259,49 @@ class ExperienceLedger:
             clock_jump_seconds=clock_jump_seconds,
         )
 
-        with self._store.connection() as conn:
-            self._assert_schema_ready(conn)
-            conn.execute(
-                "INSERT INTO continuity_experience_events("
-                "event_key, task_id, kind, outcome, reason_code, occurred_at, attempt, "
-                "delay_seconds, clock_jump_seconds, fingerprint"
-                ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-                "ON CONFLICT(event_key) DO NOTHING",
-                (
-                    event_key,
-                    task_id,
-                    kind.value,
-                    outcome.value,
-                    reason_code,
-                    occurred_text,
-                    attempt,
-                    delay_seconds,
-                    clock_jump_seconds,
-                    fingerprint,
-                ),
+        self._assert_schema_ready(conn)
+        conn.execute(
+            "INSERT INTO continuity_experience_events("
+            "event_key, task_id, kind, outcome, reason_code, occurred_at, attempt, "
+            "delay_seconds, clock_jump_seconds, fingerprint"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(event_key) DO NOTHING",
+            (
+                event_key,
+                task_id,
+                kind.value,
+                outcome.value,
+                reason_code,
+                occurred_text,
+                attempt,
+                delay_seconds,
+                clock_jump_seconds,
+                fingerprint,
+            ),
+        )
+        row = conn.execute(
+            "SELECT * FROM continuity_experience_events WHERE event_key = ?",
+            (event_key,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("continuity experience event did not persist")
+        expected_fingerprint = fingerprint
+        if generated_occurrence:
+            expected_fingerprint = self._fingerprint_payload(
+                event_key=event_key,
+                task_id=task_id,
+                kind=kind,
+                outcome=outcome,
+                reason_code=reason_code,
+                occurred_at=row["occurred_at"],
+                attempt=attempt,
+                delay_seconds=delay_seconds,
+                clock_jump_seconds=clock_jump_seconds,
             )
-            row = conn.execute(
-                "SELECT * FROM continuity_experience_events WHERE event_key = ?",
-                (event_key,),
-            ).fetchone()
-            if row is None:
-                raise RuntimeError("continuity experience event did not persist")
-            expected_fingerprint = fingerprint
-            if generated_occurrence:
-                expected_fingerprint = self._fingerprint_payload(
-                    event_key=event_key,
-                    task_id=task_id,
-                    kind=kind,
-                    outcome=outcome,
-                    reason_code=reason_code,
-                    occurred_at=row["occurred_at"],
-                    attempt=attempt,
-                    delay_seconds=delay_seconds,
-                    clock_jump_seconds=clock_jump_seconds,
-                )
-            if row["fingerprint"] != expected_fingerprint:
-                raise ExperienceConflictError(
-                    "continuity experience event key conflicts with existing durable evidence"
-                )
+        if row["fingerprint"] != expected_fingerprint:
+            raise ExperienceConflictError(
+                "continuity experience event key conflicts with existing durable evidence"
+            )
         return self._from_row(row)
 
     def get(self, event_key: str) -> ExperienceEvent | None:
