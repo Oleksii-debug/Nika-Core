@@ -528,6 +528,8 @@ class ProductFactoryProgramHost:
                 durable_status, marker_detail = self._mark_uncertain_with_status(
                     operation_key,
                     lease,
+                    host_task_id=host_task_id,
+                    request=request,
                 )
                 self._release_best_effort(lease)
                 return _outcome(
@@ -638,6 +640,8 @@ class ProductFactoryProgramHost:
                         durable_status, marker_detail = self._mark_uncertain_with_status(
                             operation_key,
                             lease,
+                            host_task_id=host_task_id,
+                            request=request,
                         )
                         return _outcome(
                             request,
@@ -913,6 +917,8 @@ class ProductFactoryProgramHost:
                 durable_status, marker_detail = self._mark_uncertain_with_status(
                     operation_key,
                     lease,
+                    host_task_id=host_task_id,
+                    request=request,
                 )
             if release_lease:
                 self._release_best_effort(lease)
