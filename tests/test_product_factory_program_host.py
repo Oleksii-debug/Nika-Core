@@ -1079,3 +1079,72 @@ def test_worker_reservation_collision_does_not_cancel_independent_component(
     restored = host.restore_latest(host_task_id=task_id, binding=binding)
     assert _record(restored, collided.component_id).state is WorkState.RUNNING
     assert _record(restored, independent.component_id).state is WorkState.REVIEW_REQUIRED
+
+
+@pytest.mark.parametrize(
+    "malformed", ("wrong_carrier", "nontext_phase", "blank_phase", "nontext_token")
+)
+def test_invalid_inspected_recovery_state_cannot_reach_worker_and_can_retry(
+    tmp_path, malformed: str
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    worker.fail_dispatch.add(request.component_id)
+    host = ProductFactoryProgramHost(store, worker)
+    _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+
+    if malformed == "wrong_carrier":
+        untrusted = {"phase": "interrupted", "opaque_token": "resume"}
+    else:
+        # Simulate an external adapter bypassing frozen-dataclass construction.
+        untrusted = object.__new__(RecoveryState)
+        phase = 1 if malformed == "nontext_phase" else "interrupted"
+        if malformed == "blank_phase":
+            phase = " "
+        token = b"invalid" if malformed == "nontext_token" else "resume"
+        object.__setattr__(untrusted, "phase", phase)
+        object.__setattr__(untrusted, "opaque_token", token)
+    worker.recovery_states[request.work_id] = untrusted  # type: ignore[assignment]
+    first = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+    assert len(first) == 1
+    assert first[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert worker.recover_calls == []
+    assert worker.inspect_calls == [request.work_id]
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.UNCERTAIN
+
+    # An invalid inspection is not a terminal block: a later valid observation
+    # can reconcile the original exact work ID without a duplicate dispatch.
+    worker.recovery_states[request.work_id] = RecoveryState("interrupted", "resume")
+    recovered = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+    assert len(recovered) == 1
+    assert recovered[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    assert len(worker.dispatch_calls) == 1
+    assert len(worker.recover_calls) == 1
+    assert worker.recover_calls[0][0].work_id == request.work_id
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.COMPLETED
