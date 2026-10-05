@@ -10,9 +10,6 @@ from pathlib import Path, PurePath
 from types import ModuleType
 from typing import Any, Protocol
 
-_MAX_RUNNER_EVENTS = 10_000
-
-
 from nika_core.product_factory_deployment import (
     DeploymentFabricError,
     DeploymentIntent,
@@ -22,6 +19,8 @@ from nika_core.product_factory_deployment import (
     ProviderInspection,
     RollbackEvidence,
 )
+
+_MAX_RUNNER_EVENTS = 10_000
 
 
 class StagingAdapterError(DeploymentFabricError):
