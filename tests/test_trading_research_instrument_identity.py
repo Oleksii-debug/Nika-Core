@@ -117,7 +117,7 @@ def test_symbol_only_mark_cannot_cross_the_full_identity_boundary() -> None:
     ledger.apply_fill(_fill(_INSTRUMENT_A, "fill-a"))
 
     with pytest.raises(TradingResearchError, match="positive mark required"):
-        ledger.snapshot({"SAME": Decimal(100)})  # type: ignore[dict-item]
+        ledger.snapshot({"SAME": Decimal(100)})
 
 
 def test_replay_never_executes_against_other_venue_market_data() -> None:
