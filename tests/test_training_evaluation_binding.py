@@ -353,3 +353,12 @@ def test_cloud_descriptor_cannot_authorize_physical_trained_challenger(
         match="local model artifact",
     ):
         _bind(values, allowed_root=tmp_path)
+
+
+def test_binding_digest_revalidates_constructor_bypass_mutation(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    binding = _bind(values, allowed_root=tmp_path)
+    object.__setattr__(binding, "challenger_sha256", "not-a-digest")
+
+    with pytest.raises(ValueError, match="challenger_sha256"):
+        _ = binding.binding_sha256
