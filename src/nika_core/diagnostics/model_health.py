@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -387,11 +388,42 @@ class OllamaModelHealthProbe:
         return type(status_code) is int and 200 <= status_code < 300
 
     @staticmethod
-    def _models(response: httpx.Response) -> set[str] | None:
+    def _json_body(response: httpx.Response) -> object | None:
+        """Decode bounded real HTTP JSON without ambiguous object authority."""
+
+        if type(response) is not httpx.Response:
+            try:
+                return response.json()
+            except (ValueError, TypeError, RecursionError):
+                return None
+
+        def object_without_duplicates(
+            pairs: list[tuple[str, object]],
+        ) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("duplicate JSON object key")
+                result[key] = value
+            return result
+
+        def reject_nonstandard_constant(_value: str) -> object:
+            raise ValueError("non-standard JSON numeric constant")
+
         try:
-            body = response.json()
-        except (ValueError, TypeError, RecursionError):
-            # Deep but syntactically valid provider JSON is untrusted health evidence.
+            text = response.content.decode("utf-8")
+            return json.loads(
+                text,
+                object_pairs_hook=object_without_duplicates,
+                parse_constant=reject_nonstandard_constant,
+            )
+        except (UnicodeDecodeError, ValueError, TypeError, RecursionError):
+            return None
+
+    @staticmethod
+    def _models(response: httpx.Response) -> set[str] | None:
+        body = OllamaModelHealthProbe._json_body(response)
+        if body is None:
             return None
         if type(body) is not dict:
             return None
