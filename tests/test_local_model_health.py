@@ -101,6 +101,7 @@ def _probe(
     running: object | None = None,
     evidence: _Evidence | None = None,
     base_url: str = "http://localhost:11434",
+    model_id: str = "local-model:1",
 ) -> tuple[OllamaModelHealthProbe, list[str]]:
     base = base_url.rstrip("/")
     calls: list[str] = []
@@ -109,7 +110,7 @@ def _probe(
         responses[f"{base}/api/ps"] = running
     return (
         OllamaModelHealthProbe(
-            model_id="local-model:1",
+            model_id=model_id,
             base_url=base_url,
             evidence_port=evidence,
             client_factory=_factory(responses, calls),
@@ -269,6 +270,62 @@ def test_malformed_catalog_item_proves_reachability_only(item: dict[str, object]
     assert snapshot.model_present is ModelHealthFact.UNKNOWN
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
     assert calls == ["http://localhost:11434/api/tags"]
+
+
+def test_contradictory_catalog_identity_does_not_prove_model_presence() -> None:
+    probe, calls = _probe(
+        tags=_Response(
+            {
+                "models": [
+                    {"model": "other-model:1", "name": "local-model:1"},
+                ]
+            }
+        )
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["http://localhost:11434/api/tags"]
+
+
+def test_contradictory_running_identity_does_not_prove_model_readiness() -> None:
+    probe, calls = _probe(
+        tags=_Response({"models": [{"model": "local-model:1"}]}),
+        running=_Response(
+            {
+                "models": [
+                    {"model": "other-model:1", "name": "local-model:1"},
+                ]
+            }
+        ),
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == [
+        "http://localhost:11434/api/tags",
+        "http://localhost:11434/api/ps",
+    ]
+
+
+def test_dual_identity_latest_alias_remains_authoritative() -> None:
+    alias_entry = {"model": "local-model", "name": "local-model:latest"}
+    probe, _ = _probe(
+        tags=_Response({"models": [alias_entry]}),
+        running=_Response({"models": [alias_entry]}),
+        model_id="local-model",
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.YES
 
 
 def test_malformed_catalog_proves_reachability_only() -> None:
