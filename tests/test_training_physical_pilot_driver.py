@@ -126,3 +126,75 @@ def test_duplicate_json_field_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(driver.PhysicalPilotDriverError, match="invalid JSON"):
         driver.PhysicalPilotConfig.from_json(duplicate)
+
+def _report() -> driver.PhysicalTrainingPilotReport:
+    return driver.PhysicalTrainingPilotReport(
+        job_id="pilot-job",
+        base_sha256="1" * 64,
+        frozen_package_sha256="2" * 64,
+        training_material_sha256="3" * 64,
+        scale_authorization_sha256="4" * 64,
+        execution_plan_sha256="5" * 64,
+        job_fingerprint="6" * 64,
+        paused_checkpoint_id="pause-checkpoint",
+        restart_checkpoint_id="restart-checkpoint",
+        completed_checkpoint_id="complete-checkpoint",
+        candidate_artifact_ref="models/pilot-candidate",
+        candidate_descriptor_sha256="7" * 64,
+        candidate_registry_key="8" * 64,
+        candidate_sha256="9" * 64,
+        candidate_byte_count=123,
+        completed_steps=2,
+    )
+
+
+def test_report_writer_publishes_complete_canonical_json(tmp_path: Path) -> None:
+    path = tmp_path / "physical-pilot-report.json"
+    report = _report()
+
+    driver._write_report(path, report)
+
+    assert path.read_text(encoding="utf-8") == report.to_json() + "\n"
+    assert not tuple(tmp_path.glob(".physical-pilot-report.*.tmp"))
+
+
+def test_report_writer_never_clobbers_existing_evidence(tmp_path: Path) -> None:
+    path = tmp_path / "physical-pilot-report.json"
+    path.write_bytes(b"existing-evidence")
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="already exists"):
+        driver._write_report(path, _report())
+
+    assert path.read_bytes() == b"existing-evidence"
+    assert not tuple(tmp_path.glob(".physical-pilot-report.*.tmp"))
+
+
+def test_report_writer_cleans_temporary_after_publish_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "physical-pilot-report.json"
+    monkeypatch.setattr(driver, "_is_windows", lambda: False)
+
+    def fail_link(
+        source: Path,
+        destination: Path,
+        *,
+        follow_symlinks: bool,
+    ) -> None:
+        assert source.parent == tmp_path
+        assert destination == path
+        assert follow_symlinks is False
+        raise OSError("synthetic publish failure")
+
+    monkeypatch.setattr(driver.os, "link", fail_link)
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="could not be persisted",
+    ):
+        driver._write_report(path, _report())
+
+    assert not path.exists()
+    assert not tuple(tmp_path.glob(".physical-pilot-report.*.tmp"))
+
