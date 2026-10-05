@@ -102,6 +102,8 @@ def _report(
             resource_after=None,
             accelerator_before=None,
             accelerator_after=None,
+            evaluation_weight=float(case.weight),
+            pass_score=float(case.pass_score),
         )
         for case, score, latency_ms in zip(
             evaluation.cases,
@@ -111,6 +113,9 @@ def _report(
         )
     )
     config = _execution_config() if execution_config is None else execution_config
+    weighted_quality = sum(
+        item.score * item.evaluation_weight for item in results
+    ) / sum(item.evaluation_weight for item in results)
     return CandidateBenchmarkReport(
         candidate=candidate,
         run=BenchmarkRunEvidence(
@@ -129,7 +134,7 @@ def _report(
         execution_config_sha256=config.evidence_sha256,
         evaluation_purpose=evaluation.purpose,
         case_results=results,
-        weighted_quality_score=sum(quality) / len(quality),
+        weighted_quality_score=weighted_quality,
         task_pass_rate=sum(item.passed for item in results) / len(results),
         completion_rate=1.0,
         mean_latency_ms=sum(latency) / len(latency),
