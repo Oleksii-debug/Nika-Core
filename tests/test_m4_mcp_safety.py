@@ -571,7 +571,7 @@ def test_mcp_call_rejects_recursive_nested_argument_before_transport() -> None:
         ({"value": "x" * 1_048_576}, "safe UTF-8 byte limit"),
         ({"value": [0] * 10_001}, "safe node limit"),
         ({"value": 1 << 4096}, "safe integer size"),
-        ({"value": "\n" * 200_000}, "safe UTF-8 byte limit"),
+        ({"value": "\n" * 600_000}, "safe UTF-8 byte limit"),
         ({"x" * 1_048_576: "small"}, "safe UTF-8 byte limit"),
     ],
 )
