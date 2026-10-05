@@ -279,6 +279,45 @@ def test_task_change_during_confirmation_rolls_back_grant_and_does_not_bind(
     assert audit_count == 0
 
 
+@pytest.mark.parametrize(
+    ("field", "mutated"),
+    (
+        ("provider_id", "forged-provider"),
+        ("model", "forged-model"),
+        ("network_host", "forged.example.test"),
+    ),
+)
+def test_confirmation_callback_cannot_mutate_granted_authority(
+    tmp_path: Path,
+    field: str,
+    mutated: str,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        object.__setattr__(request, field, mutated)
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: NOW,
+    )
+
+    service.admit_created_task(record)
+
+    assert getattr(prompts[0], field) == mutated
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    _authorize(service, record.task_id)
+
+
 def test_cloud_denial_creates_no_spendable_authority(tmp_path: Path) -> None:
     store = _store(tmp_path)
     settings = _settings(store)
