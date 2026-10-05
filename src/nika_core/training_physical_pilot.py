@@ -49,12 +49,12 @@ _REQUIRED_REPORT_FIELDS = {
     "job_id",
     "model_dir_manifest_sha256",
     "paused_checkpoint_id",
-    "previous_adapter_sha256",
+    "previous_adapter_tensors_sha256",
     "restart_checkpoint_id",
     "platform",
     "scale_authorization_sha256",
     "schema_version",
-    "trained_adapter_sha256",
+    "trained_adapter_tensors_sha256",
     "trainer_artifact_id",
     "trainer_implementation_sha256",
     "trainer_sha256",
@@ -183,8 +183,8 @@ class PhysicalTrainingPilotReport:
     job_fingerprint: str
     consumed_materials_sha256: str
     model_dir_manifest_sha256: str
-    previous_adapter_sha256: str
-    trained_adapter_sha256: str
+    previous_adapter_tensors_sha256: str
+    trained_adapter_tensors_sha256: str
     trainer_artifact_id: str
     trainer_implementation_sha256: str
     trainer_sha256: str
@@ -223,8 +223,8 @@ class PhysicalTrainingPilotReport:
             (self.job_fingerprint, "job_fingerprint"),
             (self.consumed_materials_sha256, "consumed_materials_sha256"),
             (self.model_dir_manifest_sha256, "model_dir_manifest_sha256"),
-            (self.previous_adapter_sha256, "previous_adapter_sha256"),
-            (self.trained_adapter_sha256, "trained_adapter_sha256"),
+            (self.previous_adapter_tensors_sha256, "previous_adapter_tensors_sha256"),
+            (self.trained_adapter_tensors_sha256, "trained_adapter_tensors_sha256"),
             (self.trainer_artifact_id, "trainer_artifact_id"),
             (self.trainer_implementation_sha256, "trainer_implementation_sha256"),
             (self.trainer_sha256, "trainer_sha256"),
@@ -235,8 +235,8 @@ class PhysicalTrainingPilotReport:
         ):
             _require_sha256(value, name=name)
         if hmac.compare_digest(
-            self.previous_adapter_sha256,
-            self.trained_adapter_sha256,
+            self.previous_adapter_tensors_sha256,
+            self.trained_adapter_tensors_sha256,
         ):
             _fail("physical pilot did not prove trainable adapter weight mutation")
         if len(
@@ -273,12 +273,12 @@ class PhysicalTrainingPilotReport:
             "job_id": self.job_id,
             "model_dir_manifest_sha256": self.model_dir_manifest_sha256,
             "paused_checkpoint_id": self.paused_checkpoint_id,
-            "previous_adapter_sha256": self.previous_adapter_sha256,
+            "previous_adapter_tensors_sha256": self.previous_adapter_tensors_sha256,
             "restart_checkpoint_id": self.restart_checkpoint_id,
             "platform": self.platform,
             "scale_authorization_sha256": self.scale_authorization_sha256,
             "schema_version": self.schema_version,
-            "trained_adapter_sha256": self.trained_adapter_sha256,
+            "trained_adapter_tensors_sha256": self.trained_adapter_tensors_sha256,
             "trainer_artifact_id": self.trainer_artifact_id,
             "trainer_implementation_sha256": self.trainer_implementation_sha256,
             "trainer_sha256": self.trainer_sha256,
@@ -325,8 +325,8 @@ class PhysicalTrainingPilotReport:
             job_fingerprint=value["job_fingerprint"],
             consumed_materials_sha256=value["consumed_materials_sha256"],
             model_dir_manifest_sha256=value["model_dir_manifest_sha256"],
-            previous_adapter_sha256=value["previous_adapter_sha256"],
-            trained_adapter_sha256=value["trained_adapter_sha256"],
+            previous_adapter_tensors_sha256=value["previous_adapter_tensors_sha256"],
+            trained_adapter_tensors_sha256=value["trained_adapter_tensors_sha256"],
             trainer_artifact_id=value["trainer_artifact_id"],
             trainer_implementation_sha256=value["trainer_implementation_sha256"],
             trainer_sha256=value["trainer_sha256"],
@@ -453,8 +453,8 @@ def _peft_candidate_manifest_evidence(
     names = (
         "consumed_materials_sha256",
         "model_dir_manifest_sha256",
-        "previous_adapter_sha256",
-        "trained_adapter_sha256",
+        "previous_adapter_tensors_sha256",
+        "trained_adapter_tensors_sha256",
         "trainer_artifact_id",
         "trainer_implementation_sha256",
         "trainer_sha256",
@@ -465,8 +465,8 @@ def _peft_candidate_manifest_evidence(
         for name in names
     }
     if hmac.compare_digest(
-        evidence["previous_adapter_sha256"],
-        evidence["trained_adapter_sha256"],
+        evidence["previous_adapter_tensors_sha256"],
+        evidence["trained_adapter_tensors_sha256"],
     ):
         _fail("PEFT candidate manifest does not prove adapter weight mutation")
     return evidence
@@ -563,8 +563,8 @@ def build_physical_training_pilot_report(
         job_fingerprint=completed.job_fingerprint,
         consumed_materials_sha256=manifest_evidence["consumed_materials_sha256"],
         model_dir_manifest_sha256=manifest_evidence["model_dir_manifest_sha256"],
-        previous_adapter_sha256=manifest_evidence["previous_adapter_sha256"],
-        trained_adapter_sha256=manifest_evidence["trained_adapter_sha256"],
+        previous_adapter_tensors_sha256=manifest_evidence["previous_adapter_tensors_sha256"],
+        trained_adapter_tensors_sha256=manifest_evidence["trained_adapter_tensors_sha256"],
         trainer_artifact_id=manifest_evidence["trainer_artifact_id"],
         trainer_implementation_sha256=manifest_evidence[
             "trainer_implementation_sha256"
