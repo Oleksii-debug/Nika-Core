@@ -532,7 +532,7 @@ def _bind_registry_training_runtime_environment(
     if effective_runtime:
         for key in effective_runtime:
             caller_environment[key] = effective_runtime[key]
-    return caller_environment
+    return _validate_environment(caller_environment)
 
 
 def _job_identity(
