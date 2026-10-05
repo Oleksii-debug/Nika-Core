@@ -68,6 +68,18 @@ def _positive_finite_seconds(value: object, *, name: str) -> float:
     return seconds
 
 
+
+def _required_utf8_identity(value: object, *, name: str) -> str:
+    """Reject malformed caller identities before planning, journaling or effects."""
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{name} must be a non-empty UTF-8 string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be a non-empty UTF-8 string") from exc
+    return value
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -98,8 +110,9 @@ class DeterministicBrain:
         planning_timeout_seconds: float = 30.0,
         observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
-        if not run_id.strip():
-            raise ValueError("run_id must not be empty")
+        run_id = _required_utf8_identity(run_id, name="run_id")
+        if task_id is not None:
+            task_id = _required_utf8_identity(task_id, name="task_id")
         if type(max_steps) is not int or max_steps <= 0:
             raise ValueError("max_steps must be a positive integer")
         if type(max_replans) is not int or max_replans < 0:
@@ -110,7 +123,7 @@ class DeterministicBrain:
         observation_timeout_seconds = _positive_finite_seconds(
             observation_timeout_seconds, name="observation_timeout_seconds"
         )
-        if self._effect_journal is not None and (task_id is None or not task_id.strip()):
+        if self._effect_journal is not None and task_id is None:
             raise ValueError("task_id is required when effect_journal is configured")
 
         # Kept for source compatibility only. A planner-selected action ID is not approval
