@@ -187,6 +187,34 @@ def test_report_omits_invalid_resource_evidence(tmp_path, observed: object) -> N
     assert "Ресурси: поточний знімок не надано." in report.render_text()
 
 
+def test_report_bounds_grouped_audit_categories_and_discloses_truncation(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+    with store.connection() as conn:
+        conn.executemany(
+            "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            [
+                (f"audit.category.{index:02d}", "test", f"entity-{index}", "{}", inside)
+                for index in range(25)
+            ],
+        )
+
+    report = DailyActivityReportService(store).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert len(report.audit_events) == 20
+    assert report.audit_events[0] == ActivityCount("audit.category.00", 1)
+    assert report.audit_events[-1] == ActivityCount("audit.category.19", 1)
+    assert "audit.category.20" not in report.render_text()
+    assert any(
+        "20 категорій" in limitation and "події аудиту" in limitation
+        for limitation in report.limitations
+    )
+
+
 def test_report_contains_resource_observer_failure_without_leaking_details(tmp_path) -> None:
     store = _prepared_store(tmp_path)
     report = DailyActivityReportService(
