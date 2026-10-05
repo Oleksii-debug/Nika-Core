@@ -194,7 +194,11 @@ def _release_path_is_secret(value: object) -> bool:
 
 
 def _canonical_release_path(value: object) -> bool:
-    return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
+    return (
+        _canonical_relative_path(value)
+        and isinstance(value, str)
+        and value.casefold() != _RELEASE_MANIFEST_NAME
+    )
 
 
 def require_product_version(
