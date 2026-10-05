@@ -26,11 +26,11 @@ def _sha256_text(value: str) -> str:
 
 
 def _expected_artifact_id(record: ArtifactRecord) -> str:
-    return _sha256_text(f"{record.workspace_id}\\0{record.idempotency_key}")
+    return _sha256_text(f"{record.workspace_id}\0{record.idempotency_key}")
 
 
 def _expected_verification_id(verification: ArtifactVerification) -> str:
-    material = "\\0".join(
+    material = "\0".join(
         (
             verification.artifact_id,
             verification.checked_at.isoformat(),
