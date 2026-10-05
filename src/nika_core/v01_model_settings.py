@@ -23,6 +23,7 @@ from nika_core.intelligence.modes import (
 )
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
+from nika_core.model_artifacts import ModelArtifactRegistry, ModelArtifactRegistryError
 from nika_core.model_gateway.api_route import (
     ApiModelRouteConfig,
     CredentialRefOpenAICompatibleProvider,
@@ -38,7 +39,6 @@ from nika_core.model_gateway.contracts import (
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
 from nika_core.model_gateway.providers import OllamaProvider
-from nika_core.model_artifacts import ModelArtifactRegistry, ModelArtifactRegistryError
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
