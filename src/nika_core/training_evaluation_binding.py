@@ -59,10 +59,10 @@ class TrainingEvaluationBinding:
     """Secret-free identity proof prepared before any old/new benchmark effect.
 
     This receipt proves that the completed Loop-C run, frozen package, physical
-    challenger artifact, canonical model descriptor, Model-Lab candidate identities,
-    and held-out evaluation set agree. It does not prove that a model provider later
-    loads these exact bytes. The provider/evaluator boundary must separately attest
-    the actually loaded artifact before promotion can be authorized.
+    base/challenger artifacts, canonical model descriptors, Model-Lab candidate
+    identities, and held-out evaluation set agree. It does not prove that a model
+    provider later loads these exact bytes. The provider/evaluator boundary must
+    separately attest the actually loaded artifact before promotion can be authorized.
     """
 
     job_id: str
