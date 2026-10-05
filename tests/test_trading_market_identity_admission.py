@@ -1,7 +1,7 @@
 """Market entity and timestamp admission must fail closed before hashing or replay."""
 
 from collections.abc import Mapping
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -68,8 +68,13 @@ def test_event_time_normalizes_valid_offsets_and_rejects_naive_values() -> None:
     offset = datetime(2026, 1, 1, 2, tzinfo=UTC)
     event = EventTime(offset, offset + timedelta(minutes=1))
     assert event.event_at == NOW + timedelta(hours=2)
-    with pytest.raises(TradingResearchError, match="event_at"):
+    with pytest.raises(TradingResearchError, match="event_at must be timezone-aware"):
         EventTime(datetime(2026, 1, 1), NOW)
+    # Conversion at the representable boundary must produce a domain error,
+    # not leak OverflowError from datetime.astimezone().
+    near_min = datetime.min.replace(tzinfo=timezone(timedelta(hours=14)))
+    with pytest.raises(TradingResearchError, match="event_at must be a valid aware datetime"):
+        EventTime(near_min, NOW)
 
 
 @pytest.mark.parametrize("bad", (None, 1, True, b"home", "", "  "))
