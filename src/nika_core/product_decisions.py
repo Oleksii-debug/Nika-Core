@@ -157,6 +157,10 @@ class ProductDecisionRepository:
         )
         fingerprint = _decision_fingerprint(project_id, decision)
         with self.store.connection() as conn:
+            # Keep size/type preflight and hydrated evidence on one read snapshot.
+            # Otherwise a concurrent writer could replace a bounded handoff between
+            # the metadata SELECT and the later BLOB hydration SELECT.
+            conn.execute("BEGIN")
             replay = self._replay_conn(
                 conn,
                 project_id,
