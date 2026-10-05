@@ -24,6 +24,7 @@ const factory = new Function("context", `
   return {
     dispatch, mutateKeymap, getSourceDirty: () => sourceDirty,
     getActionsReady: () => actionsReady,
+    getForegroundStateRefreshPending: () => foregroundStateRefreshPending,
   };
 `);
 
@@ -77,6 +78,7 @@ async function main() {
   });
   const first = ui.dispatch("task.create", trigger);
   await Promise.resolve();
+  assert.equal(ui.getForegroundStateRefreshPending(), 1, "foreground dispatch must block polling");
   await ui.dispatch("task.create", trigger);
   await ui.dispatch("task.pause", trigger);
   assert.equal(requests.length, 1, "duplicate task and parallel control must not dispatch");
@@ -86,6 +88,7 @@ async function main() {
   assert.equal(requests[0].request_id, "req-1");
   completeFirst({status: "completed", message: "Створено.", focus_id: null});
   await first;
+  assert.equal(ui.getForegroundStateRefreshPending(), 0, "foreground fence must release after reconciliation");
   assert.equal(stateReads, 1);
   assert.deepEqual(focusIds, ["tasks-heading"]);
   console.log("PASS: duplicate and cross-command single-flight");
@@ -136,6 +139,7 @@ async function main() {
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(requests.length, 6);
+  assert.equal(ui.getForegroundStateRefreshPending(), 1, "uncertain reconciliation must retain foreground priority");
   assert.equal(
     context.document.documentElement.dataset.nikaReady,
     "false",
@@ -146,6 +150,7 @@ async function main() {
   assert(messages.at(-1)[0].includes("Попередню команду"));
   finishStateReconcile(true);
   await uncertainDispatch;
+  assert.equal(ui.getForegroundStateRefreshPending(), 0, "foreground priority must release even when durable retry remains fenced");
   assert(messages.at(-1)[0].includes("Повтор заблоковано до перезапуску"));
   assert.equal(stateReadOptions.at(-1).requireCurrentGeneration, true);
   assert(!JSON.stringify(messages).includes("SECRET_CONNECTION_DETAIL"));
@@ -297,6 +302,62 @@ async function main() {
   }, null, keymapInput);
   assert.equal(postFailureMutationCalled, false);
   console.log("PASS: confirmed keymap write with failed reread disables hotkeys and retains lock");
+
+  const pollStart = source.indexOf("  function startStatePolling() {");
+  const pollEnd = source.indexOf("  async function initializeBridge()", pollStart);
+  assert(pollStart >= 0 && pollEnd > pollStart);
+  const pollFactory = new Function("context", `
+    const {window, document, refreshState} = context;
+    let statePollHandle = null;
+    let statePollPending = false;
+    let foregroundStateRefreshPending = 0;
+    ${source.slice(pollStart, pollEnd)}
+    return {
+      startStatePolling,
+      setForegroundPending: (value) => { foregroundStateRefreshPending = value; },
+      getPollPending: () => statePollPending,
+    };
+  `);
+  let pollTick = null;
+  let pollReads = 0;
+  let finishPoll = null;
+  let pollRead = () => new Promise((resolve) => { finishPoll = resolve; });
+  const pollDocument = {hidden: false, documentElement: {dataset: {nikaReady: "true"}}};
+  const polling = pollFactory({
+    window: {
+      setInterval: (callback, milliseconds) => {
+        assert.equal(milliseconds, 1500);
+        pollTick = callback;
+        return 1;
+      },
+    },
+    document: pollDocument,
+    refreshState: async () => {
+      pollReads += 1;
+      return pollRead();
+    },
+  });
+  polling.startStatePolling();
+  assert.equal(typeof pollTick, "function");
+  polling.setForegroundPending(1);
+  await pollTick();
+  assert.equal(pollReads, 0, "background poll must yield to foreground reconciliation");
+  polling.setForegroundPending(0);
+  const slowPoll = pollTick();
+  await Promise.resolve();
+  assert.equal(pollReads, 1);
+  assert.equal(polling.getPollPending(), true);
+  await pollTick();
+  assert.equal(pollReads, 1, "slow background state reads must remain single-flight");
+  finishPoll(true);
+  await slowPoll;
+  assert.equal(polling.getPollPending(), false);
+  assert.equal(pollDocument.documentElement.dataset.nikaReady, "true");
+  pollRead = async () => false;
+  await pollTick();
+  assert.equal(pollReads, 2, "polling must resume after the prior read settles");
+  assert.equal(pollDocument.documentElement.dataset.nikaReady, "false");
+  console.log("PASS: background state polling is single-flight and yields to foreground reconciliation");
 
   const logFunctionsStart = source.indexOf("  function announce(message, assertive = false) {");
   const logFunctionsEnd = source.indexOf("  function requestId() {", logFunctionsStart);
