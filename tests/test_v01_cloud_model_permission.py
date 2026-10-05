@@ -279,6 +279,55 @@ def test_task_change_during_confirmation_rolls_back_grant_and_does_not_bind(
     assert audit_count == 0
 
 
+def test_reentrant_confirmation_cannot_replace_binding_after_consent_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service_holder: list[V01CloudModelPermissionService] = []
+    nested = [False]
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        if not nested[0]:
+            nested[0] = True
+            service_holder[0].admit_created_task(record)
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: NOW,
+    )
+    service_holder.append(service)
+
+    with pytest.raises(CloudModelPermissionDenied, match="зберегти дозвіл"):
+        service.admit_created_task(record)
+
+    assert [prompt.task_id for prompt in prompts] == [record.task_id, record.task_id]
+    with store.connection() as conn:
+        permissions = conn.execute(
+            "SELECT permission_id FROM standing_permissions ORDER BY rowid"
+        ).fetchall()
+        bindings = conn.execute(
+            "SELECT task_id, permission_id FROM v01_cloud_model_permission_bindings"
+        ).fetchall()
+        grant_audits = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE entity_type = 'standing_permission' "
+            "AND event_type = 'standing_permission.granted'"
+        ).fetchone()[0]
+
+    assert len(permissions) == 1
+    assert len(bindings) == 1
+    assert bindings[0]["task_id"] == record.task_id
+    assert bindings[0]["permission_id"] == permissions[0]["permission_id"]
+    assert grant_audits == 1
+
+
 def test_confirmation_cannot_retarget_grant_to_caller_mutated_task_record(
     tmp_path: Path,
 ) -> None:
