@@ -8,7 +8,13 @@ from decimal import Decimal
 import pytest
 
 from nika_core.intelligence.brain import DeterministicBrain
-from nika_core.intelligence.contracts import DeterministicGoal, DeterministicPlan, WorldState
+from nika_core.intelligence.contracts import (
+    DeterministicAction,
+    DeterministicGoal,
+    DeterministicPlan,
+    PlanStep,
+    WorldState,
+)
 from nika_core.tools import ToolExecutor
 
 
@@ -129,4 +135,31 @@ def test_canonical_ukrainian_identity_and_512_byte_id_remain_accepted() -> None:
     result = _run(brain, run_id="Ніка: робота 1", task_id="x" * 512)
     assert result.ok
     assert planner.calls == 1
+    assert journal.inspected is True
+
+
+class OneStepPlanner:
+    def plan(self, *, state, goal, actions) -> DeterministicPlan:
+        return DeterministicPlan(steps=(PlanStep(action_id="advance"),))
+
+
+def test_valid_ukrainian_run_and_task_complete_real_deterministic_step() -> None:
+    journal = GuardedJournal()
+    brain = DeterministicBrain(
+        planner=OneStepPlanner(), tools=ToolExecutor(), effect_journal=journal
+    )
+    result = _run(
+        brain,
+        run_id="Ніка: перевірка",
+        task_id="задача-1",
+        goal=DeterministicGoal(required=frozenset({"готово"})),
+        actions=(DeterministicAction(action_id="advance", adds=frozenset({"готово"})),),
+        max_steps=1,
+        max_replans=0,
+        planning_timeout_seconds=2,
+        observation_timeout_seconds=2,
+    )
+    assert result.ok
+    assert result.completed_actions == ("advance",)
+    assert result.final_state.facts == frozenset({"готово"})
     assert journal.inspected is True
