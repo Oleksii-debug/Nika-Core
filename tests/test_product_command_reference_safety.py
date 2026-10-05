@@ -49,6 +49,10 @@ def test_public_evidence_contract_hashes_sensitive_and_oversized_references() ->
         "authorization:Bearer raw-value",
         "provider-session:raw-session",
         "https://example.invalid/callback?access_token=raw-token",
+        "https://example.invalid/callback?access%5Ftoken=raw-token",
+        "https://example.invalid/callback?access%255Ftoken%253Draw-token",
+        "authorization%3ABearer+raw-value",
+        "credential%253A%252F%252Fprovider%252Fproject-1%252Fwriter",
     )
 
     for reference in sensitive:
@@ -67,6 +71,13 @@ def test_public_evidence_contract_hashes_sensitive_and_oversized_references() ->
         label="Evidence",
     )
     assert safe.reference == "health://project-1/service-api/healthy"
+
+    encoded_safe = EvidenceReference(
+        kind="test",
+        reference="https://example.invalid/report?section=access%20review",
+        label="Evidence",
+    )
+    assert encoded_safe.reference == "https://example.invalid/report?section=access%20review"
 
 
 def test_public_evidence_reference_uses_utf8_byte_budget() -> None:
