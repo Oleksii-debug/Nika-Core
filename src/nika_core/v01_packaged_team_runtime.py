@@ -16,6 +16,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import (
     ModelHealthFact,
     ModelHealthProbePort,
+    ModelHealthSnapshot,
     OllamaModelHealthProbe,
 )
 from nika_core.intelligence.provenance import (
@@ -75,7 +76,6 @@ _WORKER_A_ID = "v01.source-a"
 _WORKER_B_ID = "v01.source-b"
 _GRANT = ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",))
 _MAX_MODEL_ANALYSIS_CHARS = 2000
-_MODEL_SELECTION_FIELD = "v01_model_selection"
 
 
 class V01PackagedThreeAgentRuntime(AgentRuntimePort):
@@ -92,17 +92,23 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         model_health_probe_factory: Callable[[ModelSelection], ModelHealthProbePort] | None = None,
     ) -> None:
         self._sqlite = store
-        self._sources = source_settings or V01SourceSettings(store, config)
+        self._sources = (\n            V01SourceSettings(store, config) if source_settings is None else source_settings\n        )
         self._multi_store = MultiAgentStore(store)
         self._definitions = AgentDefinitionRepository(store)
-        self._model_settings = model_settings or V01ModelSettings(store)
-        self._model_factory = model_runtime_factory or V01BoundModelRuntimeFactory(
-            store=store,
-            definitions=self._definitions,
-            settings=self._model_settings,
+        self._model_settings = (\n            V01ModelSettings(store) if model_settings is None else model_settings\n        )
+        self._model_factory = (
+            V01BoundModelRuntimeFactory(
+                store=store,
+                definitions=self._definitions,
+                settings=self._model_settings,
+            )
+            if model_runtime_factory is None
+            else model_runtime_factory
         )
         self._model_health_probe_factory = (
-            model_health_probe_factory or self._default_model_health_probe
+            self._default_model_health_probe
+            if model_health_probe_factory is None
+            else model_health_probe_factory
         )
         self._model_runtimes: dict[str, ModelGatewayAgentRuntime] = {}
         self._coordinator = MultiAgentSupervisor(
@@ -183,13 +189,28 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
         try:
             health_probe = self._model_health_probe_factory(selection)
-            snapshot = await asyncio.to_thread(health_probe.snapshot)
+            observed = await asyncio.to_thread(health_probe.snapshot)
+            if type(observed) is not ModelHealthSnapshot:
+                raise TypeError("model health probe returned a noncanonical snapshot")
+            snapshot = ModelHealthSnapshot(
+                configured=observed.configured,
+                reachable=observed.reachable,
+                model_present=observed.model_present,
+                model_ready=observed.model_ready,
+                inference_proven=observed.inference_proven,
+            )
         except Exception:  # noqa: BLE001 - provider/health failures are fail-closed
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNVERIFIABLE,
                 reason="Selected Ollama model health could not be verified.",
             )
-        if snapshot.model_ready is not ModelHealthFact.YES:
+        required = (
+            snapshot.configured,
+            snapshot.reachable,
+            snapshot.model_present,
+            snapshot.model_ready,
+        )
+        if not all(value is ModelHealthFact.YES for value in required):
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNVERIFIABLE,
                 reason="Selected Ollama model is not ready for automatic resume.",
@@ -523,17 +544,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         return runtime
 
     def _task_has_model_selection(self, task_id: str) -> bool:
-        with self._sqlite.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        if row is None:
-            return False
-        payload = json.loads(row["payload_json"])
-        if not isinstance(payload, dict):
-            raise TypeError("task payload must be an object")
-        return _MODEL_SELECTION_FIELD in payload
+        return self._model_settings.task_has_selection(task_id)
 
     @staticmethod
     def _model_text(result: RuntimeResult) -> str:

@@ -98,7 +98,11 @@ class ModelSelection(BaseModel):
     def clean_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if value != value.strip() or not value or any(ord(char) < 32 for char in value):
+        if (
+            value != value.strip()
+            or not value
+            or any(not char.isprintable() for char in value)
+        ):
             raise ValueError("invalid model route text")
         return value
 
@@ -426,6 +430,27 @@ class V01ModelSettings:
             raise ModelSetupError(
                 "Не вдалося підготувати модель. Завдання не створено."
             ) from exc
+
+    def task_has_selection(self, task_id: str) -> bool:
+        """Return whether a task carries model authority without permitting downgrade."""
+
+        if type(task_id) is not str or not task_id.strip():
+            raise ModelSetupError("Немає коректного ідентифікатора завдання.")
+        try:
+            payload = TaskQueue(self._store).get(task_id).payload
+        except KeyError as exc:
+            raise ModelSetupError("Завдання для вибраної моделі не знайдено.") from exc
+        has_reference = _TASK_SELECTION_FIELD in payload
+        with self._store.connection() as conn:
+            binding = conn.execute(
+                "SELECT 1 FROM v01_task_model_bindings WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+        if binding is not None and not has_reference:
+            raise ModelSetupError(
+                "Завдання втратило посилання на вже зафіксовану модель."
+            )
+        return has_reference
 
     def for_task(self, task_id: str) -> ModelSelection:
         """Return the exact route accepted with the task and bind it once."""
