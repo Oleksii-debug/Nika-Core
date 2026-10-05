@@ -452,7 +452,16 @@ class ProductFactoryProgramHost:
         request = _request_for_component(coordinator, component_id)
         lease = self._acquire(request)
         before = coordinator.snapshot()
+        prior_record = _record_for_component_snapshot(before, component_id)
         try:
+            if prior_record.state is WorkState.RUNNING:
+                raise ProductFactoryProgramError(
+                    "running Product Factory work requires recovery-aware blocking"
+                )
+            if prior_record.result is not None:
+                raise ProductFactoryProgramError(
+                    "result-bearing Product Factory work cannot be blocked without evidence loss"
+                )
             updated = coordinator.block(component_id, reason)
             self._save_fenced(host_task_id, binding, coordinator, lease)
         except Exception:
