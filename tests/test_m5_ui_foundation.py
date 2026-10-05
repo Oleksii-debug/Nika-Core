@@ -106,6 +106,38 @@ def test_keymap_export_import_and_clear_round_trip(tmp_path: Path) -> None:
     }
 
 
+def test_keymap_known_failures_remain_localized_and_serializable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    bridge = build_bridge(tmp_path)
+
+    monkeypatch.setattr(
+        bridge._keymap,
+        "restore_default",
+        lambda _action_id: _raise("shortcut conflict with nav.tasks"),
+    )
+    assert bridge.restore_default("nav.workspaces") == {
+        "ok": False,
+        "message": (
+            "Не вдалося відновити комбінацію за замовчуванням: "
+            "перевірте конфлікти карти клавіш."
+        ),
+    }
+
+    monkeypatch.setattr(
+        bridge._keymap,
+        "export_json",
+        lambda: _raise("stored keymap binding must be text"),
+    )
+    assert bridge.export_keymap() == {
+        "ok": False,
+        "message": (
+            "Не вдалося експортувати карту клавіш: "
+            "перевірте збережені налаштування."
+        ),
+    }
+
+
 def test_list_actions_exposes_resolved_bindings_without_handlers(tmp_path: Path) -> None:
     bridge = build_bridge(tmp_path)
     actions = {item["action_id"]: item for item in bridge.list_actions()}
