@@ -287,7 +287,9 @@ class V01CloudModelPermissionService:
             if version == 0:
                 conn.execute(
                     "CREATE TABLE v01_cloud_model_permission_bindings ("
-                    "task_id TEXT PRIMARY KEY, permission_id TEXT NOT NULL, "
+                    "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+                    "permission_id TEXT NOT NULL UNIQUE "
+                    "REFERENCES standing_permissions(permission_id), "
                     "updated_at TEXT NOT NULL)"
                 )
                 conn.execute(
