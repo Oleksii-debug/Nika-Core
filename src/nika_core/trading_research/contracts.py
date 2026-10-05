@@ -33,12 +33,14 @@ class Venue:
     timezone: str = "UTC"
 
     def __post_init__(self) -> None:
-        if not self.venue_id.strip():
-            raise TradingResearchError("venue_id must not be empty")
+        if type(self.venue_id) is not str or not self.venue_id.strip():
+            raise TradingResearchError("venue_id must be nonblank text")
+        if type(self.timezone) is not str or not self.timezone.strip():
+            raise TradingResearchError("timezone must be a valid IANA name")
         try:
             ZoneInfo(self.timezone)
-        except ZoneInfoNotFoundError as exc:
-            raise TradingResearchError(f"unknown IANA timezone: {self.timezone}") from exc
+        except (ZoneInfoNotFoundError, ValueError, OverflowError):
+            raise TradingResearchError("timezone must be a valid IANA name") from None
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,17 +50,32 @@ class Instrument:
     currency: str
 
     def __post_init__(self) -> None:
-        if not self.instrument_id.strip():
-            raise TradingResearchError("instrument_id must not be empty")
-        if len(self.currency) != 3 or not self.currency.isalpha():
-            raise TradingResearchError("currency must be a three-letter code")
+        if type(self.instrument_id) is not str or not self.instrument_id.strip():
+            raise TradingResearchError("instrument_id must be nonblank text")
+        if not isinstance(self.venue, Venue):
+            raise TradingResearchError("instrument venue must be a Venue")
+        if (
+            type(self.currency) is not str
+            or len(self.currency) != 3
+            or not self.currency.isascii()
+            or not self.currency.isalpha()
+        ):
+            raise TradingResearchError("currency must be a three-letter ASCII code")
         object.__setattr__(self, "currency", self.currency.upper())
 
 
 def require_aware_utc(value: datetime, field_name: str) -> datetime:
-    if value.tzinfo is None or value.utcoffset() is None:
+    if not isinstance(value, datetime):
+        raise TradingResearchError(f"{field_name} must be a datetime")
+    if value.tzinfo is None:
         raise TradingResearchError(f"{field_name} must be timezone-aware")
-    return value.astimezone(UTC)
+    try:
+        offset = value.utcoffset()
+        if offset is not None:
+            return value.astimezone(UTC)
+    except (OverflowError, ValueError):
+        raise TradingResearchError(f"{field_name} must be a valid aware datetime") from None
+    raise TradingResearchError(f"{field_name} must be timezone-aware")
 
 
 def _finite_decimal(value: Decimal, field_name: str) -> Decimal:
@@ -91,6 +108,13 @@ class EventTime:
         object.__setattr__(self, "source_at", source_at)
 
 
+def _validate_market_identity(instrument: Instrument, time: EventTime) -> None:
+    if not isinstance(instrument, Instrument):
+        raise TradingResearchError("event instrument must be an Instrument")
+    if not isinstance(time, EventTime):
+        raise TradingResearchError("event time must be an EventTime")
+
+
 @dataclass(frozen=True, slots=True)
 class Bar:
     instrument: Instrument
@@ -103,6 +127,7 @@ class Bar:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
         for field_name in ("open", "high", "low", "close", "volume"):
             _finite_decimal(getattr(self, field_name), field_name)
@@ -125,6 +150,7 @@ class Tick:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
         _finite_decimal(self.price, "price")
         _finite_decimal(self.size, "size")
@@ -143,6 +169,7 @@ class Quote:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
         for field_name in ("bid", "ask", "bid_size", "ask_size"):
             _finite_decimal(getattr(self, field_name), field_name)
@@ -160,13 +187,22 @@ class OddsSnapshot:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
-        if not self.selections:
-            raise TradingResearchError("odds snapshot must contain selections")
-        if any(type(key) is not str or not key.strip() for key in self.selections):
-            raise TradingResearchError("odds selection keys must be nonblank text")
+        if not isinstance(self.selections, Mapping):
+            raise TradingResearchError("odds selections must be a mapping")
         try:
-            copied = {str(key): Decimal(value) for key, value in self.selections.items()}
+            items = tuple(self.selections.items())
+        except (TypeError, ValueError, RuntimeError):
+            raise TradingResearchError("odds selections could not be read") from None
+        if not items:
+            raise TradingResearchError("odds snapshot must contain selections")
+        if any(type(key) is not str or not key.strip() for key, _ in items):
+            raise TradingResearchError("odds selection keys must be nonblank text")
+        if len({key for key, _ in items}) != len(items):
+            raise TradingResearchError("odds selection keys must be unique")
+        try:
+            copied = {key: Decimal(value) for key, value in items}
         except (ArithmeticError, TypeError, ValueError):
             raise TradingResearchError("odds must contain valid finite Decimals") from None
         if any(not value.is_finite() or value <= 0 for value in copied.values()):
@@ -183,9 +219,10 @@ class OutcomeSettlement:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
-        if not self.outcome.strip():
-            raise TradingResearchError("outcome must not be empty")
+        if type(self.outcome) is not str or not self.outcome.strip():
+            raise TradingResearchError("outcome must be nonblank text")
         _finite_decimal(self.value, "value")
 
 
@@ -200,6 +237,10 @@ class Provenance:
     license_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.source_id.strip():
-            raise TradingResearchError("source_id must not be empty")
+        if type(self.source_id) is not str or not self.source_id.strip():
+            raise TradingResearchError("source_id must be nonblank text")
+        if self.source_uri is not None and type(self.source_uri) is not str:
+            raise TradingResearchError("source_uri must be text or None")
+        if self.license_id is not None and type(self.license_id) is not str:
+            raise TradingResearchError("license_id must be text or None")
         object.__setattr__(self, "acquired_at", require_aware_utc(self.acquired_at, "acquired_at"))
