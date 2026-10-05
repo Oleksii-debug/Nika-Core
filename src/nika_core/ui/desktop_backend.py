@@ -652,7 +652,7 @@ class DesktopBackend:
             ):
                 self._queue.transition(task_id, TaskState.PAUSED)
             self._record_background_failure(task_id, "desktop.runtime_submission_failed")
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001 - preserve original interrupt
             _LOGGER.error(
                 "Desktop rejected-start reconciliation failed; exception_type=%s",
                 type(exc).__name__,
