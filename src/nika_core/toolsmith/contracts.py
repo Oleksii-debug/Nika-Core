@@ -145,8 +145,10 @@ class ProcessPolicy:
             raise ValueError("generic shell execution is not allowed")
         if type(self.allowed_executables) is not tuple or not self.allowed_executables:
             raise ValueError("at least one executable must be allowlisted as a tuple")
-        if any(type(item) is not str or not item.strip() or "\\x00" in item
-               for item in self.allowed_executables):
+        if any(
+            type(item) is not str or not item.strip() or "\x00" in item
+            for item in self.allowed_executables
+        ):
             raise ValueError("allowed executable names must be nonempty text without NUL")
 
 
@@ -189,7 +191,7 @@ class AcceptanceCommand:
 
     def __post_init__(self) -> None:
         if type(self.argv) is not tuple or not self.argv or any(
-            type(item) is not str or not item or "\\x00" in item for item in self.argv
+            type(item) is not str or not item or "\x00" in item for item in self.argv
         ):
             raise ValueError("acceptance command argv must be nonempty text arguments")
         if type(self.cwd) is not str:
