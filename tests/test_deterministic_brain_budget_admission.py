@@ -191,7 +191,11 @@ def test_composed_unicode_run_identity_remains_accepted() -> None:
     assert result.ok
     assert planner.calls == 1
 
-@pytest.mark.parametrize("value", [False, b"task", "task\u200bhidden", "\ud800", "x" * 513])
+
+@pytest.mark.parametrize(
+    "value",
+    [False, b"task", "task\u200bhidden", "\ud800", "x" * 513],
+)
 def test_supplied_task_id_is_validated_without_a_journal(value: object) -> None:
     planner = CountingPlanner()
     brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
