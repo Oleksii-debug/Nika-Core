@@ -163,8 +163,9 @@ class Keymap:
             if conflict is not None:
                 raise ValueError(f"shortcut conflict with {conflict}")
             conn.execute(
-                "INSERT INTO keymap_overrides(action_id, binding, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(action_id) DO UPDATE SET binding=excluded.binding, updated_at=excluded.updated_at",
+                "INSERT INTO keymap_overrides(action_id, binding, updated_at) "
+                "VALUES (?, ?, ?) ON CONFLICT(action_id) DO UPDATE SET "
+                "binding=excluded.binding, updated_at=excluded.updated_at",
                 (action_id, cleaned, datetime.now(UTC).isoformat()),
             )
 
