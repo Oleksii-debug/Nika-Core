@@ -109,6 +109,35 @@ def _pilot_authorization(evidence: TrainingMaterialSetEvidence):
     )
 
 
+def test_scale_plan_canonical_payload_round_trip_preserves_authority() -> None:
+    evidence = _material_evidence()
+    plan = _plan(evidence)
+
+    restored = TrainingScalePlan.from_canonical_payload(plan.canonical_payload())
+
+    assert restored == plan
+    assert restored.canonical_payload() == plan.canonical_payload()
+    assert restored.plan_sha256 == plan.plan_sha256
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda value: value.update({"unexpected": "field"}),
+        lambda value: value.pop("plan_id"),
+        lambda value: value.update({"tiers": tuple(value["tiers"])}),
+        lambda value: value["tiers"][0].update({"unexpected": "field"}),
+        lambda value: value["tiers"][0].update({"max_steps": True}),
+    ),
+)
+def test_scale_plan_rehydration_rejects_noncanonical_payload(mutate: object) -> None:
+    payload = _plan(_material_evidence()).canonical_payload()
+    mutate(payload)  # type: ignore[operator]
+
+    with pytest.raises(TrainingScaleError):
+        TrainingScalePlan.from_canonical_payload(payload)
+
+
 def test_scale_plan_rejects_decreasing_limits() -> None:
     evidence = _material_evidence()
     training = next(
@@ -185,6 +214,60 @@ def test_scale_authorization_rejects_package_above_tier_bound() -> None:
             execution_plan_sha256=_sha(b"plan"),
             max_steps=1,
         )
+
+
+def _progression_payload(plan: TrainingScalePlan) -> dict[str, object]:
+    return {
+        "authorization_sha256": _sha(b"authorization"),
+        "base_artifact_ref": "models/base",
+        "base_sha256": _sha(b"base"),
+        "candidate_artifact_ref": "models/pilot-candidate",
+        "candidate_sha256": _sha(b"candidate"),
+        "comparison_evidence_sha256": _sha(b"comparison"),
+        "evaluation_set_sha256": plan.evaluation_set_sha256,
+        "execution_plan_sha256": _sha(b"execution-plan"),
+        "frozen_package_sha256": _sha(b"frozen-package"),
+        "job_fingerprint": _sha(b"job-fingerprint"),
+        "job_id": "pilot-job",
+        "plan_sha256": plan.plan_sha256,
+        "tier_index": 0,
+        "training_material_sha256": _sha(b"training-material"),
+    }
+
+
+def test_progression_proof_canonical_payload_round_trip_preserves_authority() -> None:
+    plan = _plan(_material_evidence())
+    proof = TrainingScaleProgressionProof.from_canonical_payload(
+        _progression_payload(plan)
+    )
+
+    restored = TrainingScaleProgressionProof.from_canonical_payload(
+        proof.canonical_payload()
+    )
+
+    assert restored.canonical_payload() == proof.canonical_payload()
+    assert restored.proof_sha256 == proof.proof_sha256
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    (
+        lambda value: value.update({"unexpected": "field"}),
+        lambda value: value.pop("authorization_sha256"),
+        lambda value: value.update({"tier_index": True}),
+        lambda value: value.update({"candidate_sha256": "A" * 64}),
+        lambda value: value.update({"job_id": " bad "}),
+    ),
+)
+def test_progression_proof_rehydration_rejects_noncanonical_payload(
+    mutate: object,
+) -> None:
+    plan = _plan(_material_evidence())
+    payload = _progression_payload(plan)
+    mutate(payload)  # type: ignore[operator]
+
+    with pytest.raises(TrainingScaleError):
+        TrainingScaleProgressionProof.from_canonical_payload(payload)
 
 
 def test_higher_scale_requires_non_forgeable_progression_proof() -> None:
