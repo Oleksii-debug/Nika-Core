@@ -33,6 +33,7 @@ _MAX_REVIEW_EVIDENCE_REFS = 32
 _MAX_REVIEW_EVIDENCE_UTF8_BYTES = 16384
 _MAX_REPAIR_REASON_UTF8_BYTES = _MAX_DURABLE_TEXT_UTF8_BYTES
 _MAX_CANCELLATION_REASON_UTF8_BYTES = _MAX_DURABLE_TEXT_UTF8_BYTES
+_UNICODE_LINE_BOUNDARY_CODEPOINTS = frozenset({0x85, 0x2028, 0x2029})
 
 
 class CoordinatorError(ValueError):
@@ -857,14 +858,23 @@ def _canonical_durable_text(
     label: str,
     max_utf8_bytes: int = _MAX_DURABLE_TEXT_UTF8_BYTES,
 ) -> str:
+    error = f"{label} must be canonical single-line text"
+    if type(value) is not str or not value or value != value.strip():
+        raise CoordinatorError(error)
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise CoordinatorError(error) from exc
     if (
-        type(value) is not str
-        or not value
-        or value != value.strip()
-        or len(value.encode("utf-8")) > max_utf8_bytes
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        len(encoded) > max_utf8_bytes
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or ord(character) in _UNICODE_LINE_BOUNDARY_CODEPOINTS
+            for character in value
+        )
     ):
-        raise CoordinatorError(f"{label} must be canonical single-line text")
+        raise CoordinatorError(error)
     return value
 
 
@@ -885,12 +895,20 @@ def _canonical_worker_failure_message_from_result(
 
 
 def _canonical_evidence_ref(value: object) -> bool:
+    if type(value) is not str or not value or value != value.strip():
+        return False
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
     return (
-        type(value) is str
-        and bool(value)
-        and value == value.strip()
-        and len(value.encode("utf-8")) <= _MAX_EVIDENCE_REF_UTF8_BYTES
-        and not any(ord(character) < 32 or ord(character) == 127 for character in value)
+        len(encoded) <= _MAX_EVIDENCE_REF_UTF8_BYTES
+        and not any(
+            ord(character) < 32
+            or ord(character) == 127
+            or ord(character) in _UNICODE_LINE_BOUNDARY_CODEPOINTS
+            for character in value
+        )
     )
 
 
