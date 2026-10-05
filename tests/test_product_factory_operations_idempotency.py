@@ -136,6 +136,28 @@ class BlockingPort(InspectablePort):
         )
 
 
+class StillUncertainPort(InspectablePort):
+    def inspect(self, request: MaintenanceRequest) -> MaintenanceResult:
+        self.inspect_calls += 1
+        return MaintenanceResult(
+            False,
+            True,
+            (f"provider:{request.request_id}:still-uncertain",),
+        )
+
+
+class FailingInspectionPort(InspectablePort):
+    def inspect(self, request: MaintenanceRequest) -> MaintenanceResult:
+        self.inspect_calls += 1
+        raise RuntimeError("provider inspection failed")
+
+
+class InvalidInspectionPort(InspectablePort):
+    def inspect(self, request: MaintenanceRequest) -> MaintenanceResult:
+        self.inspect_calls += 1
+        return object()  # type: ignore[return-value]
+
+
 def _runtime_journal(tmp_path):
     store = SQLiteStore(tmp_path / "nika-pf8.db")
     store.initialize()
@@ -361,6 +383,104 @@ def test_host_marked_uncertain_effect_can_reconcile_without_redispatch(tmp_path)
     assert port.apply_calls == 0
     assert port.inspect_calls == 1
     assert ledger.require(reservation.operation_key).status is IdempotencyStatus.COMPLETED
+
+
+def test_uncertain_recovery_can_remain_uncertain_without_reowning_reservation(
+    tmp_path,
+) -> None:
+    store, task_id, ledger, journal = _runtime_journal(tmp_path)
+    service = _service()
+    request = _request(service)
+    reservation = journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    journal.mark_uncertain(reservation.operation_key)
+
+    port = StillUncertainPort()
+    restarted = _coordinator(
+        port=port,
+        journal=RuntimeIdempotencyMaintenanceJournal(
+            IdempotencyLedger(store),
+            task_id=task_id,
+        ),
+        service=service,
+        request=request,
+    )
+
+    saved = restarted.request_maintenance(request)
+
+    assert saved.reconciled is True
+    assert saved.result.uncertain is True
+    assert saved.result.applied is False
+    assert port.apply_calls == 0
+    assert port.inspect_calls == 1
+    assert ledger.require(reservation.operation_key).status is IdempotencyStatus.UNCERTAIN
+
+
+def test_uncertain_recovery_preserves_inspection_exception_and_durable_state(
+    tmp_path,
+) -> None:
+    store, task_id, ledger, journal = _runtime_journal(tmp_path)
+    service = _service()
+    request = _request(service)
+    reservation = journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    journal.mark_uncertain(reservation.operation_key)
+
+    port = FailingInspectionPort()
+    restarted = _coordinator(
+        port=port,
+        journal=RuntimeIdempotencyMaintenanceJournal(
+            IdempotencyLedger(store),
+            task_id=task_id,
+        ),
+        service=service,
+        request=request,
+    )
+
+    with pytest.raises(RuntimeError, match="provider inspection failed"):
+        restarted.request_maintenance(request)
+
+    assert port.apply_calls == 0
+    assert port.inspect_calls == 1
+    assert ledger.require(reservation.operation_key).status is IdempotencyStatus.UNCERTAIN
+
+
+def test_uncertain_recovery_rejects_invalid_inspection_without_reowning_reservation(
+    tmp_path,
+) -> None:
+    store, task_id, ledger, journal = _runtime_journal(tmp_path)
+    service = _service()
+    request = _request(service)
+    reservation = journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    journal.mark_uncertain(reservation.operation_key)
+
+    port = InvalidInspectionPort()
+    restarted = _coordinator(
+        port=port,
+        journal=RuntimeIdempotencyMaintenanceJournal(
+            IdempotencyLedger(store),
+            task_id=task_id,
+        ),
+        service=service,
+        request=request,
+    )
+
+    with pytest.raises(ProductOperationsError, match="invalid inspection evidence"):
+        restarted.request_maintenance(request)
+
+    assert port.apply_calls == 0
+    assert port.inspect_calls == 1
+    assert ledger.require(reservation.operation_key).status is IdempotencyStatus.UNCERTAIN
 
 
 def test_parallel_coordinator_cannot_inspect_live_pending_owner(tmp_path) -> None:
