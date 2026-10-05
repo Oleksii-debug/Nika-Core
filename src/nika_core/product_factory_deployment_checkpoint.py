@@ -267,7 +267,7 @@ class DurableDeploymentFabric(DeploymentFabric):
         ):
             return super().reconcile(intent_id)
 
-        inspection = self.provider.inspect(record.intent)
+        inspection = self._inspect_provider(record.intent)
         if not inspection.evidence_refs:
             raise DeploymentFabricError("provider inspection requires evidence refs")
         if (
