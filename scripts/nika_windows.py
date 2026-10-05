@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -29,6 +30,12 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.shell import launch_windows_shell
+from nika_core.v01_cloud_model_permission import (
+    CloudModelGrantRequest,
+    CloudModelPermissionConfirm,
+    CloudModelPermissionDenied,
+    V01CloudModelPermissionService,
+)
 from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
 from nika_core.v01_packaged_team_state import V01PackagedTeamStateProvider
@@ -49,8 +56,47 @@ def _focus(focus_id: str, message: str) -> UIResult:
     )
 
 
+def _confirm_cloud_model_on_windows(request: CloudModelGrantRequest) -> bool:
+    """Use a standard native Windows dialog for explicit task-scoped cloud consent."""
+
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        private_text = "так" if request.private_data_allowed else "ні"
+        message = (
+            "Це завдання надсилатиме дані до зовнішнього API.\n\n"
+            f"Постачальник: {request.provider_id}\n"
+            f"Модель: {request.model}\n"
+            f"Хост: {request.network_host}\n"
+            f"Приватні дані дозволено: {private_text}\n\n"
+            "Дозволити мережеві звернення цього завдання до цієї моделі? "
+            "Дозвіл прив'язаний лише до цього завдання і діє до 24 годин."
+        )
+        flags = 0x00000004 | 0x00000030 | 0x00000100 | 0x00010000
+        result = int(
+            user32.MessageBoxW(
+                None,
+                message,
+                "Nika Core — дозвіл зовнішньої моделі",
+                flags,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - native confirmation must fail closed
+        logging.getLogger(__name__).error(
+            "Cloud model confirmation failed: exception_type=%s",
+            type(exc).__name__,
+        )
+        return False
+    return result == 6
+
+
 def build_windows_bridge(
     config: AppConfig,
+    *,
+    cloud_permission_confirm: CloudModelPermissionConfirm | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     store = SQLiteStore(config.database_path)
     store.initialize()
@@ -58,6 +104,15 @@ def build_windows_bridge(
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
+    cloud_permissions = V01CloudModelPermissionService(
+        store=store,
+        settings=model_settings,
+        confirm=(
+            _confirm_cloud_model_on_windows
+            if cloud_permission_confirm is None
+            else cloud_permission_confirm
+        ),
+    )
 
     def prepare_task_payload(payload: Mapping[str, Any]) -> Mapping[str, Any]:
         source_bound = source_settings.prepare_task_payload(payload)
@@ -67,6 +122,9 @@ def build_windows_bridge(
         store=store,
         config=config,
         source_settings=source_settings,
+        model_settings=model_settings,
+        cloud_effect_authorizer=cloud_permissions.cloud_effect_authorizer,
+        cloud_execution_authority_resolver=cloud_permissions.execution_authority_for_task,
     )
     backend = DesktopBackend(
         queue=TaskQueue(store),
@@ -75,6 +133,8 @@ def build_windows_bridge(
         audit=AuditLog(store),
         runtime=runtime,
         prepare_task_payload=prepare_task_payload,
+        admit_created_task=cloud_permissions.admit_created_task,
+        admit_resumed_task=cloud_permissions.admit_resumed_task,
         autostart_service=(
             WindowsAutostartService(Path(sys.executable))
             if sys.platform == "win32" and getattr(sys, "frozen", False)
@@ -94,7 +154,18 @@ def build_windows_bridge(
     def create_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
         try:
             return backend.create_task(payload)
-        except ModelSetupError as exc:
+        except (ModelSetupError, CloudModelPermissionDenied) as exc:
+            return UIResult(
+                request_id="desktop-handler",
+                status="rejected",
+                message=str(exc),
+                focus_id="model-route-kind",
+            )
+
+    def resume_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
+        try:
+            return backend.resume_task(payload)
+        except CloudModelPermissionDenied as exc:
             return UIResult(
                 request_id="desktop-handler",
                 status="rejected",
@@ -152,7 +223,7 @@ def build_windows_bridge(
         handlers={
             "task.create": product_router.create,
             "task.pause": backend.pause_task,
-            "task.resume": backend.resume_task,
+            "task.resume": resume_ordinary_task,
             "agent.stop": backend.stop_agent,
             "team.sources.configure": source_settings.configure,
             "settings.autostart.configure": backend.autostart_settings.configure,
