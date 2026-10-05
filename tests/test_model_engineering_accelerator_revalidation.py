@@ -6,6 +6,7 @@ from nika_core.model_engineering import (
     AcceleratorSnapshot,
     BenchmarkExecutionConfig,
     BenchmarkRunEvidence,
+    BenchmarkSuiteReport,
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
     EvaluationPurpose,
@@ -13,6 +14,7 @@ from nika_core.model_engineering import (
     benchmark_accessible_report_json,
     benchmark_configuration_sha256,
     benchmark_report_json,
+    benchmark_suite_json,
     render_text_report,
 )
 from nika_core.model_gateway.contracts import ProviderKind
@@ -117,3 +119,63 @@ def test_public_reports_reject_mutated_nested_accelerator_evidence(
 
     with pytest.raises(ValueError):
         serializer(report)
+
+
+@pytest.mark.parametrize(
+    "serializer",
+    (
+        benchmark_report_json,
+        benchmark_accessible_report_json,
+        render_text_report,
+    ),
+)
+def test_public_reports_reject_mutated_candidate_identity(serializer) -> None:
+    report = _report()
+    candidate = report.candidate
+
+    object.__setattr__(candidate, "provider_id", " padded-provider ")
+    object.__setattr__(
+        report.run,
+        "configuration_sha256",
+        benchmark_configuration_sha256(
+            candidate_evidence_sha256=candidate.evidence_sha256,
+            evaluation_set_id=report.evaluation_set_id,
+            evaluation_set_version=report.evaluation_set_version,
+            evaluation_set_sha256=report.evaluation_set_sha256,
+            execution_config_sha256=report.execution_config_sha256,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        serializer(report)
+
+
+@pytest.mark.parametrize(
+    "serializer",
+    (
+        benchmark_report_json,
+        benchmark_accessible_report_json,
+        render_text_report,
+    ),
+)
+def test_public_reports_reject_mutated_run_identity(serializer) -> None:
+    report = _report()
+    object.__setattr__(report.run, "run_id", "bad run id")
+
+    with pytest.raises(ValueError, match="safe ASCII identity"):
+        serializer(report)
+
+
+def test_suite_serializer_revalidates_outer_identity() -> None:
+    report = _report()
+    suite = BenchmarkSuiteReport(
+        evaluation_set_id=report.evaluation_set_id,
+        evaluation_set_version=report.evaluation_set_version,
+        evaluation_set_sha256=report.evaluation_set_sha256,
+        execution_config_sha256=report.execution_config_sha256,
+        reports=(report,),
+    )
+    object.__setattr__(suite, "evaluation_set_id", " padded-suite ")
+
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        benchmark_suite_json(suite)
