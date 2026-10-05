@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from urllib.parse import quote
 
 import pytest
 from pydantic import ValidationError
@@ -56,7 +57,11 @@ def test_public_evidence_contract_hashes_sensitive_and_oversized_references() ->
         "credential%253A%252F%252Fprovider%252Fproject-1%252Fwriter",
     )
 
-    for reference in sensitive:
+    deeply_encoded = "access_token=raw-token"
+    for _ in range(12):
+        deeply_encoded = quote(deeply_encoded, safe="")
+
+    for reference in (*sensitive, deeply_encoded):
         presented = EvidenceReference(kind="test", reference=reference, label="Evidence")
         assert presented.reference.startswith("evidence-sha256:")
         assert reference not in presented.reference
