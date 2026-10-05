@@ -36,8 +36,14 @@ class SecretRef:
             for value in (self.secret_ref, self.project_id, self.provider, self.purpose)
         ):
             raise CredentialBrokerError("secret reference identity fields must not be empty")
+        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+            raise CredentialBrokerError("secret generation must be a positive integer")
         if self.generation < 1:
-            raise CredentialBrokerError("secret generation must be positive")
+            raise CredentialBrokerError("secret generation must be a positive integer")
+        try:
+            object.__setattr__(self, "state", CredentialState(self.state))
+        except (ValueError, TypeError):
+            raise CredentialBrokerError("secret credential state is invalid") from None
         if not isinstance(self.scopes, (set, frozenset)) or not isinstance(
             self.allowed_audiences, (set, frozenset)
         ):
@@ -93,6 +99,12 @@ class CredentialLease:
         _aware(self.expires_at)
         if self.expires_at <= self.issued_at:
             raise CredentialBrokerError("credential lease must expire after issuance")
+        if (
+            isinstance(self.generation, bool)
+            or not isinstance(self.generation, int)
+            or self.generation < 1
+        ):
+            raise CredentialBrokerError("credential lease generation must be a positive integer")
         if not all(
             value.strip()
             for value in (
