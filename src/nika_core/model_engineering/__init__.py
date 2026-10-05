@@ -2,6 +2,7 @@ from nika_core.model_engineering.contracts import (
     AcceleratorObserverPort,
     AcceleratorSnapshot,
     BenchmarkExecutionConfig,
+    BenchmarkRunEvidence,
     BenchmarkSuiteReport,
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
@@ -9,6 +10,7 @@ from nika_core.model_engineering.contracts import (
     EvaluationPurpose,
     EvaluationSet,
     ModelCandidate,
+    benchmark_configuration_sha256,
 )
 from nika_core.model_engineering.experiment_bridge import (
     COMPLETION_METRIC,
@@ -43,6 +45,7 @@ __all__ = [
     "AcceleratorObserverPort",
     "AcceleratorSnapshot",
     "BenchmarkExecutionConfig",
+    "BenchmarkRunEvidence",
     "BenchmarkSuiteReport",
     "CandidateBenchmarkReport",
     "CaseBenchmarkResult",
@@ -58,6 +61,7 @@ __all__ = [
     "ModelScoringPort",
     "benchmark_accessible_report_json",
     "benchmark_accessible_report_payload",
+    "benchmark_configuration_sha256",
     "benchmark_observations",
     "benchmark_report_json",
     "benchmark_report_sha256",
