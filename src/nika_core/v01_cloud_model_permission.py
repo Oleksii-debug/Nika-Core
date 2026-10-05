@@ -180,9 +180,6 @@ class V01CloudModelPermissionService:
         permission_id = self._bound_permission_id(task_id, strict=True)
         if permission_id is None:
             return
-        permission = self._permissions.get(permission_id)
-        if permission is None or permission.revoked_at is not None:
-            return
         with self._permissions.revoke_transaction(
             permission_id,
             revoked_at=self._utc_now(),
