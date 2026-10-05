@@ -53,9 +53,13 @@ def build_experiment_definition(
         raise TypeError("experiment_id must be canonical text")
     if not experiment_id or experiment_id != experiment_id.strip():
         raise ValueError("experiment_id must be non-empty without surrounding whitespace")
+    if type(champion) is not ModelCandidate:
+        raise TypeError("champion must be an exact ModelCandidate")
     validate_model_candidate(champion)
     if type(challengers) is not tuple:
         raise TypeError("challengers must be a canonical tuple")
+    if any(type(candidate) is not ModelCandidate for candidate in challengers):
+        raise TypeError("challengers must use exact ModelCandidate values")
     for candidate in challengers:
         validate_model_candidate(candidate)
     validate_evaluation_set(evaluation_set)
