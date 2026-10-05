@@ -140,6 +140,7 @@ def test_same_store_explicit_work_ownership_remains_supported(tmp_path: Path) ->
     assert host._ownership is ownership
     assert host._ownership._store is store
 
+
 class _TruthinessForbiddenLedger(IdempotencyLedger):
     def __bool__(self) -> bool:
         raise AssertionError("idempotency truthiness must not execute")
