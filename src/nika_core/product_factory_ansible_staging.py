@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -20,6 +21,11 @@ from nika_core.product_factory_deployment import (
     ReleaseRef,
     RollbackEvidence,
 )
+
+_MAX_RUNNER_EVENTS = 10_000
+_MAX_RUNNER_STATUS_CHARS = 64
+_MAX_RUNNER_EVIDENCE_CHARS = 512
+_MAX_CONTRACT_JSON_BYTES = 64 * 1024
 
 
 class StagingAdapterError(DeploymentFabricError):
@@ -84,6 +90,26 @@ class RunnerExecution:
     contract: Mapping[str, object] | None
     evidence_ref: str
 
+    def __post_init__(self) -> None:
+        _validate_runner_status_rc(self.status, self.rc)
+        if (
+            type(self.evidence_ref) is not str
+            or not self.evidence_ref
+            or len(self.evidence_ref) > _MAX_RUNNER_EVIDENCE_CHARS
+        ):
+            raise StagingAdapterError(
+                "runner evidence_ref must be bounded non-empty text"
+            )
+        if self.contract is not None:
+            snapshot = _snapshot_contract(self.contract)
+            canonical = _canonical_contract_json(snapshot)
+            deep_snapshot = json.loads(canonical)
+            if type(deep_snapshot) is not dict:
+                raise StagingAdapterError(
+                    "ansible-runner contract must be an object"
+                )
+            object.__setattr__(self, "contract", deep_snapshot)
+
 
 class RunnerExecutionPort(Protocol):
     def execute(
@@ -121,9 +147,17 @@ class AnsibleRunnerClient:
             extravars=dict(extravars),
             quiet=True,
         )
-        contract = _extract_contract(result.events)
-        status = str(result.status)
-        rc = result.rc if isinstance(result.rc, int) else None
+        try:
+            events = result.events
+            status = result.status
+            rc = result.rc
+        except AttributeError as exc:
+            raise StagingAdapterError(
+                "ansible-runner returned a malformed execution result"
+            ) from exc
+
+        _validate_runner_status_rc(status, rc)
+        contract = _extract_contract(events)
         evidence_ref = _evidence_ref(ident, status, rc, contract)
         return RunnerExecution(status, rc, contract, evidence_ref)
 
@@ -189,6 +223,11 @@ class AuthorizedAnsibleStagingAdapter:
     ) -> RollbackEvidence:
         """Legacy SHA-only rollback contract retained for provider compatibility."""
         self._validate_intent(intent)
+        if previous_release_sha is not None:
+            _validate_release_sha(
+                previous_release_sha,
+                "previous_release_sha",
+            )
         execution = self._run(
             "rollback",
             self.config.rollback_playbook,
@@ -374,12 +413,22 @@ class AuthorizedAnsibleStagingAdapter:
             intent.intent_id,
             intent.release.source_sha,
         )
-        return self.runner.execute(
+        execution = self.runner.execute(
             private_data_dir=self.config.private_data_dir,
             playbook=playbook,
             inventory=self.target.inventory,
             ident=ident,
             extravars=extravars,
+        )
+        if type(execution) is not RunnerExecution:
+            raise StagingAdapterError(
+                "runner returned an invalid execution carrier"
+            )
+        return RunnerExecution(
+            execution.status,
+            execution.rc,
+            execution.contract,
+            execution.evidence_ref,
         )
 
 
@@ -398,9 +447,80 @@ def _load_ansible_runner() -> ModuleType:
         ) from exc
 
 
-def _extract_contract(events: Any) -> Mapping[str, object] | None:
-    contract: Mapping[str, object] | None = None
-    for event in events:
+def _validate_runner_status_rc(
+    status: object,
+    rc: object,
+) -> None:
+    if (
+        type(status) is not str
+        or not status
+        or len(status) > _MAX_RUNNER_STATUS_CHARS
+    ):
+        raise StagingAdapterError(
+            "ansible-runner status must be bounded non-empty text"
+        )
+    if rc is not None and type(rc) is not int:
+        raise StagingAdapterError(
+            "ansible-runner rc must be an integer or null"
+        )
+
+
+def _snapshot_contract(
+    candidate: Mapping[object, object],
+) -> dict[str, object]:
+    snapshot: dict[str, object] = {}
+    for key, value in candidate.items():
+        if type(key) is not str or not key:
+            raise StagingAdapterError(
+                "nika_pf3 result contract keys must be non-empty text"
+            )
+        if key in snapshot:
+            raise StagingAdapterError(
+                "nika_pf3 result contract contains duplicate keys"
+            )
+        snapshot[key] = value
+    return snapshot
+
+
+def _canonical_contract_json(
+    contract: Mapping[str, object],
+) -> str:
+    try:
+        encoded = json.dumps(
+            contract,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise StagingAdapterError(
+            "nika_pf3 result contract must contain "
+            "JSON-compatible finite values"
+        ) from exc
+    if len(encoded) > _MAX_CONTRACT_JSON_BYTES:
+        raise StagingAdapterError(
+            "nika_pf3 result contract exceeds the evidence size limit"
+        )
+    return encoded.decode("utf-8")
+
+
+def _extract_contract(
+    events: Any,
+) -> Mapping[str, object] | None:
+    try:
+        iterator = iter(events)
+    except TypeError as exc:
+        raise StagingAdapterError(
+            "ansible-runner events must be iterable"
+        ) from exc
+
+    contract: dict[str, object] | None = None
+    for index, event in enumerate(iterator, start=1):
+        if index > _MAX_RUNNER_EVENTS:
+            raise StagingAdapterError(
+                "ansible-runner emitted too many events"
+            )
         if (
             not isinstance(event, Mapping)
             or event.get("event") != "runner_on_ok"
@@ -422,13 +542,8 @@ def _extract_contract(events: Any) -> Mapping[str, object] | None:
             raise StagingAdapterError(
                 "ansible runner emitted multiple nika_pf3 result contracts"
             )
-        if any(not isinstance(key, str) for key in candidate):
-            raise StagingAdapterError(
-                "nika_pf3 result contract keys must be text"
-            )
-        contract = dict(candidate)
+        contract = _snapshot_contract(candidate)
     return contract
-
 
 def _require_contract(
     execution: RunnerExecution,
@@ -465,23 +580,32 @@ def _require_text(
     return value
 
 
-def _require_sha(
-    contract: Mapping[str, object],
-    key: str,
+def _validate_release_sha(
+    value: object,
+    field: str,
 ) -> str:
-    value = contract.get(key)
-    if not isinstance(value, str) or len(value) != 40:
+    if type(value) is not str or len(value) != 40:
         raise StagingAdapterError(
-            f"contract field {key} must be a lowercase 40-character SHA"
+            f"{field} must be a lowercase 40-character SHA"
         )
     if any(
         character not in "0123456789abcdef"
         for character in value
     ):
         raise StagingAdapterError(
-            f"contract field {key} must be a lowercase 40-character SHA"
+            f"{field} must be a lowercase 40-character SHA"
         )
     return value
+
+
+def _require_sha(
+    contract: Mapping[str, object],
+    key: str,
+) -> str:
+    return _validate_release_sha(
+        contract.get(key),
+        f"contract field {key}",
+    )
 
 
 def _require_digest(
@@ -568,13 +692,14 @@ def _evidence_ref(
     contract: Mapping[str, object] | None,
 ) -> str:
     safe_contract = (
-        "none"
+        "null"
         if contract is None
-        else repr(sorted(contract.items()))
+        else _canonical_contract_json(contract)
     )
-    digest = sha256(
-        f"{ident}\0{status}\0{rc}\0{safe_contract}".encode()
-    ).hexdigest()
+    payload = (
+        f"{ident}\0{status}\0{rc}\0{safe_contract}"
+    ).encode("utf-8")
+    digest = sha256(payload).hexdigest()
     return f"ansible-runner:{digest}"
 
 
