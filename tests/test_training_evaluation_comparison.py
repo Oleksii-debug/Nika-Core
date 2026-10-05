@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import pytest
 
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ExperimentEngine,
@@ -55,7 +56,11 @@ from nika_core.training_model_activation import (
     activate_attested_training_promotion,
     rollback_attested_training_promotion,
 )
-from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
+from nika_core.v01_model_settings import (
+    ModelSetupError,
+    V01BoundModelRuntimeFactory,
+    V01ModelSettings,
+)
 
 
 def _sha(value: bytes) -> str:
@@ -1068,3 +1073,36 @@ def test_caller_cannot_inject_promoted_artifact_pin(tmp_path) -> None:
                 },
             }
         )
+
+@pytest.mark.asyncio
+async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+    )
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload({"command": "use one frozen model binding"}),
+    )
+
+    def unexpected_legacy_read(*_args, **_kwargs):
+        raise AssertionError("runtime factory split the task route and artifact-pin read")
+
+    monkeypatch.setattr(settings, "for_task", unexpected_legacy_read)
+    monkeypatch.setattr(settings, "artifact_pin_for_task", unexpected_legacy_read)
+
+    factory = V01BoundModelRuntimeFactory(
+        store=store,
+        definitions=AgentDefinitionRepository(store),
+        settings=settings,
+    )
+
+    assert factory.for_task(task.task_id) is not None
+
