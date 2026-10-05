@@ -345,3 +345,53 @@ def test_model_capture_composes_after_existing_source_capture(tmp_path: Path) ->
     assert bound_sources.source_b == str(source_b.resolve())
     assert bound_model.provider_id == "ollama"
     assert bound_model.model == "qwen3:8b"
+
+def test_v3_task_binding_schema_migrates_to_artifact_pin_column(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    settings = V01ModelSettings(store)
+    assert settings.configure(_local()).status == "completed"
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload({"command": "legacy v3 task"}),
+    )
+    before = settings.for_task(task.task_id)
+
+    with store.connection() as conn:
+        conn.execute(
+            "ALTER TABLE v01_task_model_bindings "
+            "RENAME TO v01_task_model_bindings_v4"
+        )
+        conn.execute(
+            "CREATE TABLE v01_task_model_bindings ("
+            "task_id TEXT PRIMARY KEY, selection_id TEXT NOT NULL, "
+            "selection_json TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_task_model_bindings("
+            "task_id, selection_id, selection_json, created_at"
+            ") SELECT task_id, selection_id, selection_json, created_at "
+            "FROM v01_task_model_bindings_v4"
+        )
+        conn.execute("DROP TABLE v01_task_model_bindings_v4")
+        conn.execute(
+            "DELETE FROM v01_model_settings_schema WHERE version = 4"
+        )
+
+    reopened = V01ModelSettings(SQLiteStore(store.path))
+
+    assert reopened.for_task(task.task_id) == before
+    assert reopened.artifact_pin_for_task(task.task_id) is None
+    with store.connection() as conn:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(v01_task_model_bindings)")
+        }
+        assert "artifact_pin_sha256" in columns
+        row = conn.execute(
+            "SELECT artifact_pin_sha256 FROM v01_task_model_bindings "
+            "WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()
+    assert row["artifact_pin_sha256"] is None
+
