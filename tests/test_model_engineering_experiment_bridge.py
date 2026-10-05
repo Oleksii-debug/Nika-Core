@@ -12,6 +12,7 @@ from nika_core.model_engineering import (
     QUALITY_METRIC,
     TASK_PASS_METRIC,
     BenchmarkExecutionConfig,
+    BenchmarkRunEvidence,
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
     EvaluationCase,
@@ -112,6 +113,16 @@ def _report(
     config = _execution_config() if execution_config is None else execution_config
     return CandidateBenchmarkReport(
         candidate=candidate,
+        run=BenchmarkRunEvidence(
+            run_id="bridge-fixture-run",
+            configuration_sha256=benchmark_configuration_sha256(
+                candidate_evidence_sha256=candidate.evidence_sha256,
+                evaluation_set_id=evaluation.evaluation_set_id,
+                evaluation_set_version=evaluation.version,
+                evaluation_set_sha256=evaluation.content_sha256,
+                execution_config_sha256=config.evidence_sha256,
+            ),
+        ),
         evaluation_set_id=evaluation.evaluation_set_id,
         evaluation_set_version=evaluation.version,
         evaluation_set_sha256=evaluation.content_sha256,
