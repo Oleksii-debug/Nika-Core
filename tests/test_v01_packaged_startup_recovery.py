@@ -183,6 +183,7 @@ def test_packaged_reopen_promotes_unresolved_effect_before_shell_and_never_resum
     assert queue.get(task_id).state is TaskState.RUNNING
     assert ledger.require(operation_key).status is IdempotencyStatus.UNCERTAIN
 
+
 def test_startup_recovery_admission_rejection_demotes_to_manual_resume(
     tmp_path,
 ) -> None:
