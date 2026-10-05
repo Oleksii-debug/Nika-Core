@@ -138,6 +138,7 @@ def test_negative_subtitle_timestamp_is_never_published(
     assert len(result.segments) == 1
     assert result.segments[0].start_ms == 100
 
+
 @pytest.mark.parametrize(
     ("override", "field"),
     (
@@ -168,12 +169,13 @@ def test_valid_quality_policy_boundary_ratios_remain_available() -> None:
     assert policy.automatic_min_coverage_ratio == 0
     assert policy.automatic_max_malformed_ratio == 1
 
+
 @pytest.mark.parametrize(
     ("raw", "expected"),
     (
         ("1 < 2 > 0", "1 < 2 > 0"),
         ("{Україна} <i>відео</i>", "{Україна} відео"),
-        (r"{\\i1}субтитр{\\i0}", "субтитр"),
+        (r"{\i1}субтитр{\i0}", "субтитр"),
         ("<00:01.250>час <00:00:02.500>", "час"),
         ("Текст <c.green>зелений</c>", "Текст зелений"),
     ),
