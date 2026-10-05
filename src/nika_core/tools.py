@@ -306,7 +306,7 @@ class ToolEffectGuard:
                 ensure_ascii=False,
                 sort_keys=True,
             ).encode("utf-8")
-        except (TypeError, ValueError, RecursionError, UnicodeEncodeError) as exc:
+        except (TypeError, ValueError, RecursionError) as exc:
             # Never certify a result as COMPLETED if restart cannot reproduce it.
             # ToolExecutor will convert this finalize failure into UNCERTAIN.
             raise ValueError("durable tool result must be JSON-compatible") from exc
