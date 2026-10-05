@@ -334,6 +334,32 @@ def test_candidate_descriptor_metadata_substitution_is_rejected() -> None:
         driver._candidate_descriptor(substituted, report=_pilot_report())
 
 
+
+def test_windows_pe_header_admission_accepts_canonical_signature(
+    tmp_path: Path,
+) -> None:
+    executable = (tmp_path / "evaluator.exe").resolve()
+    payload = bytearray(68)
+    payload[:2] = b"MZ"
+    payload[60:64] = (64).to_bytes(4, "little")
+    payload[64:68] = b"PE\0\0"
+    executable.write_bytes(payload)
+
+    driver._require_windows_pe_executable(executable, name="evaluator executable")
+
+
+def test_windows_pe_header_admission_rejects_renamed_non_pe(
+    tmp_path: Path,
+) -> None:
+    executable = (tmp_path / "evaluator.exe").resolve()
+    executable.write_bytes(b"not-a-windows-program")
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="not a valid Windows PE executable",
+    ):
+        driver._require_windows_pe_executable(executable, name="evaluator executable")
+
 def test_model_size_preflight_does_not_read_model_bytes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -551,6 +577,38 @@ def test_idempotency_reservation_blocks_same_effect_with_changed_input(
         )
 
 
+
+
+def test_interrupted_effect_reservation_becomes_uncertain(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "uncertain-ledger.sqlite3")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+    )
+    ledger = driver.IdempotencyLedger(store)
+    reservation, created = driver._reserve_evaluation_effect(
+        ledger=ledger,
+        task_id=task.task_id,
+        operation_key="physical-old-new-effect:" + "a" * 64,
+        input_fingerprint="sha256:" + "b" * 64,
+    )
+    assert created is True
+
+    driver._mark_evaluation_uncertain(ledger, reservation)
+
+    persisted = ledger.require(reservation.operation_key)
+    assert persisted.status is driver.IdempotencyStatus.UNCERTAIN
+    replay, replay_created = driver._reserve_evaluation_effect(
+        ledger=ledger,
+        task_id=task.task_id,
+        operation_key=reservation.operation_key,
+        input_fingerprint=reservation.input_fingerprint,
+    )
+    assert replay_created is False
+    assert replay.status is driver.IdempotencyStatus.UNCERTAIN
 
 def test_completed_ledger_result_recovers_without_new_effect_identity(
     tmp_path: Path,
