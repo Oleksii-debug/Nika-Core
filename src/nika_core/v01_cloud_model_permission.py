@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -202,36 +203,31 @@ class V01CloudModelPermissionService:
         instant = self._utc_now() if now is None else now
         previous_id = self._bound_permission_id(record.task_id, strict=True)
         permission_id = self._new_permission_id(record.task_id)
-        granted = False
+        scope = StandingPermissionScope(
+            subject_id=_CLOUD_SUBJECT_ID,
+            context=self._context(record),
+            action_class=_CLOUD_ACTION_CLASS,
+            targets=(request.provider_id,),
+            sites=(request.network_host,),
+            resources=(request.model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=instant,
+            expires_at=instant + _GRANT_TTL,
+        )
         try:
-            self._permissions.grant(
+            with self._permissions.grant_transaction(
                 permission_id=permission_id,
-                scope=StandingPermissionScope(
-                    subject_id=_CLOUD_SUBJECT_ID,
-                    context=self._context(record),
-                    action_class=_CLOUD_ACTION_CLASS,
-                    targets=(request.provider_id,),
-                    sites=(request.network_host,),
-                    resources=(request.model,),
-                    risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
-                    granted_at=instant,
-                    expires_at=instant + _GRANT_TTL,
-                ),
-            )
-            granted = True
-            self._bind_permission(
-                task_id=record.task_id,
-                permission_id=permission_id,
-                updated_at=instant,
-                expected_previous_id=previous_id,
-                expected_record=record,
-            )
-        except Exception:  # noqa: BLE001 - durable permission boundary fails closed
-            if granted:
-                try:
-                    self._permissions.revoke(permission_id, revoked_at=instant)
-                except Exception:  # noqa: BLE001 - preserve the original admission failure
-                    pass
+                scope=scope,
+            ) as (conn, _permission):
+                self._bind_permission(
+                    conn=conn,
+                    task_id=record.task_id,
+                    permission_id=permission_id,
+                    updated_at=instant,
+                    expected_previous_id=previous_id,
+                    expected_record=record,
+                )
+        except Exception:  # noqa: BLE001 - atomic grant/binding boundary fails closed
             raise CloudModelPermissionDenied(
                 "Не вдалося безпечно зберегти дозвіл для зовнішньої моделі; "
                 "завдання не запущено."
@@ -330,9 +326,10 @@ class V01CloudModelPermissionService:
             return None
         return permission
 
+    @staticmethod
     def _bind_permission(
-        self,
         *,
+        conn: sqlite3.Connection,
         task_id: str,
         permission_id: str,
         updated_at: datetime,
@@ -344,36 +341,34 @@ class V01CloudModelPermissionService:
             ensure_ascii=False,
             sort_keys=True,
         )
-        with self._store.connection() as conn:
-            conn.execute("BEGIN IMMEDIATE")
-            task_row = conn.execute(
-                "SELECT workspace_id, agent_id, state, payload_json FROM tasks "
-                "WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            if (
-                task_row is None
-                or task_row["workspace_id"] != expected_record.workspace_id
-                or task_row["agent_id"] != expected_record.agent_id
-                or task_row["state"] != expected_record.state.value
-                or task_row["payload_json"] != expected_payload_json
-            ):
-                raise RuntimeError("cloud model permission task changed concurrently")
-            row = conn.execute(
-                "SELECT permission_id FROM v01_cloud_model_permission_bindings "
-                "WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            current = None if row is None else row["permission_id"]
-            if current != expected_previous_id:
-                raise RuntimeError("cloud model permission binding changed concurrently")
-            conn.execute(
-                "INSERT INTO v01_cloud_model_permission_bindings"
-                "(task_id, permission_id, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(task_id) DO UPDATE SET "
-                "permission_id=excluded.permission_id, updated_at=excluded.updated_at",
-                (task_id, permission_id, updated_at.isoformat()),
-            )
+        task_row = conn.execute(
+            "SELECT workspace_id, agent_id, state, payload_json FROM tasks "
+            "WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if (
+            task_row is None
+            or task_row["workspace_id"] != expected_record.workspace_id
+            or task_row["agent_id"] != expected_record.agent_id
+            or task_row["state"] != expected_record.state.value
+            or task_row["payload_json"] != expected_payload_json
+        ):
+            raise RuntimeError("cloud model permission task changed concurrently")
+        row = conn.execute(
+            "SELECT permission_id FROM v01_cloud_model_permission_bindings "
+            "WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        current = None if row is None else row["permission_id"]
+        if current != expected_previous_id:
+            raise RuntimeError("cloud model permission binding changed concurrently")
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_bindings"
+            "(task_id, permission_id, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(task_id) DO UPDATE SET "
+            "permission_id=excluded.permission_id, updated_at=excluded.updated_at",
+            (task_id, permission_id, updated_at.isoformat()),
+        )
 
     @staticmethod
     def _context(record: TaskRecord) -> PermissionContext:
