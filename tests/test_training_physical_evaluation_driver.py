@@ -8,7 +8,11 @@ import pytest
 
 import nika_core.training_physical_evaluation_driver as driver
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.experiments import ExperimentStatus, SQLiteExperimentRepository
+from nika_core.experiments import (
+    ExperimentStatus,
+    MetricObservation,
+    SQLiteExperimentRepository,
+)
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.model_artifacts import (
     ModelArtifactDescriptor,
@@ -191,7 +195,6 @@ def test_config_rejects_unbound_evaluator_arguments(
 
     with pytest.raises(driver.PhysicalEvaluationDriverError, match="simple --option"):
         driver.PhysicalEvaluationConfig.from_json(json.dumps(payload))
-
 
 
 @pytest.mark.parametrize(
@@ -547,6 +550,144 @@ def test_idempotency_reservation_blocks_same_effect_with_changed_input(
             input_fingerprint="sha256:" + "c" * 64,
         )
 
+
+
+def test_completed_ledger_result_recovers_without_new_effect_identity(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    champion, challenger = _physical_candidates(tmp_path)
+    evaluation = driver._evaluation_set_from_json(
+        json.dumps(_evaluation_payload(), ensure_ascii=False)
+    )
+    store = SQLiteStore(tmp_path / "recovery.sqlite3")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+    )
+    ledger = driver.IdempotencyLedger(store)
+    repository = SQLiteExperimentRepository(store)
+    operation_key, input_fingerprint, experiment_id = (
+        driver._evaluation_effect_identity(
+            requested_experiment_id=config.experiment_id,
+            pilot=_pilot_report(),
+            training_binding_sha256="a" * 64,
+            champion_binding_sha256="b" * 64,
+            champion=champion,
+            challenger=challenger,
+            evaluation_set=evaluation,
+            execution_config=config.benchmark,
+            policy=config.policy,
+            permission_fingerprint=config.permission_fingerprint,
+            attestor_id="evaluator-artifact",
+            attestor_sha256="c" * 64,
+        )
+    )
+    reservation, created = driver._reserve_evaluation_effect(
+        ledger=ledger,
+        task_id=task.task_id,
+        operation_key=operation_key,
+        input_fingerprint=input_fingerprint,
+    )
+    assert created is True
+
+    driver._claim_evaluation_attempt(
+        repository=repository,
+        experiment_id=experiment_id,
+        champion=champion,
+        challenger=challenger,
+        evaluation_set=evaluation,
+        execution_config=config.benchmark,
+        policy=config.policy,
+        permission_fingerprint=config.permission_fingerprint,
+    )
+    engine = driver.ExperimentEngine(repository)
+    for candidate_id, quality, task_pass in (
+        (champion.candidate_id, 0.0, 1.0),
+        (challenger.candidate_id, 1.0, 1.0),
+    ):
+        engine.record(
+            experiment_id,
+            MetricObservation(
+                candidate_id=candidate_id,
+                replay_id="case-one",
+                metric="model_quality_score",
+                value=quality,
+            ),
+        )
+        engine.record(
+            experiment_id,
+            MetricObservation(
+                candidate_id=candidate_id,
+                replay_id="case-one",
+                metric="model_task_pass",
+                value=task_pass,
+            ),
+        )
+    terminal = engine.complete(experiment_id)
+    assert terminal.status is ExperimentStatus.PROMOTED
+
+    payload = {
+        "schema_version": 1,
+        "schema": "nika-physical-old-new-evaluation-report-v1",
+        "physical_pilot_evidence_sha256": _pilot_report().evidence_sha256,
+        "requested_experiment_id": config.experiment_id,
+        "evaluation_set_sha256": evaluation.content_sha256,
+        "execution_config_sha256": config.benchmark.evidence_sha256,
+        "comparison_evidence_sha256": "d" * 64,
+        "experiment_id": experiment_id,
+        "experiment_status": terminal.status.value,
+        "selected_candidate_id": terminal.selected_candidate_id,
+        "previous_champion_id": terminal.previous_champion_id,
+        "training_binding_sha256": "a" * 64,
+        "champion_benchmark_sha256": "e" * 64,
+        "challenger_benchmark_sha256": "f" * 64,
+        "attestor_id": "evaluator-artifact",
+        "attestor_sha256": "c" * 64,
+        "champion_provider_manifest_sha256": None,
+        "challenger_provider_manifest_sha256": None,
+    }
+    ledger.complete_pending_if_matches(
+        operation_key=reservation.operation_key,
+        task_id=reservation.task_id,
+        operation_type=reservation.operation_type,
+        input_fingerprint=reservation.input_fingerprint,
+        created_at=reservation.created_at,
+        result=payload,
+    )
+
+    replay, replay_created = driver._reserve_evaluation_effect(
+        ledger=ledger,
+        task_id=task.task_id,
+        operation_key=operation_key,
+        input_fingerprint=input_fingerprint,
+    )
+    assert replay_created is False
+    assert replay.status is driver.IdempotencyStatus.COMPLETED
+    recovered = driver._validate_recovered_report_payload(
+        replay.result,
+        pilot=_pilot_report(),
+        requested_experiment_id=config.experiment_id,
+        evaluation_set=evaluation,
+        execution_config=config.benchmark,
+        experiment_id=experiment_id,
+        training_binding_sha256="a" * 64,
+        attestor_id="evaluator-artifact",
+        attestor_sha256="c" * 64,
+    )
+    driver._validate_recovered_experiment(
+        repository=repository,
+        experiment_id=experiment_id,
+        champion=champion,
+        challenger=challenger,
+        evaluation_set=evaluation,
+        execution_config=config.benchmark,
+        policy=config.policy,
+        permission_fingerprint=config.permission_fingerprint,
+        report_payload=recovered,
+    )
+    assert recovered == payload
 
 def test_report_writer_is_no_clobber(tmp_path: Path) -> None:
     path = tmp_path / "physical-old-new-evaluation-report.json"
