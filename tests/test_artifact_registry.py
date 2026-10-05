@@ -411,6 +411,43 @@ def test_record_json_cannot_rebind_primary_key_identity(tmp_path: Path) -> None:
         registry.get(record.artifact_id)
 
 
+def test_record_json_rejects_duplicate_keys_even_when_last_value_matches_index(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    registry = ArtifactRegistry.from_store(store)
+    record = registry.register_reference(
+        workspace_id="workspace-a",
+        idempotency_key="artifact-a",
+        reference="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+        kind="evidence",
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT record_json FROM artifact_registry_records WHERE artifact_id = ?",
+            (record.artifact_id,),
+        ).fetchone()
+        assert row is not None
+        raw = row["record_json"]
+        assert type(raw) is str
+        needle = '"workspace_id":"workspace-a"'
+        assert raw.count(needle) == 1
+        ambiguous = raw.replace(
+            needle,
+            '"workspace_id":"workspace-forged","workspace_id":"workspace-a"',
+            1,
+        )
+        conn.execute(
+            "UPDATE artifact_registry_records SET record_json = ? WHERE artifact_id = ?",
+            (ambiguous, record.artifact_id),
+        )
+
+    with pytest.raises(ArtifactRegistryError, match="record payload is invalid"):
+        registry.get(record.artifact_id)
+
+
 def test_index_columns_cannot_launder_workspace_identity(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "state.sqlite3")
     registry = ArtifactRegistry.from_store(store)
@@ -460,6 +497,46 @@ def test_verification_json_cannot_rebind_artifact_identity(tmp_path: Path) -> No
         )
 
     with pytest.raises(ArtifactRegistryError, match="indexed metadata"):
+        registry.verification_history(record.artifact_id)
+
+
+def test_verification_json_rejects_duplicate_keys_even_when_last_value_matches_index(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    registry = ArtifactRegistry.from_store(store)
+    record = registry.register_reference(
+        workspace_id="workspace-a",
+        idempotency_key="artifact-a",
+        reference="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+        kind="evidence",
+    )
+    verification = registry.verify(record.artifact_id)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT verification_json FROM artifact_registry_verifications "
+            "WHERE verification_id = ?",
+            (verification.verification_id,),
+        ).fetchone()
+        assert row is not None
+        raw = row["verification_json"]
+        assert type(raw) is str
+        needle = '"state":"unavailable"'
+        assert raw.count(needle) == 1
+        ambiguous = raw.replace(
+            needle,
+            '"state":"verified","state":"unavailable"',
+            1,
+        )
+        conn.execute(
+            "UPDATE artifact_registry_verifications SET verification_json = ? "
+            "WHERE verification_id = ?",
+            (ambiguous, verification.verification_id),
+        )
+
+    with pytest.raises(ArtifactRegistryError, match="verification payload is invalid"):
         registry.verification_history(record.artifact_id)
 
 
