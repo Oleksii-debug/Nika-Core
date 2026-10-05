@@ -8,6 +8,7 @@ on:
       - "src/nika_core/ui/**"
       - "src/nika_core/diagnostics/**"
       - "src/nika_core/v01_packaged_team_runtime.py"
+      - "src/nika_core/v01_model_settings.py"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
@@ -18,6 +19,7 @@ on:
       - "tests/test_diagnostics_health*.py"
       - "tests/test_local_model_health*.py"
       - "tests/test_v01_packaged_model_recovery_health.py"
+      - "tests/test_v01_model_settings.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   push:
@@ -29,6 +31,7 @@ on:
       - "src/nika_core/ui/**"
       - "src/nika_core/diagnostics/**"
       - "src/nika_core/v01_packaged_team_runtime.py"
+      - "src/nika_core/v01_model_settings.py"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
@@ -39,6 +42,7 @@ on:
       - "tests/test_diagnostics_health*.py"
       - "tests/test_local_model_health*.py"
       - "tests/test_v01_packaged_model_recovery_health.py"
+      - "tests/test_v01_model_settings.py"
       - "pyproject.toml"
       - ".github/workflows/m11-windows-release.yml"
   workflow_dispatch:
@@ -93,6 +97,7 @@ jobs:
           tests/test_local_model_health_string_authority.py
           tests/test_local_model_health_timeout_contract.py
           tests/test_v01_packaged_model_recovery_health.py
+          tests/test_v01_model_settings.py
           -q
       - name: Build standalone one-dir Windows candidate, notices and manifest
         shell: pwsh
