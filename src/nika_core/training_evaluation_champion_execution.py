@@ -14,15 +14,11 @@ from nika_core.model_engineering import (
     ModelScoringPort,
     benchmark_report_sha256,
 )
-from nika_core.model_engineering.contracts import (
-    validate_candidate_benchmark_report,
-    validate_evaluation_set,
-    validate_model_candidate,
-)
+from nika_core.model_engineering.contracts import validate_candidate_benchmark_report
 from nika_core.model_gateway.contracts import ModelFailureEffect, ProviderKind
 from nika_core.resources.contracts import ResourceObserverPort
 from nika_core.training_evaluation_attestation import LoadedModelAttestedCompletionPort
-from nika_core.training_evaluation_binding import TrainingEvaluationBinding
+from nika_core.training_evaluation_champion import ChampionEvaluationBinding
 from nika_core.training_evaluation_execution import (
     AttestedCaseReceipt,
     TrainingEvaluationExecutionError,
@@ -66,61 +62,6 @@ def _expected_request_id(
     return f"model-bench-{hashlib.sha256(raw).hexdigest()[:32]}"
 
 
-@dataclass(frozen=True, slots=True)
-class _ChampionBindingView:
-    """Private role adapter over the single canonical TrainingEvaluationBinding."""
-
-    source: TrainingEvaluationBinding
-
-    def __post_init__(self) -> None:
-        if type(self.source) is not TrainingEvaluationBinding:
-            raise TypeError("source must be an exact TrainingEvaluationBinding")
-        self.source.revalidated()
-
-    def revalidated(self) -> _ChampionBindingView:
-        return _ChampionBindingView(self.source.revalidated())
-
-    @property
-    def job_id(self) -> str:
-        return self.source.job_id
-
-    @property
-    def challenger_candidate_id(self) -> str:
-        return self.source.base_candidate_id
-
-    @property
-    def challenger_provider_id(self) -> str:
-        return self.source.base_provider_id
-
-    @property
-    def challenger_model_id(self) -> str:
-        return self.source.base_model_id
-
-    @property
-    def challenger_sha256(self) -> str:
-        return self.source.base_sha256
-
-    @property
-    def challenger_size_bytes(self) -> int:
-        return self.source.base_size_bytes
-
-    @property
-    def descriptor_digest(self) -> str:
-        return self.source.base_descriptor_digest
-
-    @property
-    def descriptor_registry_key(self) -> str:
-        return self.source.base_descriptor_registry_key
-
-    @property
-    def evaluation_set_sha256(self) -> str:
-        return self.source.evaluation_set_sha256
-
-    @property
-    def binding_sha256(self) -> str:
-        return self.source.binding_sha256
-
-
 def _receipt_payload(receipt: AttestedCaseReceipt) -> dict[str, str]:
     item = receipt.revalidated()
     return {
@@ -149,9 +90,9 @@ def _payload_sha256(payload: dict[str, object]) -> str:
 
 @dataclass(frozen=True, slots=True, init=False)
 class AttestedChampionBenchmarkResult:
-    """Complete champion benchmark bound to the canonical Loop-C v2 binding."""
+    """Complete champion benchmark using the incumbent Loop-C attestation authority."""
 
-    binding: TrainingEvaluationBinding
+    binding: ChampionEvaluationBinding
     report: CandidateBenchmarkReport
     case_receipts: tuple[AttestedCaseReceipt, ...]
     attestor_id: str
@@ -161,8 +102,8 @@ class AttestedChampionBenchmarkResult:
         raise TypeError("AttestedChampionBenchmarkResult cannot be subclassed")
 
     def _validate(self) -> None:
-        if type(self.binding) is not TrainingEvaluationBinding:
-            raise TypeError("binding must be an exact TrainingEvaluationBinding")
+        if type(self.binding) is not ChampionEvaluationBinding:
+            raise TypeError("binding must be an exact ChampionEvaluationBinding")
         binding = self.binding.revalidated()
         if type(self.report) is not CandidateBenchmarkReport:
             raise TypeError("report must be an exact CandidateBenchmarkReport")
@@ -175,19 +116,19 @@ class AttestedChampionBenchmarkResult:
 
         candidate = self.report.candidate
         if (
-            candidate.candidate_id != binding.base_candidate_id
-            or candidate.provider_id != binding.base_provider_id
+            candidate.candidate_id != binding.candidate_id
+            or candidate.provider_id != binding.provider_id
             or candidate.provider_kind is not ProviderKind.LOCAL
-            or candidate.request_model != binding.base_model_id
-            or candidate.expected_response_model != binding.base_model_id
-            or candidate.model_sha256 != binding.base_sha256
+            or candidate.request_model != binding.model_id
+            or candidate.expected_response_model != binding.model_id
+            or candidate.model_sha256 != binding.artifact_sha256
         ):
-            raise ValueError("benchmark candidate does not match base binding")
+            raise ValueError("benchmark candidate does not match champion binding")
         if (
             self.report.evaluation_set_sha256 != binding.evaluation_set_sha256
             or self.report.evaluation_purpose is not EvaluationPurpose.HELD_OUT
         ):
-            raise ValueError("benchmark evaluation does not match base binding")
+            raise ValueError("benchmark evaluation does not match champion binding")
         if (
             self.report.completion_rate != 1.0
             or any(
@@ -218,10 +159,10 @@ class AttestedChampionBenchmarkResult:
                 raise ValueError("attested receipt request identity is inconsistent")
             if (
                 receipt.binding_sha256 != binding.binding_sha256
-                or receipt.provider_id != binding.base_provider_id
-                or receipt.model_id != binding.base_model_id
-                or receipt.artifact_sha256 != binding.base_sha256
-                or receipt.descriptor_digest != binding.base_descriptor_digest
+                or receipt.provider_id != binding.provider_id
+                or receipt.model_id != binding.model_id
+                or receipt.artifact_sha256 != binding.artifact_sha256
+                or receipt.descriptor_digest != binding.descriptor_digest
                 or receipt.attestor_id != attestor_id
                 or receipt.attestor_sha256 != attestor_sha256
             ):
@@ -260,9 +201,10 @@ class AttestedChampionBenchmarkResult:
         return {
             "schema": "nika-attested-champion-benchmark-v1",
             "job_id": result.binding.job_id,
-            "binding_sha256": result.binding.binding_sha256,
-            "champion_candidate_id": result.binding.base_candidate_id,
-            "champion_sha256": result.binding.base_sha256,
+            "training_binding_sha256": result.binding.training_binding_sha256,
+            "champion_binding_sha256": result.binding.binding_sha256,
+            "champion_candidate_id": result.binding.candidate_id,
+            "champion_sha256": result.binding.artifact_sha256,
             "evaluation_set_sha256": result.binding.evaluation_set_sha256,
             "execution_config_sha256": result.report.execution_config_sha256,
             "benchmark_run_id": result.report.run.run_id,
@@ -280,7 +222,7 @@ class AttestedChampionBenchmarkResult:
 
 def _build_result(
     *,
-    binding: TrainingEvaluationBinding,
+    binding: ChampionEvaluationBinding,
     report: CandidateBenchmarkReport,
     case_receipts: tuple[AttestedCaseReceipt, ...],
     attestor_id: str,
@@ -296,41 +238,9 @@ def _build_result(
     return result
 
 
-def _validate_champion_preflight(
-    *,
-    binding: TrainingEvaluationBinding,
-    champion: ModelCandidate,
-    evaluation_set: EvaluationSet,
-) -> tuple[TrainingEvaluationBinding, ModelCandidate, EvaluationSet]:
-    if type(binding) is not TrainingEvaluationBinding:
-        raise TypeError("binding must be an exact TrainingEvaluationBinding")
-    canonical_binding = binding.revalidated()
-    if type(champion) is not ModelCandidate:
-        raise TypeError("champion must be an exact ModelCandidate")
-    try:
-        validate_model_candidate(champion)
-        validate_evaluation_set(evaluation_set)
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise ValueError("champion benchmark input is not canonical") from exc
-    if (
-        champion.candidate_id != canonical_binding.base_candidate_id
-        or champion.provider_id != canonical_binding.base_provider_id
-        or champion.provider_kind is not ProviderKind.LOCAL
-        or champion.request_model != canonical_binding.base_model_id
-        or champion.expected_response_model != canonical_binding.base_model_id
-        or champion.model_sha256 != canonical_binding.base_sha256
-    ):
-        raise ValueError("champion does not match training evaluation binding")
-    if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
-        raise ValueError("Loop-C champion benchmark requires held-out evaluation")
-    if evaluation_set.content_sha256 != canonical_binding.evaluation_set_sha256:
-        raise ValueError("evaluation set does not match training evaluation binding")
-    return canonical_binding, champion, evaluation_set
-
-
 async def run_attested_champion_benchmark(
     *,
-    binding: TrainingEvaluationBinding,
+    binding: ChampionEvaluationBinding,
     champion: ModelCandidate,
     evaluation_set: EvaluationSet,
     effect_port: LoadedModelAttestedCompletionPort,
@@ -343,22 +253,16 @@ async def run_attested_champion_benchmark(
     resource_observer: ResourceObserverPort | None = None,
     accelerator_observer: AcceleratorObserverPort | None = None,
 ) -> AttestedChampionBenchmarkResult:
-    """Run the bound champion through the incumbent fail-fast attested path."""
+    """Run champion through the exact incumbent fail-fast attested benchmark path."""
 
-    (
-        canonical_binding,
-        canonical_champion,
-        canonical_evaluation,
-    ) = _validate_champion_preflight(
-        binding=binding,
-        champion=champion,
-        evaluation_set=evaluation_set,
-    )
-    view = _ChampionBindingView(canonical_binding)
+    if type(binding) is not ChampionEvaluationBinding:
+        raise TypeError("binding must be an exact ChampionEvaluationBinding")
+    canonical_binding = binding.revalidated()
+
     inner = await run_attested_challenger_benchmark(
-        binding=view,  # type: ignore[arg-type]
-        challenger=canonical_champion,
-        evaluation_set=canonical_evaluation,
+        binding=canonical_binding,  # type: ignore[arg-type]
+        challenger=champion,
+        evaluation_set=evaluation_set,
         effect_port=effect_port,
         expected_attestor_id=expected_attestor_id,
         expected_attestor_sha256=expected_attestor_sha256,

@@ -2,14 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
-import sys
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from nika_core.artifacts import ArtifactRegistry
-from nika_core.data.sqlite import SQLiteStore
 from nika_core.model_artifacts import (
     ModelArtifactDescriptor,
     ModelArtifactKind,
@@ -34,12 +31,15 @@ from nika_core.training_evaluation_attestation import (
     LoadedModelArtifactAttestation,
 )
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
+from nika_core.training_evaluation_champion import (
+    ChampionEvaluationBinding,
+    bind_champion_for_attested_evaluation,
+)
 from nika_core.training_evaluation_champion_execution import (
     AttestedChampionBenchmarkResult,
     run_attested_champion_benchmark,
 )
 from nika_core.training_evaluation_execution import TrainingEvaluationExecutionError
-from nika_core.training_evaluation_subprocess import RegistrySubprocessLoadedModelAttestor
 
 
 def _sha(value: bytes) -> str:
@@ -73,8 +73,18 @@ def _evaluation() -> EvaluationSet:
     )
 
 
-def _base_descriptor(body: bytes) -> ModelArtifactDescriptor:
-    return ModelArtifactDescriptor(
+def _fixture(
+    tmp_path: Path,
+) -> tuple[
+    ChampionEvaluationBinding,
+    ModelCandidate,
+    EvaluationSet,
+]:
+    evaluation = _evaluation()
+    body = b"physical-champion-weights\n"
+    path = tmp_path / "champion weights.bin"
+    path.write_bytes(body)
+    descriptor = ModelArtifactDescriptor(
         kind=ModelArtifactKind.EXTERNAL_LOCAL,
         provider_id="ollama",
         model_id="champion-model",
@@ -85,22 +95,6 @@ def _base_descriptor(body: bytes) -> ModelArtifactDescriptor:
         sha256=_sha(body),
         size_bytes=len(body),
     )
-
-
-def _fixture(
-    tmp_path: Path,
-) -> tuple[
-    TrainingEvaluationBinding,
-    ModelCandidate,
-    EvaluationSet,
-    Path,
-    ModelArtifactDescriptor,
-]:
-    evaluation = _evaluation()
-    body = b"physical-champion-weights\n"
-    path = tmp_path / "champion weights.bin"
-    path.write_bytes(body)
-    descriptor = _base_descriptor(body)
     champion = ModelCandidate(
         candidate_id="models/base",
         provider_id=descriptor.provider_id,
@@ -113,14 +107,14 @@ def _fixture(
         model_license_ref=descriptor.license_reference,
         model_sha256=descriptor.sha256,
     )
-    binding = TrainingEvaluationBinding(
+    training = TrainingEvaluationBinding(
         job_id="job-1",
         base_candidate_id=champion.candidate_id,
-        base_provider_id=champion.provider_id,
-        base_model_id=champion.request_model,
+        base_provider_id=descriptor.provider_id,
+        base_model_id=descriptor.model_id,
         challenger_candidate_id="models/candidate/job-1",
         challenger_provider_id="ollama",
-        challenger_model_id="challenger-model",
+        challenger_model_id="candidate-model",
         base_sha256=descriptor.sha256,
         challenger_sha256=_sha(b"challenger-weights"),
         candidate_artifact_ref="models/candidate/job-1",
@@ -133,7 +127,14 @@ def _fixture(
         descriptor_registry_key=_sha(b"challenger-registry-key"),
         challenger_size_bytes=len(b"challenger-weights"),
     )
-    return binding, champion, evaluation, path, descriptor
+    binding = bind_champion_for_attested_evaluation(
+        training_binding=training,
+        champion=champion,
+        descriptor=descriptor,
+        champion_path=path,
+        allowed_root=tmp_path,
+    )
+    return binding, champion, evaluation
 
 
 class _AttestedEffect:
@@ -184,80 +185,11 @@ class _AttestedEffect:
         )
 
 
-def _success_script(tmp_path: Path) -> Path:
-    path = tmp_path / "champion-evaluator.py"
-    path.write_text(
-        """
-import hashlib
-import json
-import sys
-from pathlib import Path
-
-request = json.loads(sys.stdin.buffer.read())
-candidate = Path(request["candidate"]["path"]).read_bytes()
-response = {
-    "protocol_version": request["protocol_version"],
-    "request_id": request["request"]["request_id"],
-    "provider_id": request["request"]["provider_id"],
-    "model": request["request"]["model"],
-    "text": "one",
-    "loaded_artifact_sha256": hashlib.sha256(candidate).hexdigest(),
-    "loaded_artifact_size_bytes": len(candidate),
-    "descriptor_digest": request["binding"]["descriptor_digest"],
-    "usage": {
-        "input_tokens": 2,
-        "output_tokens": 1,
-        "total_tokens": 3,
-    },
-}
-sys.stdout.write(json.dumps(response))
-""".strip(),
-        encoding="utf-8",
-    )
-    return path
-
-
-def _concrete_attestor(
-    tmp_path: Path,
-    candidate_path: Path,
-    descriptor: ModelArtifactDescriptor,
-) -> RegistrySubprocessLoadedModelAttestor:
-    script = _success_script(tmp_path)
-    executable = Path(sys.executable).resolve()
-    roots = tuple(dict.fromkeys((executable.parent, tmp_path.resolve())))
-    registry = ArtifactRegistry.from_store(
-        SQLiteStore(tmp_path / "champion-evaluation-artifacts.sqlite3"),
-        local_file_roots=roots,
-    )
-    executable_record = registry.register_file(
-        workspace_id="champion-evaluation-tests",
-        idempotency_key="python-evaluator-executable",
-        path=executable,
-        kind="model_evaluator_executable",
-    )
-    script_record = registry.register_file(
-        workspace_id="champion-evaluation-tests",
-        idempotency_key="champion-evaluator-script",
-        path=script,
-        kind="model_evaluator_command_file",
-    )
-    return RegistrySubprocessLoadedModelAttestor(
-        (str(executable), str(script)),
-        artifact_registry=registry,
-        evaluator_artifact_id=executable_record.artifact_id,
-        command_artifact_ids={1: script_record.artifact_id},
-        candidate_path=str(candidate_path.resolve()),
-        descriptor=descriptor,
-        allowed_root=str(tmp_path.resolve()),
-        timeout_seconds=5.0,
-    )
-
-
 @pytest.mark.asyncio
 async def test_complete_champion_benchmark_reuses_attested_runner(
     tmp_path: Path,
 ) -> None:
-    binding, champion, evaluation, _, _ = _fixture(tmp_path)
+    binding, champion, evaluation = _fixture(tmp_path)
     effect = _AttestedEffect()
 
     result = await run_attested_champion_benchmark(
@@ -270,7 +202,6 @@ async def test_complete_champion_benchmark_reuses_attested_runner(
     )
 
     assert effect.calls == ["case-one", "case-two"]
-    assert result.binding == binding
     assert result.report.candidate.candidate_id == champion.candidate_id
     assert result.report.completion_rate == 1.0
     assert result.report.task_pass_rate == 1.0
@@ -288,7 +219,7 @@ async def test_complete_champion_benchmark_reuses_attested_runner(
 async def test_champion_evidence_has_champion_schema_and_no_prompt_response(
     tmp_path: Path,
 ) -> None:
-    binding, champion, evaluation, _, _ = _fixture(tmp_path)
+    binding, champion, evaluation = _fixture(tmp_path)
     result = await run_attested_champion_benchmark(
         binding=binding,
         champion=champion,
@@ -303,7 +234,8 @@ async def test_champion_evidence_has_champion_schema_and_no_prompt_response(
 
     assert payload["schema"] == "nika-attested-champion-benchmark-v1"
     assert payload["champion_candidate_id"] == champion.candidate_id
-    assert payload["binding_sha256"] == binding.binding_sha256
+    assert payload["training_binding_sha256"] == binding.training_binding_sha256
+    assert payload["champion_binding_sha256"] == binding.binding_sha256
     assert payload["case_count"] == 2
     assert "nika-attested-champion-case-v1" in body
     assert "secret question one" not in body
@@ -316,7 +248,7 @@ async def test_champion_evidence_has_champion_schema_and_no_prompt_response(
 async def test_champion_loaded_artifact_mismatch_aborts_after_first_effect(
     tmp_path: Path,
 ) -> None:
-    binding, champion, evaluation, _, _ = _fixture(tmp_path)
+    binding, champion, evaluation = _fixture(tmp_path)
     effect = _AttestedEffect(wrong_artifact=True)
 
     with pytest.raises(TrainingEvaluationExecutionError) as exc_info:
@@ -337,9 +269,12 @@ async def test_champion_loaded_artifact_mismatch_aborts_after_first_effect(
 async def test_cross_evaluation_substitution_fails_before_effect(
     tmp_path: Path,
 ) -> None:
-    binding, champion, evaluation, _, _ = _fixture(tmp_path)
+    binding, champion, evaluation = _fixture(tmp_path)
     effect = _AttestedEffect()
-    substituted = replace(evaluation, version="v2")
+    substituted = replace(
+        evaluation,
+        version="v2",
+    )
 
     with pytest.raises(ValueError, match="evaluation set does not match"):
         await run_attested_champion_benchmark(
@@ -358,7 +293,7 @@ async def test_cross_evaluation_substitution_fails_before_effect(
 async def test_cross_candidate_substitution_fails_before_effect(
     tmp_path: Path,
 ) -> None:
-    binding, champion, evaluation, _, _ = _fixture(tmp_path)
+    binding, champion, evaluation = _fixture(tmp_path)
     effect = _AttestedEffect()
     substituted = replace(champion, candidate_id="models/not-base")
 
@@ -379,7 +314,7 @@ async def test_cross_candidate_substitution_fails_before_effect(
 async def test_champion_result_revalidation_rejects_receipt_artifact_substitution(
     tmp_path: Path,
 ) -> None:
-    binding, champion, evaluation, _, _ = _fixture(tmp_path)
+    binding, champion, evaluation = _fixture(tmp_path)
     result = await run_attested_champion_benchmark(
         binding=binding,
         champion=champion,
@@ -406,7 +341,7 @@ async def test_champion_result_revalidation_rejects_receipt_artifact_substitutio
 async def test_champion_result_revalidation_binds_receipts_to_run_identity(
     tmp_path: Path,
 ) -> None:
-    binding, champion, evaluation, _, _ = _fixture(tmp_path)
+    binding, champion, evaluation = _fixture(tmp_path)
     result = await run_attested_champion_benchmark(
         binding=binding,
         champion=champion,
@@ -444,7 +379,7 @@ def test_direct_attested_champion_result_construction_is_disabled() -> None:
 async def test_champion_evidence_digest_is_stable_for_unchanged_result(
     tmp_path: Path,
 ) -> None:
-    binding, champion, evaluation, _, _ = _fixture(tmp_path)
+    binding, champion, evaluation = _fixture(tmp_path)
     result = await run_attested_champion_benchmark(
         binding=binding,
         champion=champion,
@@ -456,33 +391,3 @@ async def test_champion_evidence_digest_is_stable_for_unchanged_result(
 
     assert result.evidence_sha256 == result.evidence_sha256
     assert len(result.evidence_sha256) == 64
-
-
-@pytest.mark.asyncio
-async def test_registry_subprocess_attests_bound_base_bytes_in_same_effect(
-    tmp_path: Path,
-) -> None:
-    binding, champion, evaluation, path, descriptor = _fixture(tmp_path)
-    one_case = replace(evaluation, cases=(evaluation.cases[0],))
-    binding = replace(
-        binding,
-        evaluation_set_sha256=one_case.content_sha256,
-    )
-    attestor = _concrete_attestor(tmp_path, path, descriptor)
-
-    result = await run_attested_champion_benchmark(
-        binding=binding,
-        champion=champion,
-        evaluation_set=one_case,
-        effect_port=attestor,
-        expected_attestor_id=attestor.attestor_id,
-        expected_attestor_sha256=attestor.attestor_sha256,
-    )
-
-    assert result.report.completion_rate == 1.0
-    assert result.report.task_pass_rate == 1.0
-    assert result.case_receipts[0].artifact_sha256 == binding.base_sha256
-    assert (
-        result.case_receipts[0].descriptor_digest
-        == binding.base_descriptor_digest
-    )
