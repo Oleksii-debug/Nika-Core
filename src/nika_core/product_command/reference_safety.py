@@ -32,7 +32,7 @@ def _strict_utf8(reference: str) -> bytes:
 def _sensitivity_view(reference: str) -> str:
     normalized = reference.strip().casefold()
     for _ in range(_MAX_SENSITIVE_DECODE_ROUNDS):
-        decoded = unquote_plus(normalized)
+        decoded = unquote_plus(normalized).casefold()
         if decoded == normalized:
             break
         normalized = decoded
