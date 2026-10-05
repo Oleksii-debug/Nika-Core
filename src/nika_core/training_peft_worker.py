@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -768,6 +769,22 @@ def candidate_artifact_path(output_root: Path, candidate_artifact_ref: str) -> P
     return root / _candidate_key(ref) / "candidate" / _CANDIDATE_FILE
 
 
+def _reserve_candidate_temporary(candidate: Path) -> Path:
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{_CANDIDATE_FILE}.",
+            suffix=".tmp",
+            dir=candidate.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+    except OSError:
+        _fail("candidate_publish_failed")
+    _require_regular_unlinked(temporary, code="candidate_publish_failed")
+    return temporary
+
+
 def _job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     return config.output_root / _candidate_key(request.candidate_artifact_ref)
 
@@ -1142,7 +1159,7 @@ def _train_one_step(
         or not stat.S_ISDIR(parent_stat.st_mode)
     ):
         _fail("candidate_publish_failed")
-    temporary = candidate.parent / f".{_CANDIDATE_FILE}.tmp"
+    temporary = _reserve_candidate_temporary(candidate)
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
