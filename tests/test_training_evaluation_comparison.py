@@ -1311,7 +1311,23 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
         )
         conn.execute("DROP TABLE v01_model_promotions_v3")
         conn.execute(
-            "DELETE FROM v01_model_settings_schema WHERE version = 3"
+            "ALTER TABLE v01_task_model_bindings "
+            "RENAME TO v01_task_model_bindings_v4"
+        )
+        conn.execute(
+            "CREATE TABLE v01_task_model_bindings ("
+            "task_id TEXT PRIMARY KEY, selection_id TEXT NOT NULL, "
+            "selection_json TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_task_model_bindings("
+            "task_id, selection_id, selection_json, created_at"
+            ") SELECT task_id, selection_id, selection_json, created_at "
+            "FROM v01_task_model_bindings_v4"
+        )
+        conn.execute("DROP TABLE v01_task_model_bindings_v4")
+        conn.execute(
+            "DELETE FROM v01_model_settings_schema WHERE version >= 3"
         )
 
     reopened = V01ModelSettings(SQLiteStore(store.path))
@@ -1351,6 +1367,16 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     with store.connection() as conn:
         conn.execute("DROP TABLE v01_model_promotions")
         conn.execute(
+            "ALTER TABLE v01_task_model_bindings "
+            "RENAME TO v01_task_model_bindings_v4"
+        )
+        conn.execute(
+            "CREATE TABLE v01_task_model_bindings ("
+            "task_id TEXT PRIMARY KEY, selection_id TEXT NOT NULL, "
+            "selection_json TEXT NOT NULL, created_at TEXT NOT NULL)"
+        )
+        conn.execute("DROP TABLE v01_task_model_bindings_v4")
+        conn.execute(
             "DELETE FROM v01_model_settings_schema WHERE version >= 2"
         )
 
@@ -1359,8 +1385,9 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     assert reopened.snapshot() == before
     with store.connection() as conn:
         assert conn.execute(
-            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version IN (2, 3)"
-        ).fetchone()[0] == 2
+            "SELECT COUNT(*) FROM v01_model_settings_schema "
+            "WHERE version IN (2, 3, 4)"
+        ).fetchone()[0] == 3
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type = 'table' AND name = 'v01_model_promotions'"
