@@ -1461,15 +1461,20 @@ def _validate_candidate_manifest_payload(
 
     base_ref = value["base_artifact_ref"]
     candidate_ref = value["candidate_artifact_ref"]
+    if type(base_ref) is not str or type(candidate_ref) is not str:
+        _fail("candidate_manifest_invalid")
+    try:
+        base_ref_bytes = base_ref.encode("utf-8", errors="strict")
+        candidate_ref_bytes = candidate_ref.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        _fail("candidate_manifest_invalid")
     if (
-        type(base_ref) is not str
-        or type(candidate_ref) is not str
-        or not base_ref
+        not base_ref
         or not candidate_ref
         or base_ref != base_ref.strip()
         or candidate_ref != candidate_ref.strip()
-        or len(base_ref.encode("utf-8", errors="strict")) > 4096
-        or len(candidate_ref.encode("utf-8", errors="strict")) > 4096
+        or len(base_ref_bytes) > 4096
+        or len(candidate_ref_bytes) > 4096
         or _looks_like_private_local_path(base_ref)
         or _looks_like_private_local_path(candidate_ref)
     ):
@@ -1528,8 +1533,8 @@ def _validate_candidate_manifest_payload(
         or type(targets) is not list
         or not targets
         or len(targets) > 64
-        or len(set(targets)) != len(targets)
         or any(type(item) is not str or _TOKEN_RE.fullmatch(item) is None for item in targets)
+        or len(set(targets)) != len(targets)
     ):
         _fail("candidate_manifest_invalid")
 
