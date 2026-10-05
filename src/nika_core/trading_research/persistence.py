@@ -8,6 +8,21 @@ from .accounting import AccountSnapshot
 from .orders import SimulatedFill
 
 _TRADER_SCHEMA_VERSION = 3
+_FILL_EVIDENCE_COLUMNS = (
+    "approval_id",
+    "intent_id",
+    "order_id",
+    "venue_id",
+    "venue_timezone",
+    "instrument_id",
+    "currency",
+    "side",
+    "quantity",
+    "price",
+    "fee",
+    "filled_at",
+    "filled_slice",
+)
 
 
 class TradingStateRepository:
@@ -49,14 +64,20 @@ class TradingStateRepository:
         payload = _snapshot_payload(snapshot)
         workspace_id = fill.authority.workspace_id
         run_id = fill.authority.run_id
+        evidence = _fill_evidence(fill)
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
-                "SELECT 1 FROM trading_research_run_fills "
+                "SELECT approval_id, intent_id, order_id, venue_id, venue_timezone, "
+                "instrument_id, currency, side, quantity, price, fee, filled_at, filled_slice "
+                "FROM trading_research_run_fills "
                 "WHERE workspace_id = ? AND run_id = ? AND fill_id = ?",
                 (workspace_id, run_id, fill.fill_id),
             ).fetchone()
             if existing is not None:
+                actual = tuple(existing[name] for name in _FILL_EVIDENCE_COLUMNS)
+                if actual != evidence:
+                    raise RuntimeError("conflicting durable fill identity")
                 return False
             conn.execute(
                 "INSERT INTO trading_research_run_fills("
@@ -64,24 +85,7 @@ class TradingStateRepository:
                 "venue_id, venue_timezone, instrument_id, currency, side, quantity, "
                 "price, fee, filled_at, filled_slice) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    workspace_id,
-                    run_id,
-                    fill.fill_id,
-                    fill.approval_id,
-                    fill.intent_id,
-                    fill.authority.order_id,
-                    fill.instrument.venue.venue_id,
-                    fill.instrument.venue.timezone,
-                    fill.instrument.instrument_id,
-                    fill.instrument.currency,
-                    fill.side.value,
-                    str(fill.quantity),
-                    str(fill.price),
-                    str(fill.fee),
-                    fill.filled_at.isoformat(),
-                    fill.filled_slice,
-                ),
+                (workspace_id, run_id, fill.fill_id, *evidence),
             )
             conn.execute(
                 "INSERT INTO trading_research_run_account_state("
@@ -128,6 +132,26 @@ class TradingStateRepository:
         if not isinstance(value, dict):
             raise TypeError("invalid durable trading account payload")
         return value
+
+
+
+
+def _fill_evidence(fill: SimulatedFill) -> tuple[object, ...]:
+    return (
+        fill.approval_id,
+        fill.intent_id,
+        fill.authority.order_id,
+        fill.instrument.venue.venue_id,
+        fill.instrument.venue.timezone,
+        fill.instrument.instrument_id,
+        fill.instrument.currency,
+        fill.side.value,
+        str(fill.quantity),
+        str(fill.price),
+        str(fill.fee),
+        fill.filled_at.isoformat(),
+        fill.filled_slice,
+    )
 
 
 def _create_v3_tables(conn: sqlite3.Connection) -> None:
