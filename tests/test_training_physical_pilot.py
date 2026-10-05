@@ -29,6 +29,7 @@ from nika_core.training_runtime import (
 
 
 _TRAINER_JOB_FINGERPRINT = "9" * 64
+_TRAINER_DEPLOYMENT_IDENTITY = ArtifactIdentity("3" * 64, "5" * 64)
 
 
 @pytest.fixture(autouse=True)
@@ -181,6 +182,7 @@ def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrai
     candidate.write_bytes(payload)
     return build_physical_training_pilot_report(
         trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+        trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
         paused=_run_evidence(
             state=TrainingRunState.PAUSED,
             next_step=1,
@@ -244,6 +246,7 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
 
     report = build_physical_training_pilot_report(
         trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+        trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
         paused=_run_evidence(
             state=TrainingRunState.PAUSED,
             next_step=1,
@@ -326,6 +329,7 @@ def test_build_report_rejects_runtime_candidate_digest_mismatch(tmp_path: Path) 
     with pytest.raises(PhysicalTrainingPilotError, match="runtime evidence"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -347,6 +351,7 @@ def test_build_report_rejects_descriptor_digest_mismatch(tmp_path: Path) -> None
     with pytest.raises(PhysicalTrainingPilotError, match="verification failed"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -370,6 +375,7 @@ def test_build_report_rejects_restart_probe_without_durable_reopen(
     with pytest.raises(PhysicalTrainingPilotError, match="reopen"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -393,6 +399,7 @@ def test_build_report_requires_effect_free_restart_probe_reason(
     with pytest.raises(PhysicalTrainingPilotError, match="before admission"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -414,6 +421,7 @@ def test_build_report_rejects_restart_identity_drift(tmp_path: Path) -> None:
     with pytest.raises(PhysicalTrainingPilotError, match="job_fingerprint"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -447,6 +455,7 @@ def test_build_report_rejects_boolean_step_carrier(tmp_path: Path) -> None:
     with pytest.raises(PhysicalTrainingPilotError, match="step boundary"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=paused,
             restart_probe=_restart_probe(),
             completed=_completed_for(payload),
@@ -464,6 +473,7 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
     with pytest.raises(PhysicalTrainingPilotError, match="checkpoint"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -496,6 +506,45 @@ def test_build_report_rejects_candidate_manifest_identity_drift(
     with pytest.raises(PhysicalTrainingPilotError, match="job fingerprint"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        ("trainer_artifact_id", "7" * 64, "trainer artifact identity"),
+        ("trainer_sha256", "8" * 64, "trainer deployment digest"),
+    ),
+)
+def test_build_report_rejects_candidate_manifest_trainer_deployment_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    manifest = _candidate_manifest()
+    manifest[field] = value
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", lambda _: manifest)
+
+    with pytest.raises(PhysicalTrainingPilotError, match=message):
+        build_physical_training_pilot_report(
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -525,6 +574,7 @@ def test_build_report_rejects_candidate_manifest_reader_failure(
     with pytest.raises(PhysicalTrainingPilotError, match="manifest verification failed"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -563,6 +613,7 @@ def test_build_report_holds_candidate_stable_during_manifest_read(
 
     report = build_physical_training_pilot_report(
         trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+        trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
         paused=_run_evidence(
             state=TrainingRunState.PAUSED,
             next_step=1,
@@ -676,6 +727,7 @@ def test_build_report_rejects_non_windows_builder(
     with pytest.raises(PhysicalTrainingPilotError, match="built on Windows"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -703,6 +755,7 @@ def test_build_report_requires_explicit_pause_reason(tmp_path: Path) -> None:
     with pytest.raises(PhysicalTrainingPilotError, match="explicit pause control"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
             paused=paused,
             restart_probe=_restart_probe(),
             completed=_completed_for(payload),
@@ -753,6 +806,8 @@ def _install_runner_fakes(
     initial_pause: TrainingRunEvidence | None = None,
     initial_trainer_job_fingerprint: str = _TRAINER_JOB_FINGERPRINT,
     resumed_trainer_job_fingerprint: str = _TRAINER_JOB_FINGERPRINT,
+    initial_trainer_deployment_identity: ArtifactIdentity = _TRAINER_DEPLOYMENT_IDENTITY,
+    resumed_trainer_deployment_identity: ArtifactIdentity = _TRAINER_DEPLOYMENT_IDENTITY,
 ) -> tuple[object, object, list[tuple[str, bool]]]:
     calls: list[tuple[str, bool]] = []
 
@@ -777,8 +832,13 @@ def _install_runner_fakes(
             return completed
 
     class FakeWorker:
-        def __init__(self, trainer_job_fingerprint: str) -> None:
+        def __init__(
+            self,
+            trainer_job_fingerprint: str,
+            trainer_deployment_identity: ArtifactIdentity,
+        ) -> None:
             self.trainer_job_fingerprint = trainer_job_fingerprint
+            self.trainer_deployment_identity = trainer_deployment_identity
 
         @property
         def execution_plan_sha256(self) -> str:
@@ -786,6 +846,9 @@ def _install_runner_fakes(
 
         def protocol_job_fingerprint(self, _: object) -> str:
             return self.trainer_job_fingerprint
+
+        def verified_trainer_deployment_identity(self) -> ArtifactIdentity:
+            return self.trainer_deployment_identity
 
     class FakeSpec:
         max_steps = 2
@@ -805,8 +868,14 @@ def _install_runner_fakes(
 
     initial_runtime = FakeRuntime("initial")
     resumed_runtime = FakeRuntime("resumed")
-    initial_worker = FakeWorker(initial_trainer_job_fingerprint)
-    resumed_worker = FakeWorker(resumed_trainer_job_fingerprint)
+    initial_worker = FakeWorker(
+        initial_trainer_job_fingerprint,
+        initial_trainer_deployment_identity,
+    )
+    resumed_worker = FakeWorker(
+        resumed_trainer_job_fingerprint,
+        resumed_trainer_deployment_identity,
+    )
     sentinel = object()
 
     monkeypatch.setattr(pilot, "TrainingRuntime", FakeRuntime)
@@ -825,6 +894,10 @@ def _install_runner_fakes(
     )
     def fake_build_report(**kwargs: object) -> object:
         assert kwargs["trainer_job_fingerprint"] == resumed_trainer_job_fingerprint
+        assert (
+            kwargs["trainer_deployment_identity"]
+            == resumed_trainer_deployment_identity
+        )
         return sentinel
 
     monkeypatch.setattr(
@@ -892,6 +965,19 @@ def test_physical_runner_rejects_trainer_protocol_identity_drift_across_restart(
             completed=_completed_for(b"candidate"),
             initial_trainer_job_fingerprint="7" * 64,
             resumed_trainer_job_fingerprint="8" * 64,
+        )
+
+
+def test_physical_runner_rejects_trainer_deployment_drift_across_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(PhysicalTrainingPilotError, match="deployment identity"):
+        _install_runner_fakes(
+            monkeypatch,
+            resumed_probe=_restart_probe(),
+            completed=_completed_for(b"candidate"),
+            initial_trainer_deployment_identity=ArtifactIdentity("3" * 64, "5" * 64),
+            resumed_trainer_deployment_identity=ArtifactIdentity("7" * 64, "8" * 64),
         )
 
 
