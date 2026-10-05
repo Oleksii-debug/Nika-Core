@@ -13,11 +13,13 @@ from nika_core.model_artifacts import (
     ModelIntegrityBasis,
 )
 from nika_core.model_engineering import (
+    BenchmarkExecutionConfig,
     EvaluationCase,
     EvaluationPurpose,
     EvaluationSet,
     ModelBenchmarkRunner,
     ModelCandidate,
+    benchmark_configuration_sha256,
 )
 from nika_core.model_engineering.physical_candidate import (
     PhysicalCandidateEvaluationError,
@@ -93,6 +95,15 @@ def _evaluation_set() -> EvaluationSet:
 
 
 def _request(candidate: ModelCandidate) -> ModelRequest:
+    evaluation = _evaluation_set()
+    execution = BenchmarkExecutionConfig()
+    configuration = benchmark_configuration_sha256(
+        candidate_evidence_sha256=candidate.evidence_sha256,
+        evaluation_set_id=evaluation.evaluation_set_id,
+        evaluation_set_version=evaluation.version,
+        evaluation_set_sha256=evaluation.content_sha256,
+        execution_config_sha256=execution.evidence_sha256,
+    )
     return ModelRequest(
         request_id="physical-candidate-request",
         messages=(ModelMessage("user", "test prompt"),),
@@ -100,6 +111,16 @@ def _request(candidate: ModelCandidate) -> ModelRequest:
         provider_id=candidate.provider_id,
         provider_kind=candidate.provider_kind,
         privacy=PrivacyClass.PRIVATE,
+        metadata={
+            "benchmark_configuration_sha256": configuration,
+            "benchmark_execution_config_sha256": execution.evidence_sha256,
+            "benchmark_run_id": "run-test",
+            "evaluation_case_id": "exact",
+            "evaluation_set_id": evaluation.evaluation_set_id,
+            "evaluation_set_sha256": evaluation.content_sha256,
+            "evaluation_set_version": evaluation.version,
+            "model_candidate_id": candidate.candidate_id,
+        },
     )
 
 
@@ -150,7 +171,7 @@ def test_model_benchmark_reverifies_physical_candidate_before_provider_effect(
     report = asyncio.run(runner.benchmark(candidate, _evaluation_set()))
 
     assert delegate.calls == 1
-    assert report.candidate_id == candidate.candidate_id
+    assert report.candidate.candidate_id == candidate.candidate_id
     assert report.completion_rate == 1.0
     assert report.task_pass_rate == 1.0
     assert report.weighted_quality_score == 1.0
@@ -167,6 +188,26 @@ def test_same_size_artifact_tamper_fails_before_provider_effect(tmp_path: Path) 
 
     with pytest.raises(CandidateArtifactIntegrityError, match="digest does not match"):
         asyncio.run(gateway.complete(_request(candidate)))
+
+    assert delegate.calls == 0
+
+
+def test_candidate_evidence_mutation_fails_before_provider_effect(
+    tmp_path: Path,
+) -> None:
+    gateway, delegate, candidate, _, _ = _gateway(tmp_path)
+    object.__setattr__(
+        candidate,
+        "model_license_ref",
+        "https://licenses.example.test/nika/mutated-license",
+    )
+    runner = ModelBenchmarkRunner(gateway)
+
+    with pytest.raises(
+        PhysicalCandidateEvaluationError,
+        match="configuration does not match",
+    ):
+        asyncio.run(runner.benchmark(candidate, _evaluation_set()))
 
     assert delegate.calls == 0
 
@@ -286,6 +327,28 @@ def test_request_identity_substitution_is_rejected_before_provider_effect(
     request = replace(_request(candidate), **{field: value})
 
     with pytest.raises(PhysicalCandidateEvaluationError, match=message):
+        asyncio.run(gateway.complete(request))
+
+    assert delegate.calls == 0
+
+
+def test_missing_benchmark_evidence_is_rejected_before_provider_effect(
+    tmp_path: Path,
+) -> None:
+    gateway, delegate, candidate, _, _ = _gateway(tmp_path)
+    request = ModelRequest(
+        request_id="physical-candidate-no-evidence",
+        messages=(ModelMessage("user", "test prompt"),),
+        model=candidate.request_model,
+        provider_id=candidate.provider_id,
+        provider_kind=candidate.provider_kind,
+        privacy=PrivacyClass.PRIVATE,
+    )
+
+    with pytest.raises(
+        PhysicalCandidateEvaluationError,
+        match="missing candidate/evaluation evidence",
+    ):
         asyncio.run(gateway.complete(request))
 
     assert delegate.calls == 0
