@@ -33,7 +33,12 @@ def _store(tmp_path: Path) -> SQLiteStore:
     return store
 
 
-def _settings(store: SQLiteStore, *, route: str = "openai_compatible") -> V01ModelSettings:
+def _settings(
+    store: SQLiteStore,
+    *,
+    route: str = "openai_compatible",
+    private_data_allowed: bool = True,
+) -> V01ModelSettings:
     settings = V01ModelSettings(store)
     if route == "openai_compatible":
         payload = {
@@ -43,7 +48,7 @@ def _settings(store: SQLiteStore, *, route: str = "openai_compatible") -> V01Mod
             "model": "api-model",
             "base_url": "https://api.example.test/v1",
             "credential_ref": "env:NIKA_TEST_SECRET_REF",
-            "private_data_allowed": True,
+            "private_data_allowed": private_data_allowed,
             "timeout_seconds": 30,
             "revision": 0,
         }
@@ -123,6 +128,28 @@ def test_local_task_never_prompts_or_receives_cloud_authority(tmp_path: Path) ->
     queue.transition(record.task_id, TaskState.RUNNING)
     assert prompts == []
     assert service.execution_authority_for_task(record.task_id) is None
+
+
+def test_cloud_task_without_private_data_permission_fails_before_prompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store, private_data_allowed=False)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(CloudModelPermissionDenied, match="приватні дані"):
+        service.admit_created_task(record)
+
+    assert prompts == []
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 0
 
 
 def test_cloud_denial_creates_no_spendable_authority(tmp_path: Path) -> None:
