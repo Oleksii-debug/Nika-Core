@@ -79,6 +79,12 @@ class SafeProcessRunner:
         bounded_paths = tuple(
             self._bounded_watch_path(path, cwd=resolved_cwd) for path in watched_paths
         )
+        # Refuse unsafe pre-existing output before starting an external process.
+        preflight_failure = self._watched_file_failure(
+            bounded_paths, max_bytes=max_watched_file_bytes
+        )
+        if preflight_failure is not None:
+            raise preflight_failure
 
         creationflags = 0
         start_new_session = os.name != "nt"
@@ -193,14 +199,22 @@ class SafeProcessRunner:
         if max_bytes is None:
             return None
         for path in paths:
-            if not path.exists():
-                continue
+            # Path.exists() follows links and returns False for dangling links.
+            # Reject the link itself even when its target is missing.
             if path.is_symlink():
                 return MediaError(
                     MediaErrorCode.PATH_ESCAPE,
                     "watched media output must not be a symbolic link",
                 )
-            resolved = path.resolve(strict=True)
+            if not path.exists():
+                continue
+            try:
+                resolved = path.resolve(strict=True)
+            except (OSError, RuntimeError):
+                return MediaError(
+                    MediaErrorCode.PATH_ESCAPE,
+                    "watched media output changed during validation",
+                )
             if not resolved.is_file():
                 return MediaError(
                     MediaErrorCode.INVALID_SOURCE,
