@@ -98,6 +98,7 @@ def _spec(
         ),
         frozen_package_sha256=materials.evidence.package_manifest_sha256,
         training_material_sha256=materials.training_material_sha256,
+        scale_authorization_sha256=_sha256(b"subprocess-scale-authorization"),
         candidate_artifact_ref=f"models/candidate/{job_id}",
         max_steps=max_steps,
     )
@@ -417,6 +418,7 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
         ),
         frozen_package_sha256=materials.evidence.package_manifest_sha256,
         training_material_sha256="f" * 64,
+        scale_authorization_sha256=_sha256(b"subprocess-scale-authorization"),
         candidate_artifact_ref="models/candidate/mismatch",
         max_steps=1,
     )
