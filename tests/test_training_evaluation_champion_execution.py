@@ -119,6 +119,7 @@ def _fixture(
         challenger_sha256=_sha(b"challenger-weights"),
         candidate_artifact_ref="models/candidate/job-1",
         frozen_package_sha256=_sha(b"frozen-package"),
+        execution_plan_sha256=_sha(b"training-execution-plan"),
         evaluation_set_sha256=evaluation.content_sha256,
         base_descriptor_digest=descriptor.descriptor_digest,
         base_descriptor_registry_key=descriptor.registry_key,
