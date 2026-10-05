@@ -707,6 +707,11 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     )
     assert receipt.activated_revision == 2
     assert receipt.rollback_revision is None
+    training = result.challenger_benchmark.binding.revalidated()
+    assert receipt.base_artifact_sha256 == training.base_sha256
+    assert receipt.base_descriptor_digest == training.base_descriptor_digest
+    assert receipt.challenger_artifact_sha256 == training.challenger_sha256
+    assert receipt.challenger_descriptor_digest == training.descriptor_digest
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
 
@@ -880,6 +885,10 @@ def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path
             challenger_model_id="challenger-model",
             decision_sha256=decision_sha256,
             binding_sha256=binding_sha256,
+            base_artifact_sha256=_sha(b"base-artifact"),
+            base_descriptor_digest=_sha(b"base-descriptor"),
+            challenger_artifact_sha256=_sha(b"challenger-artifact"),
+            challenger_descriptor_digest=_sha(b"challenger-descriptor"),
         )
 
     assert settings.snapshot()["model"] == "base-model"
@@ -922,9 +931,9 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
     )
     with store.connection() as conn:
         conn.execute(
-            "UPDATE v01_model_promotions SET binding_sha256 = ? "
+            "UPDATE v01_model_promotions SET challenger_artifact_sha256 = ? "
             "WHERE decision_sha256 = ?",
-            ("not-a-digest", receipt.decision_sha256),
+            (_sha(b"substituted-challenger-artifact"), receipt.decision_sha256),
         )
 
     with pytest.raises(
@@ -939,3 +948,41 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
+
+
+
+def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "foundry-promotion.db")
+    store.initialize()
+    settings = V01ModelSettings(store)
+    configured = settings.configure(
+        {
+            "route_kind": "foundry_local",
+            "provider_id": "foundry-local",
+            "model": "base-model",
+            "base_url": None,
+            "credential_ref": None,
+            "private_data_allowed": False,
+            "timeout_seconds": 30,
+            "revision": 0,
+        }
+    )
+    assert configured.status == "completed"
+
+    with pytest.raises(ModelSetupError, match="Ollama"):
+        settings.activate_promoted_local_model(
+            expected_revision=1,
+            base_provider_id="foundry-local",
+            base_model_id="base-model",
+            challenger_provider_id="foundry-local",
+            challenger_model_id="challenger-model",
+            decision_sha256=_sha(b"foundry-decision"),
+            binding_sha256=_sha(b"foundry-binding"),
+            base_artifact_sha256=_sha(b"foundry-base-artifact"),
+            base_descriptor_digest=_sha(b"foundry-base-descriptor"),
+            challenger_artifact_sha256=_sha(b"foundry-challenger-artifact"),
+            challenger_descriptor_digest=_sha(b"foundry-challenger-descriptor"),
+        )
+
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
