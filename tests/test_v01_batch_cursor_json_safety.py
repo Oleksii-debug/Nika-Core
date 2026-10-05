@@ -92,7 +92,8 @@ def test_shared_subtree_is_safe_and_detached() -> None:
 def test_exact_byte_boundary_and_depth_limit_remain_supported() -> None:
     maximum = {"x": "a" * (_MAX_VALUE_BYTES - len('{"x":""}'))}
     assert _json_copy(maximum) == maximum
-    assert _json_copy(_deep(32)) == _deep(32)
+    nested = {"nested": _deep(31)}
+    assert _json_copy(nested) == nested
 
 
 @pytest.mark.parametrize("bad_id", ["\ud800", "\udfff"])
@@ -244,3 +245,20 @@ def test_missing_durable_completion_never_accepts_a_new_caller_claim(
             batch_size=1,
         )
     assert ledger.require(grant.operation_key).status is IdempotencyStatus.COMPLETED
+
+
+@pytest.mark.parametrize("bad_carrier", [None, [], "text", True, 3])
+def test_non_object_carriers_fail_before_effect_completion_or_uncertainty(
+    tmp_path: Path, bad_carrier: object
+) -> None:
+    memory, ledger, task_id = _services(tmp_path)
+    cursor = _cursor(memory, ledger, task_id=task_id)
+    grant = cursor.begin_effect("перший")
+
+    with pytest.raises(BatchCursorStateError, match="JSON object"):
+        cursor.confirm("перший", bad_carrier)
+    with pytest.raises(BatchCursorStateError, match="JSON object"):
+        cursor.mark_uncertain("перший", bad_carrier)
+
+    assert ledger.require(grant.operation_key).status is IdempotencyStatus.PENDING
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
