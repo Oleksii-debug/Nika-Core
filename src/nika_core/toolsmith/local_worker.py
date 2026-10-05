@@ -417,6 +417,24 @@ def _result_from_payload(payload: object) -> CodingResult:
     )
 
 
+def _evidence_from_state(state: Mapping[str, object]) -> LocalExecutionEvidence:
+    raw = state.get("evidence")
+    if type(raw) is not dict or set(raw) != {
+        "repository_id",
+        "base_sha",
+        "result_sha",
+        "diff_digest",
+    }:
+        raise ValueError("local worker terminal evidence is invalid")
+    return LocalExecutionEvidence(
+        job_id=state["job_id"],
+        repository_id=raw["repository_id"],
+        base_sha=raw["base_sha"],
+        result_sha=raw["result_sha"],
+        diff_digest=raw["diff_digest"],
+    )
+
+
 def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -509,19 +527,179 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         state = self._load_state(job_id)
         if state is None or state["phase"] != "terminal":
             raise ContainedLocalWorkerError("local worker has no terminal execution evidence")
-        raw = state["evidence"]
-        if type(raw) is not dict:
-            raise ContainedLocalWorkerError("local worker terminal evidence is invalid")
         try:
-            return LocalExecutionEvidence(
-                job_id=state["job_id"],
-                repository_id=raw["repository_id"],
-                base_sha=raw["base_sha"],
-                result_sha=raw["result_sha"],
-                diff_digest=raw["diff_digest"],
-            )
+            evidence = _evidence_from_state(state)
+            result = _result_from_payload(state["result"])
+            self._validate_terminal_storage(evidence, result)
+            return evidence
         except Exception as exc:
             raise ContainedLocalWorkerError("local worker terminal evidence is invalid") from exc
+
+    def _validate_terminal_storage(
+        self,
+        evidence: LocalExecutionEvidence,
+        result: CodingResult,
+    ) -> None:
+        if result.job_id != evidence.job_id:
+            raise ContainedLocalWorkerError(
+                "terminal result identity does not match execution evidence"
+            )
+        if evidence.result_sha == evidence.base_sha:
+            if result.failure is None or result.changed_files or result.artifacts:
+                raise ContainedLocalWorkerError(
+                    "terminal no-candidate evidence contradicts the persisted result"
+                )
+            return
+        if not result.changed_files:
+            raise ContainedLocalWorkerError(
+                "terminal candidate evidence is missing changed-file proof"
+            )
+
+        repository_root = self._repository_root(evidence.repository_id)
+        job_root = ensure_real_directory_root(
+            self.workspace_root_for(evidence.job_id),
+            label="contained worker job root",
+        )
+        plan = make_sterile_git_plan(
+            repository_root=repository_root,
+            job_root=job_root,
+            branch_name=self._branch_name(evidence.job_id),
+            base_sha=evidence.base_sha,
+            source_environment=self.source_environment,
+        )
+        ensure_real_directory_root(
+            plan.private_git_dir,
+            label="contained worker private Git metadata",
+        )
+        ensure_real_directory_root(
+            plan.worktree_root,
+            label="contained worker candidate worktree",
+        )
+        prefix = (
+            self.git_executable,
+            *plan.config_args,
+            "--git-dir",
+            str(plan.private_git_dir),
+            "--work-tree",
+            str(plan.worktree_root),
+        )
+        head = _git(
+            (*prefix, "rev-parse", "--verify", "HEAD^{commit}"),
+            cwd=job_root,
+            environment=plan.environment,
+        ).stdout.strip().casefold()
+        if head != evidence.result_sha:
+            raise ContainedLocalWorkerError(
+                "private candidate HEAD no longer matches terminal evidence"
+            )
+        resolved = _git(
+            (*prefix, "rev-parse", "--verify", f"{evidence.result_sha}^{{commit}}"),
+            cwd=job_root,
+            environment=plan.environment,
+        ).stdout.strip().casefold()
+        if resolved != evidence.result_sha:
+            raise ContainedLocalWorkerError(
+                "private candidate commit identity no longer matches terminal evidence"
+            )
+        lineage = _git(
+            (*prefix, "rev-list", "--parents", "-n", "1", evidence.result_sha),
+            cwd=job_root,
+            environment=plan.environment,
+        ).stdout.strip().casefold().split()
+        if lineage != [evidence.result_sha, evidence.base_sha]:
+            raise ContainedLocalWorkerError(
+                "private candidate commit is no longer the exact child of the pinned base"
+            )
+        remotes = tuple(
+            item.strip()
+            for item in _git(
+                (*prefix, "remote"),
+                cwd=job_root,
+                environment=plan.environment,
+            ).stdout.splitlines()
+            if item.strip()
+        )
+        if remotes:
+            raise ContainedLocalWorkerError(
+                "private candidate metadata unexpectedly regained a Git remote"
+            )
+        status = _git(
+            (*prefix, "status", "--porcelain=v1", "-z", "--untracked-files=all"),
+            cwd=job_root,
+            environment=plan.environment,
+        ).stdout
+        if status:
+            raise ContainedLocalWorkerError(
+                "private candidate worktree changed after terminal evidence was recorded"
+            )
+
+        artifacts: dict[str, ArtifactEvidence] = {}
+        for artifact in result.artifacts:
+            if artifact.name in artifacts:
+                raise ContainedLocalWorkerError(
+                    "terminal candidate result repeats an artifact identity"
+                )
+            artifacts[artifact.name] = artifact
+        commit_artifact = artifacts.get("candidate-git-commit")
+        tree_artifact = artifacts.get("candidate-tree-sha256")
+        if (
+            commit_artifact is None
+            or commit_artifact.digest.casefold() != evidence.result_sha
+            or commit_artifact.media_type != "application/vnd.git.commit"
+        ):
+            raise ContainedLocalWorkerError(
+                "terminal candidate commit artifact does not match execution evidence"
+            )
+        tree = collect_tree_evidence(plan.worktree_root)
+        if (
+            tree_artifact is None
+            or tree_artifact.digest.casefold() != tree.digest.casefold()
+            or tree_artifact.media_type != "application/vnd.nika.tree+sha256"
+        ):
+            raise ContainedLocalWorkerError(
+                "terminal candidate tree artifact does not match current candidate bytes"
+            )
+
+        diff_paths = tuple(
+            item
+            for item in _git(
+                (
+                    *prefix,
+                    "diff",
+                    "--name-only",
+                    "-z",
+                    "--no-renames",
+                    evidence.base_sha,
+                    evidence.result_sha,
+                    "--",
+                ),
+                cwd=job_root,
+                environment=plan.environment,
+            ).stdout.split("\0")
+            if item
+        )
+        changed_by_path: dict[str, ChangedFile] = {}
+        for item in result.changed_files:
+            if item.path in changed_by_path:
+                raise ContainedLocalWorkerError(
+                    "terminal candidate result repeats a changed-file identity"
+                )
+            changed_by_path[item.path] = item
+        if set(diff_paths) != set(changed_by_path) or len(diff_paths) != len(changed_by_path):
+            raise ContainedLocalWorkerError(
+                "terminal changed-file evidence does not match the candidate commit"
+            )
+        files_by_path = {item.path: item for item in tree.files}
+        for path, changed in changed_by_path.items():
+            current = files_by_path.get(path)
+            if (
+                current is None
+                or current.sha256.casefold() != changed.sha256.casefold()
+                or current.size_bytes != changed.size_bytes
+            ):
+                raise ContainedLocalWorkerError(
+                    "terminal changed-file evidence does not match current candidate bytes"
+                )
 
     def candidate_worktree(self, job_id: str) -> pathlib.Path:
         evidence = self.execution_evidence(job_id)
@@ -664,10 +842,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             return self._manual_reconcile(exact.job_id)
         if durable["phase"] != "terminal":
             return self._manual_reconcile(exact.job_id)
-        try:
-            return _result_from_payload(durable["result"])
-        except Exception:
-            return self._manual_reconcile(exact.job_id)
+        return self._existing_result(exact, durable)
 
     def _execute_sync(
         self,
@@ -1256,7 +1431,18 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         if state["phase"] != "terminal":
             return self._manual_reconcile(job.job_id)
         try:
-            return _result_from_payload(state["result"])
+            evidence = _evidence_from_state(state)
+            result = _result_from_payload(state["result"])
+            if (
+                evidence.job_id != job.job_id
+                or evidence.repository_id != job.repository.repository_id
+                or evidence.base_sha != job.repository.base_sha.casefold()
+            ):
+                raise ContainedLocalWorkerError(
+                    "terminal evidence identity does not match the requested job"
+                )
+            self._validate_terminal_storage(evidence, result)
+            return result
         except Exception:
             return self._manual_reconcile(job.job_id)
 
