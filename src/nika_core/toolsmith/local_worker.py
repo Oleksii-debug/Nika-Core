@@ -13,6 +13,7 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from types import MappingProxyType
 from typing import Protocol
 
 from nika_core.toolsmith.contracts import (
@@ -582,10 +583,10 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             copied[identity] = resolved
         if not copied:
             raise ContainedLocalWorkerError("at least one local repository is required")
-        self.repositories = copied
+        self.repositories = MappingProxyType(copied)
         self.git_executable = _resolve_host_git_executable(self.git_executable)
-        self.source_environment = dict(
-            os.environ if self.source_environment is None else self.source_environment
+        self.source_environment = MappingProxyType(
+            dict(os.environ if self.source_environment is None else self.source_environment)
         )
         self._active: dict[str, threading.Event] = {}
         self._active_lock = threading.Lock()
