@@ -440,14 +440,22 @@ class V01CloudModelPermissionService:
                 "cloud model permission binding permission_id must be unique"
             )
 
-        migration = conn.execute(
-            "SELECT applied_at, typeof(applied_at) AS applied_at_type "
-            "FROM v01_cloud_model_permission_schema WHERE version = ?",
-            (_BINDING_SCHEMA_VERSION,),
-        ).fetchone()
+        migrations = conn.execute(
+            "SELECT version, typeof(version) AS version_type, "
+            "applied_at, typeof(applied_at) AS applied_at_type "
+            "FROM v01_cloud_model_permission_schema ORDER BY version"
+        ).fetchall()
         if (
-            migration is None
-            or migration["applied_at_type"] != "text"
+            len(migrations) != 1
+            or migrations[0]["version_type"] != "integer"
+            or migrations[0]["version"] != _BINDING_SCHEMA_VERSION
+        ):
+            raise RuntimeError(
+                "cloud model permission binding migration history is invalid"
+            )
+        migration = migrations[0]
+        if (
+            migration["applied_at_type"] != "text"
             or not V01CloudModelPermissionService._is_canonical_utc_timestamp(
                 migration["applied_at"]
             )
