@@ -360,9 +360,7 @@ class StandingPermissionStore:
         scope: StandingPermissionScope,
     ) -> _ScopeRecord:
         _permission_id(permission_id)
-        if type(scope) is not StandingPermissionScope:
-            raise TypeError("grant scope must be an exact StandingPermissionScope value")
-        return _material(scope)
+        return _material(_snapshot_scope(scope))
 
     def _grant_with_connection(
         self,
@@ -399,11 +397,10 @@ class StandingPermissionStore:
         _permission_id(parent_permission_id)
         _permission_id(permission_id)
         _identity(delegated_by_subject_id, "delegated_by_subject_id")
-        if type(scope) is not StandingPermissionScope:
-            raise TypeError("delegated scope must be an exact StandingPermissionScope value")
+        child_scope = _snapshot_scope(scope)
         if parent_permission_id == permission_id:
             raise PermissionError("permission cannot delegate to itself")
-        child = _material(scope)
+        child = _material(child_scope)
         with self._store.connection() as conn:
             existing = self._get(conn, permission_id)
             if existing is not None:
@@ -413,7 +410,7 @@ class StandingPermissionStore:
                     scope_fingerprint=child.fingerprint,
                 )
             parent = self._require(conn, parent_permission_id)
-            self._active(parent, scope.granted_at)
+            self._active(parent, child_scope.granted_at)
             if _hash(delegated_by_subject_id) != parent._scope.subject_hash:
                 raise PermissionError("delegator is not the parent permission subject")
             self._child_subset(parent._scope, child)
@@ -825,6 +822,32 @@ class StandingPermissionPolicy:
             effect_fingerprint=authorized_intent.effect_fingerprint,
             approval_fingerprint=authorized_intent.approval_fingerprint,
         )
+
+
+def _snapshot_context(value: object) -> PermissionContext:
+    if type(value) is not PermissionContext:
+        raise TypeError("scope context must be an exact PermissionContext value")
+    return PermissionContext(
+        user_id=value.user_id,
+        project_id=value.project_id,
+        task_id=value.task_id,
+    )
+
+
+def _snapshot_scope(value: object) -> StandingPermissionScope:
+    if type(value) is not StandingPermissionScope:
+        raise TypeError("scope must be an exact StandingPermissionScope value")
+    return StandingPermissionScope(
+        subject_id=value.subject_id,
+        context=_snapshot_context(value.context),
+        action_class=value.action_class,
+        targets=value.targets,
+        sites=value.sites,
+        resources=value.resources,
+        risk_ceiling=value.risk_ceiling,
+        granted_at=value.granted_at,
+        expires_at=value.expires_at,
+    )
 
 
 def _material(scope: StandingPermissionScope) -> _ScopeRecord:
