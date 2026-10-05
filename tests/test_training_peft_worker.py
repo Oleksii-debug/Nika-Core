@@ -927,3 +927,45 @@ def test_final_candidate_rejects_checkpoint_change_during_materialization(
 
     assert not candidate.exists()
 
+def test_final_candidate_rejects_checkpoint_change_after_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    checkpoint = peft._checkpoint_dir(peft._job_root(config, request), 1)
+    adapter_file = checkpoint / "adapter" / "adapter_model.safetensors"
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_unlink = peft.os.unlink
+    mutated = False
+
+    def _unlink(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal mutated
+        value = Path(path)
+        real_unlink(path, *args, **kwargs)
+        if (
+            not mutated
+            and value.parent == candidate.parent
+            and value.name.startswith(".adapter_model.safetensors.")
+            and value.name.endswith(".tmp")
+        ):
+            adapter_file.write_bytes(adapter_file.read_bytes() + b"-late-tamper")
+            mutated = True
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "unlink", _unlink)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="checkpoint_payload_changed_after_candidate",
+    ):
+        peft._train_one_step(request, config, consumed)
+
+    assert mutated is True
+    assert not candidate.exists()
+
