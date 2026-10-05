@@ -131,6 +131,28 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_NAMESPACED_SECRET_ASSIGNMENT_RE = re.compile(
+    rb"""
+    [\r\n]
+    (?:\xef\xbb\xbf)?
+    [ \t-]*
+    (?:[A-Za-z][A-Za-z0-9]*[_-])+
+    (?:
+    """
+    + _SECRET_ASSIGNMENT_KEY_PATTERN
+    + rb"""
+    )
+    \s*=\s*
+    (?P<value>
+        "(?:\\.|[^"\\\r\n]){1,4096}"|
+        '(?:\\.|[^'\\\r\n]){1,4096}'|
+        \$\{[A-Za-z_][A-Za-z0-9_]*\}(?=[\s,;\#}\]\r\n]|$)|
+        [^\s,\#;}{\]\r\n]{1,4096}
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE = re.compile(
     rb"""
     [\r\n{,\[]
@@ -151,6 +173,26 @@ _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_OVERSIZED_NAMESPACED_SECRET_ASSIGNMENT_RE = re.compile(
+    rb"""
+    [\r\n]
+    (?:\xef\xbb\xbf)?
+    [ \t-]*
+    (?:[A-Za-z][A-Za-z0-9]*[_-])+
+    (?:
+    """
+    + _SECRET_ASSIGNMENT_KEY_PATTERN
+    + rb"""
+    )
+    \s*=\s*
+    (?:
+        "(?:\\.|[^"\\\r\n]){4097}|
+        '(?:\\.|[^'\\\r\n]){4097}
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+
 _PRIVATE_KEY_PEM_RE = re.compile(
     rb"-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
     re.IGNORECASE,
@@ -314,6 +356,20 @@ def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
     return normalized.startswith((b"env:", b"keyring:", b"credential-ref:"))
 
 
+def _window_contains_secret_assignment(window: bytes) -> bool:
+    if _PRIVATE_KEY_PEM_RE.search(window):
+        return True
+    if _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE.search(window):
+        return True
+    if _OVERSIZED_NAMESPACED_SECRET_ASSIGNMENT_RE.search(window):
+        return True
+    for pattern in (_SECRET_ASSIGNMENT_RE, _NAMESPACED_SECRET_ASSIGNMENT_RE):
+        for match in pattern.finditer(window):
+            if not _secret_assignment_value_is_placeholder(match.group("value")):
+                return True
+    return False
+
+
 def _stream_contains_secret_assignment(handle: Any) -> bool:
     overlap = b""
     first_window = True
@@ -324,13 +380,8 @@ def _stream_contains_secret_assignment(handle: Any) -> bool:
         raw_window = overlap + chunk
         window = b"\n" + raw_window if first_window else raw_window
         first_window = False
-        if _PRIVATE_KEY_PEM_RE.search(window):
+        if _window_contains_secret_assignment(window):
             return True
-        if _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE.search(window):
-            return True
-        for match in _SECRET_ASSIGNMENT_RE.finditer(window):
-            if not _secret_assignment_value_is_placeholder(match.group("value")):
-                return True
         overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
 
 
@@ -453,15 +504,8 @@ def _stream_release_file_snapshot(
         raw_window = overlap + chunk
         window = b"\n" + raw_window if first_window else raw_window
         first_window = False
-        if _PRIVATE_KEY_PEM_RE.search(window):
+        if _window_contains_secret_assignment(window):
             contains_secret_assignment = True
-        elif _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE.search(window):
-            contains_secret_assignment = True
-        else:
-            for match in _SECRET_ASSIGNMENT_RE.finditer(window):
-                if not _secret_assignment_value_is_placeholder(match.group("value")):
-                    contains_secret_assignment = True
-                    break
         overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
 
     return _ReleaseFileSnapshot(
