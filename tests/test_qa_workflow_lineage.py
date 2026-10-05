@@ -216,10 +216,14 @@ M11_PACKAGED_TEST_TRIGGERS = (
     "tests/test_speech_to_text.py",
 )
 M11_FOCUSED_RESTART_TESTS = (
-    "tests/test_product_factory_packaged_journey.py::"
-    "test_headless_pf11_composition_proof_survives_process_restart",
-    "tests/test_product_factory_packaged_journey.py::"
-    "test_release_builder_records_packaged_pf11_restart_evidence",
+    (
+        "tests/test_product_factory_packaged_journey.py::"
+        "test_headless_pf11_composition_proof_survives_process_restart"
+    ),
+    (
+        "tests/test_product_factory_packaged_journey.py::"
+        "test_release_builder_records_packaged_pf11_restart_evidence"
+    ),
 )
 
 
