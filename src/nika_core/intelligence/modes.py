@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass, replace
 from enum import StrEnum
-import unicodedata
 from typing import Protocol
 
 from nika_core.model_gateway.contracts import (
