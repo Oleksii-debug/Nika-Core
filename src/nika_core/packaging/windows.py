@@ -59,16 +59,17 @@ class WindowsBuildPlan:
     def validate(self) -> None:
         _require_windows_bundle_name(self.name)
         for label, path in (("entrypoint", self.entrypoint), ("web_assets", self.web_assets)):
-            if not path.exists():
-                raise FileNotFoundError(f"{label} does not exist: {path}")
-        for label, path in (("entrypoint", self.entrypoint), ("web_assets", self.web_assets)):
             # Canonical #1051/#1052 source-input authority: linked ancestors
             # can redirect ordinary leaf paths outside the exact checkout.
+            # Inspect links before exists()/is_file()/is_dir(), which dereference
+            # the path and could otherwise touch redirected or broken targets.
             for component in (path, *path.parents):
                 if component.is_symlink() or component.is_junction():
                     raise ValueError(
                         f"{label} path traverses a symbolic link or junction: {component}"
                     )
+            if not path.exists():
+                raise FileNotFoundError(f"{label} does not exist: {path}")
         if not self.entrypoint.is_file():
             raise ValueError("entrypoint must be a file")
         if not self.web_assets.is_dir():
