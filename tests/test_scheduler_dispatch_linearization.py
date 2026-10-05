@@ -213,6 +213,128 @@ def test_compare_disable_rejects_stale_snapshot(tmp_path: Path) -> None:
     assert current.enabled is True
 
 
+
+@pytest.mark.parametrize(
+    ("previous", "successor"),
+    (
+        (True, 1),
+        (False, 0),
+        (1, 1.0),
+        (0.0, -0.0),
+        ({"nested": [True, {"weight": 1.0}]}, {"nested": [1, {"weight": 1}]}),
+    ),
+)
+def test_typed_payload_replacement_rejects_stale_dispatch_and_disable(
+    tmp_path: Path,
+    previous: object,
+    successor: object,
+) -> None:
+    jobs = ScheduledJobStore(_sqlite(tmp_path))
+    stale = _job(payload={"value": previous})
+    replacement = replace(stale, payload={"value": successor})
+    # Python's native dataclass/dict equality aliases these distinct JSON values.
+    assert stale == replacement
+    jobs.upsert(stale)
+    jobs.upsert(replacement)
+    resolver_calls: list[str] = []
+    calls: list[dict[str, object]] = []
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda action: resolver_calls.append(action) or calls.append,
+    )
+
+    assert jobs.authorize_dispatch(stale) is None
+    assert jobs.disable_if_current(stale) is False
+    adapter._dispatch(stale.job_id, stale)
+
+    assert resolver_calls == []
+    assert calls == []
+    assert jobs.get(stale.job_id) == replacement
+    assert jobs.get(stale.job_id).enabled is True
+    assert jobs.authorize_dispatch(replacement) == replacement
+
+
+
+def test_typed_trigger_replacement_rejects_stale_occurrence(
+    tmp_path: Path,
+) -> None:
+    jobs = ScheduledJobStore(_sqlite(tmp_path))
+    stale = replace(
+        _job(),
+        trigger_kind=TriggerKind.INTERVAL,
+        trigger={"seconds": 1},
+    )
+    replacement = replace(stale, trigger={"seconds": 1.0})
+    assert stale == replacement
+    jobs.upsert(stale)
+    jobs.upsert(replacement)
+    resolver_calls: list[str] = []
+    adapter = APSchedulerAdapter(
+        jobs,
+        lambda action: resolver_calls.append(action) or (lambda _payload: None),
+    )
+
+    assert jobs.authorize_dispatch(stale) is None
+    assert jobs.disable_if_current(stale) is False
+    adapter._dispatch(stale.job_id, stale)
+    assert resolver_calls == []
+    assert jobs.get(stale.job_id) == replacement
+
+
+def test_same_typed_reordered_unicode_payload_keeps_valid_authority(
+    tmp_path: Path,
+) -> None:
+    jobs = ScheduledJobStore(_sqlite(tmp_path))
+    installed = _job(payload={"мова": "українська", "nested": {"a": 1, "b": True}})
+    reordered = replace(
+        installed,
+        payload={"nested": {"b": True, "a": 1}, "мова": "українська"},
+    )
+    jobs.upsert(installed)
+    calls: list[dict[str, object]] = []
+    adapter = APSchedulerAdapter(jobs, lambda _action: calls.append)
+
+    assert jobs.authorize_dispatch(reordered) == installed
+    adapter._dispatch(installed.job_id, reordered)
+    assert calls == [installed.payload]
+    assert jobs.disable_if_current(reordered) is True
+    assert jobs.get(installed.job_id).enabled is False
+
+
+
+def test_runtime_sync_retries_type_changed_definition_on_final_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    jobs = ScheduledJobStore(_sqlite(tmp_path))
+    stale = _job(payload={"value": True})
+    replacement = replace(stale, payload={"value": 1})
+    jobs.upsert(stale)
+    original_get = jobs.get
+    read_count = 0
+
+    def replace_on_final_read(job_id: str) -> ScheduledJob | None:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 3:
+            jobs.upsert(replacement)
+        return original_get(job_id)
+
+    monkeypatch.setattr(jobs, "get", replace_on_final_read)
+    adapter = APSchedulerAdapter(jobs, lambda _action: lambda _payload: None)
+    installed: list[ScheduledJob] = []
+    monkeypatch.setattr(adapter, "_install", installed.append)
+
+    synced = adapter._sync_runtime_job(stale.job_id)
+
+    assert read_count >= 6
+    assert synced is not None
+    assert type(synced.payload["value"]) is int
+    assert len(installed) == 1
+    assert type(installed[0].payload["value"]) is int
+    assert jobs.get(stale.job_id) == replacement
+
+
 def test_runtime_sync_preserves_replacement_when_stale_suppression_loses_cas(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
