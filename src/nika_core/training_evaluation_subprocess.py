@@ -885,7 +885,15 @@ class RegistrySubprocessLoadedModelAttestor:
                     if reader in done:
                         raw_response = reader.result()
                     returncode = await waiter
-                    if returncode == 0 and os.name == "nt":
+                    if returncode != 0:
+                        await self._terminate(process, job)
+                        raise _error(
+                            ModelErrorCode.PROVIDER_ERROR,
+                            "evaluation subprocess exited unsuccessfully",
+                            provider_id=provider_id,
+                            effect=ModelFailureEffect.UNKNOWN,
+                        )
+                    if os.name == "nt":
                         job.close()
                     if reader not in done:
                         raw_response = await reader
@@ -914,14 +922,6 @@ class RegistrySubprocessLoadedModelAttestor:
                         task.cancel()
                 await asyncio.gather(writer, reader, waiter, return_exceptions=True)
 
-            if returncode != 0:
-                await self._terminate(process, job)
-                raise _error(
-                    ModelErrorCode.PROVIDER_ERROR,
-                    "evaluation subprocess exited unsuccessfully",
-                    provider_id=provider_id,
-                    effect=ModelFailureEffect.UNKNOWN,
-                )
             return raw_response
         except asyncio.CancelledError:
             await self._terminate(process, job)
