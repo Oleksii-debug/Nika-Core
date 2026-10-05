@@ -92,9 +92,6 @@ _SECRET_ENVIRONMENT_TOKENS = frozenset(
 _TRAINING_RUNTIME_MANIFEST_DOMAIN = b"nika-peft-runtime-manifest-v1\x00"
 _TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY = "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"
 _TRAINING_RUNTIME_METADATA_PREFIX = "nika.training.runtime."
-_TRAINING_RUNTIME_MANIFEST_METADATA_KEY = (
-    _TRAINING_RUNTIME_METADATA_PREFIX + "manifest_sha256"
-)
 _TRAINING_RUNTIME_BINDINGS = (
     ("torch", "NIKA_TRAINER_TORCH_VERSION"),
     ("transformers", "NIKA_TRAINER_TRANSFORMERS_VERSION"),
@@ -426,14 +423,10 @@ def training_runtime_registry_metadata(
     """Build immutable Artifact Registry metadata for one trainer deployment runtime."""
 
     normalized = _normalize_training_runtime_versions(dict(runtime_versions))
-    metadata = {
-        _TRAINING_RUNTIME_METADATA_PREFIX + distribution: normalized[distribution]
+    return {
+        _TRAINING_RUNTIME_METADATA_PREFIX + distribution + ".version": normalized[distribution]
         for distribution, _ in _TRAINING_RUNTIME_BINDINGS
     }
-    metadata[_TRAINING_RUNTIME_MANIFEST_METADATA_KEY] = (
-        _training_runtime_manifest_sha256(normalized)
-    )
-    return metadata
 
 
 def _training_runtime_environment_from_registry_metadata(
@@ -447,31 +440,26 @@ def _training_runtime_environment_from_registry_metadata(
     if not runtime_keys:
         return {}
     expected_metadata_keys = {
-        _TRAINING_RUNTIME_METADATA_PREFIX + distribution
+        _TRAINING_RUNTIME_METADATA_PREFIX + distribution + ".version"
         for distribution, _ in _TRAINING_RUNTIME_BINDINGS
-    } | {_TRAINING_RUNTIME_MANIFEST_METADATA_KEY}
+    }
     if runtime_keys != expected_metadata_keys:
         raise ValueError("trainer runtime Registry metadata is incomplete or ambiguous")
     versions = _normalize_training_runtime_versions(
         {
-            distribution: metadata[_TRAINING_RUNTIME_METADATA_PREFIX + distribution]
+            distribution: metadata[
+                _TRAINING_RUNTIME_METADATA_PREFIX + distribution + ".version"
+            ]
             for distribution, _ in _TRAINING_RUNTIME_BINDINGS
         }
     )
-    manifest_sha256 = _validate_sha256(
-        metadata[_TRAINING_RUNTIME_MANIFEST_METADATA_KEY],
-        name="training_runtime_manifest_sha256",
-    )
-    if not hmac.compare_digest(
-        manifest_sha256,
-        _training_runtime_manifest_sha256(versions),
-    ):
-        raise ValueError("trainer runtime Registry manifest digest is inconsistent")
     environment = {
         environment_key: versions[distribution]
         for distribution, environment_key in _TRAINING_RUNTIME_BINDINGS
     }
-    environment[_TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY] = manifest_sha256
+    environment[_TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY] = (
+        _training_runtime_manifest_sha256(versions)
+    )
     return environment
 
 
