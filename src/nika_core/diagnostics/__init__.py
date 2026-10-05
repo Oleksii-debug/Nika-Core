@@ -1,5 +1,6 @@
 from nika_core.diagnostics.health import HealthCheck, HealthReport, HealthService, HealthStatus
 from nika_core.diagnostics.model_health import (
+    FoundryLocalModelHealthProbe,
     ModelHealthFact,
     ModelHealthProbePort,
     ModelHealthSnapshot,
@@ -12,6 +13,7 @@ __all__ = [
     "HealthReport",
     "HealthService",
     "HealthStatus",
+    "FoundryLocalModelHealthProbe",
     "ModelHealthFact",
     "ModelHealthProbePort",
     "ModelHealthSnapshot",
