@@ -60,6 +60,28 @@ _PROVIDER_SECRET_FIELDS = frozenset(
         "xmsencryptionkeysha256",
     }
 )
+_MEMORY_SECRET_FIELD_SUFFIXES = frozenset(
+    {
+        "accesskeyid",
+        "accesstoken",
+        "apikey",
+        "clientsecret",
+        "cookie",
+        "cookies",
+        "password",
+        "refreshtoken",
+        "secret",
+        "secretaccesskey",
+        "sessionid",
+        "subscriptionkey",
+        "token",
+    }
+)
+_MEMORY_ASSIGNMENT = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])"
+    r"([A-Za-z][A-Za-z0-9_.-]{0,127})(\s*[:=]\s*)"
+    r"([^\s,;&#]+)"
+)
 _KEY_COLLISION_ERROR = "memory persistence key collision after minimization"
 
 
@@ -71,6 +93,7 @@ def minimize_for_persistence(value: Any) -> Any:
 
 def _redact_secret_text(value: str) -> str:
     redacted = redact_text(value)
+    redacted = _MEMORY_ASSIGNMENT.sub(_redact_memory_assignment, redacted)
     redacted = _OIDC_ID_TOKEN_CREDENTIAL.sub(
         lambda match: f"{match.group(1)}[REDACTED]",
         redacted,
@@ -125,9 +148,21 @@ def _redact_secrets(value: Any) -> Any:
     return value
 
 
+def _redact_memory_assignment(match: re.Match[str]) -> str:
+    key = match.group(1)
+    if not _uses_canonical_secret_field_semantics(key):
+        return match.group(0)
+    return f"{key}{match.group(2)}[REDACTED]"
+
+
 def _uses_canonical_secret_field_semantics(key: str) -> bool:
     normalized = re.sub(r"[^a-z0-9]+", "", key.casefold())
     if normalized in _PROVIDER_SECRET_FIELDS:
+        return True
+    if any(
+        normalized.endswith(suffix)
+        for suffix in _MEMORY_SECRET_FIELD_SUFFIXES
+    ):
         return True
     probe = object()
     return redact_mapping({key: probe})[key] is not probe
