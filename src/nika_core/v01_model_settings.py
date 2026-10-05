@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import sqlite3
@@ -39,6 +40,7 @@ from nika_core.ui.bridge_models import UIResult
 
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
+_MAX_STORED_SELECTION_BYTES = 64 * 1024
 _SCHEMA_VERSION = 1
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
@@ -65,6 +67,26 @@ _MIGRATIONS = {
 
 class ModelSetupError(ValueError):
     """Fixed user-safe model configuration failure without provider diagnostics."""
+
+
+def _unique_selection_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate persisted model selection key")
+        result[key] = value
+    return result
+
+
+def _finite_selection_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("nonfinite persisted model selection number")
+    return value
+
+
+def _reject_selection_constant(_raw: str) -> None:
+    raise ValueError("nonfinite persisted model selection constant")
 
 
 class ModelSelection(BaseModel):
@@ -232,8 +254,21 @@ class ModelSelection(BaseModel):
         try:
             if type(value) is not str:
                 raise TypeError("stored model selection must be text")
-            return cls.model_validate_json(value)
-        except (TypeError, ValueError, ValidationError) as exc:
+            # Validate UTF-8 before hashing: SQLite TEXT can contain corrupt Unicode.
+            if len(value) > _MAX_STORED_SELECTION_BYTES:
+                raise ValueError("oversized stored model selection")
+            if len(value.encode("utf-8")) > _MAX_STORED_SELECTION_BYTES:
+                raise ValueError("oversized stored model selection")
+            decoded = json.loads(
+                value,
+                object_pairs_hook=_unique_selection_keys,
+                parse_float=_finite_selection_float,
+                parse_constant=_reject_selection_constant,
+            )
+            if type(decoded) is not dict:
+                raise ValueError("stored model selection must be an object")
+            return cls.model_validate(decoded)
+        except (TypeError, ValueError, ValidationError, RecursionError) as exc:
             raise ModelSetupError(
                 "Збережені налаштування моделі пошкоджені або несумісні."
             ) from exc
@@ -304,9 +339,10 @@ class V01ModelSettings:
         if row is None or not isinstance(row["selection_json"], str):
             raise ModelSetupError("Збережену модель завдання не знайдено.")
         body = row["selection_json"]
+        selection = ModelSelection.from_stored(body)
         if hashlib.sha256(body.encode("utf-8")).hexdigest() != selection_id:
             raise ModelSetupError("Збережену модель завдання не вдалося перевірити.")
-        return ModelSelection.from_stored(body)
+        return selection
 
     def _selected(self, conn: sqlite3.Connection) -> ModelSelection:
         row = conn.execute("SELECT * FROM v01_model_settings WHERE singleton = 1").fetchone()
