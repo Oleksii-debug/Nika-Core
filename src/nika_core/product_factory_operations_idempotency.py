@@ -4,6 +4,7 @@ import hashlib
 import json
 import sqlite3
 from collections.abc import Mapping
+from threading import Lock
 
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
@@ -37,6 +38,8 @@ class RuntimeIdempotencyMaintenanceJournal:
         canonical_text(task_id, "maintenance effect journal task_id")
         self._ledger = ledger
         self._task_id = task_id
+        self._created_reservations: dict[str, tuple[str, str]] = {}
+        self._created_reservations_lock = Lock()
 
     def lookup(
         self,
@@ -67,37 +70,102 @@ class RuntimeIdempotencyMaintenanceJournal:
     ) -> MaintenanceEffectReservation:
         operation_key = self._operation_key(project_id, request.request_id)
         fingerprint = self._fingerprint(project_id, service, request)
+        with self._created_reservations_lock:
+            if operation_key in self._created_reservations:
+                raise ProductOperationsError(
+                    "maintenance effect adapter already owns a live created reservation"
+                )
+            try:
+                record, created = self._ledger.reserve_once(
+                    operation_key=operation_key,
+                    task_id=self._task_id,
+                    operation_type=_OPERATION_TYPE,
+                    input_fingerprint=fingerprint,
+                )
+            except (IdempotencyConflictError, sqlite3.Error, KeyError, ValueError) as exc:
+                raise ProductOperationsError(
+                    "maintenance effect reservation conflicts with durable runtime authority"
+                ) from exc
+            if created:
+                self._created_reservations[operation_key] = (
+                    fingerprint,
+                    record.created_at,
+                )
+        return self._reservation(record, created=created)
+
+    def complete(self, operation_key: str, result: MaintenanceResult) -> None:
+        fingerprint, created_at = self._created_reservation_identity(operation_key)
         try:
-            record, created = self._ledger.reserve_once(
+            self._ledger.complete_pending_if_matches(
                 operation_key=operation_key,
                 task_id=self._task_id,
                 operation_type=_OPERATION_TYPE,
                 input_fingerprint=fingerprint,
+                created_at=created_at,
+                result=self._encode_result(result),
             )
         except (IdempotencyConflictError, sqlite3.Error, KeyError, ValueError) as exc:
             raise ProductOperationsError(
-                "maintenance effect reservation conflicts with durable runtime authority"
+                "maintenance effect completion could not be committed for exact reservation"
             ) from exc
-        return self._reservation(record, created=created)
-
-    def complete(self, operation_key: str, result: MaintenanceResult) -> None:
-        try:
-            self._ledger.complete(operation_key, self._encode_result(result))
-        except (IdempotencyConflictError, sqlite3.Error, KeyError, ValueError) as exc:
-            raise ProductOperationsError(
-                "maintenance effect completion could not be committed durably"
-            ) from exc
+        self._forget_created_reservation(operation_key, fingerprint, created_at)
 
     def mark_uncertain(self, operation_key: str) -> None:
+        fingerprint, created_at = self._created_reservation_identity(operation_key)
         try:
-            current = self._ledger.require(operation_key)
-            if current.status is IdempotencyStatus.UNCERTAIN:
-                return
-            self._ledger.mark_uncertain(operation_key)
+            self._ledger.mark_pending_uncertain_if_matches(
+                operation_key=operation_key,
+                task_id=self._task_id,
+                operation_type=_OPERATION_TYPE,
+                input_fingerprint=fingerprint,
+                created_at=created_at,
+            )
         except (IdempotencyConflictError, sqlite3.Error, KeyError, ValueError) as exc:
+            try:
+                current = self._ledger.require(operation_key)
+            except (sqlite3.Error, KeyError, ValueError):
+                current = None
+            if (
+                current is not None
+                and current.task_id == self._task_id
+                and current.operation_type == _OPERATION_TYPE
+                and current.input_fingerprint == fingerprint
+                and current.created_at == created_at
+                and current.status is IdempotencyStatus.UNCERTAIN
+            ):
+                self._forget_created_reservation(
+                    operation_key,
+                    fingerprint,
+                    created_at,
+                )
+                return
             raise ProductOperationsError(
-                "maintenance effect uncertainty could not be committed durably"
+                "maintenance effect uncertainty could not be committed for exact reservation"
             ) from exc
+        self._forget_created_reservation(operation_key, fingerprint, created_at)
+
+    def _created_reservation_identity(self, operation_key: str) -> tuple[str, str]:
+        canonical_text(operation_key, "maintenance effect reservation identity")
+        with self._created_reservations_lock:
+            identity = self._created_reservations.get(operation_key)
+        if identity is None:
+            raise ProductOperationsError(
+                "maintenance effect finalization requires the exact created reservation"
+            )
+        return identity
+
+    def _forget_created_reservation(
+        self,
+        operation_key: str,
+        fingerprint: str,
+        created_at: str,
+    ) -> None:
+        with self._created_reservations_lock:
+            if self._created_reservations.get(operation_key) == (
+                fingerprint,
+                created_at,
+            ):
+                del self._created_reservations[operation_key]
 
     def reconcile(self, operation_key: str, result: MaintenanceResult) -> None:
         encoded = self._encode_result(result)
