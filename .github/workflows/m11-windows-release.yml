@@ -6,6 +6,7 @@ on:
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
+      - "src/nika_core/runtime/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
       - "scripts/package_release_zip.py"
@@ -15,6 +16,11 @@ on:
       - "tests/test_m11_m12_release.py"
       - "tests/test_m11_pf11_proof_integrity.py"
       - "tests/test_m11_voice_proof_integrity.py"
+      - "tests/test_v01_durable_active_pause.py"
+      - "tests/test_v01_durable_active_pause_concurrency.py"
+      - "tests/test_v01_durable_pause_resume_authority_ordering.py"
+      - "tests/test_v01_durable_pause_resume_race.py"
+      - "tests/test_windows_desktop_active_pause.py"
       - "tests/test_pf11_proof_precommand.py"
       - "tests/test_windows_packaging_input_safety.py"
       - "tests/test_windows_packaging_ancestor_links.py"
@@ -29,6 +35,7 @@ on:
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
+      - "src/nika_core/runtime/**"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
       - "scripts/package_release_zip.py"
@@ -38,6 +45,11 @@ on:
       - "tests/test_m11_m12_release.py"
       - "tests/test_m11_pf11_proof_integrity.py"
       - "tests/test_m11_voice_proof_integrity.py"
+      - "tests/test_v01_durable_active_pause.py"
+      - "tests/test_v01_durable_active_pause_concurrency.py"
+      - "tests/test_v01_durable_pause_resume_authority_ordering.py"
+      - "tests/test_v01_durable_pause_resume_race.py"
+      - "tests/test_windows_desktop_active_pause.py"
       - "tests/test_pf11_proof_precommand.py"
       - "tests/test_windows_packaging_input_safety.py"
       - "tests/test_windows_packaging_ancestor_links.py"
@@ -87,6 +99,11 @@ jobs:
           tests/test_m11_m12_release.py
           tests/test_m11_pf11_proof_integrity.py
           tests/test_m11_voice_proof_integrity.py
+          tests/test_v01_durable_active_pause.py
+          tests/test_v01_durable_active_pause_concurrency.py
+          tests/test_v01_durable_pause_resume_authority_ordering.py
+          tests/test_v01_durable_pause_resume_race.py
+          tests/test_windows_desktop_active_pause.py
           tests/test_pf11_proof_precommand.py
           tests/test_windows_packaging_input_safety.py
           tests/test_windows_packaging_ancestor_links.py
