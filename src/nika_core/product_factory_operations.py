@@ -245,13 +245,14 @@ class ProductOperationsCoordinator:
         return tuple(sorted(affected))
 
     def record_rollback(self, observation: RollbackObservation) -> ServiceRecord:
+        observation = _private_rollback(observation)
         record = self._require(observation.service_id)
         if observation.failed_release_sha != record.service.release_sha:
             raise ProductOperationsError("rollback failed release SHA mismatch")
         if record.rollback is not None:
             if record.rollback != observation:
                 raise ProductOperationsError("rollback evidence conflicts with prior payload")
-            return record
+            return _private_service_record(record)
         if record.observation is not None and observation.observed_at < record.observation.observed_at:
             raise ProductOperationsError("rollback evidence cannot predate service observation")
         if record.health is not ServiceHealth.ROLLBACK_REQUIRED:
@@ -270,9 +271,10 @@ class ProductOperationsCoordinator:
             record.node_loss,
         )
         self._services[record.service.service_id] = updated
-        return updated
+        return _private_service_record(updated)
 
     def request_maintenance(self, request: MaintenanceRequest) -> MaintenanceRecord:
+        request = _private_request(request)
         with self._maintenance_lock:
             record = self._require(request.service_id)
             existing = self._maintenance.get(request.request_id)
@@ -283,7 +285,7 @@ class ProductOperationsCoordinator:
                     )
                 self._validate_maintenance_authority(record, request)
                 self._validate_existing_maintenance_effect(record, existing)
-                return existing
+                return _private_maintenance_record(existing)
             if self.port is None or request.approval_ref is None:
                 raise ProductOperationsError(
                     "maintenance side effect requires configured port and explicit approval"
@@ -296,9 +298,10 @@ class ProductOperationsCoordinator:
             )
             saved = MaintenanceRecord(request, result, reconciled=reconciled)
             self._save_maintenance(record, saved)
-            return saved
+            return _private_maintenance_record(saved)
 
     def reconcile_maintenance(self, request_id: str) -> MaintenanceRecord:
+        canonical_text(request_id, "maintenance request identity")
         with self._maintenance_lock:
             if request_id not in self._maintenance:
                 raise ProductOperationsError("unknown maintenance request")
@@ -308,7 +311,7 @@ class ProductOperationsCoordinator:
                     self._require(current.request.service_id),
                     current,
                 )
-                return current
+                return _private_maintenance_record(current)
             if self.port is None:
                 raise ProductOperationsError("maintenance side-effect port is not configured")
             record = self._require(current.request.service_id)
@@ -320,7 +323,7 @@ class ProductOperationsCoordinator:
             )
             saved = MaintenanceRecord(current.request, result, reconciled=True)
             self._save_maintenance(record, saved)
-            return saved
+            return _private_maintenance_record(saved)
 
     def health_summary(self) -> ProjectHealthSummary:
         bucket = {state: [] for state in ServiceHealth}
@@ -338,15 +341,18 @@ class ProductOperationsCoordinator:
         )
 
     def snapshot(self) -> ProductOperationsSnapshot:
-        return ProductOperationsSnapshot(
-            self.project_id,
-            tuple(self._services[key] for key in sorted(self._services)),
-            tuple(self._maintenance[key] for key in sorted(self._maintenance)),
-            tuple(sorted(self._revoked)),
-            tuple(sorted(self._down_nodes)),
+        return _private_snapshot(
+            ProductOperationsSnapshot(
+                self.project_id,
+                tuple(self._services[key] for key in sorted(self._services)),
+                tuple(self._maintenance[key] for key in sorted(self._maintenance)),
+                tuple(sorted(self._revoked)),
+                tuple(sorted(self._down_nodes)),
+            )
         )
 
     def restore(self, snapshot: ProductOperationsSnapshot) -> None:
+        snapshot = _private_snapshot(snapshot)
         if snapshot.project_id != self.project_id:
             raise ProductOperationsError("operations snapshot belongs to another project")
         ids = [record.service.service_id for record in snapshot.services]
