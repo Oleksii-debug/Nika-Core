@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -287,6 +288,57 @@ def test_risk_generated_approval_id_binds_full_instrument_identity() -> None:
     assert approve(_INSTRUMENT_A).approval_id != approve(_INSTRUMENT_B).approval_id
 
 
+
+def test_strategy_intent_id_and_time_do_not_define_risk_approval_identity() -> None:
+    snapshot = AccountSnapshot(
+        cash=Decimal(1000),
+        fees=Decimal(0),
+        realized_pnl=Decimal(0),
+        unrealized_pnl=Decimal(0),
+        equity=Decimal(1000),
+        gross_exposure=Decimal(0),
+        net_exposure=Decimal(0),
+        positions=(),
+    )
+    limits = RiskLimits(
+        max_abs_position=Decimal(10),
+        max_gross_exposure=Decimal(1000),
+        max_net_exposure=Decimal(1000),
+        max_session_loss=Decimal(1000),
+        max_drawdown=Decimal(1000),
+        max_leverage=Decimal(10),
+    )
+    engine = RiskEngine(limits)
+    authority = _authority("host-stamped-order")
+
+    def approve(intent_id: str, proposed_at: datetime) -> RiskApprovedOrder:
+        return engine.approve(
+            OrderIntent(
+                intent_id,
+                _INSTRUMENT_A,
+                Side.BUY,
+                OrderType.MARKET,
+                Decimal(1),
+                proposed_at,
+                99,
+            ),
+            authority=authority,
+            snapshot=snapshot,
+            mark_price=Decimal(100),
+            pending_signed_quantity=Decimal(0),
+            approved_at=_NOW,
+            approved_slice=0,
+            policy=ExecutionPolicy("host-stamp"),
+            risk_state=RiskState(Decimal(1000), Decimal(1000)),
+        )
+
+    first = approve("strategy-a", _NOW + timedelta(days=1))
+    second = approve("strategy-b", _NOW + timedelta(days=2))
+    assert first.approval_id == second.approval_id
+    assert first.authority == authority
+    assert second.authority == authority
+
+
 def test_replay_book_state_does_not_alias_shared_approval_id_across_venues() -> None:
     book = ReplayBook(PortfolioLedger(Decimal(1000)))
     first = book.process_existing_order(
@@ -311,14 +363,14 @@ def test_replay_book_state_does_not_alias_shared_approval_id_across_venues() -> 
     ).positions) == 2
 
 
-def test_execution_uses_host_submission_slice_not_strategy_proposal_slice() -> None:
+def test_execution_uses_host_submission_not_strategy_proposal_metadata() -> None:
     intent = OrderIntent(
         "strategy-controlled-id",
         _INSTRUMENT_A,
         Side.BUY,
         OrderType.MARKET,
         Decimal(1),
-        _NOW,
+        _NOW + timedelta(days=1),
         99,
     )
     order = RiskApprovedOrder(
@@ -466,6 +518,27 @@ def test_persistence_isolates_equal_fill_ids_and_accounts_between_runs(tmp_path)
     assert repo.has_fill("workspace", "run-b", "same-fill")
     assert repo.account_payload("workspace", "run-a")["cash"] == "900"
     assert repo.account_payload("workspace", "run-b")["cash"] == "1900"
+
+
+
+def test_conflicting_retry_of_same_scoped_fill_id_fails_closed(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repo = TradingStateRepository(store)
+    repo.initialize()
+
+    fill = _fill(_INSTRUMENT_A, "conflict-fill")
+    ledger = PortfolioLedger(Decimal(1000))
+    ledger.apply_fill(fill)
+    snapshot = ledger.snapshot({instrument_identity(_INSTRUMENT_A): Decimal(100)})
+    assert repo.commit_fill_and_account(fill, snapshot)
+
+    conflicting = replace(fill, price=Decimal(101))
+    with pytest.raises(RuntimeError, match="conflicting durable fill identity"):
+        repo.commit_fill_and_account(conflicting, snapshot)
+
+    assert repo.fill_count("workspace", "run") == 1
+    assert repo.commit_fill_and_account(fill, snapshot) is False
 
 
 def test_nonempty_v1_state_fails_closed_instead_of_inventing_venue(tmp_path) -> None:
