@@ -222,7 +222,7 @@ def _open_notices_descriptor(target: Path) -> int:
                 handle,
                 os.O_RDONLY | getattr(os, "O_BINARY", 0),
             )
-        except BaseException:
+        except Exception:
             close_handle(handle)
             raise
 
