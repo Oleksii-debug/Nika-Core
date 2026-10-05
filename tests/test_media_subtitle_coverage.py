@@ -8,7 +8,11 @@ import pytest
 
 from nika_core.media.contracts import SubtitleKind, SubtitleTrack
 from nika_core.media.errors import MediaError, MediaErrorCode
-from nika_core.media.subtitles import SubtitlePolicy, normalize_subtitle_file
+from nika_core.media.subtitles import (
+    SubtitlePolicy,
+    _normalize_text,
+    normalize_subtitle_file,
+)
 
 
 def _normalize(
@@ -163,3 +167,18 @@ def test_valid_quality_policy_boundary_ratios_remain_available() -> None:
     )
     assert policy.automatic_min_coverage_ratio == 0
     assert policy.automatic_max_malformed_ratio == 1
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    (
+        ("1 < 2 > 0", "1 < 2 > 0"),
+        ("{Україна} <i>відео</i>", "{Україна} відео"),
+        (r"{\\i1}субтитр{\\i0}", "субтитр"),
+        ("<00:01.250>час <00:00:02.500>", "час"),
+        ("Текст <c.green>зелений</c>", "Текст зелений"),
+    ),
+)
+def test_subtitle_normalization_strips_formatting_without_losing_literal_text(
+    raw: str, expected: str
+) -> None:
+    assert _normalize_text(raw) == expected
