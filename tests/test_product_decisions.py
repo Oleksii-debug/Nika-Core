@@ -484,11 +484,22 @@ def test_non_lock_operational_error_is_not_reclassified_as_contention(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, _, decisions = _repos(tmp_path)
+    store, _, _ = _repos(tmp_path)
+
+    class EmptyReplayCursor:
+        @staticmethod
+        def fetchone():
+            return None
 
     class NonLockFailureConnection:
         @staticmethod
-        def execute(statement: str, *_args: object) -> None:
+        def execute(statement: str, *_args: object):
+            if statement == "BEGIN":
+                return None
+            if statement.startswith(
+                "SELECT project_id,operation_kind,entity_id,entity_version,"
+            ):
+                return EmptyReplayCursor()
             assert statement == "BEGIN IMMEDIATE"
             raise sqlite3.OperationalError("synthetic non-lock failure")
 
@@ -499,9 +510,12 @@ def test_non_lock_operational_error_is_not_reclassified_as_contention(
     )
 
     with pytest.raises(sqlite3.OperationalError, match="synthetic non-lock failure"):
-        decisions.record(
+        ProductDecisionRepository(store).record(
             "p1",
-            _decision(),
+            _decision(
+                state=ProductDecisionState.PROPOSED,
+                rationale="Writer-error boundary",
+            ),
             expected_row_version=0,
             idempotency_key="decision:non-lock",
         )
