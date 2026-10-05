@@ -5,6 +5,13 @@ from typing import Protocol
 from nika_core.web_api.contracts import WebCommand, WebCommandResult, WebPrincipal
 
 
+class WebCommandAdmissionError(ValueError):
+    """Untrusted command input failed the Web application admission boundary."""
+
+    def __init__(self) -> None:
+        super().__init__("Web command was rejected by boundary admission")
+
+
 class WebCommandOutcomeUnknownError(RuntimeError):
     """The handler may have applied an effect; callers must reconcile before retry."""
 
@@ -45,7 +52,10 @@ class WebApplicationBoundary:
     def dispatch(self, *, principal: WebPrincipal, command: object) -> WebCommandResult:
         if type(principal) is not WebPrincipal:
             raise ValueError("principal must be the exact server authority carrier")
-        admitted = WebCommand.from_untrusted(command)
+        try:
+            admitted = WebCommand.from_untrusted(command)
+        except ValueError as exc:
+            raise WebCommandAdmissionError() from exc
 
         allowed = self._authorization.allows(principal, admitted)
         if type(allowed) is not bool:
