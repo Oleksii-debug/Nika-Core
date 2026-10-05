@@ -765,3 +765,38 @@ def test_observation_bridge_fences_envelopes_before_behavior() -> None:
             definition=_HostileBridgeEnvelope(),  # type: ignore[arg-type]
             evaluation_set=evaluation,
         )
+
+
+def test_observation_bridge_rejects_pass_score_substitution() -> None:
+    candidate = _candidate("candidate", "m")
+    evaluation = _evaluation()
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 0.0),
+        latency=(10.0, 20.0),
+    )
+    forged_first = replace(report.case_results[0], pass_score=0.5)
+    forged = replace(
+        report,
+        case_results=(forged_first, report.case_results[1]),
+    )
+    definition = build_experiment_definition(
+        experiment_id="pass-score-binding",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=_execution_config(),
+        policy=PromotionPolicy(
+            primary_metric=TASK_PASS_METRIC,
+            minimum_replays=2,
+        ),
+        permission_fingerprint="permissions-v1",
+    )
+
+    with pytest.raises(ValueError, match="pass-score evidence"):
+        benchmark_observations(
+            forged,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
