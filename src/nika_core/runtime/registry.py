@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from inspect import getattr_static
+import unicodedata
 
 from nika_core.runtime.contracts import AgentRuntimePort, RuntimeCapability
 
@@ -33,8 +34,13 @@ def _canonical_runtime_id(value: object) -> str:
         raise ValueError(
             f"runtime_id must contain at most {MAX_RUNTIME_ID_CHARS} characters"
         )
-    if any(ord(char) < 32 or ord(char) == 127 for char in value):
-        raise ValueError("runtime_id must not contain control characters")
+    if any(
+        unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+        for char in value
+    ):
+        raise ValueError(
+            "runtime_id must not contain control, format, or line-separator characters"
+        )
     return value
 
 
