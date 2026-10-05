@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -15,7 +16,11 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
 from nika_core.research.blobs import ContentAddressedBlobStore
 from nika_core.training_adapters import SubprocessTrainingWorker, TrainingSubprocessError
-from nika_core.training_materials import ResolvedTrainingPackage, resolve_training_materials
+from nika_core.training_materials import (
+    ResolvedTrainingPackage,
+    TrainingMaterialEvidence,
+    resolve_training_materials,
+)
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
@@ -169,6 +174,9 @@ Path({str(observed_path)!r}).write_text(
 )
 response = {{
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {{"epoch": 1}},
@@ -190,7 +198,7 @@ sys.stdout.write(json.dumps(response))
 
     observed = json.loads(observed_path.read_text(encoding="utf-8"))
     record = registry.get(artifact_id)
-    assert observed["protocol_version"] == 2
+    assert observed["protocol_version"] == 3
     assert len(worker.execution_plan_sha256) == 64
     assert observed["trainer_artifact_id"] == artifact_id
     assert observed["trainer_sha256"] == record.sha256
@@ -210,6 +218,9 @@ sys.stdout.write(json.dumps(response))
     envelope = result.resume_state["_nika_subprocess"]
     assert isinstance(envelope, dict)
     assert envelope["command_sha256"] == observed["command_sha256"]
+    assert envelope["consumed_materials_sha256"] == (
+        observed["training_materials"]["required_consumed_materials_sha256"]
+    )
     assert envelope["trainer_artifact_id"] == artifact_id
     assert envelope["trainer_sha256"] == record.sha256
 
@@ -225,6 +236,9 @@ request = json.loads(sys.stdin.buffer.read())
 step_index = request["step_index"]
 response = {
     "candidate_sha256": "b" * 64 if step_index == 1 else None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": step_index == 1,
     "protocol_version": request["protocol_version"],
     "resume_state": {"next_epoch": step_index + 1},
@@ -255,6 +269,59 @@ sys.stdout.write(json.dumps(response))
     assert second.candidate_sha256 == "b" * 64
 
 
+def test_resume_rejects_tampered_material_attestation_before_process_effect(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "second-step-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+if request["step_index"] == 1:
+    Path({str(marker)!r}).write_text("started", encoding="utf-8")
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{"step": request["step_index"]}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    first = worker.step(
+        spec=_spec(materials),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+    tampered = json.loads(json.dumps(first.resume_state))
+    envelope = tampered["_nika_subprocess"]
+    assert isinstance(envelope, dict)
+    envelope["consumed_materials_sha256"] = "0" * 64
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=1,
+            resume_state=tampered,
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "resume_state_material_attestation_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
 def test_resume_binds_trainer_artifact_id_even_when_digest_is_same(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
@@ -265,6 +332,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {"step": request["step_index"]},
@@ -331,6 +401,9 @@ if request["step_index"] == 1:
     Path({str(marker)!r}).write_text("started", encoding="utf-8")
 response = {{
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {{"step": request["step_index"]}},
@@ -479,6 +552,9 @@ request = json.loads(sys.stdin.buffer.read())
 Path({str(marker)!r}).write_text("effect", encoding="utf-8")
 response = {{
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {{}},
@@ -513,6 +589,191 @@ sys.stdout.write(json.dumps(response))
     assert exc_info.value.code == "training_material_changed_after_process_start"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
     assert not marker.exists()
+
+
+def test_inner_material_evidence_cannot_diverge_from_frozen_package_before_effect(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "trainer-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+observations = []
+for item in request["training_materials"]["materials"]:
+    body = Path(item["path"]).read_bytes()
+    observations.append({{
+        "artifact_sha256": hashlib.sha256(body).hexdigest(),
+        "byte_count": len(body),
+        "split": item["split"],
+    }})
+encoded = json.dumps(
+    observations,
+    allow_nan=False,
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+domain = b"nika-training-consumed-materials-v1" + bytes([0])
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "consumed_materials_sha256": hashlib.sha256(domain + encoded).hexdigest(),
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials, max_steps=1)
+    material = materials.materials[0]
+    original_evidence = material.evidence
+    replacement = b"x" * original_evidence.byte_count
+    material.path.write_bytes(replacement)
+    object.__setattr__(
+        material,
+        "evidence",
+        TrainingMaterialEvidence(
+            split=original_evidence.split,
+            artifact_sha256=_sha256(replacement),
+            provenance_sha256=original_evidence.provenance_sha256,
+            license_evidence_sha256=original_evidence.license_evidence_sha256,
+            record_count=original_evidence.record_count,
+            byte_count=original_evidence.byte_count,
+        ),
+    )
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=spec,
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_materials_invalid"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_consumed_material_attestation_mismatch_is_unknown_effect(
+    tmp_path: Path,
+) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "consumed_materials_sha256": "0" * 64,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_subprocess_material_attestation_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+
+
+def test_material_swap_after_final_parent_reverify_is_detected_by_trainer_attestation(
+    tmp_path: Path,
+) -> None:
+    request_seen = tmp_path / "request-seen"
+    trainer = _script(
+        tmp_path,
+        f"""
+import hashlib
+import json
+import sys
+import time
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+Path({str(request_seen)!r}).write_text("seen", encoding="utf-8")
+time.sleep(0.2)
+observations = []
+for item in request["training_materials"]["materials"]:
+    body = Path(item["path"]).read_bytes()
+    observations.append({{
+        "artifact_sha256": hashlib.sha256(body).hexdigest(),
+        "byte_count": len(body),
+        "split": item["split"],
+    }})
+encoded = json.dumps(
+    observations,
+    allow_nan=False,
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+domain = b"nika-training-consumed-materials-v1" + bytes([0])
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "consumed_materials_sha256": hashlib.sha256(domain + encoded).hexdigest(),
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    target = materials.materials[0]
+    replacement = b"x" * target.evidence.byte_count
+
+    def replace_after_request() -> None:
+        deadline = time.monotonic() + 3.0
+        while not request_seen.exists():
+            if time.monotonic() >= deadline:
+                return
+            time.sleep(0.005)
+        target.path.write_bytes(replacement)
+
+    mutator = threading.Thread(target=replace_after_request, daemon=True)
+    mutator.start()
+    try:
+        with pytest.raises(TrainingSubprocessError) as exc_info:
+            worker.step(
+                spec=_spec(materials, max_steps=1),
+                step_index=0,
+                resume_state={},
+                training_materials=materials,
+            )
+    finally:
+        mutator.join(timeout=1.0)
+
+    assert not mutator.is_alive()
+    assert request_seen.exists()
+    assert exc_info.value.code == "training_subprocess_material_attestation_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
 
 
 def test_registry_artifact_must_match_command_executable(tmp_path: Path) -> None:
@@ -600,6 +861,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {},
@@ -659,6 +923,9 @@ request = json.loads(sys.stdin.buffer.read())
 Path({str(marker)!r}).write_text("effect", encoding="utf-8")
 response = {{
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {{}},
@@ -710,6 +977,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {"secret_seen": os.getenv("NIKA_TRAINING_SECRET") is not None},
@@ -849,6 +1119,9 @@ request = json.loads(sys.stdin.buffer.read())
 response = {{
     "candidate_sha256": None,
     "completed": False,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "protocol_version": request["protocol_version"],
     "resume_state": {{"epoch": 1}},
     "step_id": request["step_id"],
@@ -1012,6 +1285,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {"observed_step_id": request["step_id"]},
@@ -1077,6 +1353,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {"allowed": os.getenv("NIKA_ALLOWED")},
@@ -1116,6 +1395,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {"step": request["step_index"]},
@@ -1176,6 +1458,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {"step": request["step_index"]},
@@ -1271,6 +1556,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {},
@@ -1304,6 +1592,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": False,
     "protocol_version": request["protocol_version"],
     "resume_state": {},
@@ -1338,6 +1629,9 @@ import sys
 request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": "not-a-digest",
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
     "completed": True,
     "protocol_version": request["protocol_version"],
     "resume_state": {},
