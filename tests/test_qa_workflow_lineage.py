@@ -27,9 +27,11 @@ M12_UPSTREAM_WORKFLOW_PATHS = (
 M11_MODEL_RECOVERY_FILTERS = (
     '      - "src/nika_core/diagnostics/**"',
     '      - "src/nika_core/v01_packaged_team_runtime.py"',
+    '      - "src/nika_core/v01_model_settings.py"',
     '      - "tests/test_diagnostics_health*.py"',
     '      - "tests/test_local_model_health*.py"',
     '      - "tests/test_v01_packaged_model_recovery_health.py"',
+    '      - "tests/test_v01_model_settings.py"',
 )
 M11_MODEL_RECOVERY_TESTS = (
     "tests/test_diagnostics_health.py",
@@ -43,6 +45,7 @@ M11_MODEL_RECOVERY_TESTS = (
     "tests/test_local_model_health_string_authority.py",
     "tests/test_local_model_health_timeout_contract.py",
     "tests/test_v01_packaged_model_recovery_health.py",
+    "tests/test_v01_model_settings.py",
 )
 
 
