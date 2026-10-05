@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from nika_core.interaction import (
     PlaywrightInteractionAdapter,
     UnsupportedInteractionError,
 )
+from nika_core.interaction.playwright_adapter import _safe_download_filename
 
 
 class _FakeDialog:
@@ -285,17 +287,33 @@ def test_download_broker_treats_backslash_parent_text_as_basename(
     assert broker.saved[0].read_text(encoding="utf-8") == "UTF-8 доказ"
 
 
-def test_download_broker_accepts_255_utf16_unit_unicode_component(
+def test_download_broker_stages_outside_approved_root_before_publication(
     tmp_path: Path,
 ) -> None:
     broker = DownloadBroker(tmp_path / "downloads")
-    filename = ("а" * 251) + ".txt"
-    download = _FakeDownload(filename, "boundary")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("protected", encoding="utf-8")
 
+    class ApprovedRootEntryAttacker(_FakeDownload):
+        def save_as(self, destination: str) -> None:
+            staging = Path(destination)
+            if staging.parent == broker.approved_root:
+                staging.unlink()
+                os.link(victim, staging)
+            super().save_as(destination)
+
+    download = ApprovedRootEntryAttacker("evidence.txt", "downloaded")
     broker.handle(download)
 
-    assert broker.saved == [(broker.approved_root / filename).resolve()]
-    assert broker.saved[0].read_text(encoding="utf-8") == "boundary"
+    assert victim.read_text(encoding="utf-8") == "protected"
+    assert broker.saved == [(broker.approved_root / "evidence.txt").resolve()]
+    assert broker.saved[0].read_text(encoding="utf-8") == "downloaded"
+
+
+def test_download_filename_accepts_255_utf16_unit_unicode_component() -> None:
+    filename = ("а" * 251) + ".txt"
+
+    assert _safe_download_filename(filename) == filename
 
 
 def test_download_filename_subclass_is_rejected_without_behavior(

@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -216,15 +217,24 @@ class DownloadBroker:
         if destination.parent != self.approved_root:
             raise UnsupportedInteractionError("download path escaped approved root")
 
-        # A complete download is published with a no-clobber filesystem operation.
-        # The staging file lives on the same filesystem for os.link on Windows/Unix.
-        fd, staging_name = tempfile.mkstemp(
-            prefix=".nika-download-", suffix=".part", dir=self.approved_root
-        )
-        os.close(fd)
-        staging = Path(staging_name)
-        try:
+        # Stage outside the approved artifact root so a less-trusted writer that
+        # can replace entries only inside that root cannot redirect save_as().
+        # A sibling private directory keeps staging on the same filesystem for
+        # the final atomic, no-clobber hard-link publication.
+        with tempfile.TemporaryDirectory(
+            prefix=".nika-download-stage-",
+            dir=self.approved_root.parent,
+        ) as staging_dir:
+            staging = Path(staging_dir) / "payload.part"
             download.save_as(str(staging))
+            try:
+                staging_info = staging.lstat()
+            except OSError as exc:
+                raise UnsupportedInteractionError(
+                    "download staging artifact is unavailable"
+                ) from exc
+            if not stat.S_ISREG(staging_info.st_mode):
+                raise UnsupportedInteractionError("download staging artifact is unsafe")
             try:
                 os.link(staging, destination)
             except FileExistsError as exc:
@@ -232,8 +242,6 @@ class DownloadBroker:
                     "download destination already exists"
                 ) from exc
             self.saved.append(destination)
-        finally:
-            staging.unlink(missing_ok=True)
 
 
 @dataclass(slots=True)
