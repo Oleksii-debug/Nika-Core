@@ -1,46 +1,44 @@
 from __future__ import annotations
 
-import multiprocessing
 import os
 from pathlib import Path
+import subprocess
+import sys
 
 import pytest
 
 from nika_core.packaging import notices
 
 
-def _read_after_fifo_swap(
-    target_text: str,
-    fifo_text: str,
-    link_swap: bool,
-    sender: object,
-) -> None:
-    target = Path(target_text)
-    fifo = Path(fifo_text)
-    original_lstat = Path.lstat
-    swapped = False
+_FIFO_SWAP_SCRIPT = r"""
+import os
+import sys
+from pathlib import Path
 
-    def swapping_lstat(path: Path, *args: object, **kwargs: object):
-        nonlocal swapped
-        result = original_lstat(path, *args, **kwargs)
-        if path == target and not swapped:
-            swapped = True
-            target.unlink()
-            if link_swap:
-                target.symlink_to(fifo)
-            else:
-                os.replace(fifo, target)
-        return result
+from nika_core.packaging import notices
 
-    Path.lstat = swapping_lstat
-    try:
-        result = notices._read_notices(target)
-        sender.send(("ok", result))
-    except BaseException as exc:
-        sender.send(("error", type(exc).__name__, str(exc)))
-    finally:
-        Path.lstat = original_lstat
-        sender.close()
+target = Path(sys.argv[1])
+fifo = Path(sys.argv[2])
+link_swap = sys.argv[3] == "link"
+original_lstat = Path.lstat
+swapped = False
+
+def swapping_lstat(path, *args, **kwargs):
+    global swapped
+    result = original_lstat(path, *args, **kwargs)
+    if path == target and not swapped:
+        swapped = True
+        target.unlink()
+        if link_swap:
+            target.symlink_to(fifo)
+        else:
+            os.replace(fifo, target)
+    return result
+
+Path.lstat = swapping_lstat
+result = notices._read_notices(target)
+raise SystemExit(0 if result is None else 2)
+"""
 
 
 @pytest.fixture
@@ -164,23 +162,24 @@ def test_notice_fifo_swap_is_process_bounded(
     _bundle, target, _valid = notice_bundle
     fifo = tmp_path / "blocked-notices.fifo"
     os.mkfifo(fifo)
-    context = multiprocessing.get_context("fork")
-    receiver, sender = context.Pipe(duplex=False)
-    process = context.Process(
-        target=_read_after_fifo_swap,
-        args=(str(target), str(fifo), link_swap, sender),
-    )
-    process.start()
-    sender.close()
-    process.join(1.0)
-    if process.is_alive():
-        process.kill()
-        process.join()
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                _FIFO_SWAP_SCRIPT,
+                str(target),
+                str(fifo),
+                "link" if link_swap else "fifo",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+        )
+    except subprocess.TimeoutExpired:
         pytest.fail("notice admission blocked while opening a swapped FIFO")
-    assert process.exitcode == 0
-    assert receiver.poll(0.1)
-    assert receiver.recv() == ("ok", None)
-    receiver.close()
+    assert result.returncode == 0, result.stderr
 
 
 def test_generated_notices_reject_oversize_before_replacing_existing_file(
