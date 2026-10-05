@@ -81,20 +81,31 @@ def _validate_json_shape(value: Any, *, label: str) -> Any:
             raise ProductProjectError(f"{label} exceeds JSON node limit")
         if depth > _MAX_JSON_DEPTH:
             raise ProductProjectError(f"{label} exceeds JSON nesting limit")
-        if isinstance(current, dict):
+        if type(current) is dict:
             for key, child in current.items():
+                if type(key) is not str:
+                    raise ProductProjectError(
+                        f"{label} contains a non-text JSON object key"
+                    )
                 try:
                     key.encode("utf-8")
                 except UnicodeEncodeError as exc:
                     raise ProductProjectError(f"{label} contains invalid Unicode") from exc
                 stack.append((child, depth + 1))
-        elif isinstance(current, list):
+        elif type(current) is list:
             stack.extend((child, depth + 1) for child in current)
-        elif isinstance(current, str):
+        elif type(current) is str:
             try:
                 current.encode("utf-8")
             except UnicodeEncodeError as exc:
                 raise ProductProjectError(f"{label} contains invalid Unicode") from exc
+        elif current is None or type(current) is bool or type(current) is int:
+            continue
+        elif type(current) is float:
+            if not math.isfinite(current):
+                raise ProductProjectError(f"{label} contains non-finite JSON number")
+        else:
+            raise ProductProjectError(f"{label} contains unsupported JSON value")
     return value
 
 
