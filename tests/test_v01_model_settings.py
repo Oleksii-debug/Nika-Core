@@ -67,6 +67,7 @@ def test_local_model_selection_is_durable_and_snapshot_is_ui_safe(tmp_path: Path
         "timeout_seconds": 90.0,
         "private_data_allowed": True,
         "credential_configured": False,
+        "artifact": {"status": "unregistered"},
     }
     restarted = V01ModelSettings(SQLiteStore(store.path))
     assert restarted.snapshot() == settings.snapshot()
