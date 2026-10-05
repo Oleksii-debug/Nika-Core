@@ -642,6 +642,41 @@ def test_wrong_workspace_material_identity_fails_before_worker_effect(
 
 
 @dataclass
+class _DriftingExecutionPlanWorker:
+    execution_plan_sha256: str = "a" * 64
+    calls: list[int] = field(default_factory=list)
+
+    def step(
+        self,
+        *,
+        spec: TrainingJobSpec,
+        step_index: int,
+        resume_state: dict[str, object],
+        training_materials: ResolvedTrainingPackage,
+    ) -> TrainingStepResult:
+        del spec, resume_state, training_materials
+        self.calls.append(step_index)
+        self.execution_plan_sha256 = "b" * 64
+        return TrainingStepResult(
+            resume_state={"last_step": step_index},
+            completed=False,
+        )
+
+
+def test_execution_plan_drift_fails_before_next_worker_effect(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    worker = _DriftingExecutionPlanWorker()
+
+    failed = _runtime(store).run(_spec(), worker)
+
+    assert failed.state is TrainingRunState.FAILED
+    assert failed.reason == "training_execution_plan_changed"
+    assert failed.next_step == 1
+    assert failed.execution_plan_sha256 == "a" * 64
+    assert worker.calls == [0]
+
+
+@dataclass
 class _TamperingWorker:
     execution_plan_sha256: str = field(
         default=_EXECUTION_PLAN_SHA256,

@@ -347,6 +347,36 @@ class TrainingRuntime:
                         reason="training_material_verification_failed",
                     )
                 try:
+                    observed_execution_plan_sha256 = _worker_execution_plan_sha256(worker)
+                except (TypeError, ValueError):
+                    observed_execution_plan_sha256 = None
+                if (
+                    observed_execution_plan_sha256 is None
+                    or not hmac.compare_digest(
+                        observed_execution_plan_sha256,
+                        execution_plan_sha256,
+                    )
+                ):
+                    saved = self._save(
+                        spec,
+                        fingerprint=fingerprint,
+                        state=TrainingRunState.FAILED,
+                        next_step=step_index,
+                        resume_state=resume_state,
+                        candidate_sha256=None,
+                        reason="training_execution_plan_changed",
+                    )
+                    return self._evidence(
+                        spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
+                        state=TrainingRunState.FAILED,
+                        next_step=step_index,
+                        candidate_sha256=None,
+                        checkpoint=saved,
+                        reason="training_execution_plan_changed",
+                    )
+                try:
                     step_result = worker.step(
                         spec=spec,
                         step_index=step_index,
