@@ -106,7 +106,7 @@ def _charge_mcp_argument_budget(
     budget[1] -= encoded_bytes
 
 
-def _mcp_scalar_bytes(value: str | int | float | bool | None) -> int:
+def _mcp_scalar_bytes(value: str | float | bool | None) -> int:
     if type(value) is str and len(value) > _MAX_MCP_ARGUMENT_BYTES:
         raise ValueError("MCP arguments exceed safe UTF-8 byte limit")
     return len(
