@@ -39,6 +39,12 @@ class _DecisionView:
     evidence_package_ids: tuple[str, ...]
 
 
+def _durable_integer(raw: object, *, label: str, minimum: int) -> int:
+    if type(raw) is not int or raw < minimum:
+        raise ProductProjectError(f"invalid durable {label}")
+    return raw
+
+
 class ProductProjectIntegrityService:
     """Fail-closed PF1 reconciliation over one durable ProductProject snapshot."""
 
@@ -52,36 +58,44 @@ class ProductProjectIntegrityService:
         expected_spec_version: int | None = None,
         expected_row_version: int | None = None,
     ) -> ProductProjectIntegrityReport:
-        if type(project_id) is not str or not project_id.strip():
-            raise ProductProjectError("project_id must be non-empty text")
+        if not project_id.strip():
+            raise ProductProjectError("project_id must not be empty")
         with self.store.connection() as conn:
             conn.execute("BEGIN")
-            row = conn.execute(
-                "SELECT p.project_id,p.current_spec_version,p.row_version,s.spec_json "
-                "FROM product_projects p JOIN product_project_specs s "
-                "ON s.project_id=p.project_id "
-                "AND s.spec_version=p.current_spec_version WHERE p.project_id=?",
+            project_row = conn.execute(
+                "SELECT project_id,current_spec_version,row_version "
+                "FROM product_projects WHERE project_id=?",
                 (project_id,),
             ).fetchone()
-            if row is None:
+            if project_row is None:
                 raise KeyError(project_id)
-            spec_version = self._required_int(
-                row["current_spec_version"],
+            spec_version = _durable_integer(
+                project_row["current_spec_version"],
+                label="ProductProject spec version metadata",
                 minimum=1,
-                label="ProductProject current_spec_version",
             )
-            row_version = self._required_int(
-                row["row_version"],
+            row_version = _durable_integer(
+                project_row["row_version"],
+                label="ProductProject row version metadata",
                 minimum=0,
-                label="ProductProject row_version",
             )
+            spec_row = conn.execute(
+                "SELECT spec_json FROM product_project_specs "
+                "WHERE project_id=? AND spec_version=?",
+                (project_id, spec_version),
+            ).fetchone()
+            if spec_row is None:
+                raise ProductProjectError(
+                    "current ProductProject specification is missing: "
+                    f"project_id={project_id}, spec_version={spec_version}"
+                )
             self._validate_expected_versions(
                 spec_version,
                 row_version,
                 expected_spec_version=expected_spec_version,
                 expected_row_version=expected_row_version,
             )
-            spec = self._parse_spec(row["spec_json"], label="current specification")
+            spec = self._parse_spec(spec_row["spec_json"], label="current specification")
             revision_count, legacy_lineage_count = self._validate_spec_lineage(
                 conn,
                 project_id,
@@ -134,45 +148,19 @@ class ProductProjectIntegrityService:
         expected_spec_version: int | None,
         expected_row_version: int | None,
     ) -> None:
-        if expected_spec_version is not None:
-            ProductProjectIntegrityService._required_int(
-                expected_spec_version,
-                minimum=1,
-                label="expected_spec_version",
+        if expected_spec_version is not None and spec_version != expected_spec_version:
+            raise StaleProjectVersionError(
+                f"stale ProductProject spec: expected {expected_spec_version}, "
+                f"current {spec_version}"
             )
-            if spec_version != expected_spec_version:
-                raise StaleProjectVersionError(
-                    f"stale ProductProject spec: expected {expected_spec_version}, "
-                    f"current {spec_version}"
-                )
-        if expected_row_version is not None:
-            ProductProjectIntegrityService._required_int(
-                expected_row_version,
-                minimum=0,
-                label="expected_row_version",
+        if expected_row_version is not None and row_version != expected_row_version:
+            raise StaleProjectVersionError(
+                f"stale ProductProject row: expected {expected_row_version}, "
+                f"current {row_version}"
             )
-            if row_version != expected_row_version:
-                raise StaleProjectVersionError(
-                    f"stale ProductProject row: expected {expected_row_version}, "
-                    f"current {row_version}"
-                )
-
-    @staticmethod
-    def _required_int(value: Any, *, minimum: int, label: str) -> int:
-        if type(value) is not int or value < minimum:
-            raise ProductProjectError(f"invalid integer identity for {label}")
-        return value
-
-    @staticmethod
-    def _required_text(value: Any, *, label: str) -> str:
-        if type(value) is not str or not value.strip():
-            raise ProductProjectError(f"invalid text identity for {label}")
-        return value
 
     @staticmethod
     def _parse_spec(raw: str, *, label: str) -> ProductProjectSpec:
-        if type(raw) is not str:
-            raise ProductProjectError(f"invalid {label} JSON")
         try:
             data = json.loads(raw)
         except (TypeError, json.JSONDecodeError) as exc:
@@ -197,10 +185,10 @@ class ProductProjectIntegrityService:
             (project_id,),
         ).fetchall()
         versions = tuple(
-            self._required_int(
+            _durable_integer(
                 row["spec_version"],
+                label="ProductProject specification version",
                 minimum=1,
-                label="ProductProject spec_version",
             )
             for row in rows
         )
@@ -211,10 +199,10 @@ class ProductProjectIntegrityService:
             )
         legacy_lineage_count = 0
         for row in rows:
-            version = self._required_int(
+            version = _durable_integer(
                 row["spec_version"],
+                label="ProductProject specification version",
                 minimum=1,
-                label="ProductProject spec_version",
             )
             spec = self._parse_spec(
                 row["spec_json"],
@@ -249,24 +237,14 @@ class ProductProjectIntegrityService:
             "WHERE project_id=? ORDER BY package_id",
             (project_id,),
         ).fetchall()
-        package_ids = {
-            ProductProjectIntegrityService._required_text(
-                row["package_id"],
-                label="research package identity",
-            )
-            for row in rows
-        }
+        package_ids = {str(row["package_id"]) for row in rows}
+        if any(not package_id.strip() for package_id in package_ids):
+            raise ProductProjectError("research package identity must not be empty")
         options: dict[str, tuple[str, ...]] = {}
         for row in rows:
-            package_id = ProductProjectIntegrityService._required_text(
-                row["package_id"],
-                label="research package identity",
-            )
-            raw_payload = row["payload_json"]
-            if type(raw_payload) is not str:
-                raise ProductProjectError(f"invalid research handoff JSON: {package_id}")
+            package_id = str(row["package_id"])
             try:
-                payload = json.loads(raw_payload)
+                payload = json.loads(row["payload_json"])
             except (TypeError, json.JSONDecodeError) as exc:
                 raise ProductProjectError(
                     f"invalid research handoff JSON: {package_id}"
@@ -287,19 +265,12 @@ class ProductProjectIntegrityService:
                     raise ProductProjectError(
                         f"research package has invalid evidence: {package_id}"
                     )
-                try:
-                    evidence_id = ProductProjectIntegrityService._required_text(
-                        item.get("evidence_id"),
-                        label=f"research evidence identity in {package_id}",
-                    )
-                    provenance_ref = ProductProjectIntegrityService._required_text(
-                        item.get("provenance_ref"),
-                        label=f"research provenance identity in {package_id}",
-                    )
-                except ProductProjectError as exc:
+                evidence_id = str(item.get("evidence_id", ""))
+                provenance_ref = str(item.get("provenance_ref", ""))
+                if not evidence_id.strip() or not provenance_ref.strip():
                     raise ProductProjectError(
                         f"research package has incomplete evidence: {package_id}"
-                    ) from exc
+                    )
                 if evidence_id in evidence_ids:
                     raise ProductProjectError(
                         f"research package has duplicate evidence id: {evidence_id}"
@@ -310,21 +281,12 @@ class ProductProjectIntegrityService:
                     raise ProductProjectError(
                         f"research package has invalid product option: {package_id}"
                     )
-                try:
-                    option_id = ProductProjectIntegrityService._required_text(
-                        item.get("option_id"),
-                        label=f"research option identity in {package_id}",
-                    )
-                except ProductProjectError as exc:
-                    raise ProductProjectError(
-                        f"research package has incomplete product option: {package_id}"
-                    ) from exc
-                raw_evidence_refs = item.get("evidence_package_ids")
-                if not isinstance(raw_evidence_refs, list) or not raw_evidence_refs:
+                option_id = str(item.get("option_id", ""))
+                evidence_refs = tuple(item.get("evidence_package_ids", ()))
+                if not option_id.strip() or not evidence_refs:
                     raise ProductProjectError(
                         f"research package has incomplete product option: {package_id}"
                     )
-                evidence_refs = tuple(raw_evidence_refs)
                 if option_id in options:
                     raise ProductProjectError(
                         f"ambiguous product option identity across research handoffs: {option_id}"
@@ -366,21 +328,17 @@ class ProductProjectIntegrityService:
         ).fetchall()
         grouped: dict[str, list[Any]] = defaultdict(list)
         for row in rows:
-            decision_id = self._required_text(
-                row["decision_id"],
-                label="product decision identity",
-            )
-            grouped[decision_id].append(row)
+            grouped[str(row["decision_id"])].append(row)
         latest: dict[str, _DecisionView] = {}
         approved: list[str] = []
         for decision_id, history in grouped.items():
             if not decision_id.strip():
                 raise ProductProjectError("product decision identity must not be empty")
             versions = tuple(
-                self._required_int(
+                _durable_integer(
                     row["decision_version"],
+                    label="product decision version",
                     minimum=1,
-                    label=f"product decision version {decision_id}",
                 )
                 for row in history
             )
@@ -388,13 +346,7 @@ class ProductProjectIntegrityService:
                 raise ProductProjectError(
                     f"product decision history is not contiguous: {decision_id}"
                 )
-            option_ids = {
-                self._required_text(
-                    row["option_id"],
-                    label=f"product decision option identity {decision_id}",
-                )
-                for row in history
-            }
+            option_ids = {str(row["option_id"]) for row in history}
             if len(option_ids) != 1:
                 raise ProductProjectError(
                     f"product decision changed option identity: {decision_id}"
@@ -413,37 +365,18 @@ class ProductProjectIntegrityService:
                     raise ProductProjectError(
                         f"product decision has invalid state: {decision_id}"
                     ) from exc
-                try:
-                    self._required_text(
-                        row["rationale"],
-                        label=f"product decision rationale {decision_id}",
-                    )
-                    self._required_text(
-                        row["decided_by_ref"],
-                        label=f"product decision actor {decision_id}",
-                    )
-                except ProductProjectError as exc:
+                if not str(row["rationale"]).strip() or not str(row["decided_by_ref"]).strip():
                     raise ProductProjectError(
                         f"product decision has incomplete audit identity: {decision_id}"
-                    ) from exc
-                raw_evidence = row["evidence_package_ids_json"]
-                if type(raw_evidence) is not str:
-                    raise ProductProjectError(
-                        f"product decision has invalid evidence JSON: {decision_id}"
                     )
                 try:
-                    parsed_evidence = json.loads(raw_evidence)
+                    evidence_refs = tuple(json.loads(row["evidence_package_ids_json"]))
                 except (TypeError, json.JSONDecodeError) as exc:
                     raise ProductProjectError(
                         f"product decision has invalid evidence JSON: {decision_id}"
                     ) from exc
-                if not isinstance(parsed_evidence, list):
-                    raise ProductProjectError(
-                        f"product decision has invalid evidence JSON: {decision_id}"
-                    )
-                evidence_refs = tuple(parsed_evidence)
                 if any(
-                    type(ref) is not str or not ref.strip()
+                    not isinstance(ref, str) or not ref.strip()
                     for ref in evidence_refs
                 ):
                     raise ProductProjectError(
