@@ -8,7 +8,6 @@ import re
 import stat
 import sys
 import tempfile
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
