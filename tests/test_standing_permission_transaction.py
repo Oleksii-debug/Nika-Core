@@ -14,7 +14,6 @@ from nika_core.security.standing_permission import (
 )
 from nika_core.tools import ToolRisk
 
-
 NOW = datetime(2026, 10, 5, 4, 55, tzinfo=UTC)
 
 
@@ -51,18 +50,20 @@ def test_grant_transaction_rolls_back_grant_and_audit_on_dependent_failure(
     store, audit, permissions = _authority(tmp_path)
     permission_id = "model-cloud:atomic-rollback"
 
-    with pytest.raises(RuntimeError, match="dependent binding failed"):
-        with permissions.grant_transaction(
+    with (
+        pytest.raises(RuntimeError, match="dependent binding failed"),
+        permissions.grant_transaction(
             permission_id=permission_id,
             scope=_scope(),
-        ) as (conn, granted):
-            assert granted.permission_id == permission_id
-            row = conn.execute(
-                "SELECT permission_id FROM standing_permissions WHERE permission_id = ?",
-                (permission_id,),
-            ).fetchone()
-            assert row["permission_id"] == permission_id
-            raise RuntimeError("dependent binding failed")
+        ) as (conn, granted),
+    ):
+        assert granted.permission_id == permission_id
+        row = conn.execute(
+            "SELECT permission_id FROM standing_permissions WHERE permission_id = ?",
+            (permission_id,),
+        ).fetchone()
+        assert row["permission_id"] == permission_id
+        raise RuntimeError("dependent binding failed")
 
     assert permissions.get(permission_id) is None
     assert audit.list_for(
@@ -82,12 +83,11 @@ def test_grant_transaction_abrupt_exit_leaves_no_grant_or_audit(
     _store, audit, permissions = _authority(tmp_path)
     permission_id = "model-cloud:atomic-system-exit"
 
-    with pytest.raises(SystemExit):
-        with permissions.grant_transaction(
-            permission_id=permission_id,
-            scope=_scope(),
-        ):
-            raise SystemExit("simulated process exit")
+    with pytest.raises(SystemExit), permissions.grant_transaction(
+        permission_id=permission_id,
+        scope=_scope(),
+    ):
+        raise SystemExit("simulated process exit")
 
     assert permissions.get(permission_id) is None
     assert audit.list_for(
