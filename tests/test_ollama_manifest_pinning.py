@@ -44,9 +44,9 @@ def _catalog(*, digest: str, model: str = _MODEL) -> dict[str, object]:
     }
 
 
-def _chat() -> dict[str, object]:
+def _chat(model: str = _MODEL) -> dict[str, object]:
     return {
-        "model": _MODEL,
+        "model": model,
         "message": {"role": "assistant", "content": "answer"},
         "done": True,
         "done_reason": "stop",
@@ -55,14 +55,14 @@ def _chat() -> dict[str, object]:
     }
 
 
-def _provider(handler: Any) -> OllamaProvider:
+def _provider(handler: Any, *, model: str = _MODEL) -> OllamaProvider:
     transport = httpx.MockTransport(handler)
 
     def client_factory(**kwargs: Any) -> httpx.AsyncClient:
         return httpx.AsyncClient(transport=transport, **kwargs)
 
     return OllamaProvider(
-        default_model=_MODEL,
+        default_model=model,
         expected_manifest_sha256=_EXPECTED,
         client_factory=client_factory,
     )
@@ -89,6 +89,29 @@ def test_pinned_ollama_verifies_catalog_and_loaded_manifest_around_chat() -> Non
         ("POST", "/api/chat"),
         ("GET", "/api/ps"),
     ]
+
+
+def test_pinned_bare_model_accepts_latest_alias_in_manifest_catalog() -> None:
+    model = "nika-trained"
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path in {"/api/tags", "/api/ps"}:
+            return httpx.Response(
+                200,
+                json=_catalog(digest=_EXPECTED, model=model + ":latest"),
+            )
+        assert request.url.path == "/api/chat"
+        assert json.loads(request.read())["model"] == model
+        return httpx.Response(200, json=_chat(model))
+
+    result = asyncio.run(
+        _provider(handler, model=model).complete(_request(model=model))
+    )
+
+    assert result.text == "answer"
+    assert seen == ["/api/tags", "/api/chat", "/api/ps"]
 
 
 def test_preflight_manifest_mismatch_blocks_chat_with_no_effect() -> None:
