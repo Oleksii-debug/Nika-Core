@@ -26,6 +26,10 @@ class _BehavioralDict(dict[str, object]):
         self.events.append("items")
         return super().items()
 
+    def __bool__(self) -> bool:
+        self.events.append("bool")
+        return True
+
 
 class _BehavioralToolId(str):
     def __new__(cls, value: str, events: list[str]) -> Self:
@@ -40,6 +44,17 @@ class _BehavioralToolId(str):
     def removeprefix(self, prefix: str) -> str:
         self.events.append("removeprefix")
         return "publish"
+
+
+class _BehavioralMetadataText(str):
+    def __new__(cls, value: str, events: list[str]) -> Self:
+        instance = super().__new__(cls, value)
+        instance.events = events
+        return instance
+
+    def __bool__(self) -> bool:
+        self.events.append("bool")
+        return True
 
 
 def _server(called: list[dict[str, object]], label: str = "published") -> MCPServer:
@@ -726,3 +741,39 @@ def test_mcp_discovery_caps_tools_across_pages_before_materialization(
     with pytest.raises(ValueError, match="safe tool limit"):
         asyncio.run(adapter.list_tools())
     assert seen_cursors == [None, "next"]
+
+
+def test_mcp_discovery_rejects_behavioral_description_before_truthiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    tool = _listed_tool("first")
+    tool.description = _BehavioralMetadataText("unsafe", events)
+    fake_client = _list_tools_client({None: ([tool], None)})
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+
+    with pytest.raises(TypeError, match="description must be an exact string"):
+        asyncio.run(adapter.list_tools())
+
+    assert events == []
+
+
+def test_mcp_discovery_rejects_behavioral_schema_before_truthiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    tool = _listed_tool("first")
+    tool.input_schema = _BehavioralDict(events)
+    fake_client = _list_tools_client({None: ([tool], None)})
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+
+    with pytest.raises(TypeError, match="arguments must be an exact dict"):
+        asyncio.run(adapter.list_tools())
+
+    assert events == []
