@@ -600,7 +600,10 @@ def test_notice_verifier_rejects_noncanonical_preamble_prefix(
 ) -> None:
     bundle, target, valid = notice_bundle
     target.write_bytes(b"untrusted prefix\n" + valid)
-    assert notices.verify_third_party_notices(bundle) == ("notices:structure",)
+    assert notices.verify_third_party_notices(bundle) == (
+        "notices:pythonruntime",
+        "notices:structure",
+    )
 
 
 def test_notice_verifier_rejects_extra_preamble_spacing(
@@ -612,7 +615,10 @@ def test_notice_verifier_rejects_extra_preamble_spacing(
         "===== Python runtime =====\nPSF license\n",
         encoding="utf-8",
     )
-    assert notices.verify_third_party_notices(bundle) == ("notices:structure",)
+    assert notices.verify_third_party_notices(bundle) == (
+        "notices:pythonruntime",
+        "notices:structure",
+    )
 
 
 def test_notice_verifier_rejects_unknown_extra_section(
@@ -638,7 +644,10 @@ def test_notice_verifier_rejects_decorated_section_marker(
         " ===== Python runtime ===== \nPSF license\n",
         encoding="utf-8",
     )
-    assert notices.verify_third_party_notices(bundle) == ("notices:structure",)
+    assert notices.verify_third_party_notices(bundle) == (
+        "notices:pythonruntime",
+        "notices:structure",
+    )
 
 
 def test_notice_parser_bounds_section_count(
@@ -652,4 +661,7 @@ def test_notice_parser_bounds_section_count(
         + b"\n===== extra-one =====\none\n"
         + b"\n===== extra-two =====\ntwo\n"
     )
-    assert notices.verify_third_party_notices(bundle) == ("notices:structure",)
+    assert notices.verify_third_party_notices(bundle) == (
+        "notices:pythonruntime",
+        "notices:structure",
+    )
