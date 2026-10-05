@@ -151,3 +151,57 @@ def test_windows_session_denied_cloud_consent_cancels_before_runtime(
         assert "PRIVATE_CREDENTIAL_REFERENCE_CANARY" not in repr(prompt)
     finally:
         session.close()
+
+
+def test_windows_resume_denied_reconsent_stays_paused_and_keeps_task_focus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _configured_cloud_product(tmp_path)
+    decisions = [True, False]
+    prompts: list[CloudModelGrantRequest] = []
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        return decisions.pop(0)
+
+    session = nika_windows.build_windows_session(
+        config,
+        cloud_permission_confirm=confirm,
+    )
+    try:
+        def reject_host_submission(_task_id: str, _command: str) -> None:
+            raise RuntimeError("HOST_SUBMISSION_TEST_FAILURE")
+
+        monkeypatch.setattr(session.backend, "_schedule_start", reject_host_submission)
+        with pytest.raises(RuntimeError, match="HOST_SUBMISSION_TEST_FAILURE"):
+            session.backend.create_task(
+                {"command": "Порівняй ці два джерела і дай короткий висновок."}
+            )
+
+        queue = TaskQueue(SQLiteStore(config.database_path))
+        task = queue.list_recent(limit=10)[0]
+        assert task.state is TaskState.PAUSED
+        permission_service = session.backend._admit_resumed_task.__self__
+        permission_service.revoke_task(task.task_id)
+
+        result = session.bridge.dispatch(
+            {
+                "request_id": "deny-cloud-resume",
+                "action_id": "task.resume",
+                "payload": {},
+            }
+        )
+
+        assert result["request_id"] == "deny-cloud-resume"
+        assert result["status"] == "rejected"
+        assert result["focus_id"] == "tasks-heading"
+        assert "не дозволено" in result["message"]
+        assert queue.get(task.task_id).state is TaskState.PAUSED
+        assert session.backend._runtime_loop is None
+        assert session.backend._active_futures == {}
+        assert len(prompts) == 2
+        assert prompts[0].task_id == task.task_id
+        assert prompts[1].task_id == task.task_id
+    finally:
+        session.close()
