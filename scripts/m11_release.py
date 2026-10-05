@@ -438,11 +438,8 @@ def _run_packaged_pf11(
     )
     if completed.returncode != 0:
         raise RuntimeError("packaged data-adoption proof executable exited unsuccessfully")
-    try:
-        payload = json.loads(output.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("packaged data-adoption proof did not emit JSON") from exc
-    if not isinstance(payload, dict) or payload.get("route") != "product_project":
+    payload = _read_pf11_evidence(output)
+    if payload["route"] != "product_project":
         raise RuntimeError("packaged data-adoption proof returned invalid PF11 evidence")
     return payload
 
