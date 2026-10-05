@@ -16,6 +16,8 @@ from nika_core.product_project import (
     StaleProjectVersionError,
 )
 from nika_core.research_product_handoff import verify_sealed_handoffs_conn
+from nika_core.security.policy import ActionIntent, ApprovalEvidence, ApprovalVerifier
+from nika_core.tools import ToolRisk
 
 
 def _now() -> str:
@@ -56,6 +58,51 @@ def _decode_id_list(raw: Any, *, label: str) -> tuple[str, ...]:
     return tuple(values)
 
 
+_FINAL_DECISION_STATES = frozenset(
+    {ProductDecisionState.APPROVED, ProductDecisionState.REJECTED}
+)
+_PRODUCT_DECISION_ACTION_ID = "product_project.decision.finalize"
+_PRODUCT_DECISION_TOOL_ID = "product_project.decision"
+
+
+def _decision_input_fingerprint(project_id: str, decision: ProductDecision) -> str:
+    return hashlib.sha256(
+        _canonical(
+            {
+                "project_id": project_id,
+                "decision_id": decision.decision_id,
+                "option_id": decision.option_id,
+                "state": decision.state.value,
+                "rationale": decision.rationale,
+                "decided_by_ref": (
+                    decision.decided_by_ref
+                    if decision.state is ProductDecisionState.PROPOSED
+                    else None
+                ),
+            }
+        ).encode()
+    ).hexdigest()
+
+
+def _approval_reference(approval: ApprovalEvidence) -> str:
+    digest = hashlib.sha256(
+        _canonical(
+            {
+                "approval_id": approval.approval_id,
+                "issuer_id": approval.issuer_id,
+                "authority_version": approval.authority_version,
+            }
+        ).encode()
+    ).hexdigest()
+    return f"approval://{digest}"
+
+
+def _approval_task_id(value: str | None) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise PermissionError("product-owner approval requires an exact task_id")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class StoredProductDecision:
     project_id: str
@@ -68,9 +115,46 @@ class StoredProductDecision:
 class ProductDecisionRepository:
     """Durable PF1 decision lifecycle over the canonical ProductProject SQLite store."""
 
-    def __init__(self, store: Any) -> None:
+    def __init__(
+        self,
+        store: Any,
+        *,
+        approval_verifier: ApprovalVerifier | None = None,
+    ) -> None:
         self.store = store
         self.projects = ProductProjectRepository(store)
+        self._approval_verifier = approval_verifier
+
+    def approval_intent(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        task_id: str,
+    ) -> ActionIntent:
+        """Build the exact current owner-approval intent for one final decision."""
+
+        self._validate_decision(decision)
+        if decision.state not in _FINAL_DECISION_STATES:
+            raise ProductProjectError(
+                "only final product decisions require product-owner approval"
+            )
+        expected_row_version = _strict_int(
+            expected_row_version,
+            label="expected ProductProject row_version",
+            minimum=0,
+        )
+        task_id = _approval_task_id(task_id)
+        with self.store.connection() as conn:
+            intent, _, _ = self._approval_context_conn(
+                conn,
+                project_id,
+                decision,
+                expected_row_version=expected_row_version,
+                task_id=task_id,
+            )
+        return intent
 
     def record(
         self,
@@ -79,6 +163,8 @@ class ProductDecisionRepository:
         *,
         expected_row_version: int,
         idempotency_key: str,
+        approval: ApprovalEvidence | None = None,
+        approval_task_id: str | None = None,
     ) -> StoredProductDecision:
         self._validate_input(decision, idempotency_key)
         expected_row_version = _strict_int(
@@ -86,18 +172,66 @@ class ProductDecisionRepository:
             label="expected ProductProject row_version",
             minimum=0,
         )
-        fingerprint = hashlib.sha256(
-            _canonical(
-                {
-                    "project_id": project_id,
-                    "decision_id": decision.decision_id,
-                    "option_id": decision.option_id,
-                    "state": decision.state.value,
-                    "rationale": decision.rationale,
-                    "decided_by_ref": decision.decided_by_ref,
-                }
-            ).encode()
-        ).hexdigest()
+        fingerprint = _decision_input_fingerprint(project_id, decision)
+
+        is_final = decision.state in _FINAL_DECISION_STATES
+        effective_decision = decision
+        approval_payload: dict[str, Any] | None = None
+        approved_intent: ActionIntent | None = None
+
+        if is_final:
+            # A completed idempotent mutation is already durable authority and can be
+            # replayed after restart without minting or consuming a second approval.
+            with self.store.connection() as conn:
+                replay = self._replay_conn(
+                    conn,
+                    project_id,
+                    decision,
+                    idempotency_key=idempotency_key,
+                    fingerprint=fingerprint,
+                )
+            if replay is not None:
+                return replay
+
+            verifier = self._approval_verifier
+            if verifier is None:
+                raise PermissionError(
+                    "trusted product-owner approval authority is required"
+                )
+            if approval is None:
+                raise PermissionError("explicit product-owner approval is required")
+            task_id = _approval_task_id(approval_task_id)
+            approved_intent = self.approval_intent(
+                project_id,
+                decision,
+                expected_row_version=expected_row_version,
+                task_id=task_id,
+            )
+            now = datetime.now(UTC)
+            with verifier.authorization_lock:
+                verifier.validate_locked(approved_intent, approval, now=now)
+                # Consume before the durable mutation. A later DB/race failure can require
+                # fresh approval, but a failed DB write can never leave reusable authority.
+                verifier.commit_locked(approval)
+            effective_decision = replace(
+                decision,
+                decided_by_ref=_approval_reference(approval),
+            )
+            approval_payload = {
+                "approval_ref": effective_decision.decided_by_ref,
+                "approval_id": approval.approval_id,
+                "request_id": approval.request_id,
+                "issuer_id": approval.issuer_id,
+                "authority_version": approval.authority_version,
+                "action_fingerprint": approval.action_fingerprint,
+                "effect_fingerprint": approval.effect_fingerprint,
+                "task_id": task_id,
+            }
+        elif approval is not None or approval_task_id is not None:
+            raise ProductProjectError(
+                "proposed product decisions must not consume product-owner approval"
+            )
+
         with self.store.connection() as conn:
             # Serialize idempotency/version authority with the durable decision mutation.
             try:
@@ -108,38 +242,16 @@ class ProductDecisionRepository:
                         "product decision write is temporarily busy"
                     ) from exc
                 raise
-            replay = conn.execute(
-                "SELECT project_id,operation_kind,entity_id,entity_version,input_fingerprint "
-                "FROM product_project_mutation_idempotency WHERE operation_key=?",
-                (idempotency_key,),
-            ).fetchone()
+
+            replay = self._replay_conn(
+                conn,
+                project_id,
+                decision,
+                idempotency_key=idempotency_key,
+                fingerprint=fingerprint,
+            )
             if replay is not None:
-                if (
-                    replay["project_id"] != project_id
-                    or replay["operation_kind"] != "product_decision.record"
-                    or replay["entity_id"] != decision.decision_id
-                    or replay["input_fingerprint"] != fingerprint
-                ):
-                    raise ProductProjectError(
-                        "idempotency key was already used with different mutation input"
-                    )
-                entity_version = _strict_int(
-                    replay["entity_version"],
-                    label="persisted product decision entity_version",
-                    minimum=1,
-                )
-                stored = self._get_version_conn(
-                    conn,
-                    project_id,
-                    decision.decision_id,
-                    entity_version,
-                )
-                verify_sealed_handoffs_conn(
-                    conn,
-                    project_id,
-                    stored.evidence_package_ids,
-                )
-                return stored
+                return replay
 
             project = conn.execute(
                 "SELECT row_version FROM product_projects WHERE project_id=?",
@@ -158,22 +270,34 @@ class ProductDecisionRepository:
                     f"current {current_row_version}"
                 )
 
-            evidence_package_ids = self._option_evidence_conn(
-                conn, project_id, decision.option_id
-            )
-            verify_sealed_handoffs_conn(conn, project_id, evidence_package_ids)
-            current = self._latest_conn(conn, project_id, decision.decision_id)
-            self._validate_transition(current, decision)
-            if decision.state is ProductDecisionState.APPROVED:
-                approved = self._approved_conn(
-                    conn,
-                    project_id,
-                    excluding_decision_id=decision.decision_id,
-                )
-                if approved is not None:
-                    raise ProductProjectError(
-                        f"project already has approved option {approved.decision.option_id}"
+            if is_final:
+                assert approved_intent is not None
+                assert approval is not None
+                current_intent, evidence_package_ids, current = (
+                    self._approval_context_conn(
+                        conn,
+                        project_id,
+                        decision,
+                        expected_row_version=expected_row_version,
+                        task_id=_approval_task_id(approval_task_id),
                     )
+                )
+                if (
+                    approval.action_fingerprint != current_intent.approval_fingerprint
+                    or approval.effect_fingerprint != current_intent.effect_fingerprint
+                    or approved_intent.approval_fingerprint
+                    != current_intent.approval_fingerprint
+                ):
+                    raise PermissionError(
+                        "product-owner approval no longer matches the current decision authority"
+                    )
+            else:
+                evidence_package_ids = self._option_evidence_conn(
+                    conn, project_id, decision.option_id
+                )
+                verify_sealed_handoffs_conn(conn, project_id, evidence_package_ids)
+                current = self._latest_conn(conn, project_id, decision.decision_id)
+                self._validate_transition(current, decision)
 
             version = 1 if current is None else current.decision_version + 1
             now = _now()
@@ -190,12 +314,12 @@ class ProductDecisionRepository:
                 "VALUES (?,?,?,?,?,?,?,?,?)",
                 (
                     project_id,
-                    decision.decision_id,
+                    effective_decision.decision_id,
                     version,
-                    decision.option_id,
-                    decision.state.value,
-                    decision.rationale,
-                    decision.decided_by_ref,
+                    effective_decision.option_id,
+                    effective_decision.state.value,
+                    effective_decision.rationale,
+                    effective_decision.decided_by_ref,
                     _canonical(list(evidence_package_ids)),
                     now,
                 ),
@@ -214,17 +338,16 @@ class ProductDecisionRepository:
                     now,
                 ),
             )
-            self._audit(
-                conn,
-                project_id,
-                {
-                    "decision_id": decision.decision_id,
-                    "decision_version": version,
-                    "option_id": decision.option_id,
-                    "state": decision.state.value,
-                    "evidence_package_ids": list(evidence_package_ids),
-                },
-            )
+            audit_payload: dict[str, Any] = {
+                "decision_id": decision.decision_id,
+                "decision_version": version,
+                "option_id": decision.option_id,
+                "state": decision.state.value,
+                "evidence_package_ids": list(evidence_package_ids),
+            }
+            if approval_payload is not None:
+                audit_payload["approval"] = approval_payload
+            self._audit(conn, project_id, audit_payload)
             stored = self._get_version_conn(
                 conn,
                 project_id,
@@ -372,16 +495,184 @@ class ProductDecisionRepository:
             read_only_precondition=verify_current_evidence,
         )
 
+    def _replay_conn(
+        self,
+        conn: Any,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        idempotency_key: str,
+        fingerprint: str,
+    ) -> StoredProductDecision | None:
+        replay = conn.execute(
+            "SELECT project_id,operation_kind,entity_id,entity_version,input_fingerprint "
+            "FROM product_project_mutation_idempotency WHERE operation_key=?",
+            (idempotency_key,),
+        ).fetchone()
+        if replay is None:
+            return None
+        if (
+            replay["project_id"] != project_id
+            or replay["operation_kind"] != "product_decision.record"
+            or replay["entity_id"] != decision.decision_id
+            or replay["input_fingerprint"] != fingerprint
+        ):
+            raise ProductProjectError(
+                "idempotency key was already used with different mutation input"
+            )
+        entity_version = _strict_int(
+            replay["entity_version"],
+            label="persisted product decision entity_version",
+            minimum=1,
+        )
+        stored = self._get_version_conn(
+            conn,
+            project_id,
+            decision.decision_id,
+            entity_version,
+        )
+        verify_sealed_handoffs_conn(
+            conn,
+            project_id,
+            stored.evidence_package_ids,
+        )
+        return stored
+
+    def _approval_context_conn(
+        self,
+        conn: Any,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        task_id: str,
+    ) -> tuple[ActionIntent, tuple[str, ...], StoredProductDecision | None]:
+        project = conn.execute(
+            "SELECT row_version FROM product_projects WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+        if project is None:
+            raise KeyError(project_id)
+        current_row_version = _strict_int(
+            project["row_version"],
+            label="persisted ProductProject row_version",
+            minimum=0,
+        )
+        if current_row_version != expected_row_version:
+            raise StaleProjectVersionError(
+                f"stale ProductProject write: expected {expected_row_version}, "
+                f"current {current_row_version}"
+            )
+
+        evidence_package_ids = self._option_evidence_conn(
+            conn, project_id, decision.option_id
+        )
+        verify_sealed_handoffs_conn(conn, project_id, evidence_package_ids)
+        current = self._latest_conn(conn, project_id, decision.decision_id)
+        self._validate_transition(current, decision)
+        if decision.state is ProductDecisionState.APPROVED:
+            approved = self._approved_conn(
+                conn,
+                project_id,
+                excluding_decision_id=decision.decision_id,
+            )
+            if approved is not None:
+                raise ProductProjectError(
+                    f"project already has approved option {approved.decision.option_id}"
+                )
+
+        evidence_fingerprint = self._evidence_fingerprint_conn(
+            conn,
+            project_id,
+            evidence_package_ids,
+        )
+        payload = {
+            "decision_id": decision.decision_id,
+            "option_id": decision.option_id,
+            "state": decision.state.value,
+            "rationale": decision.rationale,
+            "expected_row_version": expected_row_version,
+            "evidence_package_ids": list(evidence_package_ids),
+            "evidence_fingerprint": evidence_fingerprint,
+        }
+        effect_id = hashlib.sha256(_canonical(payload).encode()).hexdigest()
+        resource_id = hashlib.sha256(
+            _canonical(
+                {
+                    "project_id": project_id,
+                    "decision_id": decision.decision_id,
+                }
+            ).encode()
+        ).hexdigest()
+        intent = ActionIntent(
+            action_id=_PRODUCT_DECISION_ACTION_ID,
+            tool_id=_PRODUCT_DECISION_TOOL_ID,
+            risk=ToolRisk.HIGH_IMPACT,
+            target="Finalize ProductProject owner decision",
+            approval_required=True,
+            task_id=task_id,
+            project_id=project_id,
+            resource=f"product-decision:{resource_id}",
+            arguments=payload,
+            effect_id=f"product-decision:{effect_id}",
+            scope=(("authority", "product-owner"),),
+        )
+        return intent, evidence_package_ids, current
+
     @staticmethod
-    def _validate_input(decision: ProductDecision, idempotency_key: str) -> None:
-        if not idempotency_key.strip():
-            raise ProductProjectError("idempotency_key is required")
+    def _evidence_fingerprint_conn(
+        conn: Any,
+        project_id: str,
+        evidence_package_ids: tuple[str, ...],
+    ) -> str:
+        entries: list[dict[str, str]] = []
+        for package_id in evidence_package_ids:
+            row = conn.execute(
+                "SELECT typeof(payload_json) AS payload_type, "
+                "CAST(payload_json AS BLOB) AS raw_payload "
+                "FROM product_research_handoffs WHERE project_id=? AND package_id=?",
+                (project_id, package_id),
+            ).fetchone()
+            if row is None:
+                raise ProductProjectError(
+                    f"product decision references unknown evidence package: {package_id}"
+                )
+            raw_payload = row["raw_payload"]
+            if row["payload_type"] != "text" or not isinstance(
+                raw_payload, (bytes, bytearray, memoryview)
+            ):
+                raise ProductProjectError(
+                    f"product evidence package has invalid storage type: {package_id}"
+                )
+            entries.append(
+                {
+                    "package_id": package_id,
+                    "payload_sha256": hashlib.sha256(bytes(raw_payload)).hexdigest(),
+                }
+            )
+        return hashlib.sha256(_canonical(entries).encode()).hexdigest()
+
+    @staticmethod
+    def _validate_decision(decision: ProductDecision) -> None:
         if not decision.decision_id.strip() or not decision.option_id.strip():
             raise ProductProjectError("product decision requires decision_id and option_id")
         if not isinstance(decision.state, ProductDecisionState):
             raise ProductProjectError("product decision state must be ProductDecisionState")
-        if not decision.rationale.strip() or not decision.decided_by_ref.strip():
-            raise ProductProjectError("product decision requires rationale and decided_by_ref")
+        if not decision.rationale.strip():
+            raise ProductProjectError("product decision requires rationale")
+        if (
+            decision.state is ProductDecisionState.PROPOSED
+            and not decision.decided_by_ref.strip()
+        ):
+            raise ProductProjectError(
+                "proposed product decision requires decided_by_ref"
+            )
+
+    @staticmethod
+    def _validate_input(decision: ProductDecision, idempotency_key: str) -> None:
+        if not idempotency_key.strip():
+            raise ProductProjectError("idempotency_key is required")
+        ProductDecisionRepository._validate_decision(decision)
 
     @staticmethod
     def _validate_transition(
