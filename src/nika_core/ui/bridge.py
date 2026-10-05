@@ -38,11 +38,11 @@ class UIActionBridge:
     def dispatch(self, raw: object) -> dict[str, Any]:
         try:
             command = UICommand.model_validate(raw)
-        except ValidationError as exc:
+        except ValidationError:
             return UIResult(
                 request_id=self._rejected_request_id(raw),
                 status="rejected",
-                message=f"Invalid UI command: {exc.errors()[0]['msg']}",
+                message="Некоректна команда інтерфейсу.",
             ).model_dump()
 
         try:
@@ -51,7 +51,7 @@ class UIActionBridge:
             return UIResult(
                 request_id=command.request_id,
                 status="rejected",
-                message=f"Unknown action: {command.action_id}",
+                message="Невідома дія інтерфейсу.",
             ).model_dump()
 
         handler = self._handlers.get(command.action_id)
@@ -59,7 +59,7 @@ class UIActionBridge:
             return UIResult(
                 request_id=command.request_id,
                 status="rejected",
-                message=f"Action is not available in this UI context: {command.action_id}",
+                message="Ця дія недоступна в поточному контексті.",
             ).model_dump()
 
         try:
@@ -127,7 +127,7 @@ class UIActionBridge:
 
     def get_state(self) -> dict[str, Any]:
         if self._state_provider is None:
-            return {"ok": False, "message": "Desktop state provider is unavailable."}
+            return {"ok": False, "message": "Джерело стану програми недоступне."}
         try:
             state = dict(self._state_provider())
         except (KeyError, TypeError, ValueError) as exc:
@@ -168,38 +168,79 @@ class UIActionBridge:
     def set_binding(self, action_id: str, binding: str | None) -> dict[str, Any]:
         try:
             self._keymap.set_binding(action_id, binding)
-        except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+        except (KeyError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося зберегти комбінацію: "
+                    "перевірте дію, формат і конфлікти."
+                ),
+            }
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("set_binding", exc)
-        return {"ok": True, "message": "Shortcut saved."}
+        return {"ok": True, "message": "Комбінацію клавіш збережено."}
 
     def restore_default(self, action_id: str) -> dict[str, Any]:
         try:
             self._keymap.restore_default(action_id)
-        except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+        except KeyError:
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося відновити комбінацію за замовчуванням: "
+                    "невідома дія."
+                ),
+            }
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося відновити комбінацію за замовчуванням: "
+                    "перевірте конфлікти карти клавіш."
+                ),
+            }
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("restore_default", exc)
-        return {"ok": True, "message": "Default shortcut restored."}
+        return {
+            "ok": True,
+            "message": "Комбінацію за замовчуванням відновлено.",
+        }
 
     def export_keymap(self) -> dict[str, Any]:
         try:
             data = self._keymap.export_json()
+        except (KeyError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося експортувати карту клавіш: "
+                    "перевірте збережені налаштування."
+                ),
+            }
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("export_keymap", exc)
-        return {"ok": True, "data": data, "message": "Shortcut map exported."}
+        return {
+            "ok": True,
+            "data": data,
+            "message": "Карту клавіш експортовано.",
+        }
 
     def import_keymap(self, data: str) -> dict[str, Any]:
         if not isinstance(data, str):
-            return {"ok": False, "message": "Shortcut map must be JSON text."}
+            return {"ok": False, "message": "Карта клавіш має бути текстом JSON."}
         try:
             self._keymap.import_json(data)
-        except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
+        except (KeyError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося імпортувати карту клавіш: "
+                    "перевірте JSON, дії та конфлікти."
+                ),
+            }
         except Exception as exc:  # noqa: BLE001 - final pywebview transport boundary
             return self._unexpected_keymap_failure("import_keymap", exc)
-        return {"ok": True, "message": "Shortcut map imported."}
+        return {"ok": True, "message": "Карту клавіш імпортовано."}
 
     @staticmethod
     def _unexpected_keymap_failure(operation: str, exc: Exception) -> dict[str, Any]:

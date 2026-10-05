@@ -40,6 +40,11 @@ async function main() {
   const messages = [];
   const logs = [];
   const focusIds = [];
+  const canonicalAck = (request, response) => ({
+    request_id: request.request_id,
+    focus_id: null,
+    ...response,
+  });
   const trigger = {
     dataset: {focusTarget: "tasks-heading", errorFocusTarget: "command-input"},
     focus: () => { focusCount += 1; },
@@ -67,7 +72,9 @@ async function main() {
   };
   let ui = factory(context);
   let completeFirst;
-  bridge = () => new Promise((resolve) => {completeFirst = resolve;});
+  bridge = (request) => new Promise((resolve) => {
+    completeFirst = (response) => resolve(canonicalAck(request, response));
+  });
   const first = ui.dispatch("task.create", trigger);
   await Promise.resolve();
   await ui.dispatch("task.create", trigger);
@@ -83,13 +90,15 @@ async function main() {
   assert.deepEqual(focusIds, ["tasks-heading"]);
   console.log("PASS: duplicate and cross-command single-flight");
 
-  bridge = async () => ({status: "completed", message: "Призупинено."});
+  bridge = async (request) => canonicalAck(request, {status: "completed", message: "Призупинено."});
   await ui.dispatch("task.pause", trigger);
   assert.equal(requests.length, 2);
   assert.equal(requests[1].request_id, "req-2");
   console.log("PASS: command unlocks after acknowledged completion");
 
-  bridge = async () => ({status: "accepted", message: "Завдання прийнято.", focus_id: "tasks-heading"});
+  bridge = async (request) => canonicalAck(
+    request, {status: "accepted", message: "Завдання прийнято.", focus_id: "tasks-heading"},
+  );
   stateRead = async () => true;
   await ui.dispatch("task.create", trigger);
   assert.equal(requests.length, 3);
@@ -99,7 +108,9 @@ async function main() {
   console.log("PASS: accepted task acknowledgement is trusted and reconciled");
 
   let releaseSource;
-  bridge = () => new Promise((resolve) => {releaseSource = resolve;});
+  bridge = (request) => new Promise((resolve) => {
+    releaseSource = (response) => resolve(canonicalAck(request, response));
+  });
   const sourceSave = ui.dispatch("team.sources.configure", trigger);
   await Promise.resolve();
   await ui.dispatch("team.sources.configure", trigger);
@@ -112,7 +123,7 @@ async function main() {
   assert.equal(ui.getSourceDirty(), true, "accepted is not a completed source write");
   console.log("PASS: accepted source acknowledgement keeps the dirty revision");
 
-  bridge = async () => ({status: "completed", message: "Збережено."});
+  bridge = async (request) => canonicalAck(request, {status: "completed", message: "Збережено."});
   await ui.dispatch("team.sources.configure", trigger);
   assert.equal(requests.length, 5);
   assert.equal(ui.getSourceDirty(), false);
@@ -125,6 +136,11 @@ async function main() {
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(requests.length, 6);
+  assert.equal(
+    context.document.documentElement.dataset.nikaReady,
+    "false",
+    "Uncertain durable effect must drop packaged readiness before reconciliation completes",
+  );
   await ui.dispatch("task.pause", trigger);
   assert.equal(requests.length, 6, "retry must stay blocked while reconciliation is pending");
   assert(messages.at(-1)[0].includes("Попередню команду"));
@@ -141,7 +157,7 @@ async function main() {
   ui = factory(context);
 
   stateRead = async () => true;
-  bridge = async () => ({status: "unexpected", message: "false success"});
+  bridge = async (request) => canonicalAck(request, {status: "unexpected", message: "false success"});
   await ui.dispatch("task.create", trigger);
   assert.equal(requests.length, 7, "malformed acknowledgement must not blind-retry");
   assert(messages.at(-1)[0].includes("Повтор заблоковано до перезапуску"));
@@ -151,7 +167,7 @@ async function main() {
   console.log("PASS: malformed durable acknowledgement remains locked after reconciliation");
   ui = factory(context);
 
-  bridge = async () => ({status: "accepted", message: "Записано."});
+  bridge = async (request) => canonicalAck(request, {status: "accepted", message: "Записано."});
   stateRead = async () => false;
   await ui.dispatch("task.create", trigger);
   assert.equal(requests.length, 8);
@@ -170,9 +186,9 @@ async function main() {
   await ui.dispatch("task.create", trigger);
   assert.equal(stateReadOptions.at(-1).requireCurrentGeneration, true);
   let blockedAfterStrictFailureCalled = false;
-  bridge = async () => {
+  bridge = async (request) => {
     blockedAfterStrictFailureCalled = true;
-    return {status: "completed", message: "must stay blocked"};
+    return canonicalAck(request, {status: "completed", message: "must stay blocked"});
   };
   await ui.dispatch("task.pause", trigger);
   assert.equal(blockedAfterStrictFailureCalled, false);
@@ -180,6 +196,48 @@ async function main() {
   assert(messages.at(-1)[0].includes("Попередню команду"));
   assert(!JSON.stringify(messages).includes("UNCERTAIN_AFTER_READY_STATE"));
   console.log("PASS: failed current-generation reconciliation retains task-control lock");
+
+  ui = factory(context);
+  stateRead = async () => true;
+  const beforeWrongRequestId = requests.length;
+  bridge = async (request) => ({
+    ...canonicalAck(request, {status: "completed", message: "НЕ ДОВІРЯТИ"}),
+    request_id: "wrong-request-id",
+  });
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, beforeWrongRequestId + 1);
+  assert(!logs.includes("НЕ ДОВІРЯТИ"), "wrong request-id acknowledgement message is not trusted");
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(
+    requests.length,
+    beforeWrongRequestId + 1,
+    "wrong request-id durable acknowledgement must retain retry fence",
+  );
+  console.log("PASS: wrong request-id acknowledgement is uncertain and permanently fenced");
+
+  ui = factory(context);
+  const beforeBadMessage = requests.length;
+  bridge = async (request) => canonicalAck(
+    request, {status: "completed", message: {private: "BAD_MESSAGE_CANARY"}},
+  );
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, beforeBadMessage + 1);
+  assert(!JSON.stringify(messages).includes("BAD_MESSAGE_CANARY"));
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(requests.length, beforeBadMessage + 1);
+  console.log("PASS: non-text acknowledgement message is rejected before presentation");
+
+  ui = factory(context);
+  const beforeBadFocus = requests.length;
+  bridge = async (request) => canonicalAck(
+    request, {status: "completed", message: "НЕ ДОВІРЯТИ ФОКУСУ", focus_id: {id: "tasks-heading"}},
+  );
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, beforeBadFocus + 1);
+  assert(!logs.includes("НЕ ДОВІРЯТИ ФОКУСУ"));
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(requests.length, beforeBadFocus + 1);
+  console.log("PASS: non-text acknowledgement focus target is rejected before use");
 
   let finishKeymap;
   const keymapInput = {focus: () => {focusCount += 1;}};

@@ -183,6 +183,30 @@
   let keymapMutationPending = false;
   let stateUnavailableReported = false;
   const maxActivityItems = 200;
+
+  function validDispatchResponse(response, expectedRequestId) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && response.request_id === expectedRequestId
+      && ["accepted", "completed", "failed", "rejected"].includes(response.status)
+      && typeof response.message === "string"
+      && (response.focus_id == null || typeof response.focus_id === "string"),
+    );
+  }
+
+  function validKeymapResponse(response, requireData = false) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && typeof response.ok === "boolean"
+      && typeof response.message === "string"
+      && (!requireData || !response.ok || typeof response.data === "string"),
+    );
+  }
+
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let stateRefreshGeneration = 0;
@@ -1102,12 +1126,13 @@
     setModelControlsDisabled(true);
     let result = null;
     try {
+      const dispatchRequestId = requestId();
       result = await globalThis.pywebview.api.dispatch({
-        request_id: requestId(),
+        request_id: dispatchRequestId,
         action_id: actionId,
         payload,
       });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) {
+      if (!validDispatchResponse(result, dispatchRequestId) || result.status === "accepted") {
         throw new Error("Invalid model settings acknowledgement");
       }
       const failed = result.status !== "completed";
@@ -1116,6 +1141,7 @@
       appendLog(result.message);
     } catch {
       result = null;
+      document.documentElement.dataset.nikaReady = "false";
       announce("Немає підтвердження зміни моделі. Перечитайте збережені налаштування перед повтором.", true);
       appendLog("Немає підтвердження зміни моделі; автоматичний повтор не виконується.");
     } finally {
@@ -1134,7 +1160,12 @@
         focusTarget.disabled = false;
       }
       const focusApplied = focusId ? focusElementById(focusId) : false;
-      if (!await refreshState({ announceTeamTransitions: false, requireCurrentGeneration: result === null })) {
+      const stateReady = await refreshState({
+        announceTeamTransitions: false,
+        requireCurrentGeneration: result === null,
+      });
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
         renderModelSettings(null);
       }
       if (!focusApplied) {
@@ -1185,8 +1216,13 @@
     autostartSave.disabled = true;
     let uncertain = false;
     try {
-      const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) throw new Error("Invalid acknowledgement");
+      const dispatchRequestId = requestId();
+      const result = await globalThis.pywebview.api.dispatch({
+        request_id: dispatchRequestId, action_id: actionId, payload,
+      });
+      if (!validDispatchResponse(result, dispatchRequestId) || result.status === "accepted") {
+        throw new Error("Invalid acknowledgement");
+      }
       const failed = result.status !== "completed";
       if (!failed || !save) autostartDirty = false;
       announce(result.message, failed);
@@ -1194,11 +1230,17 @@
     } catch {
       // The OS write may have completed before the bridge disconnected. No blind retry.
       uncertain = true;
+      document.documentElement.dataset.nikaReady = "false";
       announce("Немає підтвердження зміни автозапуску. Перечитайте стан перед повтором.", true);
     } finally {
       autostartPending = false;
       autostartGeneration += 1;
-      if (!await refreshState({ announceTeamTransitions: false, requireCurrentGeneration: uncertain })) {
+      const stateReady = await refreshState({
+        announceTeamTransitions: false,
+        requireCurrentGeneration: uncertain,
+      });
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
         renderAutostart(null);
       }
       if (!autostartInput.disabled) autostartInput.focus();
@@ -1339,6 +1381,7 @@
     inFlightActions.add(lockKey);
     let keepLocked = false;
     const reconcileUncertain = async (message) => {
+      document.documentElement.dataset.nikaReady = "false";
       announce(message, true);
       appendLog(message);
       let stateReady = false;
@@ -1371,10 +1414,11 @@
         payload.revision = sourceRevision;
         for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
       }
+      const dispatchRequestId = requestId();
       let result;
       try {
         result = await globalThis.pywebview.api.dispatch({
-          request_id: requestId(), action_id: actionId, payload,
+          request_id: dispatchRequestId, action_id: actionId, payload,
         });
       } catch {
         // The durable effect may have committed before the bridge disconnected. Never retry blindly.
@@ -1383,7 +1427,7 @@
         );
         return;
       }
-      if (!result || !["accepted", "completed", "failed", "rejected"].includes(result.status)) {
+      if (!validDispatchResponse(result, dispatchRequestId)) {
         await reconcileUncertain(
           "Міст повернув непідтверджений результат. Стан буде перечитано перед можливим повтором.",
         );
@@ -1471,7 +1515,7 @@
         );
         return;
       }
-      if (!response || typeof response.ok !== "boolean") {
+      if (!validKeymapResponse(response)) {
         await reconcileUncertainKeymap(
           "Міст повернув непідтверджену зміну клавіш. Карта буде перечитана перед можливим повтором.",
         );
@@ -1615,8 +1659,7 @@
     }
     try {
       const response = await globalThis.pywebview.api.export_keymap();
-      if (!response || typeof response.ok !== "boolean"
-          || (response.ok && typeof response.data !== "string")) {
+      if (!validKeymapResponse(response, true)) {
         throw new Error("invalid keymap export acknowledgement");
       }
       const message = typeof response.message === "string" && response.message
