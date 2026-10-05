@@ -1504,6 +1504,7 @@ response = {
         "transformers": os.getenv("NIKA_TRAINER_TRANSFORMERS_VERSION"),
         "manifest": os.getenv("NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"),
         "deployment": os.getenv("NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"),
+        "deployment_sha256": os.getenv("NIKA_TRAINER_DEPLOYMENT_SHA256"),
         "allowed": os.getenv("NIKA_ALLOWED"),
     },
     "step_id": request["step_id"],
@@ -1512,7 +1513,7 @@ sys.stdout.write(json.dumps(response))
 """.strip(),
     )
     metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
-    worker, _, artifact_id = _worker(
+    worker, registry, artifact_id = _worker(
         tmp_path,
         trainer,
         trainer_metadata=metadata,
@@ -1537,6 +1538,7 @@ sys.stdout.write(json.dumps(response))
         "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"
     ]
     assert trainer_state["deployment"] == artifact_id
+    assert trainer_state["deployment_sha256"] == registry.get(artifact_id).sha256
     assert trainer_state["allowed"] == "yes"
 
 
@@ -1549,6 +1551,23 @@ def test_runtime_deployment_artifact_id_must_match_registry_authority(
     environment["NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"] = "0" * 64
 
     with pytest.raises(ValueError, match="deployment artifact identity does not match"):
+        _worker(
+            tmp_path,
+            trainer,
+            trainer_metadata=metadata,
+            environment=environment,
+        )
+
+
+def test_runtime_deployment_sha256_must_match_registry_authority(
+    tmp_path: Path,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    environment = _runtime_environment()
+    environment["NIKA_TRAINER_DEPLOYMENT_SHA256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="deployment digest does not match"):
         _worker(
             tmp_path,
             trainer,
