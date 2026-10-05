@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
+from nika_core.experience_ledger import ContinuityKind, ContinuityOutcome, ExperienceLedger
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
@@ -72,6 +75,7 @@ class ConnectivityWaitService:
         self._audit = audit
         self._probe = probe
         self._scheduler = scheduler
+        self._experience = ExperienceLedger(queue.store)
 
     def defer(
         self,
@@ -102,6 +106,14 @@ class ConnectivityWaitService:
                 entity_type="scheduled_job",
                 entity_id=job_id,
                 payload=_audit_payload(task_id=task_id, intent=intent),
+            )
+            self._record_experience_with_connection(
+                conn,
+                job_id=job_id,
+                task_id=task_id,
+                intent=intent,
+                outcome=ContinuityOutcome.WAITING,
+                reason_code="network_wait_deferred",
             )
 
         # Durable DB state is already authoritative. If runtime installation fails, expose
@@ -260,6 +272,15 @@ class ConnectivityWaitService:
                         "disposition": fresh.disposition.value,
                     },
                 )
+                outcome, reason_code = _terminal_experience(fresh.disposition)
+                self._record_experience_with_connection(
+                    conn,
+                    job_id=job_id,
+                    task_id=binding.task_id,
+                    intent=binding.intent,
+                    outcome=outcome,
+                    reason_code=reason_code,
+                )
                 return ConnectivityWaitDecision(fresh.disposition, False, binding.intent)
             if fresh.disposition is not ScriptRetryDisposition.READY:
                 self._jobs.set_enabled_with_connection(conn, job_id, False)
@@ -276,6 +297,14 @@ class ConnectivityWaitService:
                     entity_type="scheduled_job",
                     entity_id=job_id,
                     payload=_audit_payload(task_id=binding.task_id, intent=binding.intent),
+                )
+                self._record_experience_with_connection(
+                    conn,
+                    job_id=job_id,
+                    task_id=binding.task_id,
+                    intent=binding.intent,
+                    outcome=ContinuityOutcome.RESUMED,
+                    reason_code="network_reconnected",
                 )
                 return ConnectivityWaitDecision(
                     ScriptRetryDisposition.READY,
@@ -316,6 +345,14 @@ class ConnectivityWaitService:
                         intent=next_decision.intent,
                     ),
                 )
+                self._record_experience_with_connection(
+                    conn,
+                    job_id=job_id,
+                    task_id=binding.task_id,
+                    intent=next_decision.intent,
+                    outcome=ContinuityOutcome.WAITING,
+                    reason_code="network_unavailable",
+                )
                 result = ConnectivityWaitDecision(
                     ScriptRetryDisposition.SCHEDULED,
                     False,
@@ -335,6 +372,15 @@ class ConnectivityWaitService:
                         "disposition": next_decision.disposition.value,
                     },
                 )
+                outcome, reason_code = _terminal_experience(next_decision.disposition)
+                self._record_experience_with_connection(
+                    conn,
+                    job_id=job_id,
+                    task_id=binding.task_id,
+                    intent=binding.intent,
+                    outcome=outcome,
+                    reason_code=reason_code,
+                )
                 result = ConnectivityWaitDecision(
                     next_decision.disposition,
                     False,
@@ -344,6 +390,31 @@ class ConnectivityWaitService:
         if runtime_job is not None:
             self._activate_runtime(runtime_job)
         return result
+
+    def _record_experience_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        job_id: str,
+        task_id: str,
+        intent: ScriptRetryIntent,
+        outcome: ContinuityOutcome,
+        reason_code: str,
+    ) -> None:
+        self._experience.record_with_connection(
+            conn,
+            event_key=_experience_event_key(
+                job_id=job_id,
+                task_id=task_id,
+                intent=intent,
+                reason_code=reason_code,
+            ),
+            task_id=task_id,
+            kind=ContinuityKind.INTERNET,
+            outcome=outcome,
+            reason_code=reason_code,
+            attempt=intent.retry_number,
+        )
 
     def _disable_terminal(
         self,
@@ -374,6 +445,15 @@ class ConnectivityWaitService:
                     "reason": reason,
                 },
             )
+            outcome, reason_code = _terminal_experience(disposition, reason=reason)
+            self._record_experience_with_connection(
+                conn,
+                job_id=job_id,
+                task_id=binding.task_id,
+                intent=binding.intent,
+                outcome=outcome,
+                reason_code=reason_code,
+            )
         return ConnectivityWaitDecision(disposition, False, binding.intent)
 
     def _reject_malformed(self, job_id: str, *, reason: str = "invalid_payload") -> None:
@@ -400,6 +480,50 @@ class ConnectivityWaitService:
     def _activate_runtime(self, job: ScheduledJob) -> None:
         if self._scheduler is not None:
             self._scheduler.upsert(job)
+
+
+def _experience_event_key(
+    *,
+    job_id: str,
+    task_id: str,
+    intent: ScriptRetryIntent,
+    reason_code: str,
+) -> str:
+    identity = json.dumps(
+        {
+            "job_id": job_id,
+            "operation_id": intent.operation_id,
+            "reason_code": reason_code,
+            "retry_number": intent.retry_number,
+            "task_id": task_id,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    digest = hashlib.sha256(identity).hexdigest()
+    return f"runtime-connectivity:{reason_code}:{digest}"
+
+
+def _terminal_experience(
+    disposition: ScriptRetryDisposition,
+    *,
+    reason: str | None = None,
+) -> tuple[ContinuityOutcome, str]:
+    if reason == "task_cancelled" or disposition is ScriptRetryDisposition.CANCELLED:
+        return ContinuityOutcome.PRESERVED, "task_cancelled"
+    if disposition is ScriptRetryDisposition.PAUSED:
+        return ContinuityOutcome.PRESERVED, "retry_paused"
+    reasons = {
+        ScriptRetryDisposition.NOT_RETRYABLE: "retry_not_retryable",
+        ScriptRetryDisposition.ATTEMPTS_EXHAUSTED: "retry_attempts_exhausted",
+        ScriptRetryDisposition.BACKOFF_LIMIT_EXCEEDED: "retry_backoff_limit_exceeded",
+        ScriptRetryDisposition.DEADLINE_EXCEEDED: "retry_deadline_exceeded",
+    }
+    reason_code = reasons.get(disposition)
+    if reason_code is not None:
+        return ContinuityOutcome.BLOCKED, reason_code
+    return ContinuityOutcome.FAILED_SAFE, "retry_authority_not_ready"
 
 
 def _job_from_intent(
