@@ -345,7 +345,7 @@ def build_release_manifest(
             sha256=_sha256(path),
         )
         for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
+        if path.relative_to(root).as_posix() != _RELEASE_MANIFEST_NAME
     )
     if not entries:
         raise ValueError("release bundle is empty")
@@ -402,7 +402,7 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
     actual_paths = {
         path.relative_to(root).as_posix(): path
         for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
+        if path.relative_to(root).as_posix() != _RELEASE_MANIFEST_NAME
     }
     findings: list[str] = []
     for relative_path in sorted(actual_paths):
