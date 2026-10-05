@@ -4,6 +4,7 @@ import pytest
 
 from nika_core.business_factory import (
     BusinessFactory,
+    BusinessFactoryError,
     BusinessObjective,
     BusinessPolicy,
     CommunicationAuthority,
@@ -102,3 +103,25 @@ def test_initialize_rejects_malformed_owned_snapshot_table(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="schema mismatch"):
         repository.initialize()
+
+
+def test_load_rejects_duplicate_key_durable_snapshot_json(tmp_path) -> None:
+    store, repository = _repository(tmp_path, "duplicate-json.sqlite")
+    snapshot = _snapshot("objective-duplicate-json")
+    repository.save(snapshot, expected_row_version=0)
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM business_factory_snapshots WHERE objective_id = ?",
+            (snapshot.objective.objective_id,),
+        ).fetchone()
+        payload = row["payload_json"]
+        assert payload.endswith("}")
+        ambiguous = payload[:-1] + f',"row_version":{snapshot.row_version}' + "}"
+        conn.execute(
+            "UPDATE business_factory_snapshots SET payload_json = ? WHERE objective_id = ?",
+            (ambiguous, snapshot.objective.objective_id),
+        )
+
+    with pytest.raises(BusinessFactoryError, match="duplicate business snapshot field"):
+        repository.load(snapshot.objective.objective_id)
