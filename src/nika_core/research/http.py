@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
-from math import isfinite
 from dataclasses import dataclass
 from ipaddress import ip_address
+from math import isfinite
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -58,6 +58,16 @@ class HttpFetchPolicy:
         )
         if any(value <= 0 for value in positive):
             raise ValueError("HTTP policy limits must be positive")
+        timing = (
+            self.connect_timeout_seconds,
+            self.read_timeout_seconds,
+            self.write_timeout_seconds,
+            self.pool_timeout_seconds,
+            self.backoff_base_seconds,
+            self.max_backoff_seconds,
+        )
+        if any(not isfinite(value) for value in timing):
+            raise ValueError("HTTP policy timing must be finite")
         if self.max_redirects < 0:
             raise ValueError("max_redirects must not be negative")
         if self.backoff_base_seconds < 0:
