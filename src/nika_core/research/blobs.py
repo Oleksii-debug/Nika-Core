@@ -20,7 +20,11 @@ _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 def _workspace_key(workspace_id: str) -> str:
     if type(workspace_id) is not str or not workspace_id.strip():
         raise ValueError("workspace_id must be nonempty text")
-    return hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()
+    try:
+        encoded = workspace_id.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("workspace_id must be valid UTF-8 text") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _sha256_file(path: Path) -> str:
