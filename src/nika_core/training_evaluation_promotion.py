@@ -321,6 +321,25 @@ def _ensure_running_experiment(
     return snapshot
 
 
+def _validate_persisted_observations(
+    snapshot: ExperimentSnapshot,
+    *,
+    expected: dict[tuple[str, str, str], MetricObservation],
+) -> dict[tuple[str, str, str], MetricObservation]:
+    observed = _observation_map(snapshot.observations)
+    for key, persisted in observed.items():
+        wanted = expected.get(key)
+        if wanted is None:
+            raise AttestedOldVsNewDecisionError(
+                "persisted experiment contains evidence outside attested benchmark"
+            )
+        if float(persisted.value) != float(wanted.value):
+            raise AttestedOldVsNewDecisionError(
+                "persisted experiment evidence conflicts with attested benchmark"
+            )
+    return observed
+
+
 def _record_missing_observations(
     *,
     engine: ExperimentEngine,
@@ -330,6 +349,10 @@ def _record_missing_observations(
 ) -> ExperimentSnapshot:
     experiment_id = definition.experiment_id
     expected = _observation_map(observations)
+    initial = repository.get(experiment_id)
+    _validate_existing_definition(initial, definition)
+    if initial.status is ExperimentStatus.RUNNING:
+        _validate_persisted_observations(initial, expected=expected)
     for key, item in expected.items():
         snapshot = repository.get(experiment_id)
         _validate_existing_definition(snapshot, definition)
@@ -343,21 +366,24 @@ def _record_missing_observations(
             raise AttestedOldVsNewDecisionError(
                 "persisted experiment is not running while evidence is incomplete"
             )
-        observed = _observation_map(snapshot.observations)
+        observed = _validate_persisted_observations(
+            snapshot,
+            expected=expected,
+        )
         persisted = observed.get(key)
         if persisted is not None:
-            if float(persisted.value) != float(item.value):
-                raise AttestedOldVsNewDecisionError(
-                    "persisted experiment evidence conflicts with attested benchmark"
-                )
             continue
         try:
             engine.record(experiment_id, item)
         except ValueError:
             current = repository.get(experiment_id)
             _validate_existing_definition(current, definition)
-            persisted = _observation_map(current.observations).get(key)
-            if persisted is not None and float(persisted.value) == float(item.value):
+            observed = _validate_persisted_observations(
+                current,
+                expected=expected,
+            )
+            persisted = observed.get(key)
+            if persisted is not None:
                 continue
             if current.status in {
                 ExperimentStatus.COMPLETED,
