@@ -275,6 +275,31 @@ def test_running_pause_fails_before_effect_without_durable_resume_capability(
     backend.close()
 
 
+def test_stale_cancel_callback_does_not_remove_newer_cancel_generation(
+    tmp_path: Path,
+) -> None:
+    runtime = DurableBlockingRuntime()
+    backend, _queue, _audit = _build_backend(tmp_path, runtime)
+    task_id = "same-durable-task"
+    stale_cancel: Future[bool] = Future()
+    newer_cancel: Future[bool] = Future()
+    stale_cancel.set_result(True)
+
+    with backend._active_lock:
+        backend._cancel_futures[task_id] = newer_cancel
+
+    backend._cancel_done(task_id, stale_cancel)
+
+    with backend._active_lock:
+        assert backend._cancel_futures.get(task_id) is newer_cancel
+
+    newer_cancel.set_result(True)
+    backend._cancel_done(task_id, newer_cancel)
+    with backend._active_lock:
+        assert task_id not in backend._cancel_futures
+    backend.close()
+
+
 def test_stale_pause_callback_does_not_remove_newer_pause_generation(
     tmp_path: Path,
 ) -> None:
