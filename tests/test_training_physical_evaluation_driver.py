@@ -345,7 +345,6 @@ def test_model_size_preflight_does_not_read_model_bytes(
     assert driver._model_size(model, name="model") == 8192
 
 
-
 def _physical_candidates(
     tmp_path: Path,
 ) -> tuple[driver.ModelCandidate, driver.ModelCandidate]:
@@ -388,7 +387,7 @@ def test_durable_attempt_claim_precedes_and_fences_repeat_effects(
     store = SQLiteStore(tmp_path / "attempt.sqlite3")
     store.initialize()
     repository = SQLiteExperimentRepository(store)
-    attempt_id = driver._physical_attempt_id(
+    _, _, attempt_id = driver._evaluation_effect_identity(
         requested_experiment_id=config.experiment_id,
         pilot=_pilot_report(),
         training_binding_sha256="a" * 64,
@@ -456,18 +455,97 @@ def test_physical_attempt_identity_binds_exact_attestor(
         "attestor_id": "evaluator-artifact",
     }
 
-    first = driver._physical_attempt_id(
+    first_operation, first_input, first_experiment = driver._evaluation_effect_identity(
         **common,
         attestor_sha256="c" * 64,
     )
-    second = driver._physical_attempt_id(
+    second_operation, second_input, second_experiment = driver._evaluation_effect_identity(
         **common,
         attestor_sha256="d" * 64,
     )
 
-    assert first != second
-    assert first.startswith("nika-physical-old-new-")
-    assert len(first.rsplit("-", 1)[1]) == 64
+    assert first_operation != second_operation
+    assert first_input != second_input
+    assert first_experiment != second_experiment
+    assert first_operation.startswith("physical-old-new-effect:")
+    assert first_experiment.startswith("nika-physical-old-new-")
+
+
+def test_requested_experiment_label_cannot_bypass_effect_fence(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    champion, challenger = _physical_candidates(tmp_path)
+    evaluation = driver._evaluation_set_from_json(
+        json.dumps(_evaluation_payload(), ensure_ascii=False)
+    )
+    common = {
+        "pilot": _pilot_report(),
+        "training_binding_sha256": "a" * 64,
+        "champion_binding_sha256": "b" * 64,
+        "champion": champion,
+        "challenger": challenger,
+        "evaluation_set": evaluation,
+        "execution_config": config.benchmark,
+        "policy": config.policy,
+        "permission_fingerprint": config.permission_fingerprint,
+        "attestor_id": "evaluator-artifact",
+        "attestor_sha256": "c" * 64,
+    }
+
+    first_operation, first_input, _ = driver._evaluation_effect_identity(
+        requested_experiment_id="label-one",
+        **common,
+    )
+    second_operation, second_input, _ = driver._evaluation_effect_identity(
+        requested_experiment_id="label-two",
+        **common,
+    )
+
+    assert first_operation == second_operation
+    assert first_input != second_input
+
+
+def test_idempotency_reservation_blocks_same_effect_with_changed_input(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "effect-ledger.sqlite3")
+    store.initialize()
+    task = TaskQueue(store).create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+    )
+    ledger = driver.IdempotencyLedger(store)
+
+    first, created = driver._reserve_evaluation_effect(
+        ledger=ledger,
+        task_id=task.task_id,
+        operation_key="physical-old-new-effect:" + "a" * 64,
+        input_fingerprint="sha256:" + "b" * 64,
+    )
+    replay, replay_created = driver._reserve_evaluation_effect(
+        ledger=ledger,
+        task_id=task.task_id,
+        operation_key=first.operation_key,
+        input_fingerprint=first.input_fingerprint,
+    )
+
+    assert created is True
+    assert replay_created is False
+    assert replay == first
+    assert replay.status is driver.IdempotencyStatus.PENDING
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="already bound to different",
+    ):
+        driver._reserve_evaluation_effect(
+            ledger=ledger,
+            task_id=task.task_id,
+            operation_key=first.operation_key,
+            input_fingerprint="sha256:" + "c" * 64,
+        )
+
 
 def test_report_writer_is_no_clobber(tmp_path: Path) -> None:
     path = tmp_path / "physical-old-new-evaluation-report.json"
@@ -489,15 +567,9 @@ def test_report_writer_cleans_temporary_after_publish_failure(
     path = tmp_path / "physical-old-new-evaluation-report.json"
     monkeypatch.setattr(driver.os, "name", "posix")
 
-    def fail_link(
-        source: Path,
-        destination: Path,
-        *,
-        follow_symlinks: bool,
-    ) -> None:
+    def fail_link(source: Path, destination: Path) -> None:
         assert source.parent == tmp_path
         assert destination == path
-        assert follow_symlinks is False
         raise OSError("synthetic publish failure")
 
     monkeypatch.setattr(driver.os, "link", fail_link)
@@ -505,6 +577,119 @@ def test_report_writer_cleans_temporary_after_publish_failure(
     with pytest.raises(
         driver.PhysicalEvaluationDriverError,
         match="could not be persisted",
+    ):
+        driver._write_report(path, {"schema": "test"})
+
+    assert not path.exists()
+    assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
+
+
+def test_report_writer_preserves_foreign_destination_on_publish_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "physical-old-new-evaluation-report.json"
+
+    def substitute_destination(source: Path, destination: Path) -> None:
+        assert source.parent == tmp_path
+        assert destination == path
+        destination.write_text("foreign-evidence\n", encoding="utf-8")
+        raise FileExistsError("synthetic destination race")
+
+    monkeypatch.setattr(driver.os, "link", substitute_destination)
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="already exists",
+    ):
+        driver._write_report(path, {"schema": "test"})
+
+    assert path.read_text(encoding="utf-8") == "foreign-evidence\n"
+    assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
+
+
+def test_report_writer_rolls_back_only_owned_file_after_final_byte_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "physical-old-new-evaluation-report.json"
+    real_reader = driver._read_regular_file
+
+    def drifted_reader(
+        target: Path,
+        *,
+        name: str,
+        max_bytes: int,
+    ) -> bytes:
+        if name == "published physical evaluation report":
+            return b'{"schema":"other"}\n'
+        return real_reader(target, name=name, max_bytes=max_bytes)
+
+    monkeypatch.setattr(driver, "_read_regular_file", drifted_reader)
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="bytes changed",
+    ):
+        driver._write_report(path, {"schema": "test"})
+
+    assert not path.exists()
+    assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
+
+
+def test_report_writer_rejects_linked_parent_before_publication(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlinks are unavailable on this test host")
+    path = linked / "physical-old-new-evaluation-report.json"
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="parent must be a canonical non-linked directory",
+    ):
+        driver._write_report(path, {"schema": "test"})
+
+    assert not path.exists()
+
+
+def test_report_writer_strict_parse_back_rejects_duplicate_key() -> None:
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="invalid JSON",
+    ):
+        driver._strict_report_parse_back(b'{"schema":"one","schema":"two"}\n')
+
+
+def test_report_writer_rejects_parent_identity_change_during_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "physical-old-new-evaluation-report.json"
+    original_lstat = driver.os.lstat
+    parent_calls = 0
+
+    def changed_parent(target: Path) -> os.stat_result:
+        nonlocal parent_calls
+        snapshot = original_lstat(target)
+        if Path(target) == tmp_path:
+            parent_calls += 1
+            if parent_calls >= 2:
+                values = list(snapshot)
+                values[1] = int(snapshot.st_ino) + 1
+                return os.stat_result(values)
+        return snapshot
+
+    monkeypatch.setattr(driver.os, "lstat", changed_parent)
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="parent changed during publication",
     ):
         driver._write_report(path, {"schema": "test"})
 
