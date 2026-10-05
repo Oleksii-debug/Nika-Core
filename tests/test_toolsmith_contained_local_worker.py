@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import pathlib
 import shutil
 import subprocess
@@ -287,6 +288,37 @@ def test_terminal_result_survives_reconstruction_without_replanning(
     assert reconstructed.execution_evidence(job.job_id) == worker.execution_evidence(
         job.job_id
     )
+
+
+def test_terminal_result_survives_lease_expiry_renewal_without_replay(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    planner = _Planner(LocalFileEdit("src/value.py", b"VALUE = 2\n"))
+    worker = _worker(tmp_path, repository, planner)
+    job = _job(worker, base_sha)
+
+    first = _run(worker.execute(job))
+    assert first.failure is None
+    renewed = dataclasses.replace(
+        job,
+        lease=WorkspaceLease(
+            lease_id=job.lease.lease_id,
+            workspace_root=job.lease.workspace_root,
+            isolation_class=job.lease.isolation_class,
+            expires_at="2100-01-01T00:00:00+00:00",
+        ),
+    )
+    reconstructed = ContainedLocalCodingWorker(
+        workspace_parent=worker.workspace_parent,
+        repositories={"repo-1": repository},
+        planner=_MustNotPlan(),
+    )
+
+    replayed = _run(reconstructed.execute(renewed))
+
+    assert replayed == first
+    assert reconstructed.execution_evidence(job.job_id).result_sha != base_sha
 
 
 def test_cancel_during_execution_produces_nonretryable_cancelled_result(
