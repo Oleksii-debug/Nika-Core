@@ -375,8 +375,9 @@ def test_v3_task_binding_schema_migrates_to_artifact_pin_column(tmp_path: Path) 
             "FROM v01_task_model_bindings_v4"
         )
         conn.execute("DROP TABLE v01_task_model_bindings_v4")
+        conn.execute("DROP TABLE v01_model_promotion_manifests")
         conn.execute(
-            "DELETE FROM v01_model_settings_schema WHERE version = 4"
+            "DELETE FROM v01_model_settings_schema WHERE version >= 4"
         )
 
     reopened = V01ModelSettings(SQLiteStore(store.path))
