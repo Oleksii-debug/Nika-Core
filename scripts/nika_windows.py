@@ -15,6 +15,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.action_registry import Keymap
 from nika_core.kernel.agent_registry import AgentRegistry
 from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
@@ -32,6 +33,7 @@ from nika_core.product_project import ProductProjectRepository
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
+from nika_core.training_runtime import TrainingStatusService
 from nika_core.ui.shell import launch_windows_shell
 from nika_core.v01_cloud_model_permission import (
     CloudModelGrantRequest,
@@ -126,6 +128,39 @@ def _daily_activity_report_result(
     )
 
 
+def _training_status_result(
+    service: TrainingStatusService,
+    task_id: str,
+) -> UIResult:
+    try:
+        status = service.read(task_id)
+        message = (
+            status.render_text()
+            if status is not None
+            else (
+                "Для цього task_id немає збереженого durable checkpoint "
+                "стану навчання."
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 - packaged boundary must fail closed
+        logging.getLogger(__name__).error(
+            "Training status read failed: exception_type=%s",
+            type(exc).__name__,
+        )
+        return UIResult(
+            request_id="desktop-handler",
+            status="failed",
+            message="Не вдалося безпечно прочитати стан навчання.",
+            focus_id="logs-heading",
+        )
+    return UIResult(
+        request_id="desktop-handler",
+        status="completed",
+        message=message,
+        focus_id="logs-heading",
+    )
+
+
 def build_windows_bridge(
     config: AppConfig,
     *,
@@ -135,6 +170,7 @@ def build_windows_bridge(
     store = SQLiteStore(config.database_path)
     store.initialize()
     activity_reports = DailyActivityReportService(store)
+    training_status = TrainingStatusService(CheckpointService(store))
     actions = build_default_action_registry()
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
@@ -215,6 +251,10 @@ def build_windows_bridge(
         activity_report_handler=lambda: _daily_activity_report_result(
             activity_reports,
             day_provider=activity_report_day,
+        ),
+        training_status_handler=lambda task_id: _training_status_result(
+            training_status,
+            task_id,
         ),
         selection_store=PackagedProductSelectionStore(store),
     )
