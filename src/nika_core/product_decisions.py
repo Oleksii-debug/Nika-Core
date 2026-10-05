@@ -27,7 +27,7 @@ def _valid_stored_text(value: object) -> bool:
         value.encode("utf-8")
     except UnicodeEncodeError:
         return False
-    return True
+    return all(char.isprintable() for char in value)
 
 
 def _decode_stored_utf8(value: object) -> str:
