@@ -256,9 +256,9 @@ def test_non_object_carriers_fail_before_effect_completion_or_uncertainty(
     cursor = _cursor(memory, ledger, task_id=task_id)
     grant = cursor.begin_effect("перший")
 
-    with pytest.raises(BatchCursorStateError, match="JSON object"):
+    with pytest.raises(TypeError, match="exact JSON object"):
         cursor.confirm("перший", bad_carrier)
-    with pytest.raises(BatchCursorStateError, match="JSON object"):
+    with pytest.raises(TypeError, match="exact JSON object"):
         cursor.mark_uncertain("перший", bad_carrier)
 
     assert ledger.require(grant.operation_key).status is IdempotencyStatus.PENDING
