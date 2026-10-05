@@ -409,3 +409,21 @@ def test_run_digest_rejects_text_subclass_before_identity_use(tmp_path: Path) ->
         match="training run frozen package",
     ):
         _bind(values, allowed_root=tmp_path)
+
+
+def test_binding_rejects_unbounded_identity_text(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    binding = _bind(values, allowed_root=tmp_path)
+    object.__setattr__(binding, "challenger_model_id", "m" * 513)
+
+    with pytest.raises(ValueError, match="configured byte limit"):
+        _ = binding.binding_sha256
+
+
+def test_binding_rejects_invalid_utf8_identity_text(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    binding = _bind(values, allowed_root=tmp_path)
+    object.__setattr__(binding, "challenger_model_id", "model-\ud800")
+
+    with pytest.raises(ValueError):
+        _ = binding.binding_sha256
