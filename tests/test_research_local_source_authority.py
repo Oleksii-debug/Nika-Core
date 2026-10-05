@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -91,6 +92,40 @@ def test_local_source_id_cannot_relabel_existing_http_source(tmp_path: Path) -> 
             "SELECT COUNT(*) FROM research_sources WHERE source_id=?",
             ("source-id",),
         ).fetchone()[0] == 0
+
+
+def test_local_source_claim_reserves_writer_before_cross_table_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, repository = _repository(tmp_path)
+    statements: list[str] = []
+    original_connection = store.connection
+
+    @contextmanager
+    def traced_connection():
+        with original_connection() as conn:
+            conn.set_trace_callback(statements.append)
+            yield conn
+
+    monkeypatch.setattr(store, "connection", traced_connection)
+    repository.upsert_source(
+        SourceSpec("serialized-id", "owner-a", SourceKind.LOCAL_FILE, "/local.txt")
+    )
+
+    normalized = [statement.strip().upper() for statement in statements]
+    begin_index = normalized.index("BEGIN IMMEDIATE")
+    collision_index = next(
+        index
+        for index, statement in enumerate(normalized)
+        if "SELECT 1 FROM RESEARCH_HTTP_SOURCES WHERE SOURCE_ID=" in statement
+    )
+    insert_index = next(
+        index
+        for index, statement in enumerate(normalized)
+        if statement.startswith("INSERT INTO RESEARCH_SOURCES")
+    )
+    assert begin_index < collision_index < insert_index
 
 
 @pytest.mark.parametrize(
