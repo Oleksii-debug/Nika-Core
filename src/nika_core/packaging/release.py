@@ -12,6 +12,7 @@ from typing import Any
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_PRODUCT_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.!+_-]*$")
 _MANIFEST_VERSION = 2
 _RELEASE_MANIFEST_NAME = "release-manifest.json"
 _MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
@@ -181,14 +182,33 @@ def _canonical_release_path(value: object) -> bool:
     return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
 
 
+def require_product_version(
+    value: object,
+    *,
+    authority: str = "product version",
+) -> str:
+    """Return one canonical release-version token safe for manifests and artifact names."""
+
+    if type(value) is not str:
+        raise ValueError(f"{authority} must be exact text")
+    if not value or value != value.strip():
+        raise ValueError(f"{authority} must be non-empty canonical text")
+    if (
+        len(value) > _MAX_PRODUCT_VERSION_CHARS
+        or _PRODUCT_VERSION_RE.fullmatch(value) is None
+    ):
+        raise ValueError(
+            f"{authority} exceeds the bounded release-version text contract"
+        )
+    return value
+
+
 def _valid_product_version(value: object) -> bool:
-    return (
-        isinstance(value, str)
-        and bool(value)
-        and len(value) <= _MAX_PRODUCT_VERSION_CHARS
-        and value == value.strip()
-        and not any(ord(character) < 32 for character in value)
-    )
+    try:
+        require_product_version(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
@@ -252,11 +272,7 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
         or manifest.product != manifest.product.strip()
     ):
         findings.append("manifest:product")
-    if (
-        not isinstance(manifest.version, str)
-        or not manifest.version
-        or manifest.version != manifest.version.strip()
-    ):
+    if not _valid_product_version(manifest.version):
         findings.append("manifest:product-version")
     if (
         not isinstance(manifest.source_sha, str)
