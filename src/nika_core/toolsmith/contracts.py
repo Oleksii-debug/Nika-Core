@@ -168,8 +168,9 @@ class ResourceBudget:
     max_changed_files: int
 
     def __post_init__(self) -> None:
-        if self.timeout_seconds <= 0 or self.max_output_bytes <= 0 or self.max_changed_files <= 0:
-            raise ValueError("resource budget values must be positive")
+        values = (self.timeout_seconds, self.max_output_bytes, self.max_changed_files)
+        if any(type(value) is not int or value <= 0 for value in values):
+            raise ValueError("resource budget values must be positive integers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,8 +186,10 @@ class AcceptanceCommand:
             raise ValueError("shell executables are not valid acceptance command entrypoints")
         if self.cwd != ".":
             normalize_relative_path(self.cwd)
-        if self.timeout_seconds is not None and self.timeout_seconds <= 0:
-            raise ValueError("acceptance command timeout must be positive")
+        if self.timeout_seconds is not None and (
+            type(self.timeout_seconds) is not int or self.timeout_seconds <= 0
+        ):
+            raise ValueError("acceptance command timeout must be a positive integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,8 +223,8 @@ class ChangedFile:
         normalize_relative_path(self.path)
         if len(self.sha256) != 64 or any(c not in "0123456789abcdef" for c in self.sha256.lower()):
             raise ValueError("changed-file sha256 must be hexadecimal")
-        if self.size_bytes < 0:
-            raise ValueError("changed-file size must be non-negative")
+        if type(self.size_bytes) is not int or self.size_bytes < 0:
+            raise ValueError("changed-file size must be a non-negative integer")
 
 
 @dataclass(frozen=True, slots=True)
@@ -233,6 +236,8 @@ class TestEvidence:
     def __post_init__(self) -> None:
         if not self.command:
             raise ValueError("test evidence requires a command")
+        if type(self.exit_code) is not int:
+            raise ValueError("test evidence exit code must be an integer")
         if not self.output_digest.strip():
             raise ValueError("test evidence requires an output digest")
 
@@ -322,8 +327,8 @@ class CapabilityManifestV1:
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
-            raise ValueError("only capability manifest schema v1 is supported")
+        if type(self.schema_version) is not int or self.schema_version != 1:
+            raise ValueError("only integer capability manifest schema v1 is supported")
         if not all(value.strip() for value in (self.capability_id, self.version, self.digest, self.entrypoint, self.source)):
             raise ValueError("capability manifest fields must not be empty")
         if not self.permissions:
