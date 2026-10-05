@@ -54,7 +54,7 @@ from nika_core.training_model_activation import (
     activate_attested_training_promotion,
     rollback_attested_training_promotion,
 )
-from nika_core.v01_model_settings import V01ModelSettings
+from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 
 
 def _sha(value: bytes) -> str:
@@ -717,6 +717,12 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     assert retried == receipt
     assert settings.snapshot()["revision"] == 2
     assert settings.for_task(old_task.task_id).model == "base-model"
+    new_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload({"command": "use promoted route"}),
+    )
+    assert settings.for_task(new_task.task_id).model == "challenger-model"
 
     restarted = V01ModelSettings(SQLiteStore(store.path))
     assert restarted.snapshot()["model"] == "challenger-model"
@@ -737,6 +743,15 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         expected_revision=2,
     )
     assert repeated == rolled_back
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="rejected by the active route authority",
+    ):
+        activate_attested_training_promotion(
+            result=result,
+            settings=restarted,
+            expected_revision=3,
+        )
 
     reopened = V01ModelSettings(SQLiteStore(store.path))
     assert reopened.snapshot()["model"] == "base-model"
@@ -751,6 +766,15 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         ]
     assert events.count("v01.model.promoted") == 1
     assert events.count("v01.model.promotion_rolled_back") == 1
+    with store.connection() as conn:
+        audit_payloads = [
+            row["payload_json"]
+            for row in conn.execute(
+                "SELECT payload_json FROM audit_events ORDER BY event_id"
+            )
+        ]
+    assert "base-model" not in repr(audit_payloads)
+    assert "challenger-model" not in repr(audit_payloads)
 
 
 @pytest.mark.asyncio
@@ -846,7 +870,7 @@ def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path
     decision_sha256 = _sha(b"decision")
     binding_sha256 = _sha(b"binding")
 
-    with pytest.raises(Exception, match="постачальника"):
+    with pytest.raises(ModelSetupError, match="постачальника"):
         settings.activate_promoted_local_model(
             expected_revision=1,
             base_provider_id="ollama",
@@ -859,3 +883,58 @@ def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path
 
     assert settings.snapshot()["model"] == "base-model"
     assert settings.snapshot()["revision"] == 1
+
+
+
+def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
+    store, settings = _configured_model_settings(tmp_path)
+    before = settings.snapshot()
+    with store.connection() as conn:
+        conn.execute("DROP TABLE v01_model_promotions")
+        conn.execute(
+            "DELETE FROM v01_model_settings_schema WHERE version = 2"
+        )
+
+    reopened = V01ModelSettings(SQLiteStore(store.path))
+
+    assert reopened.snapshot() == before
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version = 2"
+        ).fetchone()[0] == 1
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type = 'table' AND name = 'v01_model_promotions'"
+        ).fetchone()[0] == 1
+
+
+@pytest.mark.asyncio
+async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    receipt = activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_model_promotions SET binding_sha256 = ? "
+            "WHERE decision_sha256 = ?",
+            ("not-a-digest", receipt.decision_sha256),
+        )
+
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="rollback was rejected",
+    ):
+        rollback_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=2,
+        )
+
+    assert settings.snapshot()["model"] == "challenger-model"
+    assert settings.snapshot()["revision"] == 2
