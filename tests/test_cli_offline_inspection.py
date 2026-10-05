@@ -25,7 +25,7 @@ def test_help_does_not_initialize_settings_or_database(
     assert caught.value.code == 0
     output = capsys.readouterr().out
     assert "--version" in output
-    assert "nica" not in output.lower()
+    assert "Inspect the local Nika Core runtime." in output
 
 
 def test_version_uses_installed_package_without_startup(
