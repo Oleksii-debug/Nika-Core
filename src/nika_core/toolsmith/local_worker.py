@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import pathlib
 import shutil
@@ -61,6 +62,9 @@ _STATE_SCHEMA = "nika-contained-local-worker-v1"
 _MAX_EDIT_BYTES = 8 * 1024 * 1024
 _MAX_PLAN_BYTES = 32 * 1024 * 1024
 _MAX_STATE_BYTES = 1024 * 1024
+_MAX_STATE_JSON_DEPTH = 64
+_MAX_STATE_JSON_INTEGER_BITS = 4096
+_MAX_STATE_JSON_INTEGER_DECIMAL_CHARS = 1234
 
 
 class ContainedLocalWorkerError(RuntimeError):
@@ -540,6 +544,48 @@ def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ValueError("local worker state contains duplicate JSON keys")
         result[key] = value
     return result
+
+
+def _finite_state_json_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _bounded_state_json_int(raw: str) -> int:
+    digits = raw[1:] if raw.startswith("-") else raw
+    if len(digits) > _MAX_STATE_JSON_INTEGER_DECIMAL_CHARS:
+        raise ValueError("local worker state integer exceeds the digit limit")
+    value = int(raw)
+    if value.bit_length() > _MAX_STATE_JSON_INTEGER_BITS:
+        raise ValueError("local worker state integer exceeds the bit limit")
+    return value
+
+
+def _state_json_depth_is_bounded(raw: bytes) -> bool:
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                quoted = False
+        elif byte == 0x22:
+            quoted = True
+        elif byte in (0x5B, 0x7B):
+            depth += 1
+            if depth > _MAX_STATE_JSON_DEPTH:
+                return False
+        elif byte in (0x5D, 0x7D):
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
 
 
 def _reject_constant(value: str) -> object:
@@ -1638,13 +1684,17 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             raw = handle.read(_MAX_STATE_BYTES + 1)
         if len(raw) > _MAX_STATE_BYTES:
             raise ContainedLocalWorkerError("local worker state exceeds the byte limit")
+        if not _state_json_depth_is_bounded(raw):
+            raise ContainedLocalWorkerError("local worker state is invalid")
         try:
             payload = json.loads(
                 raw.decode("utf-8"),
                 object_pairs_hook=_strict_object,
+                parse_float=_finite_state_json_float,
+                parse_int=_bounded_state_json_int,
                 parse_constant=_reject_constant,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             raise ContainedLocalWorkerError("local worker state is invalid") from exc
         if type(payload) is not dict:
             raise ContainedLocalWorkerError("local worker state root is invalid")
