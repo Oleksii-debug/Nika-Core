@@ -112,7 +112,7 @@ class AgentCompiler:
                 approvals.append(grant.tool_id)
 
         return CompilationResult(
-            definition=definition,
+            definition=definition.model_copy(deep=True),
             required_human_approvals=tuple(sorted(approvals)),
             highest_risk=highest,
         )
