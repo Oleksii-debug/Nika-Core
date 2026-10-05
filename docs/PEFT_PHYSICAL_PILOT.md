@@ -67,8 +67,9 @@ Pass a `candidate_descriptor_factory` that receives detached canonical COMPLETED
 Only then should it create or retrieve the SHA-256 `ModelArtifactDescriptor` for the final
 published `adapter_model.safetensors`; its size and digest must describe those exact bytes.
 The factory may use the completed candidate digest plus the now-materialized file size and the
-project's canonical public provenance/license references. The harness then delegates physical byte/containment verification to the existing
-candidate-artifact integrity authority and strict manifest parsing to the existing PEFT
+project's canonical public provenance/license references. The harness then delegates physical
+byte/containment verification to the existing candidate-artifact integrity authority and strict
+manifest parsing to the existing PEFT
 candidate reader rather than implementing another verifier or parser. On Windows it holds a
 read-only deny-write/delete handle across both checks so a pathname replacement cannot splice
 manifest evidence from different candidate bytes.
@@ -97,8 +98,9 @@ print(report.evidence_sha256)
 ```
 
 The helper supplies both the control sequence required to create the one-step pause and the
-effect-free restart probe. Reports use schema version 3 because strict candidate-manifest and persisted trainer/runtime
-provenance are now part of the evidence identity in addition to the durable-reopen checkpoint.
+effect-free restart probe. Reports use schema version 3 because strict candidate-manifest and
+persisted trainer/runtime provenance are now part of the evidence identity in addition to the
+durable-reopen checkpoint.
 
 ## Evidence boundaries
 
