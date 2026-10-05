@@ -34,7 +34,6 @@ from nika_core.training_evaluation_binding import TrainingEvaluationBinding
 from nika_core.training_evaluation_execution import (
     AttestedCaseReceipt,
     AttestedChallengerBenchmarkResult,
-    TrainingEvaluationExecutionError,
     run_attested_challenger_benchmark,
 )
 
@@ -675,8 +674,7 @@ class AttestedOldNewEvaluationResult:
             "job_id": training.job_id,
             "training_binding_sha256": training.binding_sha256,
             "evaluation_set_sha256": training.evaluation_set_sha256,
-            "execution_config_sha256":
-                champion.report.execution_config_sha256,
+            "execution_config_sha256": champion.report.execution_config_sha256,
             "champion_candidate_id": training.base_candidate_id,
             "champion_evidence_sha256": champion.evidence_sha256,
             "challenger_candidate_id": training.challenger_candidate_id,
