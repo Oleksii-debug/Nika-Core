@@ -43,6 +43,14 @@ def _require_windows_bundle_name(name: str) -> str:
     return name
 
 
+def _reject_linked_path(label: str, path: Path) -> None:
+    for component in (path, *path.parents):
+        if component.is_symlink() or component.is_junction():
+            raise ValueError(
+                f"{label} path traverses a symbolic link or junction: {component}"
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class WindowsBuildPlan:
     """Deterministic PyInstaller arguments for the Windows desktop release candidate."""
@@ -63,13 +71,15 @@ class WindowsBuildPlan:
             # can redirect ordinary leaf paths outside the exact checkout.
             # Inspect links before exists()/is_file()/is_dir(), which dereference
             # the path and could otherwise touch redirected or broken targets.
-            for component in (path, *path.parents):
-                if component.is_symlink() or component.is_junction():
-                    raise ValueError(
-                        f"{label} path traverses a symbolic link or junction: {component}"
-                    )
+            _reject_linked_path(label, path)
             if not path.exists():
                 raise FileNotFoundError(f"{label} does not exist: {path}")
+        for label, path in (
+            ("dist_dir", self.dist_dir),
+            ("work_dir", self.work_dir),
+            ("spec_dir", self.spec_dir),
+        ):
+            _reject_linked_path(label, path)
         if not self.entrypoint.is_file():
             raise ValueError("entrypoint must be a file")
         if not self.web_assets.is_dir():
@@ -119,10 +129,12 @@ class WindowsBuildPlan:
 
     @property
     def bundle_dir(self) -> Path:
+        _reject_linked_path("dist_dir", self.dist_dir)
         return self.dist_dir / _require_windows_bundle_name(self.name)
 
 
 def default_windows_plan(project_root: Path) -> WindowsBuildPlan:
+    _reject_linked_path("project_root", project_root)
     root = project_root.resolve()
     build_root = root / "build" / "m11"
     return WindowsBuildPlan(
