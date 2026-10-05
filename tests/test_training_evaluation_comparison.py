@@ -496,6 +496,38 @@ async def test_comparison_rejects_different_attestor_before_persistence(
 
 
 @pytest.mark.asyncio
+async def test_comparison_result_rejects_terminal_outcome_mutation(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new",
+        repository=InMemoryExperimentRepository(),
+    )
+    assert result.experiment_snapshot.status is ExperimentStatus.PROMOTED
+    object.__setattr__(
+        result.experiment_snapshot,
+        "status",
+        ExperimentStatus.COMPLETED,
+    )
+    object.__setattr__(
+        result.experiment_snapshot,
+        "selected_candidate_id",
+        "models/base",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="canonical Experiment Engine decision",
+    ):
+        result.evidence_payload()
+
+
+@pytest.mark.asyncio
 async def test_comparison_result_rejects_attestor_authority_substitution(
     tmp_path,
 ) -> None:

@@ -415,11 +415,16 @@ class AttestedTrainingComparisonResult:
             != challenger.report.candidate.candidate_id
         ):
             raise ValueError("experiment candidate authority changed")
-        if self.experiment_snapshot.status not in {
-            ExperimentStatus.COMPLETED,
-            ExperimentStatus.PROMOTED,
-        }:
-            raise ValueError("comparison result requires a terminal experiment snapshot")
+        expected_terminal = _run_canonical_terminal(
+            definition=self.experiment_snapshot.definition,
+            observations=self.experiment_snapshot.observations,
+        )
+        _validate_terminal_snapshot(
+            self.experiment_snapshot,
+            definition=self.experiment_snapshot.definition,
+            expected_observations=self.experiment_snapshot.observations,
+            expected_terminal=expected_terminal,
+        )
 
     def revalidated(self) -> AttestedTrainingComparisonResult:
         if type(self) is not AttestedTrainingComparisonResult:
