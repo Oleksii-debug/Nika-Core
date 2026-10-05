@@ -218,6 +218,7 @@ def test_startup_recovery_admission_rejection_demotes_to_manual_resume(
     assert recovery["resume_failed_count"] == 0
     backend.close()
 
+
 def test_startup_recovery_admission_rejection_isolated_per_task(
     tmp_path,
 ) -> None:
