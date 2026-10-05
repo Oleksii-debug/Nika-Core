@@ -330,6 +330,40 @@ async def test_comparison_is_idempotent_after_terminal_persistence(tmp_path) -> 
 
 
 @pytest.mark.asyncio
+async def test_comparison_rejects_terminal_outcome_that_disagrees_with_engine(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    repository = InMemoryExperimentRepository()
+    kwargs = dict(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new",
+        repository=repository,
+    )
+    result = run_attested_old_vs_new_comparison(**kwargs)
+    assert result.experiment_snapshot.status is ExperimentStatus.PROMOTED
+    forged = replace(
+        result.experiment_snapshot,
+        status=ExperimentStatus.COMPLETED,
+        selected_candidate_id="models/base",
+    )
+    repository.save(forged)
+
+    with pytest.raises(
+        ValueError,
+        match="canonical Experiment Engine decision",
+    ):
+        run_attested_old_vs_new_comparison(**kwargs)
+
+    assert repository.get("training-job-1-old-vs-new") == forged
+
+
+@pytest.mark.asyncio
 async def test_comparison_resumes_partial_experiment_without_duplicate_observations(
     tmp_path,
 ) -> None:
@@ -393,12 +427,22 @@ async def test_comparison_rejects_conflicting_persisted_observation(tmp_path) ->
         policy=policy,
         permission_fingerprint="perm:test",
     )
-    expected = benchmark_observations(
-        champion_result.report,
-        definition=definition,
-        evaluation_set=evaluation,
-    )[0]
-    conflicting = replace(expected, value=0.25)
+    observations = (
+        *benchmark_observations(
+            champion_result.report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ),
+        *benchmark_observations(
+            challenger_result.report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ),
+    )
+    conflicting = replace(
+        observations[-1],
+        value=float(observations[-1].value) + 0.25,
+    )
     engine = ExperimentEngine(repository)
     engine.create(definition)
     engine.start(definition.experiment_id)
@@ -415,6 +459,10 @@ async def test_comparison_rejects_conflicting_persisted_observation(tmp_path) ->
             experiment_id=definition.experiment_id,
             repository=repository,
         )
+
+    persisted = repository.get(definition.experiment_id)
+    assert persisted.status is ExperimentStatus.RUNNING
+    assert persisted.observations == (conflicting,)
 
 
 @pytest.mark.asyncio
@@ -455,6 +503,38 @@ async def test_comparison_rejects_different_attestor_before_persistence(
 
     with pytest.raises(KeyError):
         repository.get("training-job-1-old-vs-new")
+
+
+@pytest.mark.asyncio
+async def test_comparison_result_rejects_terminal_outcome_mutation(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new",
+        repository=InMemoryExperimentRepository(),
+    )
+    assert result.experiment_snapshot.status is ExperimentStatus.PROMOTED
+    object.__setattr__(
+        result.experiment_snapshot,
+        "status",
+        ExperimentStatus.COMPLETED,
+    )
+    object.__setattr__(
+        result.experiment_snapshot,
+        "selected_candidate_id",
+        "models/base",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="canonical Experiment Engine decision",
+    ):
+        result.evidence_payload()
 
 
 @pytest.mark.asyncio
@@ -543,6 +623,45 @@ async def test_comparison_rejects_altered_held_out_set_before_persistence(tmp_pa
 
     with pytest.raises(KeyError):
         repository.get("training-job-1-old-vs-new")
+
+
+@pytest.mark.asyncio
+async def test_comparison_rejects_running_terminal_fields_before_writes(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    repository = InMemoryExperimentRepository()
+    config = _config()
+    policy = _policy()
+    definition = build_experiment_definition(
+        experiment_id="training-job-1-old-vs-new",
+        champion=champion_result.report.candidate,
+        challengers=(challenger_result.report.candidate,),
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint="perm:test",
+    )
+    engine = ExperimentEngine(repository)
+    engine.create(definition)
+    running = engine.start(definition.experiment_id)
+    forged = replace(
+        running,
+        selected_candidate_id=challenger_result.report.candidate.candidate_id,
+    )
+    repository.save(forged)
+
+    with pytest.raises(ValueError, match="terminal decision fields"):
+        run_attested_old_vs_new_comparison(
+            champion_result=champion_result,
+            challenger_result=challenger_result,
+            evaluation_set=evaluation,
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="perm:test",
+            experiment_id=definition.experiment_id,
+            repository=repository,
+        )
+
+    assert repository.get(definition.experiment_id) == forged
 
 
 @pytest.mark.asyncio
