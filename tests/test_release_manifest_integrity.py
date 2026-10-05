@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.packaging.release as release_module
 from nika_core.packaging.release import (
     ReleaseFile,
     ReleaseManifest,
@@ -214,6 +215,69 @@ def test_valid_manifest_still_verifies_and_writes(tmp_path: Path) -> None:
     assert verify_release_manifest(bundle, manifest) == ()
     target = write_release_manifest(bundle, manifest)
     assert target.is_file()
+
+
+def test_snapshot_identity_rejects_same_size_path_replacement(tmp_path: Path) -> None:
+    original = tmp_path / "original.bin"
+    replacement = tmp_path / "replacement.bin"
+    original.write_bytes(b"binary")
+    replacement.write_bytes(b"binary")
+
+    opened = original.stat()
+    current = replacement.stat()
+
+    assert not release_module._release_file_snapshot_is_stable(
+        opened,
+        opened,
+        current,
+        opened.st_size,
+    )
+
+
+def test_builder_fails_closed_when_release_file_snapshot_is_unstable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, _ = _bundle(tmp_path)
+    original = release_module._stable_release_file_snapshot
+
+    def unstable(path: Path, *, scan_secrets: bool):
+        if path.name == "NikaCore.exe":
+            return None
+        return original(path, scan_secrets=scan_secrets)
+
+    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
+
+    with pytest.raises(ValueError, match="release file changed while building manifest"):
+        build_release_manifest(
+            bundle,
+            product="NikaCore",
+            version="1.0.0",
+            source_sha=SOURCE_SHA,
+        )
+
+
+def test_verifier_fails_closed_when_release_file_snapshot_is_unstable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, _ = _bundle(tmp_path)
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
+    original = release_module._stable_release_file_snapshot
+
+    def unstable(path: Path, *, scan_secrets: bool):
+        if path.name == "NikaCore.exe":
+            return None
+        return original(path, scan_secrets=scan_secrets)
+
+    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
+
+    assert verify_release_manifest(bundle, manifest) == ("unstable:NikaCore.exe",)
 
 
 def _write_release_zip(bundle: Path, target: Path) -> None:
