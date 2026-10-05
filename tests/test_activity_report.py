@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -57,6 +57,11 @@ class _FailingResourceObserver:
 class _BehavioralDatetime(datetime):
     def utcoffset(self) -> object:
         raise AssertionError("datetime behavior must not run before exact-type admission")
+
+
+class _BehavioralDate(date):
+    def timetuple(self) -> object:
+        raise AssertionError("date behavior must not run before exact-type admission")
 
 
 def _prepared_store(tmp_path) -> SQLiteStore:
@@ -187,6 +192,34 @@ def test_report_omits_invalid_resource_evidence(tmp_path, observed: object) -> N
     assert "Ресурси: поточний знімок не надано." in report.render_text()
 
 
+def test_report_bounds_grouped_audit_categories_and_discloses_truncation(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+    with store.connection() as conn:
+        conn.executemany(
+            "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            [
+                (f"audit.category.{index:02d}", "test", f"entity-{index}", "{}", inside)
+                for index in range(25)
+            ],
+        )
+
+    report = DailyActivityReportService(store).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert len(report.audit_events) == 20
+    assert report.audit_events[0] == ActivityCount("audit.category.00", 1)
+    assert report.audit_events[-1] == ActivityCount("audit.category.19", 1)
+    assert "audit.category.20" not in report.render_text()
+    assert any(
+        "20 категорій" in limitation and "події аудиту" in limitation
+        for limitation in report.limitations
+    )
+
+
 def test_report_contains_resource_observer_failure_without_leaking_details(tmp_path) -> None:
     store = _prepared_store(tmp_path)
     report = DailyActivityReportService(
@@ -245,6 +278,31 @@ def test_report_rejects_behavioral_datetime_before_timezone_hooks(tmp_path) -> N
     with pytest.raises(TypeError, match="start must be a built-in datetime"):
         service.build_window(
             start=start,
+            end=datetime(2026, 9, 13, tzinfo=UTC),
+        )
+
+
+def test_report_rejects_behavioral_date_before_daily_window_construction(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    service = DailyActivityReportService(store)
+
+    with pytest.raises(TypeError, match="day must be a built-in date"):
+        service.build_utc_day(_BehavioralDate(2026, 9, 12))
+
+
+def test_report_rejects_non_text_grouped_durable_label(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            (sqlite3.Binary(b"invalid-label"), "test", "entity-1", "{}", inside),
+        )
+
+    with pytest.raises(ValueError, match="grouped activity label must use SQLite TEXT"):
+        DailyActivityReportService(store).build_window(
+            start=datetime(2026, 9, 12, tzinfo=UTC),
             end=datetime(2026, 9, 13, tzinfo=UTC),
         )
 
