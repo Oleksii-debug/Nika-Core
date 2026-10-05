@@ -16,6 +16,7 @@ from nika_core.model_gateway.contracts import (
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_IDENTITY_BYTES = 512
 
 
 def _canonical_text(value: object, *, name: str) -> str:
@@ -23,6 +24,12 @@ def _canonical_text(value: object, *, name: str) -> str:
         raise ValueError(f"{name} must be non-empty canonical text")
     if any(not character.isprintable() for character in value):
         raise ValueError(f"{name} must not contain control characters")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
+    if len(encoded) > _MAX_IDENTITY_BYTES:
+        raise ValueError(f"{name} exceeds the configured byte limit")
     return value
 
 
@@ -155,6 +162,37 @@ def _request_matches_binding(
         )
 
 
+def _validate_usage(usage: ModelUsage, *, provider_id: str) -> None:
+    if type(usage) is not ModelUsage:
+        raise ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "attested provider response usage is invalid",
+            provider_id=provider_id,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+    values = (usage.input_tokens, usage.output_tokens, usage.total_tokens)
+    if any(value is not None and (type(value) is not int or value < 0) for value in values):
+        raise ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "attested provider response usage is invalid",
+            provider_id=provider_id,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+    input_tokens, output_tokens, total_tokens = values
+    if (
+        total_tokens is not None
+        and input_tokens is not None
+        and output_tokens is not None
+        and total_tokens < input_tokens + output_tokens
+    ):
+        raise ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "attested provider response usage is inconsistent",
+            provider_id=provider_id,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+
+
 def _response_matches_request(
     response: ModelResponse,
     *,
@@ -199,13 +237,10 @@ def _response_matches_request(
             provider_id=binding.challenger_provider_id,
             failure_effect=ModelFailureEffect.UNKNOWN,
         ) from exc
-    if type(response.usage) is not ModelUsage:
-        raise ModelGatewayError(
-            ModelErrorCode.PROVIDER_ERROR,
-            "attested provider response usage is invalid",
-            provider_id=binding.challenger_provider_id,
-            failure_effect=ModelFailureEffect.UNKNOWN,
-        )
+    _validate_usage(
+        response.usage,
+        provider_id=binding.challenger_provider_id,
+    )
 
 
 def _attestation_matches_effect(
