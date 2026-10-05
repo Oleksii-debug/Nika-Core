@@ -21,7 +21,7 @@ class WebApplicationBoundary:
     """Validate, authorize and dispatch an untrusted Web command.
 
     Authentication is intentionally outside this class. The caller must establish a
-    \`\`WebPrincipal\`\` from trusted server-side session/token state and pass it separately
+    ``WebPrincipal`` from trusted server-side session/token state and pass it separately
     from client JSON, so a browser cannot self-assert tenant/user/workspace authority.
     """
 
