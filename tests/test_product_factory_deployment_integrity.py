@@ -552,3 +552,23 @@ def test_provider_rollback_cannot_mutate_internal_previous_release() -> None:
     )
     assert stored_first.intent.release.version == "release-1"
 
+
+class _BehavioralIntentId(str):
+    def __hash__(self) -> int:
+        raise AssertionError("behavioral intent id hash must not execute")
+
+    def strip(self, chars=None):
+        raise AssertionError("behavioral intent id strip must not execute")
+
+
+def test_reconcile_rejects_behavioral_intent_id_before_hash() -> None:
+    provider = FakeProvider(uncertain={"safe-intent"})
+    fabric = DeploymentFabric(provider)
+    record = fabric.deploy(_intent("project-a", "safe-intent", 1))
+    assert record.state is DeploymentState.UNCERTAIN
+
+    with pytest.raises(DeploymentFabricError, match="intent id carrier"):
+        fabric.reconcile(_BehavioralIntentId("safe-intent"))
+
+    assert fabric.snapshot().records[0].state is DeploymentState.UNCERTAIN
+
