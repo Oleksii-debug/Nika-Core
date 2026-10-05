@@ -911,6 +911,31 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
         peft._validate_candidate_manifest_payload(duplicate_adapter_target)
 
 
+def test_candidate_manifest_producer_rejects_reader_invalid_adapter_config(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": ["q_proj", "q_proj", "v_proj"],
+        "task_type": "CAUSAL_LM",
+    }
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._candidate_manifest_json(
+            request=request,
+            config=config,
+            consumed=consumed,
+            adapter_config=adapter_config,
+        )
+
+
 def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
