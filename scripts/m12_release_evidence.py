@@ -6,6 +6,7 @@ import json
 import math
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import zipfile
@@ -99,6 +100,89 @@ def _read_runtime_evidence_json(path: Path, *, label: str) -> object:
         )
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise RuntimeError(f"{label} is invalid or oversized JSON") from exc
+
+
+def _stable_file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _is_regular_non_reparse(value: os.stat_result) -> bool:
+    if not stat.S_ISREG(value.st_mode):
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    attributes = getattr(value, "st_file_attributes", 0)
+    return not (reparse_flag and attributes & reparse_flag)
+
+
+def _snapshot_release_artifact(source: Path, snapshot_dir: Path) -> Path:
+    """Copy one stable regular release artifact into a private verification snapshot."""
+    try:
+        before = source.lstat()
+    except OSError as exc:
+        raise RuntimeError("M12 release artifact is missing or unsafe") from exc
+    if not _is_regular_non_reparse(before):
+        raise RuntimeError("M12 release artifact is missing or unsafe")
+    if not snapshot_dir.is_dir() or snapshot_dir.is_symlink():
+        raise RuntimeError("M12 artifact snapshot directory is unsafe")
+
+    descriptor = -1
+    temporary: Path | None = None
+    target = snapshot_dir / "verified-distributable.zip"
+    try:
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(source, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not _is_regular_non_reparse(opened)
+            or _stable_file_identity(opened) != _stable_file_identity(before)
+        ):
+            raise RuntimeError("M12 release artifact changed before snapshot")
+
+        with os.fdopen(descriptor, "rb", closefd=True) as input_stream:
+            descriptor = -1
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=".m12-artifact-",
+                suffix=".tmp",
+                dir=snapshot_dir,
+                delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                shutil.copyfileobj(input_stream, output)
+                output.flush()
+                os.fsync(output.fileno())
+            after = os.fstat(input_stream.fileno())
+
+        current = source.lstat()
+        if (
+            not _is_regular_non_reparse(current)
+            or _stable_file_identity(after) != _stable_file_identity(opened)
+            or _stable_file_identity(current) != _stable_file_identity(opened)
+        ):
+            raise RuntimeError("M12 release artifact changed during snapshot")
+
+        os.replace(temporary, target)
+        temporary = None
+        snapshotted = target.lstat()
+        if not _is_regular_non_reparse(snapshotted):
+            raise RuntimeError("M12 release artifact snapshot is unsafe")
+    except OSError as exc:
+        raise RuntimeError("M12 release artifact could not be snapshotted safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return target
 
 
 def _powershell() -> str:
@@ -630,24 +714,28 @@ def prove_packaged_installer_lifecycle(artifact: Path) -> None:
 
 def main() -> int:
     args = parser().parse_args()
-    findings = verify_distributable_evidence(
-        args.artifact,
-        args.evidence,
-        source_sha=args.source_sha,
-        artifact_reference=args.artifact_reference,
-        expected_product_version=args.product_version,
-    )
-    if not findings:
-        findings = verify_release_archive(
-            args.artifact,
+    with tempfile.TemporaryDirectory(prefix="nika-m12-artifact-") as temporary:
+        snapshot = _snapshot_release_artifact(args.artifact, Path(temporary))
+        findings = verify_distributable_evidence(
+            snapshot,
+            args.evidence,
             source_sha=args.source_sha,
+            artifact_reference=args.artifact_reference,
             expected_product_version=args.product_version,
         )
-    if findings:
-        raise SystemExit("M12 distributable evidence verification failed: " + ", ".join(findings))
-    if os.name == "nt":
-        prove_packaged_installer_lifecycle(args.artifact)
-        print("M12 packaged Install -> Update -> Rollback lifecycle verified")
+        if not findings:
+            findings = verify_release_archive(
+                snapshot,
+                source_sha=args.source_sha,
+                expected_product_version=args.product_version,
+            )
+        if findings:
+            raise SystemExit(
+                "M12 distributable evidence verification failed: " + ", ".join(findings)
+            )
+        if os.name == "nt":
+            prove_packaged_installer_lifecycle(snapshot)
+            print("M12 packaged Install -> Update -> Rollback lifecycle verified")
     print("M12 distributable evidence verified")
     return 0
 
