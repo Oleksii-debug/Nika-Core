@@ -25,6 +25,12 @@ def _identity(value: str, name: str) -> str:
         raise TypeError(f"{name} must be canonical text")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty without surrounding whitespace")
+    if any(not char.isprintable() for char in value):
+        raise ValueError(f"{name} must not contain control characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
     return value
 
 
@@ -215,10 +221,21 @@ class EvaluationCase:
             raise ValueError("evaluation case requires at least one message")
         if any(type(message) is not ModelMessage for message in self.messages):
             raise TypeError("evaluation messages must use exact ModelMessage values")
+        for message in self.messages:
+            try:
+                message.content.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(
+                    "evaluation message content must be valid UTF-8 text"
+                ) from exc
         if type(self.expected_text) is not str:
             raise TypeError("expected_text must be canonical text")
         if not self.expected_text:
             raise ValueError("expected_text must not be empty")
+        try:
+            self.expected_text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("expected_text must be valid UTF-8 text") from exc
         if type(self.pass_score) not in (int, float):
             raise TypeError("pass_score must be numeric")
         score = float(self.pass_score)
