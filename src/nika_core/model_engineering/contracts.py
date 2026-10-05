@@ -311,6 +311,26 @@ class EvaluationSet:
         return hashlib.sha256(encoded).hexdigest()
 
 
+def validate_model_candidate(candidate: ModelCandidate) -> None:
+    """Revalidate an exact candidate carrier before trusted use."""
+
+    if type(candidate) is not ModelCandidate:
+        raise TypeError("candidate must be an exact ModelCandidate")
+    ModelCandidate.__post_init__(candidate)
+
+
+def validate_evaluation_set(evaluation_set: EvaluationSet) -> None:
+    """Revalidate the complete evaluation graph before execution or promotion."""
+
+    if type(evaluation_set) is not EvaluationSet:
+        raise TypeError("evaluation_set must be an exact EvaluationSet")
+    EvaluationSet.__post_init__(evaluation_set)
+    for case in evaluation_set.cases:
+        EvaluationCase.__post_init__(case)
+        for message in case.messages:
+            ModelMessage.__post_init__(message)
+
+
 @dataclass(frozen=True, slots=True)
 class AcceleratorSnapshot:
     utilization_percent: float | None = None
