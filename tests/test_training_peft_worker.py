@@ -214,6 +214,108 @@ def test_model_directory_manifest_binds_content_and_paths(tmp_path: Path) -> Non
     assert first != second
 
 
+def test_model_directory_manifest_rejects_path_swap_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = model_dir / "config.json"
+    source.write_text('{"a":1}', encoding="utf-8")
+    replacement = model_dir / "replacement.json"
+    replacement.write_text('{"a":2}', encoding="utf-8")
+    real_open = peft.os.open
+    substituted = False
+
+    def substituting_open(
+        path: object,
+        flags: int,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
+        nonlocal substituted
+        if Path(path) == source and not substituted:
+            substituted = True
+            return real_open(replacement, flags, *args, **kwargs)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(peft.os, "open", substituting_open)
+
+    with pytest.raises(ValueError, match="changed before hashing"):
+        peft.model_directory_manifest_sha256(model_dir)
+
+    assert substituted is True
+
+
+def test_model_directory_manifest_rejects_casefold_collision(tmp_path: Path) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    (model_dir / "Config.json").write_text('{"a":1}', encoding="utf-8")
+    (model_dir / "config.json").write_text('{"a":1}', encoding="utf-8")
+
+    with pytest.raises(ValueError, match="case-fold path collisions"):
+        peft.model_directory_manifest_sha256(model_dir)
+
+
+def test_model_directory_snapshot_detaches_live_source(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    job_root.mkdir(parents=True)
+
+    snapshot = peft._model_directory_snapshot(config, job_root)
+    original = (snapshot / "config.json").read_bytes()
+
+    (config.model_dir / "config.json").write_text('{"changed":true}', encoding="utf-8")
+
+    assert snapshot.name == "model-snapshot"
+    assert (snapshot / "config.json").read_bytes() == original
+    assert peft.model_directory_manifest_sha256(snapshot) == config.model_dir_manifest_sha256
+
+
+def test_model_directory_snapshot_rejects_source_replacement_during_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    job_root.mkdir(parents=True)
+    source = config.model_dir / "config.json"
+    original = source.with_name("config.original.json")
+    real_read = peft.os.read
+    replaced = False
+
+    def swapping_read(fd: int, size: int) -> bytes:
+        nonlocal replaced
+        chunk = real_read(fd, size)
+        if chunk and not replaced:
+            replaced = True
+            source.replace(original)
+            source.write_text('{"replacement":true}', encoding="utf-8")
+        return chunk
+
+    monkeypatch.setattr(peft.os, "read", swapping_read)
+
+    with pytest.raises(peft.PeftTrainerError, match="model_dir_source_changed"):
+        peft._model_directory_snapshot(config, job_root)
+
+    assert replaced is True
+
+
+def test_model_directory_snapshot_detects_persisted_tamper(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    job_root.mkdir(parents=True)
+
+    snapshot = peft._model_directory_snapshot(config, job_root)
+    (snapshot / "config.json").write_text('{"tampered":true}', encoding="utf-8")
+
+    with pytest.raises(peft.PeftTrainerError, match="model_dir_snapshot_mismatch"):
+        peft._model_directory_snapshot(config, job_root)
+
+
 def test_candidate_path_is_stable_and_reference_specific(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     first = peft.candidate_artifact_path(root, "models/candidate/a")
@@ -348,6 +450,7 @@ def test_response_tokens_must_survive_sequence_budget() -> None:
 class _FakeTokenizerFactory:
     @staticmethod
     def from_pretrained(*args: object, **kwargs: object) -> _FakeTokenizer:
+        assert Path(str(args[0])).name == "model-snapshot"
         assert kwargs["local_files_only"] is True
         assert kwargs["trust_remote_code"] is False
         assert str(kwargs["gguf_file"]).endswith("base.gguf")
@@ -413,6 +516,7 @@ def _fake_safe_save_file(
 class _FakeModelFactory:
     @staticmethod
     def from_pretrained(*args: object, **kwargs: object) -> _FakeModel:
+        assert Path(str(args[0])).name == "model-snapshot"
         assert kwargs["local_files_only"] is True
         assert kwargs["trust_remote_code"] is False
         assert kwargs["dtype"] == "auto"
@@ -738,7 +842,6 @@ def test_final_candidate_immediate_post_link_substitution_is_detected(
     assert substituted is True
     assert candidate.read_bytes() == b"substituted"
 
-
 def test_final_candidate_uses_unique_reserved_temporary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -765,7 +868,6 @@ def test_final_candidate_uses_unique_reserved_temporary(
         for path in candidate.parent.iterdir()
         if path.name.endswith(".tmp")
     ) == [legacy_temporary.name]
-
 
 def test_final_candidate_cleanup_failure_rolls_back_published_path(
     tmp_path: Path,
@@ -829,7 +931,6 @@ def test_final_candidate_rejects_extra_hardlink_alias(
     assert not candidate.exists()
     assert alias.exists()
 
-
 def test_final_candidate_rejects_checkpoint_change_during_materialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -868,7 +969,6 @@ def test_final_candidate_rejects_checkpoint_change_during_materialization(
         peft._train_one_step(request, config, consumed)
 
     assert not candidate.exists()
-
 
 def test_final_candidate_rejects_checkpoint_change_after_publish(
     tmp_path: Path,
@@ -911,3 +1011,4 @@ def test_final_candidate_rejects_checkpoint_change_after_publish(
 
     assert mutated is True
     assert not candidate.exists()
+
