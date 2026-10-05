@@ -173,6 +173,7 @@ def test_reconcile_exact_rollback_restores_durable_previous_release_authority(tm
     assert second_restart.snapshot().exact_current_releases == snapshot.exact_current_releases
     assert second_restart.snapshot().exact_healthy_staging == snapshot.exact_healthy_staging
 
+
 class _ForgedInspection:
     def __init__(self, release: ReleaseRef) -> None:
         self.release_sha = release.source_sha
