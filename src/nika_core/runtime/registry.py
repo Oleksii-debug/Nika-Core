@@ -130,7 +130,13 @@ class RuntimeRegistry:
         )
         for item in registered:
             self._verified_runtime(item)
-        return tuple(item.descriptor for item in registered)
+        return tuple(
+            RuntimeDescriptor(
+                runtime_id=item.descriptor.runtime_id,
+                capabilities=item.descriptor.capabilities,
+            )
+            for item in registered
+        )
 
     @staticmethod
     def _verified_runtime(registered: _RegisteredRuntime) -> AgentRuntimePort:

@@ -249,6 +249,35 @@ def test_registry_blocks_post_registration_callable_effect_replacement(
         registry.describe()
 
 
+def test_describe_runtime_id_mutation_cannot_rewrite_registry_snapshot() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    registry.register(runtime)
+
+    descriptor = registry.describe()[0]
+    object.__setattr__(descriptor, "runtime_id", "forged-runtime")
+
+    assert registry.get("reference") is runtime
+    assert registry.describe()[0].runtime_id == "reference"
+
+
+def test_describe_capability_mutation_cannot_rewrite_registry_snapshot() -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    registry.register(runtime)
+
+    descriptor = registry.describe()[0]
+    object.__setattr__(
+        descriptor,
+        "capabilities",
+        frozenset({RuntimeCapability.DURABLE_RESUME}),
+    )
+
+    assert registry.select({RuntimeCapability.DETERMINISTIC_NO_LLM}) is runtime
+    with pytest.raises(LookupError, match="No runtime satisfies"):
+        registry.select({RuntimeCapability.DURABLE_RESUME})
+
+
 def test_registry_returns_stable_snapshot_descriptors() -> None:
     registry = RuntimeRegistry()
     first = ReferenceRuntime()
