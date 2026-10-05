@@ -108,25 +108,50 @@ class UIActionBridge:
     def set_binding(self, action_id: str, binding: str | None) -> dict[str, Any]:
         try:
             self._keymap.set_binding(action_id, binding)
-        except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
-        return {"ok": True, "message": "Shortcut saved."}
+        except (KeyError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося зберегти комбінацію: "
+                    "перевірте дію, формат і конфлікти."
+                ),
+            }
+        return {"ok": True, "message": "Комбінацію клавіш збережено."}
 
     def restore_default(self, action_id: str) -> dict[str, Any]:
         try:
             self._keymap.restore_default(action_id)
-        except KeyError as exc:
-            return {"ok": False, "message": str(exc)}
-        return {"ok": True, "message": "Default shortcut restored."}
+        except KeyError:
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося відновити комбінацію за замовчуванням: "
+                    "невідома дія."
+                ),
+            }
+        return {
+            "ok": True,
+            "message": "Комбінацію за замовчуванням відновлено.",
+        }
 
     def export_keymap(self) -> dict[str, Any]:
-        return {"ok": True, "data": self._keymap.export_json(), "message": "Shortcut map exported."}
+        return {
+            "ok": True,
+            "data": self._keymap.export_json(),
+            "message": "Карту клавіш експортовано.",
+        }
 
     def import_keymap(self, data: str) -> dict[str, Any]:
         if not isinstance(data, str):
-            return {"ok": False, "message": "Shortcut map must be JSON text."}
+            return {"ok": False, "message": "Карта клавіш має бути текстом JSON."}
         try:
             self._keymap.import_json(data)
-        except (KeyError, TypeError, ValueError) as exc:
-            return {"ok": False, "message": str(exc)}
-        return {"ok": True, "message": "Shortcut map imported."}
+        except (KeyError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося імпортувати карту клавіш: "
+                    "перевірте JSON, дії та конфлікти."
+                ),
+            }
+        return {"ok": True, "message": "Карту клавіш імпортовано."}
