@@ -13,7 +13,9 @@ This contract reuses the existing SQLite `checkpoints` table and public `Checkpo
 3. Durable `payload_json` and `checksum_sha256` carriers must be real SQLite TEXT values. SQLite affinity does not prevent a corrupt row from storing BLOB or other storage classes, so restart reads reject those carriers before hashing or parsing.
 4. A durable read verifies the SHA-256 checksum before parsing payload bytes.
 5. A durable read fails closed when payload bytes are malformed JSON, recurse beyond the JSON decoder/encoder safety boundary, decode to a non-object value, contain a non-finite number, or do not match the canonical representation produced by the service.
-6. Existing finite object payloads written by the prior service remain byte-compatible because the prior writer already used sorted keys, UTF-8 Unicode, and compact separators.
+6. Checkpoint payloads are bounded before serialization to at most 10,000 JSON value nodes, depth 64, 4,096-bit integers, and 1 MiB canonical UTF-8 JSON. Invalid Unicode fails before SQLite mutation.
+7. Restart reads fetch at most the admitted payload prefix and 65 checksum bytes through SQLite BLOB projections, verify the underlying storage classes and byte lengths, then strictly decode UTF-8/ASCII. Oversized durable payloads or checksums therefore fail closed without returning their full TEXT values to Python.
+8. Existing finite object payloads written by the prior service remain byte-compatible because the prior writer already used sorted keys, UTF-8 Unicode, and compact separators.
 
 ## Threat model
 
@@ -38,6 +40,9 @@ The focused regression family is `tests/test_kernel_checkpoint_durability.py` an
 - corrupt-newest fail-closed behavior with no stale fallback;
 - Unicode/nested finite payload round-trip after reopening the service;
 - BLOB `payload_json` and BLOB checksum storage-class rejection;
-- controlled rejection of excessive JSON nesting on both write and restart read.
+- controlled rejection of excessive JSON nesting on both write and restart read;
+- pre-serialization node/depth/integer/UTF-8 resource admission with exact positive boundary cases;
+- oversized durable payload/checksum rejection through bounded SQLite BLOB projections;
+- durable node-overflow rejection even when checksum and canonical JSON bytes otherwise match.
 
 Repository Core CI and applicable integrated workflows remain authoritative for merge credit. `HUMAN_TESTED` and `NVDA_VERIFIED` are not established by these automated tests.
