@@ -103,6 +103,7 @@
   });
   let actions = [];
   let actionsReady = false;
+  let dispatchOutcomeUnconfirmed = false;
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let teamStateSignature = null;
@@ -144,7 +145,7 @@
       && typeof response === "object"
       && !Array.isArray(response)
       && response.request_id === expectedRequestId
-      && ["completed", "failed", "rejected"].includes(response.status)
+      && ["accepted", "completed", "rejected", "failed"].includes(response.status)
       && typeof response.message === "string"
       && (response.focus_id == null || typeof response.focus_id === "string"),
     );
@@ -152,6 +153,7 @@
 
   async function reportDispatchBridgeFailure(focusTarget) {
     const message = "Немає підтвердження виконання дії. Перечитую поточний стан; не повторюйте дію до перевірки результату.";
+    dispatchOutcomeUnconfirmed = true;
     document.documentElement.dataset.nikaReady = "false";
     announce(message, true);
     appendLog(message);
@@ -161,6 +163,7 @@
     } catch {
       reportStateUnavailable();
     }
+    if (stateReady) dispatchOutcomeUnconfirmed = false;
     document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
     focusTarget?.focus?.();
   }
@@ -624,16 +627,16 @@
       announce("Міст Nika ще не готовий.", true);
       return;
     }
-    if (document.documentElement.dataset.nikaReady !== "true") {
+    if (["settings.autostart.configure", "settings.autostart.refresh"].includes(actionId)) {
+      await dispatchAutostart(actionId, trigger);
+      return;
+    }
+    if (dispatchOutcomeUnconfirmed) {
       announce(
-        "Стан Nika Core не підтверджено. Дочекайтеся успішного перечитування перед новою дією.",
+        "Попередню дію не підтверджено. Дочекайтеся успішного перечитування перед новою дією.",
         true,
       );
       trigger?.focus?.();
-      return;
-    }
-    if (["settings.autostart.configure", "settings.autostart.refresh"].includes(actionId)) {
-      await dispatchAutostart(actionId, trigger);
       return;
     }
     const payload = {};
@@ -752,6 +755,7 @@
     statePollHandle = window.setInterval(async () => {
       if (document.hidden) return;
       const ready = await refreshState();
+      if (ready) dispatchOutcomeUnconfirmed = false;
       document.documentElement.dataset.nikaReady = ready ? "true" : "false";
     }, 1500);
   }
@@ -783,6 +787,7 @@
       document.documentElement.dataset.nikaReady = "false";
       return;
     }
+    dispatchOutcomeUnconfirmed = false;
     document.documentElement.dataset.nikaReady = "true";
     announce("Nika Core готова до роботи.");
     startStatePolling();
