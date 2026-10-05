@@ -46,7 +46,8 @@ A deterministic run receives:
 - a `DeterministicGoal` with required and forbidden facts;
 - uniquely identified `DeterministicAction` definitions with explicit preconditions/effects and
   optional registered Nika tool calls;
-- caller budgets for maximum executed steps, maximum re-plans, total planning wall time and a
+- caller budgets for maximum total executed steps (including recovered
+  `previously_completed_action_ids`), maximum re-plans, total planning wall time and a
   per-observation timeout when authoritative state observation is enabled;
 - optionally, a `WorldStateObserver` for authoritative state drift detection;
 - optionally, ordered `previously_completed_action_ids` recovered from a durable checkpoint;
@@ -163,8 +164,9 @@ The message remains human-readable while `error_code` is stable for programmatic
 For read-only/purely deterministic work, a caller persists the returned `final_state` plus ordered
 `completed_actions` in its normal durable task/checkpoint state. On restart those values are
 passed back as the initial state and `previously_completed_action_ids`. The brain excludes those
-identities before planning and returns the cumulative completed sequence so another checkpoint
-can be written without relying on chat/model memory.
+identities before planning, counts them against the same `max_steps` budget instead of resetting
+the execution allowance after restart, and returns the cumulative completed sequence so another
+checkpoint can be written without relying on chat/model memory.
 
 For non-read-only tool actions, the effect journal is the additional crash-window authority. A
 completed durable effect can reconstruct its declared state transition even when process loss
