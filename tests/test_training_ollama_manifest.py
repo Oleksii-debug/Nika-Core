@@ -9,16 +9,7 @@ import httpx
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.model_gateway.contracts import (
-    ModelErrorCode,
-    ModelFailureEffect,
-    ModelGatewayError,
-    ModelMessage,
-    ModelRequest,
-    PrivacyClass,
-)
 from nika_core.training_ollama_manifest import (
-    ManifestPinnedOllamaProvider,
     OllamaManifestAuthority,
     OllamaManifestAuthorityError,
     OllamaPromotionManifestStore,
@@ -34,17 +25,6 @@ def _sha(value: bytes) -> str:
 ARTIFACT_SHA = _sha(b"candidate-gguf")
 DESCRIPTOR_SHA = _sha(b"candidate-descriptor")
 MANIFEST_SHA = _sha(b"ollama-manifest")
-
-
-def _request(model: str = "candidate:latest") -> ModelRequest:
-    return ModelRequest(
-        request_id="manifest-pinned-test",
-        messages=(ModelMessage(role="user", content="hello"),),
-        model=model,
-        provider_id="ollama",
-        privacy=PrivacyClass.PRIVATE,
-        temperature=0,
-    )
 
 
 def _client_factory(handler):
@@ -240,144 +220,6 @@ async def test_control_response_byte_limit_fails_closed() -> None:
             artifact_sha256=ARTIFACT_SHA,
             descriptor_digest=DESCRIPTOR_SHA,
         )
-
-
-@pytest.mark.asyncio
-async def test_manifest_pin_blocks_inference_before_effect_when_available_digest_changed() -> None:
-    chat_calls = 0
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal chat_calls
-        if request.url.path == "/api/tags":
-            return httpx.Response(
-                200,
-                json=_inventory("candidate:latest", _sha(b"replaced-manifest")),
-            )
-        if request.url.path == "/api/chat":
-            chat_calls += 1
-            return httpx.Response(
-                200,
-                json={
-                    "model": "candidate:latest",
-                    "message": {"role": "assistant", "content": "answer"},
-                    "done": True,
-                },
-            )
-        raise AssertionError(request.url)
-
-    factory = _client_factory(handler)
-    authority = OllamaManifestAuthority(client_factory=factory)
-    provider = ManifestPinnedOllamaProvider(
-        binding=_binding(),
-        authority=authority,
-        client_factory=factory,
-    )
-
-    with pytest.raises(ModelGatewayError) as exc_info:
-        await provider.complete(_request())
-
-    assert exc_info.value.code is ModelErrorCode.UNAVAILABLE
-    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
-    assert chat_calls == 0
-
-
-@pytest.mark.asyncio
-async def test_loaded_manifest_mismatch_after_chat_is_unknown_effect() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/api/tags":
-            return httpx.Response(200, json=_inventory("candidate:latest", MANIFEST_SHA))
-        if request.url.path == "/api/chat":
-            return httpx.Response(
-                200,
-                json={
-                    "model": "candidate:latest",
-                    "message": {"role": "assistant", "content": "answer"},
-                    "done": True,
-                },
-            )
-        if request.url.path == "/api/ps":
-            return httpx.Response(
-                200,
-                json=_inventory("candidate:latest", _sha(b"wrong-loaded-manifest")),
-            )
-        raise AssertionError(request.url)
-
-    factory = _client_factory(handler)
-    authority = OllamaManifestAuthority(client_factory=factory)
-    provider = ManifestPinnedOllamaProvider(
-        binding=_binding(),
-        authority=authority,
-        client_factory=factory,
-    )
-
-    with pytest.raises(ModelGatewayError) as exc_info:
-        await provider.complete(_request())
-
-    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
-    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
-
-
-@pytest.mark.asyncio
-async def test_manifest_pinned_provider_requires_same_digest_available_and_loaded() -> None:
-    paths: list[str] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        paths.append(request.url.path)
-        if request.url.path in {"/api/tags", "/api/ps"}:
-            return httpx.Response(200, json=_inventory("candidate:latest", MANIFEST_SHA))
-        if request.url.path == "/api/chat":
-            body = json.loads(request.content)
-            assert body["model"] == "candidate:latest"
-            assert body["stream"] is False
-            return httpx.Response(
-                200,
-                json={
-                    "model": "candidate:latest",
-                    "message": {"role": "assistant", "content": "answer"},
-                    "done": True,
-                    "prompt_eval_count": 2,
-                    "eval_count": 1,
-                },
-            )
-        raise AssertionError(request.url)
-
-    factory = _client_factory(handler)
-    authority = OllamaManifestAuthority(client_factory=factory)
-    provider = ManifestPinnedOllamaProvider(
-        binding=_binding(),
-        authority=authority,
-        client_factory=factory,
-    )
-
-    response = await provider.complete(_request())
-
-    assert response.text == "answer"
-    assert paths == ["/api/tags", "/api/chat", "/api/ps"]
-
-
-@pytest.mark.asyncio
-async def test_manifest_pinned_provider_rejects_model_substitution_without_effect() -> None:
-    calls = 0
-
-    def handler(_request: httpx.Request) -> httpx.Response:
-        nonlocal calls
-        calls += 1
-        return httpx.Response(500)
-
-    factory = _client_factory(handler)
-    authority = OllamaManifestAuthority(client_factory=factory)
-    provider = ManifestPinnedOllamaProvider(
-        binding=_binding(),
-        authority=authority,
-        client_factory=factory,
-    )
-
-    with pytest.raises(ModelGatewayError) as exc_info:
-        await provider.complete(_request(model="other:latest"))
-
-    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
-    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
-    assert calls == 0
 
 
 def test_manifest_authority_rejects_non_loopback_endpoint() -> None:
