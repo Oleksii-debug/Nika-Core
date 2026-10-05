@@ -315,6 +315,9 @@ class ProductFactoryProgramHost:
                 raise ProductFactoryProgramError(
                     "durable result operation identity requires explicit reconciliation"
                 )
+            if operation.status is IdempotencyStatus.COMPLETED:
+                self._require_completed_result_match(operation, record)
+                continue
             if operation.status not in {
                 IdempotencyStatus.PENDING,
                 IdempotencyStatus.UNCERTAIN,
@@ -357,6 +360,7 @@ class ProductFactoryProgramHost:
                             "durable result operation identity changed during reconciliation"
                         )
                     if current.status is IdempotencyStatus.COMPLETED:
+                        self._require_completed_result_match(current, record)
                         continue
                     if current.status is IdempotencyStatus.PENDING:
                         self._ledger.complete_with_connection(
@@ -449,19 +453,19 @@ class ProductFactoryProgramHost:
         component_id: str,
         reason: str,
     ) -> WorkRecord:
-        request = _request_for_component(coordinator, component_id)
-        lease = self._acquire(request)
         before = coordinator.snapshot()
         prior_record = _record_for_component_snapshot(before, component_id)
+        if prior_record.state is WorkState.RUNNING:
+            raise ProductFactoryProgramError(
+                "running Product Factory work requires recovery-aware blocking"
+            )
+        if prior_record.result is not None:
+            raise ProductFactoryProgramError(
+                "result-bearing Product Factory work cannot be blocked without evidence loss"
+            )
+        request = prior_record.request
+        lease = self._acquire(request)
         try:
-            if prior_record.state is WorkState.RUNNING:
-                raise ProductFactoryProgramError(
-                    "running Product Factory work requires recovery-aware blocking"
-                )
-            if prior_record.result is not None:
-                raise ProductFactoryProgramError(
-                    "result-bearing Product Factory work cannot be blocked without evidence loss"
-                )
             updated = coordinator.block(component_id, reason)
             self._save_fenced(host_task_id, binding, coordinator, lease)
         except Exception:
@@ -1241,6 +1245,7 @@ class ProductFactoryProgramHost:
                 raise ProductFactoryProgramError(
                     "worker operation must be completed before downstream transition"
                 )
+            self._require_completed_result_match(current, prior_record)
             self._require_checkpointed_result(
                 connection,
                 host_task_id=host_task_id,
@@ -1325,6 +1330,20 @@ class ProductFactoryProgramHost:
         if durable_record != record:
             raise ProductFactoryProgramError(
                 "worker result does not match the latest durable Product Factory checkpoint"
+            )
+
+    @staticmethod
+    def _require_completed_result_match(
+        operation: IdempotencyRecord,
+        record: WorkRecord,
+    ) -> None:
+        if operation.status is not IdempotencyStatus.COMPLETED:
+            raise ProductFactoryProgramError(
+                "worker operation is not completed for result comparison"
+            )
+        if operation.result != _result_summary(record):
+            raise ProductFactoryProgramError(
+                "completed worker operation result disagrees with durable checkpoint"
             )
 
     def _require_matching_operation(
