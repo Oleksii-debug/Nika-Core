@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
+from typing import Any
 
+import httpx
 import pytest
 
 from nika_core.builder.repository import AgentDefinitionRepository
@@ -55,6 +58,7 @@ from nika_core.training_model_activation import (
     activate_attested_training_promotion,
     rollback_attested_training_promotion,
 )
+from nika_core.training_ollama_manifest import OllamaManifestAuthority
 from nika_core.v01_model_settings import (
     ModelSetupError,
     V01BoundModelRuntimeFactory,
@@ -73,6 +77,50 @@ _CHAMPION_ATTESTOR_ID = "test-shared-attestor"
 _CHAMPION_ATTESTOR_SHA256 = _sha(b"shared-attestor")
 _CHALLENGER_ATTESTOR_ID = _CHAMPION_ATTESTOR_ID
 _CHALLENGER_ATTESTOR_SHA256 = _CHAMPION_ATTESTOR_SHA256
+_BASE_MANIFEST_SHA256 = _sha(b"base-provider-manifest")
+_CHALLENGER_MANIFEST_SHA256 = _sha(b"challenger-provider-manifest")
+
+
+def _manifest_authority(
+    *,
+    base_url: str = "http://localhost:11434",
+) -> OllamaManifestAuthority:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD" and request.url.path.startswith(
+            "/api/blobs/sha256:"
+        ):
+            return httpx.Response(200)
+        if request.url.path == "/api/create":
+            return httpx.Response(200, json={"status": "success"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "base-model",
+                            "model": "base-model",
+                            "digest": _BASE_MANIFEST_SHA256,
+                        },
+                        {
+                            "name": "challenger-model",
+                            "model": "challenger-model",
+                            "digest": _CHALLENGER_MANIFEST_SHA256,
+                        },
+                    ]
+                },
+            )
+        raise AssertionError(request.url)
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs: Any) -> httpx.AsyncClient:
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    return OllamaManifestAuthority(
+        base_url=base_url,
+        client_factory=client_factory,
+    )
 
 
 def _evaluation_set() -> EvaluationSet:
@@ -845,6 +893,7 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         settings=settings,
         expected_revision=1,
         effect_port=activation_port,
+        manifest_authority=_manifest_authority(),
     )
 
     assert receipt.decision_sha256 == result.evidence_sha256
@@ -861,6 +910,17 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     assert receipt.base_descriptor_digest == training.base_descriptor_digest
     assert receipt.challenger_artifact_sha256 == training.challenger_sha256
     assert receipt.challenger_descriptor_digest == training.descriptor_digest
+    manifest_receipt = settings.promotion_manifest_receipt(result.evidence_sha256)
+    assert manifest_receipt is not None
+    assert (
+        manifest_receipt.base_provider_manifest_sha256
+        == _BASE_MANIFEST_SHA256
+    )
+    assert (
+        manifest_receipt.challenger_provider_manifest_sha256
+        == _CHALLENGER_MANIFEST_SHA256
+    )
+    assert manifest_receipt.binding_sha256 == training.binding_sha256
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
 
@@ -1012,6 +1072,54 @@ async def test_activation_requires_fresh_loaded_model_attestation(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_activation_requires_fresh_ollama_manifest_preparation(tmp_path) -> None:
+    result = await _promoted_comparison(tmp_path)
+    _, settings = _configured_model_settings(tmp_path)
+    port = _ChallengerPort("activation-ok")
+
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="artifact-to-manifest preparation is required",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=1,
+            effect_port=port,
+        )
+
+    assert port.calls == 0
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_activation_rejects_manifest_authority_for_another_endpoint(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    _, settings = _configured_model_settings(tmp_path)
+    port = _ChallengerPort("activation-ok")
+
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="belongs to another endpoint",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=1,
+            effect_port=port,
+            manifest_authority=_manifest_authority(
+                base_url="http://localhost:11435"
+            ),
+        )
+
+    assert port.calls == 0
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
 async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
@@ -1021,14 +1129,21 @@ async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) 
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
+        manifest_authority=_manifest_authority(),
     )
 
     promoted_payload = settings.prepare_task_payload({"command": "promoted task"})
     promoted_pin = promoted_payload["v01_model_artifact_pin"]
     assert promoted_pin["role"] == "challenger"
     assert promoted_pin["route_revision"] == 2
+    assert promoted_pin["schema"] == "nika.v01.model-artifact-pin.v2"
     assert promoted_pin["artifact_sha256"] == training.challenger_sha256
     assert promoted_pin["descriptor_digest"] == training.descriptor_digest
+    assert (
+        promoted_pin["provider_manifest_sha256"]
+        == _CHALLENGER_MANIFEST_SHA256
+    )
+    assert len(promoted_pin["preparation_sha256"]) == 64
     assert "challenger-model" not in repr(promoted_pin)
 
     promoted_task = TaskQueue(store).create(
@@ -1040,6 +1155,21 @@ async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) 
     frozen_pin = settings.artifact_pin_for_task(promoted_task.task_id)
     assert frozen_pin is not None
     assert frozen_pin.artifact_sha256 == training.challenger_sha256
+    assert frozen_pin.provider_manifest_sha256 == _CHALLENGER_MANIFEST_SHA256
+
+    tampered_manifest = dict(promoted_payload)
+    tampered_manifest_pin = dict(promoted_pin)
+    tampered_manifest_pin["provider_manifest_sha256"] = _sha(
+        b"substituted-provider-manifest"
+    )
+    tampered_manifest["v01_model_artifact_pin"] = tampered_manifest_pin
+    manifest_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=tampered_manifest,
+    )
+    with pytest.raises(ModelSetupError, match="Артефакт"):
+        settings.for_task(manifest_task.task_id)
 
     tampered = dict(promoted_payload)
     tampered_pin = dict(promoted_pin)
@@ -1065,8 +1195,11 @@ async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) 
     rollback_pin = rollback_payload["v01_model_artifact_pin"]
     assert rollback_pin["role"] == "rollback"
     assert rollback_pin["route_revision"] == 3
+    assert rollback_pin["schema"] == "nika.v01.model-artifact-pin.v2"
     assert rollback_pin["artifact_sha256"] == training.base_sha256
     assert rollback_pin["descriptor_digest"] == training.base_descriptor_digest
+    assert rollback_pin["provider_manifest_sha256"] == _BASE_MANIFEST_SHA256
+    assert len(rollback_pin["preparation_sha256"]) == 64
 
     rollback_task = TaskQueue(store).create(
         workspace_id="default",
@@ -1105,6 +1238,7 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
+        manifest_authority=_manifest_authority(),
     )
     task = TaskQueue(store).create(
         workspace_id="default",
@@ -1158,6 +1292,7 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
             settings=settings,
             expected_revision=1,
             effect_port=port,
+            manifest_authority=_manifest_authority(),
         )
 
     assert port.calls == 1
@@ -1174,6 +1309,7 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
+        manifest_authority=_manifest_authority(),
     )
     manual = settings.configure(
         {
@@ -1263,6 +1399,10 @@ def test_direct_promotion_retry_keeps_first_committed_activation_proof(tmp_path)
         challenger_descriptor_digest=challenger_descriptor_digest,
         activation_request_sha256=first_request,
         activation_attestation_sha256=first_attestation,
+        base_provider_manifest_sha256=_BASE_MANIFEST_SHA256,
+        base_preparation_sha256=_sha(b"race-base-preparation"),
+        challenger_provider_manifest_sha256=_CHALLENGER_MANIFEST_SHA256,
+        challenger_preparation_sha256=_sha(b"race-challenger-preparation"),
     )
     retried = settings.activate_promoted_local_model(
         expected_revision=1,
@@ -1297,6 +1437,7 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
+        manifest_authority=_manifest_authority(),
     )
     assert original.activated_revision == 2
 
@@ -1331,6 +1472,7 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
             "FROM v01_model_promotions_v3"
         )
         conn.execute("DROP TABLE v01_model_promotions_v3")
+        conn.execute("DROP TABLE v01_model_promotion_manifests")
         _downgrade_task_binding_schema_without_artifact_pin(conn)
         conn.execute(
             "DELETE FROM v01_model_settings_schema WHERE version >= 3"
@@ -1341,6 +1483,7 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
     assert legacy is not None
     assert legacy.activation_request_sha256 is None
     assert legacy.activation_attestation_sha256 is None
+    assert reopened.promotion_manifest_receipt(result.evidence_sha256) is None
     assert reopened.snapshot()["model"] == "challenger-model"
     assert reopened.snapshot()["revision"] == 2
 
@@ -1372,6 +1515,7 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     before = settings.snapshot()
     with store.connection() as conn:
         conn.execute("DROP TABLE v01_model_promotions")
+        conn.execute("DROP TABLE v01_model_promotion_manifests")
         _downgrade_task_binding_schema_without_artifact_pin(conn)
         conn.execute(
             "DELETE FROM v01_model_settings_schema WHERE version >= 2"
@@ -1382,8 +1526,9 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     assert reopened.snapshot() == before
     with store.connection() as conn:
         assert conn.execute(
-            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version IN (2, 3, 4)"
-        ).fetchone()[0] == 3
+            "SELECT COUNT(*) FROM v01_model_settings_schema "
+            "WHERE version IN (2, 3, 4, 5)"
+        ).fetchone()[0] == 4
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type = 'table' AND name = 'v01_model_promotions'"
@@ -1401,6 +1546,7 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
+        manifest_authority=_manifest_authority(),
     )
     with store.connection() as conn:
         conn.execute(
