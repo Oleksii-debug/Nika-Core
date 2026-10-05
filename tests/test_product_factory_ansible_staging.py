@@ -318,6 +318,112 @@ def test_ansible_runner_client_evidence_is_deterministic_for_same_normalized_res
     assert first == second
 
 
+@pytest.mark.parametrize("rc", [False, True, 0.0, "0"])
+def test_ansible_runner_client_rejects_ambiguous_return_code_types(rc: object) -> None:
+    event = {
+        "event": "runner_on_ok",
+        "event_data": {"task": "nika_pf3_result", "res": {"nika_pf3": {"applied": True}}},
+    }
+
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(status="successful", rc=rc, events=[event])
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(StagingAdapterError, match="rc must be an integer or null"):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_ansible_runner_client_rejects_non_text_status() -> None:
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(status=0, rc=0, events=[])
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(StagingAdapterError, match="status must be non-empty text"):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_ansible_runner_client_rejects_multiple_result_contracts() -> None:
+    events = [
+        {
+            "event": "runner_on_ok",
+            "event_data": {
+                "task": "nika_pf3_result",
+                "res": {"nika_pf3": {"applied": True}},
+            },
+        },
+        {
+            "event": "runner_on_ok",
+            "event_data": {
+                "task": "nika_pf3_result",
+                "res": {"nika_pf3": {"applied": False}},
+            },
+        },
+    ]
+
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(status="successful", rc=0, events=events)
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(StagingAdapterError, match="multiple nika_pf3 result contracts"):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_ansible_runner_client_rejects_non_text_contract_keys() -> None:
+    event = {
+        "event": "runner_on_ok",
+        "event_data": {
+            "task": "nika_pf3_result",
+            "res": {"nika_pf3": {1: "unexpected"}},
+        },
+    }
+
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(status="successful", rc=0, events=[event])
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(StagingAdapterError, match="contract keys must be non-empty text"):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_ansible_runner_client_rejects_non_iterable_events() -> None:
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(status="successful", rc=0, events=None)
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(StagingAdapterError, match="events must be iterable"):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
 def test_default_runner_loader_rejects_native_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nika_core.product_factory_ansible_staging.sys.platform", "win32")
     client = AnsibleRunnerClient()
