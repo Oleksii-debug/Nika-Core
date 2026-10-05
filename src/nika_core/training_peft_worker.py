@@ -82,6 +82,7 @@ class TrainerConfig:
     lora_alpha: int
     lora_dropout: float
     lora_target_modules: tuple[str, ...]
+    torch_num_threads: int
     seed: int
 
 
@@ -465,6 +466,7 @@ def build_trainer_environment(
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
     lora_target_modules: tuple[str, ...] = ("q_proj", "v_proj"),
+    torch_num_threads: int = 1,
     seed: int = 1729,
 ) -> dict[str, str]:
     """Build the sterile, execution-plan-bound environment for SubprocessTrainingWorker."""
@@ -497,6 +499,8 @@ def build_trainer_environment(
         raise ValueError("lora_r is outside the supported bound")
     if type(lora_alpha) is not int or not 1 <= lora_alpha <= 65536:
         raise ValueError("lora_alpha is outside the supported bound")
+    if type(torch_num_threads) is not int or not 1 <= torch_num_threads <= 256:
+        raise ValueError("torch_num_threads is outside the supported bound")
     if type(seed) is not int or not 0 <= seed <= (1 << 31) - 1:
         raise ValueError("seed is outside the supported bound")
     if (
@@ -539,6 +543,7 @@ def build_trainer_environment(
         "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256": model_manifest,
         "NIKA_TRAINER_OUTPUT_ROOT": os.fspath(output),
         "NIKA_TRAINER_SEED": str(seed),
+        "NIKA_TRAINER_TORCH_NUM_THREADS": str(torch_num_threads),
     }
     for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
         environment[environment_key] = runtime_versions[distribution]
@@ -858,6 +863,12 @@ def _read_config() -> TrainerConfig:
         lora_alpha=_env_int("NIKA_TRAINER_LORA_ALPHA", 16, 1, 65536),
         lora_dropout=_env_float("NIKA_TRAINER_LORA_DROPOUT", 0.05, 0.0, 1.0),
         lora_target_modules=target_modules,
+        torch_num_threads=_env_int(
+            "NIKA_TRAINER_TORCH_NUM_THREADS",
+            1,
+            1,
+            256,
+        ),
         seed=_env_int("NIKA_TRAINER_SEED", 1729, 0, (1 << 31) - 1),
     )
 
@@ -1200,6 +1211,11 @@ def _train_one_step(
         set_seed,
     ) = _import_training_stack()
 
+    try:
+        torch.set_num_threads(config.torch_num_threads)
+        torch.use_deterministic_algorithms(True)
+    except (RuntimeError, TypeError, ValueError):
+        _fail("training_determinism_unavailable")
     set_seed(config.seed)
     job_root = _job_root(config, request)
     try:
@@ -1278,6 +1294,11 @@ def _train_one_step(
             report_to=[],
             seed=config.seed,
             data_seed=config.seed,
+            use_cpu=True,
+            full_determinism=True,
+            dataloader_num_workers=0,
+            dataloader_pin_memory=False,
+            optim="adamw_torch",
             remove_unused_columns=False,
         )
         trainer = Trainer(
