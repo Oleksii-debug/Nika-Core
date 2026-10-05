@@ -78,6 +78,12 @@ class ResearchRepository:
             raise ValueError("locator must not contain control characters")
         now = _now()
         with self._store.connection() as conn:
+            http_collision = conn.execute(
+                "SELECT 1 FROM research_http_sources WHERE source_id=?",
+                (source.source_id,),
+            ).fetchone()
+            if http_collision is not None:
+                raise ValueError("source_id belongs to another workspace or source kind")
             result = conn.execute(
                 """INSERT INTO research_sources(
                     source_id, workspace_id, kind, locator, created_at, updated_at
