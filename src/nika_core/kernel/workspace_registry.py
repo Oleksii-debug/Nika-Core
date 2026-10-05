@@ -27,6 +27,16 @@ def _stored_text(value: object, field_name: str, *, allow_blank: bool) -> str:
         raise ValueError(f"invalid persisted workspace {field_name}") from exc
 
 
+def _reject_corrupt_identity_alias(conn: object, workspace_id: str) -> None:
+    row = conn.execute(
+        "SELECT 1 FROM workspaces WHERE typeof(workspace_id) != 'text' "
+        "AND CAST(workspace_id AS TEXT) = ? LIMIT 1",
+        (workspace_id,),
+    ).fetchone()
+    if row is not None:
+        raise ValueError("invalid persisted workspace workspace_id")
+
+
 @dataclass(frozen=True, slots=True)
 class WorkspaceDefinition:
     workspace_id: str
@@ -64,6 +74,11 @@ class WorkspaceRegistry:
     @property
     def count(self) -> int:
         with self._store.connection() as conn:
+            corrupt = conn.execute(
+                "SELECT 1 FROM workspaces WHERE typeof(workspace_id) != 'text' LIMIT 1"
+            ).fetchone()
+            if corrupt is not None:
+                raise ValueError("invalid persisted workspace workspace_id")
             row = conn.execute(
                 "SELECT COUNT(DISTINCT workspace_id) AS count FROM workspaces"
             ).fetchone()
@@ -76,6 +91,7 @@ class WorkspaceRegistry:
             # A deferred transaction would still allow multiple writers to observe the same
             # previous version before one of them commits.
             conn.execute("BEGIN IMMEDIATE")
+            _reject_corrupt_identity_alias(conn, canonical.workspace_id)
             row = conn.execute(
                 "SELECT workspace_id, name, version, description, enabled "
                 "FROM workspaces WHERE workspace_id = ? "
@@ -136,6 +152,7 @@ class WorkspaceRegistry:
 
     def _latest(self, workspace_id: str) -> WorkspaceDefinition | None:
         with self._store.connection() as conn:
+            _reject_corrupt_identity_alias(conn, workspace_id)
             row = conn.execute(
                 "SELECT workspace_id, name, version, description, enabled FROM workspaces "
                 "WHERE workspace_id = ? ORDER BY version DESC LIMIT 1",
