@@ -531,3 +531,84 @@ def test_denied_resume_reconsent_leaves_task_paused_and_old_expired_binding(
     assert queue.get(record.task_id).state is TaskState.PAUSED
     with store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 1
+
+
+def test_binding_schema_rejects_text_version_storage(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            ("1", NOW.isoformat()),
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="schema shape is invalid"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_requires_canonical_foreign_keys(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, NOW.isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY, permission_id TEXT NOT NULL UNIQUE, "
+            "updated_at TEXT NOT NULL)"
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="foreign keys are invalid"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_requires_unique_permission_identity(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, NOW.isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+            "permission_id TEXT NOT NULL "
+            "REFERENCES standing_permissions(permission_id), "
+            "updated_at TEXT NOT NULL)"
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="permission_id must be unique"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
