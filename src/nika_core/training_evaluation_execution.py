@@ -385,11 +385,91 @@ def _snapshot_evaluation_set(evaluation_set: EvaluationSet) -> EvaluationSet:
         raise ValueError("evaluation set must be canonical") from exc
 
 
+class _AttestationCapturePort:
+    """Capture detached receipt data without replacing #1298 validation authority."""
+
+    def __init__(self, effect_port: LoadedModelAttestedCompletionPort) -> None:
+        self._effect_port = effect_port
+        self._pending: dict[
+            str,
+            tuple[str | None, LoadedModelArtifactAttestation | None],
+        ] = {}
+        self._receipts: list[AttestedCaseReceipt] = []
+
+    @property
+    def receipts(self) -> tuple[AttestedCaseReceipt, ...]:
+        return tuple(receipt.revalidated() for receipt in self._receipts)
+
+    async def complete_attested(
+        self,
+        request: ModelRequest,
+        *,
+        binding: TrainingEvaluationBinding,
+    ) -> AttestedModelCompletionResult:
+        request_id = request.request_id if type(request.request_id) is str else ""
+        case_id = request.metadata.get("evaluation_case_id")
+        result = await self._effect_port.complete_attested(
+            request,
+            binding=binding,
+        )
+        snapshot: LoadedModelArtifactAttestation | None = None
+        if type(result) is AttestedModelCompletionResult:
+            try:
+                snapshot = result.attestation.revalidated()
+            except (AttributeError, TypeError, ValueError):
+                snapshot = None
+        self._pending[request_id] = (
+            case_id if type(case_id) is str else None,
+            snapshot,
+        )
+        return result
+
+    def discard(self, request_id: str) -> None:
+        self._pending.pop(request_id, None)
+
+    def commit(self, request: ModelRequest) -> None:
+        request_id = request.request_id
+        pending = self._pending.pop(request_id, None)
+        if pending is None:
+            raise ValueError("attested effect did not yield capture evidence")
+        case_id, attestation = pending
+        expected_case_id = request.metadata.get("evaluation_case_id")
+        if (
+            type(expected_case_id) is not str
+            or case_id != expected_case_id
+            or attestation is None
+        ):
+            raise ValueError("attested effect capture evidence is inconsistent")
+        receipt = AttestedCaseReceipt(
+            case_id=expected_case_id,
+            request_id=request_id,
+            binding_sha256=attestation.binding_sha256,
+            provider_id=attestation.provider_id,
+            model_id=attestation.model_id,
+            artifact_sha256=attestation.artifact_sha256,
+            descriptor_digest=attestation.descriptor_digest,
+            attestor_id=attestation.attestor_id,
+            attestor_sha256=attestation.attestor_sha256,
+        )
+        if any(
+            existing.case_id == receipt.case_id
+            or existing.request_id == receipt.request_id
+            for existing in self._receipts
+        ):
+            raise ValueError("duplicate attested benchmark receipt")
+        self._receipts.append(receipt)
+
+
 class _AbortOnAttestedGatewayFailure:
     """Keep ModelBenchmarkRunner from flattening proof failures into case evidence."""
 
-    def __init__(self, gateway: ModelCompletionPort) -> None:
+    def __init__(
+        self,
+        gateway: ModelCompletionPort,
+        capture: _AttestationCapturePort,
+    ) -> None:
         self._gateway = gateway
+        self._capture = capture
         self._provider_calls_started = 0
 
     @property
@@ -399,13 +479,23 @@ class _AbortOnAttestedGatewayFailure:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self._provider_calls_started += 1
         try:
-            return await self._gateway.complete(request)
+            response = await self._gateway.complete(request)
         except ModelGatewayError as exc:
+            self._capture.discard(request.request_id)
             raise TrainingEvaluationExecutionError(
                 "attested challenger benchmark provider effect failed",
                 code=exc.code,
                 failure_effect=exc.failure_effect,
             ) from None
+        try:
+            self._capture.commit(request)
+        except (AttributeError, TypeError, ValueError):
+            raise TrainingEvaluationExecutionError(
+                "attested challenger benchmark receipt capture failed",
+                code=ModelErrorCode.PROVIDER_ERROR,
+                failure_effect=ModelFailureEffect.UNKNOWN,
+            ) from None
+        return response
 
 
 def _validate_preflight(
@@ -484,13 +574,17 @@ async def run_attested_challenger_benchmark(
         temperature=temperature,
         scorer_id=effective_scorer_id,
     )
+    capture = _AttestationCapturePort(effect_port)
     attested_gateway = AttestedTrainingCandidateGateway(
-        effect_port,
+        capture,
         binding=canonical_binding,
         expected_attestor_id=expected_attestor_id,
         expected_attestor_sha256=expected_attestor_sha256,
     )
-    fail_fast_gateway = _AbortOnAttestedGatewayFailure(attested_gateway)
+    fail_fast_gateway = _AbortOnAttestedGatewayFailure(
+        attested_gateway,
+        capture,
+    )
     runner = ModelBenchmarkRunner(
         fail_fast_gateway,
         scorer=scorer,
@@ -526,6 +620,7 @@ async def run_attested_challenger_benchmark(
         return _build_result(
             binding=canonical_binding,
             report=report,
+            case_receipts=capture.receipts,
             attestor_id=expected_attestor_id,
             attestor_sha256=expected_attestor_sha256,
         )
@@ -537,6 +632,7 @@ async def run_attested_challenger_benchmark(
 
 
 __all__ = [
+    "AttestedCaseReceipt",
     "AttestedChallengerBenchmarkResult",
     "TrainingEvaluationExecutionError",
     "run_attested_challenger_benchmark",
