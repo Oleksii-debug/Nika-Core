@@ -947,3 +947,41 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
+
+
+
+def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "foundry-promotion.db")
+    store.initialize()
+    settings = V01ModelSettings(store)
+    configured = settings.configure(
+        {
+            "route_kind": "foundry_local",
+            "provider_id": "foundry-local",
+            "model": "base-model",
+            "base_url": None,
+            "credential_ref": None,
+            "private_data_allowed": False,
+            "timeout_seconds": 30,
+            "revision": 0,
+        }
+    )
+    assert configured.status == "completed"
+
+    with pytest.raises(ModelSetupError, match="Ollama"):
+        settings.activate_promoted_local_model(
+            expected_revision=1,
+            base_provider_id="foundry-local",
+            base_model_id="base-model",
+            challenger_provider_id="foundry-local",
+            challenger_model_id="challenger-model",
+            decision_sha256=_sha(b"foundry-decision"),
+            binding_sha256=_sha(b"foundry-binding"),
+            base_artifact_sha256=_sha(b"foundry-base-artifact"),
+            base_descriptor_digest=_sha(b"foundry-base-descriptor"),
+            challenger_artifact_sha256=_sha(b"foundry-challenger-artifact"),
+            challenger_descriptor_digest=_sha(b"foundry-challenger-descriptor"),
+        )
+
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
