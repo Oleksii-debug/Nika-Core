@@ -201,11 +201,26 @@ def test_principal_rejects_noncanonical_identity_text() -> None:
             workspace_id="workspace-1",
             session_id="session-1",
         )
-    with pytest.raises(ValueError, match="whitespace|identifier characters"):
+    principal = WebPrincipal(
+        tenant_id="орендар 1",
+        user_id="користувач@example.test",
+        workspace_id="Мій робочий простір",
+        session_id="сесія/1",
+    )
+    assert principal.workspace_id == "Мій робочий простір"
+
+    with pytest.raises(ValueError, match="surrounding whitespace"):
         WebPrincipal(
-            tenant_id="tenant 1",
+            tenant_id=" tenant-1",
             user_id="user-1",
             workspace_id="workspace-1",
+            session_id="session-1",
+        )
+    with pytest.raises(ValueError, match="control text"):
+        WebPrincipal(
+            tenant_id="tenant-1",
+            user_id="user-1",
+            workspace_id="workspace\n1",
             session_id="session-1",
         )
 
