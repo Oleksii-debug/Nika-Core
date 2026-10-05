@@ -4,7 +4,6 @@ import hashlib
 from urllib.parse import unquote_plus
 
 _MAX_EVIDENCE_REFERENCE_BYTES = 512
-_MAX_SENSITIVE_DECODE_ROUNDS = 4
 _SENSITIVE_REFERENCE_MARKERS = (
     "credential://",
     "credential-use:",
@@ -29,14 +28,16 @@ def _strict_utf8(reference: str) -> bytes:
         raise ValueError("evidence reference must be valid UTF-8 text") from exc
 
 
-def _sensitivity_view(reference: str) -> str:
+def _is_sensitive(reference: str) -> bool:
     normalized = reference.strip().casefold()
-    for _ in range(_MAX_SENSITIVE_DECODE_ROUNDS):
+    for _ in range(_MAX_EVIDENCE_REFERENCE_BYTES):
+        if any(marker in normalized for marker in _SENSITIVE_REFERENCE_MARKERS):
+            return True
         decoded = unquote_plus(normalized).casefold()
         if decoded == normalized:
-            break
+            return False
         normalized = decoded
-    return normalized
+    return True
 
 
 def safe_evidence_reference(reference: str) -> str:
@@ -53,9 +54,7 @@ def safe_evidence_reference(reference: str) -> str:
         digest = hashlib.sha256(encoded).hexdigest()
         return f"evidence-sha256:{digest}"
 
-    normalized = _sensitivity_view(reference)
-    sensitive = any(marker in normalized for marker in _SENSITIVE_REFERENCE_MARKERS)
-    if sensitive:
+    if _is_sensitive(reference):
         digest = hashlib.sha256(encoded).hexdigest()
         return f"evidence-sha256:{digest}"
     return reference
