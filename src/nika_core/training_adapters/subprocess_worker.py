@@ -91,6 +91,7 @@ _SECRET_ENVIRONMENT_TOKENS = frozenset(
 )
 _TRAINING_RUNTIME_MANIFEST_DOMAIN = b"nika-peft-runtime-manifest-v1\x00"
 _TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY = "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"
+_TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY = "NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"
 _TRAINING_RUNTIME_METADATA_PREFIX = "nika.training.runtime."
 _TRAINING_RUNTIME_BINDINGS = (
     ("torch", "NIKA_TRAINER_TORCH_VERSION"),
@@ -508,6 +509,21 @@ def _bind_registry_training_runtime_environment(
     registry_runtime = _training_runtime_environment_from_registry_metadata(
         trainer_record.metadata
     )
+    caller_deployment_artifact_id = caller_environment.get(
+        _TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY
+    )
+    if caller_deployment_artifact_id is not None:
+        caller_deployment_artifact_id = _validate_sha256(
+            caller_deployment_artifact_id,
+            name="trainer_deployment_artifact_id",
+        )
+        if not hmac.compare_digest(
+            caller_deployment_artifact_id,
+            trainer_record.artifact_id,
+        ):
+            raise ValueError(
+                "trainer deployment artifact identity does not match Registry authority"
+            )
     if caller_runtime and not registry_runtime:
         raise ValueError(
             "training runtime environment requires Registry-authoritative trainer metadata"
@@ -520,6 +536,13 @@ def _bind_registry_training_runtime_environment(
     if effective_runtime:
         for key in effective_runtime:
             caller_environment[key] = effective_runtime[key]
+        caller_environment[_TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY] = (
+            trainer_record.artifact_id
+        )
+    elif caller_deployment_artifact_id is not None:
+        raise ValueError(
+            "trainer deployment artifact identity requires Registry runtime authority"
+        )
     return _validate_environment(caller_environment)
 
 
