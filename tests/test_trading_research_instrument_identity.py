@@ -151,6 +151,25 @@ def test_portfolio_keeps_equal_native_ids_on_distinct_venues_separate() -> None:
     assert snapshot.net_exposure == Decimal(300)
 
 
+def test_portfolio_ledger_rejects_cross_run_account_mixing() -> None:
+    ledger = PortfolioLedger(Decimal(1000))
+    ledger.apply_fill(_fill(_INSTRUMENT_A, "fill-a", run_id="run-a"))
+
+    with pytest.raises(TradingResearchError, match="cannot mix workspace/run"):
+        ledger.apply_fill(_fill(_INSTRUMENT_A, "fill-b", run_id="run-b"))
+
+
+def test_portfolio_ledger_exact_retry_is_idempotent_but_conflict_fails() -> None:
+    ledger = PortfolioLedger(Decimal(1000))
+    fill = _fill(_INSTRUMENT_A, "fill-a")
+    ledger.apply_fill(fill)
+    ledger.apply_fill(fill)
+    assert ledger.cash == Decimal(900)
+
+    with pytest.raises(TradingResearchError, match="conflicting in-memory fill identity"):
+        ledger.apply_fill(replace(fill, price=Decimal(101)))
+
+
 def test_symbol_only_mark_cannot_cross_the_full_identity_boundary() -> None:
     ledger = PortfolioLedger(Decimal(1000))
     ledger.apply_fill(_fill(_INSTRUMENT_A, "fill-a"))
