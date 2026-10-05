@@ -86,6 +86,33 @@ def test_broken_linked_release_output_ancestor_is_rejected(tmp_path: Path) -> No
         _ = linked.bundle_dir
 
 
+def test_existing_linked_bundle_leaf_is_rejected_before_packaging(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+    plan.dist_dir.mkdir()
+    external = tmp_path / "external-bundle"
+    external.mkdir()
+    _link_directory(plan.dist_dir / plan.name, external)
+
+    with pytest.raises(ValueError, match="bundle_dir path traverses"):
+        plan.pyinstaller_args()
+
+
+def test_bundle_leaf_is_revalidated_after_build_boundary(tmp_path: Path) -> None:
+    plan = _plan(tmp_path)
+
+    # Initial source/output authority is valid while the eventual bundle leaf
+    # does not exist.
+    assert "--onedir" in plan.pyinstaller_args()
+
+    plan.dist_dir.mkdir()
+    external = tmp_path / "post-build-external"
+    external.mkdir()
+    _link_directory(plan.dist_dir / plan.name, external)
+
+    with pytest.raises(ValueError, match="bundle_dir path traverses"):
+        _ = plan.bundle_dir
+
+
 def test_explicit_linked_project_root_is_rejected_before_resolve(tmp_path: Path) -> None:
     real_root = tmp_path / "real-root"
     real_root.mkdir()
