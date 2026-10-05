@@ -417,7 +417,13 @@ class OllamaModelHealthProbe:
                 object_pairs_hook=object_without_duplicates,
                 parse_constant=reject_nonstandard_constant,
             )
-        except (UnicodeDecodeError, ValueError, TypeError, RecursionError):
+        except (
+            UnicodeDecodeError,
+            ValueError,
+            TypeError,
+            RecursionError,
+            httpx.StreamError,
+        ):
             return None
 
     @staticmethod
