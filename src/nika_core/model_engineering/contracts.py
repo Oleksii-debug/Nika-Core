@@ -514,6 +514,12 @@ def validate_candidate_benchmark_report(report: CandidateBenchmarkReport) -> Non
 
     if type(report) is not CandidateBenchmarkReport:
         raise TypeError("report must be an exact CandidateBenchmarkReport")
+    if type(report.candidate) is not ModelCandidate:
+        raise TypeError("candidate must be an exact ModelCandidate")
+    if type(report.run) is not BenchmarkRunEvidence:
+        raise TypeError("run must be an exact BenchmarkRunEvidence")
+    ModelCandidate.__post_init__(report.candidate)
+    BenchmarkRunEvidence.__post_init__(report.run)
     CandidateBenchmarkReport.__post_init__(report)
     results = report.case_results
     if type(results) is not tuple:
