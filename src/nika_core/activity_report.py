@@ -129,7 +129,7 @@ class DailyActivityReportService:
             )
             task_transitions, task_transitions_truncated = _grouped_counts(
                 conn.execute(
-                    "SELECT new_state AS value, COUNT(*) AS count "
+                    "SELECT CAST(new_state AS BLOB) AS value_bytes, COUNT(*) AS count "
                     "FROM task_events WHERE created_at >= ? AND created_at < ? "
                     "GROUP BY new_state ORDER BY new_state LIMIT ?",
                     (start_iso, end_iso, _GROUPED_QUERY_LIMIT),
@@ -137,7 +137,7 @@ class DailyActivityReportService:
             )
             audit_events, audit_events_truncated = _grouped_counts(
                 conn.execute(
-                    "SELECT event_type AS value, COUNT(*) AS count "
+                    "SELECT CAST(event_type AS BLOB) AS value_bytes, COUNT(*) AS count "
                     "FROM audit_events WHERE created_at >= ? AND created_at < ? "
                     "GROUP BY event_type ORDER BY event_type LIMIT ?",
                     (start_iso, end_iso, _GROUPED_QUERY_LIMIT),
@@ -145,7 +145,7 @@ class DailyActivityReportService:
             )
             experiment_transitions, experiment_transitions_truncated = _grouped_counts(
                 conn.execute(
-                    "SELECT new_status AS value, COUNT(*) AS count "
+                    "SELECT CAST(new_status AS BLOB) AS value_bytes, COUNT(*) AS count "
                     "FROM experiment_events WHERE created_at >= ? AND created_at < ? "
                     "GROUP BY new_status ORDER BY new_status LIMIT ?",
                     (start_iso, end_iso, _GROUPED_QUERY_LIMIT),
@@ -316,10 +316,16 @@ def _grouped_counts(
     selected = rows[:_MAX_GROUPED_ACTIVITY_ITEMS]
     counts: list[ActivityCount] = []
     for row in selected:
-        value = row["value"]  # type: ignore[index]
+        value_bytes = row["value_bytes"]  # type: ignore[index]
         count = row["count"]  # type: ignore[index]
-        if type(value) is not str:
-            raise ValueError("grouped activity label must use SQLite TEXT storage")
+        if type(value_bytes) is not bytes:
+            raise ValueError("grouped activity label must use bounded SQLite BLOB projection")
+        if len(value_bytes) > _MAX_GROUP_LABEL_UTF8_BYTES:
+            raise ValueError("grouped activity label exceeds safe UTF-8 storage bound")
+        try:
+            value = value_bytes.decode("utf-8")
+        except UnicodeDecodeError:
+            raise ValueError("grouped activity label must contain valid UTF-8") from None
         if type(count) is not int or not 1 <= count <= _MAX_SIGNED_64:
             raise ValueError("grouped activity count must be a positive SQLite integer")
         counts.append(ActivityCount(value=value, count=count))

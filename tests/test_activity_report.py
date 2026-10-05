@@ -627,3 +627,70 @@ def test_report_accepts_group_label_at_utf8_byte_bound(tmp_path) -> None:
     assert boundary_label not in rendered
     assert "..." in rendered
 
+@pytest.mark.parametrize("section", ["task", "audit", "experiment"])
+def test_report_rejects_invalid_utf8_group_label_without_raw_sqlite_decode(
+    tmp_path, section: str
+) -> None:
+    store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+
+    with store.connection() as conn:
+        if section == "task":
+            conn.execute(
+                "INSERT INTO tasks(task_id, workspace_id, agent_id, state, payload_json, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "task-invalid-utf8-label",
+                    "workspace-1",
+                    "agent-1",
+                    "RUNNING",
+                    "{}",
+                    inside,
+                    inside,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO task_events(task_id, previous_state, new_state, created_at) "
+                "VALUES (?, ?, CAST(X'80' AS TEXT), ?)",
+                ("task-invalid-utf8-label", "QUEUED", inside),
+            )
+        elif section == "audit":
+            conn.execute(
+                "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+                "created_at) VALUES (CAST(X'80' AS TEXT), ?, ?, ?, ?)",
+                ("test", "entity-invalid-utf8-label", "{}", inside),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO experiments(experiment_id, definition_json, status, "
+                "selected_candidate_id, previous_champion_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "experiment-invalid-utf8-label",
+                    "{}",
+                    "running",
+                    None,
+                    None,
+                    inside,
+                    inside,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO experiment_events(experiment_id, previous_status, new_status, "
+                "selected_candidate_id, previous_champion_id, created_at) "
+                "VALUES (?, ?, CAST(X'80' AS TEXT), ?, ?, ?)",
+                (
+                    "experiment-invalid-utf8-label",
+                    "queued",
+                    None,
+                    None,
+                    inside,
+                ),
+            )
+
+    with pytest.raises(ValueError, match="must contain valid UTF-8"):
+        DailyActivityReportService(store).build_window(
+            start=datetime(2026, 9, 12, tzinfo=UTC),
+            end=datetime(2026, 9, 13, tzinfo=UTC),
+        )
+
