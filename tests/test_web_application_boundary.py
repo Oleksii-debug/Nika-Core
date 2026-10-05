@@ -78,6 +78,17 @@ def test_command_rejects_mapping_and_text_subclasses_before_behavior() -> None:
         WebCommand.from_untrusted(bad)
 
 
+
+def test_action_id_uses_canonical_dotted_registry_semantics() -> None:
+    value = _command()
+    value["action_id"] = "Custom.Action"
+    assert WebCommand.from_untrusted(value).action_id == "Custom.Action"
+
+    value["action_id"] = "not-dotted"
+    with pytest.raises(ValueError, match="dotted"):
+        WebCommand.from_untrusted(value)
+
+
 def test_payload_is_detached_from_client_mutation() -> None:
     payload = {"nested": {"value": 1}}
     command = WebCommand.from_untrusted(_command(payload))
