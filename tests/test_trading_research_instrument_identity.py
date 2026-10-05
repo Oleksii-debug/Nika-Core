@@ -541,6 +541,39 @@ def test_conflicting_retry_of_same_scoped_fill_id_fails_closed(tmp_path) -> None
     assert repo.commit_fill_and_account(fill, snapshot) is False
 
 
+def test_unversioned_legacy_rows_fail_closed(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE trading_research_fills ("
+            "fill_id TEXT PRIMARY KEY, approval_id TEXT NOT NULL, intent_id TEXT NOT NULL, "
+            "instrument_id TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, "
+            "price TEXT NOT NULL, fee TEXT NOT NULL, filled_at TEXT NOT NULL, "
+            "filled_slice INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO trading_research_fills("
+            "fill_id, approval_id, intent_id, instrument_id, side, quantity, price, fee, "
+            "filled_at, filled_slice) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "orphan-fill",
+                "approval",
+                "intent",
+                "SAME",
+                "buy",
+                "1",
+                "100",
+                "0",
+                _NOW.isoformat(),
+                1,
+            ),
+        )
+
+    with pytest.raises(RuntimeError, match="unversioned trading state"):
+        TradingStateRepository(store).initialize()
+
+
 def test_nonempty_v1_state_fails_closed_instead_of_inventing_venue(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
