@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 
 PACKAGED_PF11_EVIDENCE_KEYS = frozenset(
     {
@@ -54,6 +55,13 @@ def _require_text(payload: dict[str, object], field: str) -> str:
         raise PackagedPF11EvidenceError(
             f"packaged PF11 proof returned invalid {field}"
         ) from exc
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    ):
+        raise PackagedPF11EvidenceError(
+            f"packaged PF11 proof returned invalid {field}"
+        )
     return value
 
 
