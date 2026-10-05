@@ -5,6 +5,8 @@ from dataclasses import replace
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -117,7 +119,7 @@ def _approve(
 
 def test_integrity_report_survives_restart_and_checks_versions(tmp_path) -> None:
     store, projects, project = _repos(tmp_path)
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     _approve(projects, decisions, row_version=project.row_version)
     linked = decisions.link_requirement(
         "p1",
@@ -184,7 +186,7 @@ def test_integrity_rejects_requirement_reference_to_missing_research(tmp_path) -
 def test_integrity_rejects_nonapproved_requirement_decision(tmp_path) -> None:
     store, projects, project = _repos(tmp_path)
     _handoff(projects)
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     decisions.record(
         "p1",
         ProductDecision(
@@ -214,7 +216,7 @@ def test_integrity_rejects_nonapproved_requirement_decision(tmp_path) -> None:
 
 def test_integrity_rejects_decision_evidence_drift(tmp_path) -> None:
     store, projects, project = _repos(tmp_path)
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     _approve(projects, decisions, row_version=project.row_version)
     with store.connection() as conn:
         conn.execute(
