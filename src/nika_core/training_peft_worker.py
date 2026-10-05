@@ -635,7 +635,6 @@ def build_training_runtime_metadata(versions: dict[str, str]) -> dict[str, str]:
     }
 
 
-
 def _installed_training_runtime_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
     for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS:
