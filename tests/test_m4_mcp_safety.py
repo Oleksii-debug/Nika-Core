@@ -635,7 +635,7 @@ def test_mcp_rejects_excessive_argument_evidence_before_transport(
 
 
 def test_mcp_argument_budget_accepts_exact_byte_and_node_boundaries() -> None:
-    overhead = len('{"value":""}'.encode("utf-8"))
+    overhead = len(b'{"value":""}')
     value = "x" * (1_048_576 - overhead)
     payload = {"value": value}
     assert len(
