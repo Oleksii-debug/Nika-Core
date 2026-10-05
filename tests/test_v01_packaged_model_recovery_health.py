@@ -249,6 +249,7 @@ def test_unready_ollama_route_blocks_recovery_before_runtime_resume(tmp_path) ->
     assert health.probe.calls == 1
     assert queue.get(task_id).state is TaskState.RUNNING
 
+
 def _remove_model_reference(store: SQLiteStore, task_id: str) -> None:
     with store.connection() as conn:
         row = conn.execute(
