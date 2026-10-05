@@ -53,6 +53,20 @@ class _StateObservationFailure:
     message: str
 
 
+def _require_run_identity(value: object, *, name: str) -> None:
+    """Reject ambiguous or non-UTF-8 task/call identities before durable effects."""
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text") from exc
+    if len(encoded) > 512:
+        raise ValueError(f"{name} must be canonical bounded UTF-8 text")
+
+
 def _positive_finite_seconds(value: object, *, name: str) -> float:
     """Normalize time budgets before scheduling any work."""
     if type(value) not in (int, float):
@@ -98,8 +112,7 @@ class DeterministicBrain:
         planning_timeout_seconds: float = 30.0,
         observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
-        if not run_id.strip():
-            raise ValueError("run_id must not be empty")
+        _require_run_identity(run_id, name="run_id")
         if type(max_steps) is not int or max_steps <= 0:
             raise ValueError("max_steps must be a positive integer")
         if type(max_replans) is not int or max_replans < 0:
@@ -110,8 +123,10 @@ class DeterministicBrain:
         observation_timeout_seconds = _positive_finite_seconds(
             observation_timeout_seconds, name="observation_timeout_seconds"
         )
-        if self._effect_journal is not None and (task_id is None or not task_id.strip()):
-            raise ValueError("task_id is required when effect_journal is configured")
+        if self._effect_journal is not None:
+            if task_id is None:
+                raise ValueError("task_id is required when effect_journal is configured")
+            _require_run_identity(task_id, name="task_id")
 
         # Kept for source compatibility only. A planner-selected action ID is not approval
         # evidence and must never turn into ToolCall.approved=True.

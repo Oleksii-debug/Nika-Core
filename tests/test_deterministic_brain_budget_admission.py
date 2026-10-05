@@ -98,3 +98,35 @@ def test_finite_integral_and_float_timeouts_preserve_success(seconds: float) -> 
     )
     assert result.ok
     assert planner.calls == 1
+
+
+@pytest.mark.parametrize("field", ["run_id", "task_id"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None, True, 0, "", " ", " leading", "trailing ", "line\\nbreak",
+        "\\x00", "\\ud800", "x" * 513, "😀" * 200,
+    ],
+)
+def test_invalid_identity_never_reaches_planner_or_journal(
+    field: str, value: object
+) -> None:
+    planner = CountingPlanner()
+    journal = GuardedJournal()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor(), effect_journal=journal)
+    arguments: dict[str, object] = {"task_id": "task-1"}
+    arguments[field] = value
+    with pytest.raises(ValueError, match=field):
+        _run(brain, **arguments)
+    assert planner.calls == 0
+    assert journal.inspected is False
+
+
+def test_canonical_ukrainian_identity_and_512_byte_id_remain_accepted() -> None:
+    planner = CountingPlanner()
+    journal = GuardedJournal()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor(), effect_journal=journal)
+    result = _run(brain, run_id="Ніка: робота 1", task_id="x" * 512)
+    assert result.ok
+    assert planner.calls == 1
+    assert journal.inspected is True
