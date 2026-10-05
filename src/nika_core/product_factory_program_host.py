@@ -133,8 +133,13 @@ class ProductFactoryProgramHost:
         max_parallel: int = 4,
         max_count: int = 32,
     ) -> tuple[ProgramWorkOutcome, ...]:
-        if max_parallel <= 0 or max_count <= 0:
-            raise ValueError("max_parallel and max_count must be positive")
+        if (
+            type(max_parallel) is not int
+            or max_parallel <= 0
+            or type(max_count) is not int
+            or max_count <= 0
+        ):
+            raise ValueError("max_parallel and max_count must be positive integers")
 
         ready = coordinator.ready_requests()[:max_count]
         if not ready:
@@ -171,8 +176,8 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         max_parallel: int = 4,
     ) -> tuple[ProgramWorkOutcome, ...]:
-        if max_parallel <= 0:
-            raise ValueError("max_parallel must be positive")
+        if type(max_parallel) is not int or max_parallel <= 0:
+            raise ValueError("max_parallel must be a positive integer")
 
         self.reconcile_durable_results(host_task_id=host_task_id, coordinator=coordinator)
         running = tuple(
