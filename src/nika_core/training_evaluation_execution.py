@@ -100,6 +100,7 @@ class AttestedCaseReceipt:
     descriptor_digest: str
     attestor_id: str
     attestor_sha256: str
+    provider_manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         for value, name in (
@@ -117,6 +118,11 @@ class AttestedCaseReceipt:
             (self.attestor_sha256, "attestor_sha256"),
         ):
             _sha256(value, name=name)
+        if self.provider_manifest_sha256 is not None:
+            _sha256(
+                self.provider_manifest_sha256,
+                name="provider_manifest_sha256",
+            )
 
     def revalidated(self) -> AttestedCaseReceipt:
         if type(self) is not AttestedCaseReceipt:
@@ -132,13 +138,14 @@ class AttestedCaseReceipt:
                 descriptor_digest=self.descriptor_digest,
                 attestor_id=self.attestor_id,
                 attestor_sha256=self.attestor_sha256,
+                provider_manifest_sha256=self.provider_manifest_sha256,
             )
         except AttributeError as exc:
             raise ValueError("attested case receipt fields are incomplete") from exc
 
     def evidence_payload(self) -> dict[str, str]:
         receipt = self.revalidated()
-        return {
+        payload = {
             "schema": "nika-attested-challenger-case-v1",
             "case_id": receipt.case_id,
             "request_id": receipt.request_id,
@@ -150,6 +157,9 @@ class AttestedCaseReceipt:
             "attestor_id": receipt.attestor_id,
             "attestor_sha256": receipt.attestor_sha256,
         }
+        if receipt.provider_manifest_sha256 is not None:
+            payload["provider_manifest_sha256"] = receipt.provider_manifest_sha256
+        return payload
 
     @property
     def evidence_sha256(self) -> str:
@@ -241,6 +251,8 @@ class AttestedChallengerBenchmarkResult:
             raise ValueError("attested receipt case order does not match benchmark report")
         if len({receipt.request_id for receipt in receipts}) != len(receipts):
             raise ValueError("attested receipt request identities must be unique")
+        if len({receipt.provider_manifest_sha256 for receipt in receipts}) > 1:
+            raise ValueError("provider manifest changed across attested benchmark")
         for receipt in receipts:
             expected_request_id = _expected_benchmark_request_id(
                 run_id=self.report.run.run_id,
@@ -283,9 +295,16 @@ class AttestedChallengerBenchmarkResult:
         except AttributeError as exc:
             raise ValueError("attested benchmark result fields are incomplete") from exc
 
+    @property
+    def provider_manifest_sha256(self) -> str | None:
+        result = self.revalidated()
+        if not result.case_receipts:
+            return None
+        return result.case_receipts[0].provider_manifest_sha256
+
     def evidence_payload(self) -> dict[str, object]:
         result = self.revalidated()
-        return {
+        payload: dict[str, object] = {
             "schema": "nika-attested-challenger-benchmark-v1",
             "job_id": result.binding.job_id,
             "binding_sha256": result.binding.binding_sha256,
@@ -306,6 +325,14 @@ class AttestedChallengerBenchmarkResult:
                 for receipt in result.case_receipts
             ],
         }
+        provider_manifest_sha256 = (
+            result.case_receipts[0].provider_manifest_sha256
+            if result.case_receipts
+            else None
+        )
+        if provider_manifest_sha256 is not None:
+            payload["provider_manifest_sha256"] = provider_manifest_sha256
+        return payload
 
     @property
     def evidence_sha256(self) -> str:
@@ -449,6 +476,7 @@ class _AttestationCapturePort:
             descriptor_digest=attestation.descriptor_digest,
             attestor_id=attestation.attestor_id,
             attestor_sha256=attestation.attestor_sha256,
+            provider_manifest_sha256=attestation.provider_manifest_sha256,
         )
         if any(
             existing.case_id == receipt.case_id
