@@ -531,17 +531,6 @@ def test_restore_rejects_impossible_deployment_state_pairs_without_mutation(
 
 
 @pytest.mark.parametrize(
-    ("state", "deployment_state"),
-    [
-        (OperationState.PENDING, None),
-        (OperationState.RECOVERY_REQUIRED, None),
-        (OperationState.RECONCILE_REQUIRED, DeploymentState.UNCERTAIN),
-        (OperationState.SUCCEEDED, DeploymentState.HEALTHY),
-        (OperationState.REJECTED, DeploymentState.REJECTED),
-        (OperationState.ROLLED_BACK, DeploymentState.ROLLED_BACK),
-    ],
-)
-@pytest.mark.parametrize(
     ("state", "attempt"),
     [
         (OperationState.PENDING, 1),
@@ -583,6 +572,17 @@ def test_restore_rejects_impossible_state_attempt_pairs_without_mutation(
     assert target.snapshot() == before
 
 
+@pytest.mark.parametrize(
+    ("state", "deployment_state"),
+    [
+        (OperationState.PENDING, None),
+        (OperationState.RECOVERY_REQUIRED, None),
+        (OperationState.RECONCILE_REQUIRED, DeploymentState.UNCERTAIN),
+        (OperationState.SUCCEEDED, DeploymentState.HEALTHY),
+        (OperationState.REJECTED, DeploymentState.REJECTED),
+        (OperationState.ROLLED_BACK, DeploymentState.ROLLED_BACK),
+    ],
+)
 def test_restore_preserves_valid_deployment_state_pairs(
     state: OperationState,
     deployment_state: DeploymentState | None,
