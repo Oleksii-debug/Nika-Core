@@ -3,14 +3,19 @@ from __future__ import annotations
 import hashlib
 import os
 import sys
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from nika_core.artifacts import ArtifactRegistry
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
 from nika_core.research.blobs import ContentAddressedBlobStore
+from nika_core.resources.contracts import ResourceSnapshot
+from nika_core.resources.manager import ResourceManager
 from nika_core.training_adapters import SubprocessTrainingWorker, TrainingSubprocessError
 from nika_core.training_materials import (
     ResolvedTrainingPackage,
@@ -21,6 +26,8 @@ from nika_core.training_materials import (
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
+    TrainingRunState,
+    TrainingRuntime,
     TrainingStepResult,
     TrainingWorkerFailureEffect,
 )
@@ -135,6 +142,44 @@ def _step(
     )
 
 
+@dataclass
+class _Observer:
+    cpu_percent: float = 5.0
+    memory_percent: float = 10.0
+
+    def snapshot(self) -> ResourceSnapshot:
+        return ResourceSnapshot(
+            cpu_percent=self.cpu_percent,
+            memory_percent=self.memory_percent,
+            available_memory_bytes=8_000_000_000,
+        )
+
+
+def _store_with_task(path: Path) -> SQLiteStore:
+    store = SQLiteStore(path)
+    store.initialize()
+    now = datetime.now(UTC).isoformat()
+    with store.connection() as conn:
+        conn.execute(
+            """INSERT INTO tasks(
+                task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            ("task-1", "training", "training-runtime", "pending", "{}", now, now),
+        )
+    return store
+
+
+def _runtime(
+    store: SQLiteStore,
+    training_materials: ResolvedTrainingPackage,
+) -> TrainingRuntime:
+    return TrainingRuntime(
+        resources=ResourceManager(store, _Observer()),
+        checkpoints=CheckpointService(store),
+        training_materials=training_materials,
+    )
+
+
 def _spec(*, max_steps: int = 3) -> TrainingJobSpec:
     package = _frozen_package()
     return TrainingJobSpec(
@@ -178,6 +223,59 @@ sys.stdout.write(json.dumps(response))
     second = _step(worker, tmp_path, spec=_spec(), step_index=1, resume_state=first.resume_state)
     assert second.completed is True
     assert second.candidate_sha256 == "b" * 64
+
+
+def test_runtime_executes_real_subprocess_and_persists_completion(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+step = request["step_index"]
+response = {
+    "candidate_sha256": "b" * 64 if step == 1 else None,
+    "completed": step == 1,
+    "protocol_version": 2,
+    "resume_state": {"next_step": step + 1},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    worker = _worker(tmp_path, (sys.executable, str(trainer)))
+    store = _store_with_task(tmp_path / "runtime.sqlite3")
+    materials = _resolved_materials(tmp_path)
+
+    result = _runtime(store, materials).run(_spec(), worker)
+
+    assert result.state is TrainingRunState.COMPLETED
+    assert result.next_step == 2
+    assert result.candidate_sha256 == "b" * 64
+    checkpoint = CheckpointService(store).latest("task-1")
+    assert checkpoint is not None
+    assert checkpoint.stage.endswith("/completed")
+    assert checkpoint.payload["training_material_sha256"] == _spec().training_material_sha256
+
+
+def test_runtime_maps_started_subprocess_failure_to_reconciliation(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import sys
+sys.stderr.write("DO-NOT-LEAK")
+raise SystemExit(7)
+""".strip(),
+    )
+    worker = _worker(tmp_path, (sys.executable, str(trainer)))
+    store = _store_with_task(tmp_path / "runtime-failure.sqlite3")
+
+    result = _runtime(store, _resolved_materials(tmp_path)).run(_spec(), worker)
+
+    assert result.state is TrainingRunState.RECONCILE_REQUIRED
+    assert result.next_step == 0
+    assert result.reason == "worker_unknown:subprocess_nonzero_exit"
 
 
 def test_request_binds_exact_material_paths_and_digests(tmp_path: Path) -> None:
