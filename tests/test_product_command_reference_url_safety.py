@@ -143,7 +143,6 @@ def test_public_evidence_preserves_printable_ukrainian_unicode() -> None:
     assert safe_evidence_reference(reference) == reference
 
 
-
 class _BehavioralEvidenceText(str):
     def encode(self, *args, **kwargs):
         raise AssertionError("behavioral encode must not execute")
