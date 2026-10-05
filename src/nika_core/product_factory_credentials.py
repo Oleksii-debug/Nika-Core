@@ -283,6 +283,9 @@ class CredentialBroker:
             raise CredentialBrokerError("credential lease generation is revoked or superseded")
         if scope not in lease.scopes:
             raise CredentialBrokerError("credential lease does not authorize requested scope")
+        if not self.store.contains(secret.secret_ref, lease.generation):
+            self._leases.pop(lease_id, None)
+            raise CredentialBrokerError("credential lease material is unavailable")
         evidence = CredentialUseEvidence(
             self._new_event_id(),
             lease.lease_id,
