@@ -628,6 +628,33 @@ def test_report_publication_cleans_temporary_file_on_publish_failure(
     assert not tuple(tmp_path.glob(".evidence.json.*.tmp"))
 
 
+def test_report_publication_removes_destination_if_parse_back_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _build_report(tmp_path)
+    output = (tmp_path / "evidence.json").resolve()
+
+    def reject_parse_back(
+        cls: type[PhysicalTrainingPilotReport],
+        raw: str,
+    ) -> PhysicalTrainingPilotReport:
+        del cls, raw
+        raise PhysicalTrainingPilotError("simulated parse-back failure")
+
+    monkeypatch.setattr(
+        PhysicalTrainingPilotReport,
+        "from_json",
+        classmethod(reject_parse_back),
+    )
+
+    with pytest.raises(PhysicalTrainingPilotError, match="parse-back failure"):
+        write_physical_training_pilot_report(report, output)
+
+    assert not output.exists()
+    assert not tuple(tmp_path.glob(".evidence.json.*.tmp"))
+
+
 def test_report_publication_requires_absolute_canonical_parent(tmp_path: Path) -> None:
     report = _build_report(tmp_path)
 
