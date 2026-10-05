@@ -349,7 +349,17 @@ class AttestedTrainingCandidateGateway:
             name="expected_attestor_sha256",
         )
 
-    async def complete(self, request: ModelRequest) -> ModelResponse:
+    async def complete_attested(
+        self,
+        request: ModelRequest,
+    ) -> AttestedModelCompletionResult:
+        """Return the validated response plus same-effect loaded-model proof.
+
+        ModelBenchmarkRunner continues to consume complete() below. Activation
+        can use this method when it needs the validated attestation as durable
+        promotion evidence rather than discarding it after validation.
+        """
+
         authority_request = _snapshot_request(request)
         authority_binding = self._binding.revalidated()
         _request_matches_binding(authority_request, authority_binding)
@@ -400,4 +410,7 @@ class AttestedTrainingCandidateGateway:
             request=authority_request,
             binding=authority_binding,
         )
-        return result.response
+        return result
+
+    async def complete(self, request: ModelRequest) -> ModelResponse:
+        return (await self.complete_attested(request)).response
