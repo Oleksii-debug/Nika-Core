@@ -183,9 +183,12 @@ def test_download_arriving_during_save_is_joined_before_success(browser: Any, ch
     first.on_save = lambda: browser.context.emit_download(second)
     browser.state.on_click = lambda: browser.context.emit_download(first)
     _invoke(browser)
-    with pytest.raises(UnsupportedInteractionError, match="download could not be saved"):
+    with pytest.raises(UnsupportedInteractionError, match="destination already exists"):
         _verify(browser, changed=changed)
-    assert (first.attempts, second.attempts) == (1, 1)
+    assert (first.attempts, second.attempts) == (1, 0)
+    assert browser.session.downloads.saved == [
+        browser.session.downloads.approved_root / "доказ.txt"
+    ]
 
 
 def test_continuous_download_stream_fails_closed_at_a_finite_limit(browser: Any) -> None:
