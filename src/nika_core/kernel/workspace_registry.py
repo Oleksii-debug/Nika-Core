@@ -64,12 +64,16 @@ class WorkspaceRegistry:
             # previous version before one of them commits.
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT version, enabled FROM workspaces WHERE workspace_id = ? "
+                "SELECT workspace_id, name, version, description, enabled "
+                "FROM workspaces WHERE workspace_id = ? "
                 "ORDER BY version DESC LIMIT 1",
                 (definition.workspace_id,),
             ).fetchone()
             if row is not None:
+                _stored_text(row["workspace_id"], "workspace_id", allow_blank=False)
+                _stored_text(row["name"], "name", allow_blank=False)
                 current_version = _stored_version(row["version"])
+                _stored_text(row["description"], "description", allow_blank=True)
                 _stored_enabled(row["enabled"])
                 if definition.version <= current_version:
                     raise ValueError("workspace version must increase")
