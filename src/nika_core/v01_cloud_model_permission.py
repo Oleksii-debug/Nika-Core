@@ -286,6 +286,7 @@ class V01CloudModelPermissionService:
                     updated_at=instant,
                     expected_previous_id=expected_previous_id,
                     expected_record=record,
+                    expected_selection=selection,
                     connection=conn,
                 )
         except Exception:  # noqa: BLE001 - durable permission boundary fails closed
@@ -611,6 +612,7 @@ class V01CloudModelPermissionService:
         updated_at: datetime,
         expected_previous_id: str | None,
         expected_record: TaskRecord,
+        expected_selection: ModelSelection,
         connection: _SQLExecutor | None = None,
     ) -> None:
         if connection is None:
@@ -622,6 +624,7 @@ class V01CloudModelPermissionService:
                     updated_at=updated_at,
                     expected_previous_id=expected_previous_id,
                     expected_record=expected_record,
+                    expected_selection=expected_selection,
                     connection=conn,
                 )
             return
@@ -631,6 +634,36 @@ class V01CloudModelPermissionService:
             ensure_ascii=False,
             sort_keys=True,
         )
+        expected_selection_json = expected_selection.canonical_json()
+        expected_selection_id = hashlib.sha256(
+            expected_selection_json.encode("utf-8")
+        ).hexdigest()
+        if expected_record.payload.get(_TASK_SELECTION_FIELD) != expected_selection_id:
+            raise RuntimeError("cloud model task selection changed concurrently")
+
+        selected_row = connection.execute(
+            "SELECT selection_json, typeof(selection_json) AS selection_json_type "
+            "FROM v01_model_selections WHERE selection_id = ?",
+            (expected_selection_id,),
+        ).fetchone()
+        bound_selection_row = connection.execute(
+            "SELECT selection_id, typeof(selection_id) AS selection_id_type, "
+            "selection_json, typeof(selection_json) AS selection_json_type "
+            "FROM v01_task_model_bindings WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        if (
+            selected_row is None
+            or selected_row["selection_json_type"] != "text"
+            or selected_row["selection_json"] != expected_selection_json
+            or bound_selection_row is None
+            or bound_selection_row["selection_id_type"] != "text"
+            or bound_selection_row["selection_id"] != expected_selection_id
+            or bound_selection_row["selection_json_type"] != "text"
+            or bound_selection_row["selection_json"] != expected_selection_json
+        ):
+            raise RuntimeError("cloud model selection changed concurrently")
+
         task_row = connection.execute(
             "SELECT workspace_id, agent_id, state, payload_json FROM tasks "
             "WHERE task_id = ?",

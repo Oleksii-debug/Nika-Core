@@ -1318,3 +1318,63 @@ def test_recovered_running_task_reconsents_when_live_grant_scope_mismatches(
     assert service._bound_permission_id(record.task_id, strict=True) != wrong_permission_id
     assert service.execution_authority_for_task(record.task_id) is not None
     _authorize(service, record.task_id)
+
+
+def test_recovered_reconsent_rolls_back_if_model_binding_changes_during_prompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        if len(prompts) == 2:
+            with store.connection() as conn:
+                row = conn.execute(
+                    "SELECT selection_json FROM v01_task_model_bindings WHERE task_id = ?",
+                    (record.task_id,),
+                ).fetchone()
+                assert row is not None
+                body = row["selection_json"]
+                assert '"model":"api-model"' in body
+                conn.execute(
+                    "UPDATE v01_task_model_bindings SET selection_json = ? "
+                    "WHERE task_id = ?",
+                    (
+                        body.replace(
+                            '"model":"api-model"',
+                            '"model":"shadow-model","model":"api-model"',
+                            1,
+                        ),
+                        record.task_id,
+                    ),
+                )
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    first_id = service._bound_permission_id(record.task_id, strict=True)
+    assert first_id is not None
+    instant[0] = NOW + timedelta(hours=25)
+
+    with pytest.raises(CloudModelPermissionDenied, match="зберегти дозвіл"):
+        service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 2
+    assert service._bound_permission_id(record.task_id, strict=True) == first_id
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0] == 1
