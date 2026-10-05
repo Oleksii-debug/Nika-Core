@@ -15,6 +15,7 @@ from nika_core.product_factory_deployment import (
     ResourceEnvelope,
 )
 from nika_core.product_factory_deployment_execution import (
+    DeploymentExecutionError,
     DeploymentExecutionRecord,
     DeploymentExecutionSnapshot,
     DeploymentExecutionSpec,
@@ -70,13 +71,22 @@ class _FakeExecutions:
         self.complete_calls: list[str] = []
 
     def submit(self, spec: DeploymentExecutionSpec) -> DeploymentExecutionRecord:
-        return self.records.setdefault(
-            spec.operation_id,
-            DeploymentExecutionRecord(spec, OperationState.PENDING),
-        )
+        existing = self.records.get(spec.operation_id)
+        if existing is not None:
+            if existing.spec != spec:
+                raise DeploymentExecutionError(
+                    "operation id conflicts with prior deployment payload"
+                )
+            return existing
+        record = DeploymentExecutionRecord(spec, OperationState.PENDING)
+        self.records[spec.operation_id] = record
+        return record
 
     def get(self, operation_id: str) -> DeploymentExecutionRecord:
-        return self.records[operation_id]
+        record = self.records.get(operation_id)
+        if record is None:
+            raise DeploymentExecutionError("unknown deployment execution operation")
+        return record
 
     def prepare(self, operation_id: str) -> DeploymentExecutionRecord:
         record = self.records[operation_id]
@@ -514,3 +524,26 @@ def test_submit_revalidates_postconstruction_wave_before_publication() -> None:
 
     assert executions.records == {}
     assert coordinator.snapshot().plans == ()
+
+
+def test_submit_preflights_late_execution_conflict_before_any_publication() -> None:
+    coordinator, executions = _coordinator()
+    incumbent = _execution("worker")
+    conflicting = replace(
+        incumbent.execution,
+        credential_scope="different-scope",
+    )
+    executions.submit(conflicting)
+    before = coordinator.snapshot()
+
+    plan = DeploymentWavePlan(
+        "plan",
+        "social",
+        (_execution("api"), incumbent),
+    )
+
+    with pytest.raises(DeploymentWaveError, match="conflicts with prior payload"):
+        coordinator.submit(plan)
+
+    assert coordinator.snapshot() == before
+    assert "operation-api" not in executions.records
