@@ -77,6 +77,7 @@ class TrainingEvaluationBinding:
     challenger_sha256: str
     candidate_artifact_ref: str
     frozen_package_sha256: str
+    scale_authorization_sha256: str
     execution_plan_sha256: str
     evaluation_set_sha256: str
     base_descriptor_digest: str
@@ -102,6 +103,7 @@ class TrainingEvaluationBinding:
             (self.base_sha256, "base_sha256"),
             (self.challenger_sha256, "challenger_sha256"),
             (self.frozen_package_sha256, "frozen_package_sha256"),
+            (self.scale_authorization_sha256, "scale_authorization_sha256"),
             (self.execution_plan_sha256, "execution_plan_sha256"),
             (self.evaluation_set_sha256, "evaluation_set_sha256"),
             (self.base_descriptor_digest, "base_descriptor_digest"),
@@ -137,6 +139,7 @@ class TrainingEvaluationBinding:
                 challenger_sha256=self.challenger_sha256,
                 candidate_artifact_ref=self.candidate_artifact_ref,
                 frozen_package_sha256=self.frozen_package_sha256,
+                scale_authorization_sha256=self.scale_authorization_sha256,
                 execution_plan_sha256=self.execution_plan_sha256,
                 evaluation_set_sha256=self.evaluation_set_sha256,
                 base_descriptor_digest=self.base_descriptor_digest,
@@ -151,7 +154,7 @@ class TrainingEvaluationBinding:
 
     def _binding_sha256_unchecked(self) -> str:
         payload = {
-            "schema": "nika-training-evaluation-binding-v3",
+            "schema": "nika-training-evaluation-binding-v4",
             "job_id": self.job_id,
             "base_candidate_id": self.base_candidate_id,
             "base_provider_id": self.base_provider_id,
@@ -163,6 +166,7 @@ class TrainingEvaluationBinding:
             "challenger_sha256": self.challenger_sha256,
             "candidate_artifact_ref": self.candidate_artifact_ref,
             "frozen_package_sha256": self.frozen_package_sha256,
+            "scale_authorization_sha256": self.scale_authorization_sha256,
             "execution_plan_sha256": self.execution_plan_sha256,
             "evaluation_set_sha256": self.evaluation_set_sha256,
             "base_descriptor_digest": self.base_descriptor_digest,
@@ -604,6 +608,7 @@ def bind_training_result_for_evaluation(
         challenger_sha256=candidate_sha256,
         candidate_artifact_ref=canonical_spec.candidate_artifact_ref,
         frozen_package_sha256=canonical_spec.frozen_package_sha256,
+        scale_authorization_sha256=canonical_spec.scale_authorization_sha256,
         execution_plan_sha256=execution_plan_sha256,
         evaluation_set_sha256=canonical_package.evaluation_set_sha256,
         base_descriptor_digest=canonical_base_descriptor.descriptor_digest,
