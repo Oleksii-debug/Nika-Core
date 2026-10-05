@@ -27,7 +27,7 @@ class _BehavioralText(str):
 
     def __bool__(self) -> bool:
         self.events.append("bool")
-        return super().__bool__()
+        return len(self) != 0
 
     def __format__(self, format_spec: str) -> str:
         self.events.append("format")
