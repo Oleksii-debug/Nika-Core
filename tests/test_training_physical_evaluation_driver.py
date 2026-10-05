@@ -362,6 +362,88 @@ def test_report_writer_cleans_temporary_after_publish_failure(
     assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
 
 
+def test_report_writer_preserves_foreign_destination_on_publish_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "physical-old-new-evaluation-report.json"
+
+    def substitute_destination(source: Path, destination: Path) -> None:
+        assert source.parent == tmp_path
+        assert destination == path
+        destination.write_text("foreign-evidence\n", encoding="utf-8")
+        raise FileExistsError("synthetic destination race")
+
+    monkeypatch.setattr(driver.os, "link", substitute_destination)
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="already exists",
+    ):
+        driver._write_report(path, {"schema": "test"})
+
+    assert path.read_text(encoding="utf-8") == "foreign-evidence\n"
+    assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
+
+
+def test_report_writer_rolls_back_only_owned_file_after_final_byte_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "physical-old-new-evaluation-report.json"
+    real_reader = driver._read_regular_file
+
+    def drifted_reader(
+        target: Path,
+        *,
+        name: str,
+        max_bytes: int,
+    ) -> bytes:
+        if name == "published physical evaluation report":
+            return b'{"schema":"other"}\n'
+        return real_reader(target, name=name, max_bytes=max_bytes)
+
+    monkeypatch.setattr(driver, "_read_regular_file", drifted_reader)
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="bytes changed",
+    ):
+        driver._write_report(path, {"schema": "test"})
+
+    assert not path.exists()
+    assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
+
+
+def test_report_writer_rejects_linked_parent_before_publication(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    linked = tmp_path / "linked"
+    try:
+        linked.symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("directory symlinks are unavailable on this test host")
+    path = linked / "physical-old-new-evaluation-report.json"
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="parent must be a canonical non-linked directory",
+    ):
+        driver._write_report(path, {"schema": "test"})
+
+    assert not path.exists()
+
+
+def test_report_writer_strict_parse_back_rejects_duplicate_key() -> None:
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="invalid JSON",
+    ):
+        driver._strict_report_parse_back(b'{"schema":"one","schema":"two"}\n')
+
+
 def test_evaluation_set_allows_multiline_payload_text() -> None:
     payload = _evaluation_payload()
     cases = payload["cases"]
