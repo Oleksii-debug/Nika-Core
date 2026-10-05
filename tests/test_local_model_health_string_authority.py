@@ -171,3 +171,16 @@ def test_malformed_catalog_identity_is_unknown_not_absent() -> None:
         assert snapshot.model_ready is ModelHealthFact.UNKNOWN
         assert calls == ["http://localhost:11434/api/tags"]
 
+def test_oversized_catalog_fails_closed_without_runtime_inventory_probe() -> None:
+    calls: list[str] = []
+    payload = {"models": [{"name": "other-model:1"}] * 10_001}
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="local-model:1",
+        client_factory=_catalog_factory(payload, calls),
+    ).snapshot()
+
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["http://localhost:11434/api/tags"]
+
