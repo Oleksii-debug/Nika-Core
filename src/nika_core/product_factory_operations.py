@@ -560,21 +560,14 @@ class ProductOperationsCoordinator:
             raise ProductOperationsError(
                 "maintenance effect state is not eligible for provider inspection"
             )
-        try:
-            result_raw = self.port.inspect(_private_request(request))
-        except BaseException:
-            self.effect_journal.mark_uncertain(reservation.operation_key)
-            raise
+        result_raw = self.port.inspect(_private_request(request))
         try:
             result = _private_result(result_raw)
         except ProductOperationsError as exc:
-            self.effect_journal.mark_uncertain(reservation.operation_key)
             raise ProductOperationsError(
                 "maintenance port returned invalid inspection evidence"
             ) from exc
-        if result.uncertain:
-            self.effect_journal.mark_uncertain(reservation.operation_key)
-        else:
+        if not result.uncertain:
             self.effect_journal.reconcile(
                 reservation.operation_key,
                 _private_result(result),
