@@ -92,6 +92,10 @@ class DailyActivityReportService:
             raise FileNotFoundError(f"Nika database does not exist: {self._store.path}")
         with self._store.connection() as conn:
             conn.execute("PRAGMA query_only = ON")
+            # sqlite3 SELECT statements do not start a durable multi-statement transaction.
+            # Pin every projection below to one snapshot so concurrent durable writes cannot
+            # produce a report assembled from different database states.
+            conn.execute("BEGIN")
             task_transitions, task_transitions_truncated = _grouped_counts(
                 conn.execute(
                     "SELECT new_state AS value, COUNT(*) AS count "
