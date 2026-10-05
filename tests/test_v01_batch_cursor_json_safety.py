@@ -12,6 +12,7 @@ from nika_core.batch_cursor import (
     BatchCursor,
     BatchCursorStateError,
     BatchTargetSpec,
+    TargetCursor,
 )
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
@@ -265,3 +266,65 @@ def test_non_object_carriers_fail_before_effect_completion_or_uncertainty(
 
     assert ledger.require(grant.operation_key).status is IdempotencyStatus.PENDING
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+def _persisted_target_payload(
+    *,
+    payload: dict[str, object] | None = None,
+    attempt_state: AttemptState = AttemptState.PENDING,
+    confirmed_result: dict[str, object] | None = None,
+    uncertain_result: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "target_id": "persisted-target",
+        "payload": {"ok": True} if payload is None else payload,
+        "position": 0,
+        "batch_index": 0,
+        "batch_position": 0,
+        "input_positions": [0],
+        "input_fingerprint": "f" * 64,
+        "operation_key": "persisted-operation",
+        "attempt_state": attempt_state.value,
+        "attempts": 1 if attempt_state is not AttemptState.PENDING else 0,
+        "confirmed_result": confirmed_result,
+        "uncertain_result": uncertain_result,
+    }
+
+
+@pytest.mark.parametrize(
+    ("carrier", "match"),
+    [
+        (
+            _persisted_target_payload(
+                payload={"oversized": "a" * _MAX_VALUE_BYTES},
+            ),
+            "target payload must satisfy bounded JSON admission",
+        ),
+        (
+            _persisted_target_payload(
+                payload={"too_deep": _deep(33)},
+            ),
+            "target payload must satisfy bounded JSON admission",
+        ),
+        (
+            _persisted_target_payload(
+                attempt_state=AttemptState.CONFIRMED,
+                confirmed_result={"oversized": "a" * _MAX_VALUE_BYTES},
+            ),
+            "confirmed_result must satisfy bounded JSON admission",
+        ),
+        (
+            _persisted_target_payload(
+                attempt_state=AttemptState.UNCERTAIN,
+                uncertain_result={"too_deep": _deep(33)},
+            ),
+            "uncertain_result must satisfy bounded JSON admission",
+        ),
+    ],
+)
+def test_persisted_target_values_use_bounded_json_admission(
+    carrier: dict[str, object],
+    match: str,
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        TargetCursor.model_validate(carrier)
+
