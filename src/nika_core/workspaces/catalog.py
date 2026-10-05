@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -78,7 +78,18 @@ class WorkspaceResolver:
         self.root = root.resolve()
 
     def resolve(self, relative_path: str) -> Path:
-        candidate = (self.root / relative_path).resolve()
+        if not isinstance(relative_path, str) or not relative_path or "\x00" in relative_path:
+            raise ValueError("workspace path must be nonempty text without NUL")
+        windows_path = PureWindowsPath(relative_path)
+        if Path(relative_path).is_absolute() or windows_path.drive or windows_path.root:
+            raise ValueError("workspace path must be relative to configured root")
+        # Reject Windows alternate data streams even when checking on a POSIX host.
+        if ":" in relative_path:
+            raise ValueError("workspace path must not contain a stream separator")
+        # Backslash traversal must not become admissible on non-Windows test hosts.
+        if ".." in windows_path.parts or ".." in Path(relative_path).parts:
+            raise ValueError("workspace path escapes configured root")
+        candidate = (self.root / Path(relative_path.replace("\\", "/"))).resolve()
         if candidate != self.root and self.root not in candidate.parents:
             raise ValueError("workspace path escapes configured root")
         return candidate
@@ -105,6 +116,8 @@ class WorkspaceCatalog:
             plugin = plugins.get(plugin_id)
             if plugin is None:
                 raise WorkspaceCompatibilityError(f"missing required plugin: {plugin_id}")
+            if not requirement.api_min <= CURRENT_PLUGIN_API <= requirement.api_max:
+                raise WorkspaceCompatibilityError(f"incompatible plugin API: {plugin_id}")
             try:
                 plugin.assert_compatible(CURRENT_PLUGIN_API)
             except ValueError as exc:
