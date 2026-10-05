@@ -4,6 +4,7 @@ import json
 import math
 import re
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Final
@@ -309,8 +310,13 @@ def _audit_identity(value: object, *, field: str) -> str:
         raise ValueError(f"{field} must be valid UTF-8 text") from exc
     if len(encoded) > _MAX_IDENTITY_UTF8_BYTES:
         raise ValueError(f"{field} exceeds the UTF-8 byte limit")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
-        raise ValueError(f"{field} must not contain control characters")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    ):
+        raise ValueError(
+            f"{field} must not contain control, format, or line-separator characters"
+        )
     return value
 
 

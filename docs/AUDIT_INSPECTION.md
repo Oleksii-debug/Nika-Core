@@ -82,7 +82,8 @@ Inspection fails closed with
 silently skipping, coercing or partially presenting corrupted evidence.
 
 Audit event identities and inspection filters are exact, non-empty, edge-trimmed UTF-8 text with no
-ASCII control/DEL characters and at most 4096 UTF-8 bytes. Payloads are exact JSON-native objects:
+Unicode control/format (`Cc`/`Cf`) or line/paragraph-separator (`Zl`/`Zp`) characters and at most
+4096 UTF-8 bytes. Payloads are exact JSON-native objects:
 string keys plus dict/list/string/integer/finite-float/bool/null values only. Before persistence and
 again after durable decode, each payload is bounded to 1 MiB encoded JSON, 10,000 value nodes,
 32 levels of nesting and 4096-bit integers. Recursive containers, behavioral subclasses, invalid
