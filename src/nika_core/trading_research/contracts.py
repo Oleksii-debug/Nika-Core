@@ -163,6 +163,8 @@ class OddsSnapshot:
         _validate_source_sequence(self.source_sequence)
         if not self.selections:
             raise TradingResearchError("odds snapshot must contain selections")
+        if any(type(key) is not str or not key.strip() for key in self.selections):
+            raise TradingResearchError("odds selection keys must be nonblank text")
         try:
             copied = {str(key): Decimal(value) for key, value in self.selections.items()}
         except (ArithmeticError, TypeError, ValueError):
