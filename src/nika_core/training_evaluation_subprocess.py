@@ -22,12 +22,6 @@ from nika_core.model_artifacts import (
     ModelArtifactRegistryError,
     ModelIntegrityBasis,
 )
-from nika_core.process_containment import (
-    ProcessContainmentError,
-    WindowsJob,
-    process_group_popen_options,
-    terminate_process_group,
-)
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
@@ -36,6 +30,12 @@ from nika_core.model_gateway.contracts import (
     ModelResponse,
     ModelUsage,
     ProviderKind,
+)
+from nika_core.process_containment import (
+    ProcessContainmentError,
+    WindowsJob,
+    process_group_popen_options,
+    terminate_process_group,
 )
 from nika_core.training_artifacts import (
     CandidateArtifactIntegrityError,
