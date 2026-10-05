@@ -688,9 +688,9 @@ class ProductOperationsCoordinator:
         revoked: set[str],
         down_nodes: set[str],
     ) -> None:
-        if not isinstance(record.health, ServiceHealth) or not isinstance(
-            record.maintenance,
-            MaintenanceState,
+        if (
+            type(record.health) is not ServiceHealth
+            or type(record.maintenance) is not MaintenanceState
         ):
             raise ProductOperationsError("operations snapshot service state is invalid")
         expected_blocked = tuple(sorted(set(record.service.credential_refs) & revoked))
