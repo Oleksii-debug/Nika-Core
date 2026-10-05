@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -16,11 +18,13 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
+from nika_core.security.standing_permission import StandingPermissionScope
 from nika_core.v01_cloud_model_permission import (
     CloudModelGrantRequest,
     CloudModelPermissionDenied,
     V01CloudModelPermissionService,
 )
+from nika_core.tools import ToolRisk
 from nika_core.v01_model_settings import V01ModelSettings
 
 
@@ -152,7 +156,7 @@ def test_cloud_task_without_private_data_permission_fails_before_prompt(
         assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 0
 
 
-def test_binding_failure_revokes_newly_minted_permission(
+def test_binding_failure_rolls_back_newly_minted_permission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -169,7 +173,14 @@ def test_binding_failure_revokes_newly_minted_permission(
     def reject_binding(**_kwargs: object) -> None:
         raise RuntimeError("simulated durable binding failure")
 
+    revoke_calls: list[str] = []
+
+    def reject_compensating_revoke(permission_id: str, **_kwargs: object) -> None:
+        revoke_calls.append(permission_id)
+        raise AssertionError("atomic grant failure must not use compensating revoke")
+
     monkeypatch.setattr(service, "_bind_permission", reject_binding)
+    monkeypatch.setattr(service._permissions, "revoke", reject_compensating_revoke)
 
     with pytest.raises(CloudModelPermissionDenied, match="зберегти дозвіл"):
         service.admit_created_task(record)
@@ -181,13 +192,57 @@ def test_binding_failure_revokes_newly_minted_permission(
         binding_count = conn.execute(
             "SELECT COUNT(*) FROM v01_cloud_model_permission_bindings"
         ).fetchone()[0]
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE entity_type = 'standing_permission'"
+        ).fetchone()[0]
 
-    assert len(permissions) == 1
-    assert permissions[0]["revoked_at"] is not None
+    assert permissions == []
     assert binding_count == 0
+    assert audit_count == 0
+    assert revoke_calls == []
 
 
-def test_task_change_during_confirmation_revokes_new_grant_and_does_not_bind(
+def test_abrupt_exit_during_binding_rolls_back_permission_binding_and_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+
+    def abort_binding(**_kwargs: object) -> None:
+        raise SystemExit("simulated process exit during cloud binding")
+
+    monkeypatch.setattr(service, "_bind_permission", abort_binding)
+
+    with pytest.raises(SystemExit, match="simulated process exit"):
+        service.admit_created_task(record)
+
+    with store.connection() as conn:
+        permission_count = conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0]
+        binding_count = conn.execute(
+            "SELECT COUNT(*) FROM v01_cloud_model_permission_bindings"
+        ).fetchone()[0]
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE entity_type = 'standing_permission'"
+        ).fetchone()[0]
+
+    assert permission_count == 0
+    assert binding_count == 0
+    assert audit_count == 0
+
+
+def test_task_change_during_confirmation_rolls_back_grant_and_does_not_bind(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -217,10 +272,145 @@ def test_task_change_during_confirmation_revokes_new_grant_and_does_not_bind(
         binding_count = conn.execute(
             "SELECT COUNT(*) FROM v01_cloud_model_permission_bindings"
         ).fetchone()[0]
+        audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE entity_type = 'standing_permission'"
+        ).fetchone()[0]
+
+    assert permissions == []
+    assert binding_count == 0
+    assert audit_count == 0
+
+
+def test_reentrant_confirmation_cannot_replace_binding_after_consent_snapshot(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service_holder: list[V01CloudModelPermissionService] = []
+    nested = [False]
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        if not nested[0]:
+            nested[0] = True
+            service_holder[0].admit_created_task(record)
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: NOW,
+    )
+    service_holder.append(service)
+
+    with pytest.raises(CloudModelPermissionDenied, match="зберегти дозвіл"):
+        service.admit_created_task(record)
+
+    assert [prompt.task_id for prompt in prompts] == [record.task_id, record.task_id]
+    with store.connection() as conn:
+        permissions = conn.execute(
+            "SELECT permission_id FROM standing_permissions ORDER BY rowid"
+        ).fetchall()
+        bindings = conn.execute(
+            "SELECT task_id, permission_id FROM v01_cloud_model_permission_bindings"
+        ).fetchall()
+        grant_audits = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE entity_type = 'standing_permission' "
+            "AND event_type = 'standing_permission.granted'"
+        ).fetchone()[0]
 
     assert len(permissions) == 1
-    assert permissions[0]["revoked_at"] is not None
-    assert binding_count == 0
+    assert len(bindings) == 1
+    assert bindings[0]["task_id"] == record.task_id
+    assert bindings[0]["permission_id"] == permissions[0]["permission_id"]
+    assert grant_audits == 1
+
+
+def test_confirmation_cannot_retarget_grant_to_caller_mutated_task_record(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    source = _task(store, settings)
+    victim = _task(store, settings)
+    source_id = source.task_id
+    victim_id = victim.task_id
+    prompts: list[CloudModelGrantRequest] = []
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        object.__setattr__(source, "task_id", victim.task_id)
+        object.__setattr__(source, "workspace_id", victim.workspace_id)
+        object.__setattr__(source, "agent_id", victim.agent_id)
+        object.__setattr__(source, "state", victim.state)
+        object.__setattr__(source, "payload", victim.payload)
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: NOW,
+    )
+
+    service.admit_created_task(source)
+
+    assert [prompt.task_id for prompt in prompts] == [source_id]
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT task_id FROM v01_cloud_model_permission_bindings ORDER BY task_id"
+        ).fetchall()
+    assert [row["task_id"] for row in rows] == [source_id]
+    assert victim_id not in {row["task_id"] for row in rows}
+
+    queue = TaskQueue(store)
+    queue.transition(source_id, TaskState.READY)
+    queue.transition(source_id, TaskState.RUNNING)
+    _authorize(service, source_id)
+
+
+@pytest.mark.parametrize(
+    ("field", "mutated"),
+    (
+        ("provider_id", "forged-provider"),
+        ("model", "forged-model"),
+        ("network_host", "forged.example.test"),
+    ),
+)
+def test_confirmation_callback_cannot_mutate_granted_authority(
+    tmp_path: Path,
+    field: str,
+    mutated: str,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        object.__setattr__(request, field, mutated)
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: NOW,
+    )
+
+    service.admit_created_task(record)
+
+    assert getattr(prompts[0], field) == mutated
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    _authorize(service, record.task_id)
 
 
 def test_cloud_denial_creates_no_spendable_authority(tmp_path: Path) -> None:
@@ -420,6 +610,136 @@ def test_expired_grant_requires_new_resume_consent_and_new_authority(tmp_path: P
     _authorize(service, record.task_id)
 
 
+def test_revoked_preflight_cannot_hide_new_active_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    first_id = service._bound_permission_id(record.task_id, strict=True)
+    assert first_id is not None
+    service._permissions.revoke(first_id, revoked_at=NOW)
+
+    second_id = service._new_permission_id(record.task_id)
+    service._permissions.grant(
+        permission_id=second_id,
+        scope=StandingPermissionScope(
+            subject_id="nika.packaged.model",
+            context=service._context(record),
+            action_class="model.cloud.complete",
+            targets=(prompts[0].provider_id,),
+            sites=(prompts[0].network_host,),
+            resources=(prompts[0].model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        ),
+    )
+
+    original_bound = service._bound_permission_id
+    injected = [False]
+
+    def raced_bound(
+        task_id: str,
+        *,
+        strict: bool,
+        connection=None,
+    ):
+        if not injected[0] and connection is None:
+            injected[0] = True
+            with store.connection() as conn:
+                conn.execute(
+                    "UPDATE v01_cloud_model_permission_bindings "
+                    "SET permission_id = ?, updated_at = ? WHERE task_id = ?",
+                    (second_id, NOW.isoformat(), record.task_id),
+                )
+            return first_id
+        return original_bound(
+            task_id,
+            strict=strict,
+            connection=connection,
+        )
+
+    monkeypatch.setattr(service, "_bound_permission_id", raced_bound)
+
+    with pytest.raises(CloudModelPermissionDenied, match="змінився під час відкликання"):
+        service.revoke_task(record.task_id)
+
+    second = service._permissions.get(second_id)
+    assert second is not None and second.revoked_at is None
+    assert original_bound(record.task_id, strict=True) == second_id
+
+
+def test_revoke_race_rolls_back_stale_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+    assert len(prompts) == 1
+
+    first_id = service._bound_permission_id(record.task_id, strict=True)
+    assert first_id is not None
+    second_id = service._new_permission_id(record.task_id)
+    service._permissions.grant(
+        permission_id=second_id,
+        scope=StandingPermissionScope(
+            subject_id="nika.packaged.model",
+            context=service._context(record),
+            action_class="model.cloud.complete",
+            targets=(prompts[0].provider_id,),
+            sites=(prompts[0].network_host,),
+            resources=(prompts[0].model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        ),
+    )
+
+    original = service._permissions.revoke_transaction
+
+    @contextmanager
+    def raced_revoke(permission_id: str, *, revoked_at: datetime | None = None):
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE v01_cloud_model_permission_bindings "
+                "SET permission_id = ?, updated_at = ? WHERE task_id = ?",
+                (second_id, NOW.isoformat(), record.task_id),
+            )
+        with original(permission_id, revoked_at=revoked_at) as transaction:
+            yield transaction
+
+    monkeypatch.setattr(service._permissions, "revoke_transaction", raced_revoke)
+
+    with pytest.raises(CloudModelPermissionDenied, match="змінився під час відкликання"):
+        service.revoke_task(record.task_id)
+
+    first = service._permissions.get(first_id)
+    second = service._permissions.get(second_id)
+    assert first is not None and first.revoked_at is None
+    assert second is not None and second.revoked_at is None
+    assert service._bound_permission_id(record.task_id, strict=True) == second_id
+
+
 def test_revoked_grant_requires_new_resume_consent(tmp_path: Path) -> None:
     store = _store(tmp_path)
     settings = _settings(store)
@@ -484,3 +804,303 @@ def test_denied_resume_reconsent_leaves_task_paused_and_old_expired_binding(
     assert queue.get(record.task_id).state is TaskState.PAUSED
     with store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 1
+
+
+def test_binding_schema_rejects_text_version_storage(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            ("1", NOW.isoformat()),
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="schema shape is invalid"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_requires_canonical_foreign_keys(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, NOW.isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY, permission_id TEXT NOT NULL UNIQUE, "
+            "updated_at TEXT NOT NULL)"
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="foreign keys are invalid"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_requires_unique_permission_identity(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, NOW.isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+            "permission_id TEXT NOT NULL "
+            "REFERENCES standing_permissions(permission_id), "
+            "updated_at TEXT NOT NULL)"
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="permission_id must be unique"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+
+def test_binding_schema_rejects_partial_permission_unique_index(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, NOW.isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+            "permission_id TEXT NOT NULL "
+            "REFERENCES standing_permissions(permission_id), "
+            "updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX partial_cloud_permission_identity "
+            "ON v01_cloud_model_permission_bindings(permission_id) "
+            "WHERE task_id = 'only-this-task'"
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="permission_id must be unique"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_rejects_preexisting_table_without_migration(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+            "permission_id TEXT NOT NULL UNIQUE "
+            "REFERENCES standing_permissions(permission_id), "
+            "updated_at TEXT NOT NULL)"
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="exists without schema version"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_rejects_extra_migration_rows(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (0, NOW.isoformat()),
+        )
+
+    with pytest.raises(RuntimeError, match="migration history is invalid"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_rejects_noncanonical_migration_timestamp(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, "2026-10-05T06:30:00+02:00"),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+            "permission_id TEXT NOT NULL UNIQUE "
+            "REFERENCES standing_permissions(permission_id), "
+            "updated_at TEXT NOT NULL)"
+        )
+
+    settings = _settings(store)
+    with pytest.raises(RuntimeError, match="migration timestamp is invalid"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "corrupt_updated_at",
+    (
+        "2026-10-05T04:30:00",
+        "2026-10-05T06:30:00+02:00",
+    ),
+)
+def test_corrupt_binding_timestamp_fails_before_resume_prompt(
+    tmp_path: Path,
+    corrupt_updated_at: str,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    first = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+    first.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_cloud_model_permission_bindings SET updated_at = ? "
+            "WHERE task_id = ?",
+            (corrupt_updated_at, record.task_id),
+        )
+
+    prompts: list[CloudModelGrantRequest] = []
+    restarted = V01CloudModelPermissionService(
+        store=SQLiteStore(store.path),
+        settings=V01ModelSettings(SQLiteStore(store.path)),
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(CloudModelPermissionDenied, match="пошкоджено"):
+        restarted.admit_resumed_task(queue.get(record.task_id))
+
+    assert prompts == []
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0] == 1
+
+
+def test_corrupt_binding_timestamp_storage_type_blocks_execution(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_cloud_model_permission_bindings SET updated_at = ? "
+            "WHERE task_id = ?",
+            (sqlite3.Binary(NOW.isoformat().encode("utf-8")), record.task_id),
+        )
+
+    assert service.execution_authority_for_task(record.task_id) is None
+
+
+class _DateTimeSubclass(datetime):
+    pass
+
+
+def test_cloud_permission_clock_rejects_datetime_subclass(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    forged = _DateTimeSubclass(2026, 10, 5, 4, 30, tzinfo=UTC)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: forged,
+    )
+
+    with pytest.raises(RuntimeError, match="exact timezone-aware datetime"):
+        service.admit_created_task(record)
+
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0] == 0
