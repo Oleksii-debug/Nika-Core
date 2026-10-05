@@ -29,8 +29,8 @@ from nika_core.training_runtime import (
 )
 from nika_core.training_scale import TrainingScaleAuthorization
 
-_SCHEMA_VERSION = 3
-_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v3\x00"
+_SCHEMA_VERSION = 4
+_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v4\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_CANDIDATE_MANIFEST_BYTES = 512 * 1024
 _MAX_TEXT_BYTES = 1024
@@ -60,6 +60,7 @@ _REQUIRED_REPORT_FIELDS = {
     "execution_plan_sha256",
     "frozen_package_sha256",
     "job_fingerprint",
+    "trainer_job_fingerprint",
     "job_id",
     "paused_checkpoint_id",
     "restart_checkpoint_id",
@@ -180,6 +181,7 @@ def _verify_candidate_receipt(
 @dataclass(frozen=True, slots=True)
 class _CandidateManifestEvidence:
     candidate_manifest_sha256: str
+    trainer_job_fingerprint: str
     consumed_materials_sha256: str
     model_dir_manifest_sha256: str
     trainer_artifact_id: str
@@ -247,6 +249,7 @@ def _candidate_manifest_evidence(
     *,
     candidate_path: Path,
     completed: TrainingRunEvidence,
+    trainer_job_fingerprint: str,
 ) -> _CandidateManifestEvidence:
     try:
         manifest = candidate_adapter_manifest(candidate_path)
@@ -267,12 +270,19 @@ def _candidate_manifest_evidence(
         _fail("PEFT candidate manifest changed base artifact digest")
     if manifest.get("candidate_artifact_ref") != completed.candidate_artifact_ref:
         _fail("PEFT candidate manifest changed candidate artifact reference")
-    job_fingerprint = _require_sha256(
+    manifest_job_fingerprint = _require_sha256(
         manifest.get("job_fingerprint"),
         name="candidate manifest job_fingerprint",
     )
-    if not hmac.compare_digest(job_fingerprint, completed.job_fingerprint):
-        _fail("PEFT candidate manifest changed job fingerprint")
+    expected_trainer_job_fingerprint = _require_sha256(
+        trainer_job_fingerprint,
+        name="trainer_job_fingerprint",
+    )
+    if not hmac.compare_digest(
+        manifest_job_fingerprint,
+        expected_trainer_job_fingerprint,
+    ):
+        _fail("PEFT candidate manifest changed trainer protocol job fingerprint")
     step_number = manifest.get("step_number")
     if type(step_number) is not int or step_number != completed.next_step:
         _fail("PEFT candidate manifest does not match completed step boundary")
@@ -318,6 +328,7 @@ def _candidate_manifest_evidence(
 
     return _CandidateManifestEvidence(
         candidate_manifest_sha256=hashlib.sha256(encoded).hexdigest(),
+        trainer_job_fingerprint=expected_trainer_job_fingerprint,
         consumed_materials_sha256=consumed_materials_sha256,
         model_dir_manifest_sha256=model_dir_manifest_sha256,
         trainer_artifact_id=trainer_artifact_id,
@@ -338,6 +349,7 @@ class PhysicalTrainingPilotReport:
     scale_authorization_sha256: str
     execution_plan_sha256: str
     job_fingerprint: str
+    trainer_job_fingerprint: str
     paused_checkpoint_id: str
     restart_checkpoint_id: str
     completed_checkpoint_id: str
@@ -377,6 +389,7 @@ class PhysicalTrainingPilotReport:
             (self.scale_authorization_sha256, "scale_authorization_sha256"),
             (self.execution_plan_sha256, "execution_plan_sha256"),
             (self.job_fingerprint, "job_fingerprint"),
+            (self.trainer_job_fingerprint, "trainer_job_fingerprint"),
             (self.candidate_descriptor_sha256, "candidate_descriptor_sha256"),
             (self.candidate_registry_key, "candidate_registry_key"),
             (self.candidate_sha256, "candidate_sha256"),
@@ -433,6 +446,7 @@ class PhysicalTrainingPilotReport:
             "execution_plan_sha256": self.execution_plan_sha256,
             "frozen_package_sha256": self.frozen_package_sha256,
             "job_fingerprint": self.job_fingerprint,
+            "trainer_job_fingerprint": self.trainer_job_fingerprint,
             "job_id": self.job_id,
             "paused_checkpoint_id": self.paused_checkpoint_id,
             "restart_checkpoint_id": self.restart_checkpoint_id,
@@ -479,6 +493,7 @@ class PhysicalTrainingPilotReport:
             scale_authorization_sha256=value["scale_authorization_sha256"],
             execution_plan_sha256=value["execution_plan_sha256"],
             job_fingerprint=value["job_fingerprint"],
+            trainer_job_fingerprint=value["trainer_job_fingerprint"],
             paused_checkpoint_id=value["paused_checkpoint_id"],
             restart_checkpoint_id=value["restart_checkpoint_id"],
             completed_checkpoint_id=value["completed_checkpoint_id"],
@@ -719,6 +734,7 @@ def build_physical_training_pilot_report(
     paused: TrainingRunEvidence,
     restart_probe: TrainingRunEvidence,
     completed: TrainingRunEvidence,
+    trainer_job_fingerprint: str,
     candidate_path: Path,
     candidate_descriptor: ModelArtifactDescriptor,
     candidate_root: Path | None = None,
@@ -796,6 +812,7 @@ def build_physical_training_pilot_report(
         manifest_evidence = _candidate_manifest_evidence(
             candidate_path=stable_candidate_path,
             completed=completed,
+            trainer_job_fingerprint=trainer_job_fingerprint,
         )
     finally:
         _close_windows_candidate_stability_lock(stability_lock)
@@ -808,6 +825,7 @@ def build_physical_training_pilot_report(
         scale_authorization_sha256=completed.scale_authorization_sha256,
         execution_plan_sha256=completed.execution_plan_sha256,
         job_fingerprint=completed.job_fingerprint,
+        trainer_job_fingerprint=manifest_evidence.trainer_job_fingerprint,
         paused_checkpoint_id=paused.checkpoint_id,
         restart_checkpoint_id=restart_probe.checkpoint_id,
         completed_checkpoint_id=completed.checkpoint_id,
@@ -913,6 +931,10 @@ def run_physical_training_pilot(
         worker.execution_plan_sha256,
         name="initial worker execution_plan_sha256",
     )
+    initial_trainer_job_fingerprint = _require_sha256(
+        worker.protocol_job_fingerprint(canonical_spec),
+        name="initial worker trainer_job_fingerprint",
+    )
 
     control_reads = 0
 
@@ -956,6 +978,15 @@ def run_physical_training_pilot(
         initial_execution_plan_sha256,
     ):
         _fail("trainer execution plan changed across restart")
+    resumed_trainer_job_fingerprint = _require_sha256(
+        resumed_worker.protocol_job_fingerprint(canonical_spec),
+        name="resumed worker trainer_job_fingerprint",
+    )
+    if not hmac.compare_digest(
+        resumed_trainer_job_fingerprint,
+        initial_trainer_job_fingerprint,
+    ):
+        _fail("trainer protocol job identity changed across restart")
 
     restart_probe = resumed_runtime.run(
         canonical_spec,
@@ -991,6 +1022,7 @@ def run_physical_training_pilot(
         paused=paused,
         restart_probe=restart_probe,
         completed=completed,
+        trainer_job_fingerprint=resumed_trainer_job_fingerprint,
         candidate_path=candidate_path,
         candidate_descriptor=candidate_descriptor,
         candidate_root=candidate_root,
