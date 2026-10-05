@@ -165,45 +165,7 @@ def test_ollama_resume_probe_requires_exact_route_health_ready(tmp_path) -> None
     assert health.selections[0].base_url == "http://localhost:11434"
 
 
-def test_foundry_resume_accepts_exact_cached_route_health(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "foundry-ready" / "nika.db")
-    store.initialize()
-    settings, _queue, task_id = _task_with_selection(
-        store,
-        payload={
-            "route_kind": "foundry_local",
-            "provider_id": "foundry-local",
-            "model": "embedded-test-model",
-            "base_url": None,
-            "credential_ref": None,
-            "private_data_allowed": True,
-            "timeout_seconds": 60,
-        },
-    )
-    health = _HealthFactory(_snapshot(ready=ModelHealthFact.YES))
-    runtime = _runtime(store, settings, health)
-    thread_id = f"desktop-{task_id}"
-
-    probe = asyncio.run(
-        runtime.probe_resume(
-            task_id=task_id,
-            thread_id=thread_id,
-            resume_token=runtime.initial_resume_token(
-                task_id=task_id,
-                thread_id=thread_id,
-            ),
-        )
-    )
-
-    assert probe.status is RuntimeResumeProbeStatus.READY
-    assert health.probe.calls == 1
-    assert len(health.selections) == 1
-    assert health.selections[0].route_kind == "foundry_local"
-    assert health.selections[0].provider_id == "foundry-local"
-    assert health.selections[0].model == "embedded-test-model"
-
-
-def test_unready_foundry_route_remains_unverifiable(tmp_path) -> None:
+def test_foundry_resume_remains_unverifiable_without_route_health_authority(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "foundry-blocked" / "nika.db")
     store.initialize()
     settings, _queue, task_id = _task_with_selection(
@@ -214,41 +176,6 @@ def test_unready_foundry_route_remains_unverifiable(tmp_path) -> None:
             "model": "embedded-test-model",
             "base_url": None,
             "credential_ref": None,
-            "private_data_allowed": True,
-            "timeout_seconds": 60,
-        },
-    )
-    health = _HealthFactory(_snapshot(ready=ModelHealthFact.NO))
-    runtime = _runtime(store, settings, health)
-    thread_id = f"desktop-{task_id}"
-
-    probe = asyncio.run(
-        runtime.probe_resume(
-            task_id=task_id,
-            thread_id=thread_id,
-            resume_token=runtime.initial_resume_token(
-                task_id=task_id,
-                thread_id=thread_id,
-            ),
-        )
-    )
-
-    assert probe.status is RuntimeResumeProbeStatus.UNVERIFIABLE
-    assert probe.checkpoint_id is None
-    assert health.probe.calls == 1
-
-
-def test_configured_api_resume_stays_unverifiable_without_health_authority(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "api-blocked" / "nika.db")
-    store.initialize()
-    settings, _queue, task_id = _task_with_selection(
-        store,
-        payload={
-            "route_kind": "openai_compatible",
-            "provider_id": "configured-api",
-            "model": "api-model",
-            "base_url": "https://api.example.test/v1",
-            "credential_ref": "env:NIKA_TEST_REFERENCE",
             "private_data_allowed": True,
             "timeout_seconds": 60,
         },
