@@ -11,13 +11,18 @@ from nika_core.training_runtime.contracts import (
     TrainingJobSpec,
     TrainingRunEvidence,
     TrainingRunState,
+    TrainingStepResult,
+    TrainingWorkerError,
+    TrainingWorkerFailureEffect,
     TrainingWorkerPort,
 )
 
-_CHECKPOINT_PREFIX = "training_runtime/v1/"
+_CHECKPOINT_PREFIX = "training_runtime/v2/"
+_CHECKPOINT_SCHEMA_VERSION = 2
 _TERMINAL_STATES = {
     TrainingRunState.COMPLETED,
     TrainingRunState.CANCELLED,
+    TrainingRunState.RECONCILE_REQUIRED,
     TrainingRunState.EXHAUSTED,
 }
 
@@ -34,16 +39,24 @@ def _job_fingerprint(spec: TrainingJobSpec) -> str:
         "owner_id": spec.owner_id,
         "base_artifact_ref": spec.base_artifact.artifact_ref,
         "base_sha256": spec.base_artifact.sha256,
+        "frozen_package_sha256": spec.frozen_package_sha256,
         "candidate_artifact_ref": spec.candidate_artifact_ref,
         "max_steps": spec.max_steps,
         "resource_scope": spec.resource_scope,
     }
-    body = json.dumps(identity, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(body.encode("utf-8")).hexdigest()
+    body = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return hashlib.sha256(body.encode()).hexdigest()
 
 
 def _stage(state: TrainingRunState) -> str:
     return f"{_CHECKPOINT_PREFIX}{state.value}"
+
+
+def _read_control(control: Callable[[], TrainingControl]) -> TrainingControl:
+    value = control()
+    if type(value) is not TrainingControl:
+        raise TypeError("training control callback must return an exact TrainingControl")
+    return value
 
 
 class TrainingRuntime:
@@ -51,6 +64,8 @@ class TrainingRuntime:
 
     The supplied task must be dedicated to this training job. Durable checkpoints use the
     canonical task checkpoint store; ResourceManager remains the sole admission authority.
+    Before every worker effect a DISPATCHING checkpoint is committed. A process crash or
+    untyped worker exception therefore leaves durable uncertainty and can never blindly replay.
     """
 
     def __init__(self, *, resources: ResourceManager, checkpoints: CheckpointService) -> None:
@@ -73,6 +88,25 @@ class TrainingRuntime:
             checkpoint=checkpoint,
         )
 
+        if state is TrainingRunState.DISPATCHING:
+            saved = self._save(
+                spec,
+                fingerprint=fingerprint,
+                state=TrainingRunState.RECONCILE_REQUIRED,
+                next_step=next_step,
+                resume_state=resume_state,
+                candidate_sha256=None,
+                reason="previous_worker_effect_unknown",
+            )
+            return self._evidence(
+                spec,
+                state=TrainingRunState.RECONCILE_REQUIRED,
+                next_step=next_step,
+                candidate_sha256=None,
+                checkpoint=saved,
+                reason="previous_worker_effect_unknown",
+            )
+
         if state in _TERMINAL_STATES:
             return self._evidence(
                 spec,
@@ -83,7 +117,7 @@ class TrainingRuntime:
                 reason=reason,
             )
 
-        requested_control = control()
+        requested_control = _read_control(control)
         if requested_control is TrainingControl.CANCEL:
             saved = self._save(
                 spec,
@@ -132,6 +166,7 @@ class TrainingRuntime:
                 state=TrainingRunState.WAITING,
                 next_step=next_step,
                 base_artifact=spec.base_artifact,
+                frozen_package_sha256=spec.frozen_package_sha256,
                 candidate_artifact_ref=spec.candidate_artifact_ref,
                 candidate_sha256=candidate_sha256,
                 reason=decision.reason,
@@ -140,7 +175,7 @@ class TrainingRuntime:
 
         try:
             for step_index in range(next_step, spec.max_steps):
-                requested_control = control()
+                requested_control = _read_control(control)
                 if requested_control is TrainingControl.PAUSE:
                     saved = self._save(
                         spec,
@@ -178,37 +213,79 @@ class TrainingRuntime:
                         reason="cancelled",
                     )
 
+                self._save(
+                    spec,
+                    fingerprint=fingerprint,
+                    state=TrainingRunState.DISPATCHING,
+                    next_step=step_index,
+                    resume_state=resume_state,
+                    candidate_sha256=None,
+                    reason=None,
+                )
                 try:
                     step_result = worker.step(
                         spec=spec,
                         step_index=step_index,
                         resume_state=dict(resume_state),
                     )
-                except Exception as exc:  # adapter failures become durable resumable evidence
+                except TrainingWorkerError as exc:
+                    failure_state = (
+                        TrainingRunState.FAILED
+                        if exc.effect is TrainingWorkerFailureEffect.NO_EFFECT
+                        else TrainingRunState.RECONCILE_REQUIRED
+                    )
+                    reason = f"worker_{exc.effect.value}:{exc.code}"
                     saved = self._save(
                         spec,
                         fingerprint=fingerprint,
-                        state=TrainingRunState.FAILED,
+                        state=failure_state,
                         next_step=step_index,
                         resume_state=resume_state,
-                        candidate_sha256=candidate_sha256,
-                        reason=f"worker_error:{type(exc).__name__}",
+                        candidate_sha256=None,
+                        reason=reason,
                     )
                     return self._evidence(
                         spec,
-                        state=TrainingRunState.FAILED,
+                        state=failure_state,
                         next_step=step_index,
-                        candidate_sha256=candidate_sha256,
+                        candidate_sha256=None,
                         checkpoint=saved,
-                        reason=f"worker_error:{type(exc).__name__}",
+                        reason=reason,
                     )
 
-                resume_state = dict(step_result.resume_state)
-                candidate_sha256 = step_result.candidate_sha256 or candidate_sha256
+                try:
+                    if type(step_result) is not TrainingStepResult:
+                        raise TypeError("worker result must be an exact TrainingStepResult")
+                    canonical_result = TrainingStepResult(
+                        resume_state=step_result.resume_state,
+                        completed=step_result.completed,
+                        candidate_sha256=step_result.candidate_sha256,
+                    )
+                except (TypeError, ValueError):
+                    saved = self._save(
+                        spec,
+                        fingerprint=fingerprint,
+                        state=TrainingRunState.RECONCILE_REQUIRED,
+                        next_step=step_index,
+                        resume_state=resume_state,
+                        candidate_sha256=None,
+                        reason="worker_unknown:invalid_result",
+                    )
+                    return self._evidence(
+                        spec,
+                        state=TrainingRunState.RECONCILE_REQUIRED,
+                        next_step=step_index,
+                        candidate_sha256=None,
+                        checkpoint=saved,
+                        reason="worker_unknown:invalid_result",
+                    )
+
+                resume_state = dict(canonical_result.resume_state)
+                candidate_sha256 = canonical_result.candidate_sha256
                 next_step = step_index + 1
                 new_state = (
                     TrainingRunState.COMPLETED
-                    if step_result.completed
+                    if canonical_result.completed
                     else TrainingRunState.RUNNING
                 )
                 saved = self._save(
@@ -220,7 +297,7 @@ class TrainingRuntime:
                     candidate_sha256=candidate_sha256,
                     reason=None,
                 )
-                if step_result.completed:
+                if canonical_result.completed:
                     return self._evidence(
                         spec,
                         state=TrainingRunState.COMPLETED,
@@ -268,6 +345,7 @@ class TrainingRuntime:
             state=state,
             next_step=next_step,
             base_artifact=spec.base_artifact,
+            frozen_package_sha256=spec.frozen_package_sha256,
             candidate_artifact_ref=spec.candidate_artifact_ref,
             candidate_sha256=candidate_sha256,
             checkpoint_id=None if checkpoint is None else checkpoint.checkpoint_id,
@@ -286,9 +364,10 @@ class TrainingRuntime:
         reason: str | None,
     ) -> Checkpoint:
         payload: dict[str, object] = {
-            "schema_version": 1,
+            "schema_version": _CHECKPOINT_SCHEMA_VERSION,
             "job_id": spec.job_id,
             "job_fingerprint": fingerprint,
+            "frozen_package_sha256": spec.frozen_package_sha256,
             "next_step": next_step,
             "resume_state": resume_state,
             "candidate_artifact_ref": spec.candidate_artifact_ref,
@@ -308,18 +387,27 @@ class TrainingRuntime:
             return TrainingRunState.RUNNING, 0, {}, None, None
         if not checkpoint.stage.startswith(_CHECKPOINT_PREFIX):
             raise TrainingCheckpointError(
-                "latest task checkpoint is not training-runtime state; use a dedicated training task"
+                "latest task checkpoint is not training-runtime state; "
+                "use a dedicated training task"
             )
         try:
             state = TrainingRunState(checkpoint.stage.removeprefix(_CHECKPOINT_PREFIX))
         except ValueError as exc:
             raise TrainingCheckpointError("unknown training checkpoint state") from exc
+        if state is TrainingRunState.WAITING:
+            raise TrainingCheckpointError(
+                "WAITING must not be persisted as training execution state"
+            )
 
         payload = checkpoint.payload
-        if payload.get("schema_version") != 1:
+        if type(payload) is not dict:
+            raise TrainingCheckpointError("invalid training checkpoint payload")
+        if payload.get("schema_version") != _CHECKPOINT_SCHEMA_VERSION:
             raise TrainingCheckpointError("unsupported training checkpoint schema")
         if payload.get("job_id") != spec.job_id or payload.get("job_fingerprint") != fingerprint:
             raise TrainingCheckpointError("training checkpoint identity mismatch")
+        if payload.get("frozen_package_sha256") != spec.frozen_package_sha256:
+            raise TrainingCheckpointError("training frozen-package identity mismatch")
         if payload.get("candidate_artifact_ref") != spec.candidate_artifact_ref:
             raise TrainingCheckpointError("training candidate artifact identity mismatch")
 
@@ -327,13 +415,30 @@ class TrainingRuntime:
         resume_state = payload.get("resume_state")
         candidate_sha256 = payload.get("candidate_sha256")
         reason = payload.get("reason")
-        if not isinstance(next_step, int) or next_step < 0 or next_step > spec.max_steps:
+        if type(next_step) is not int or next_step < 0 or next_step > spec.max_steps:
             raise TrainingCheckpointError("invalid training checkpoint step")
-        if not isinstance(resume_state, dict):
-            raise TrainingCheckpointError("invalid training checkpoint resume state")
-        if candidate_sha256 is not None and not isinstance(candidate_sha256, str):
-            raise TrainingCheckpointError("invalid training checkpoint candidate digest")
-        if reason is not None and not isinstance(reason, str):
+        if reason is not None and type(reason) is not str:
             raise TrainingCheckpointError("invalid training checkpoint reason")
+        if state in {
+            TrainingRunState.PAUSED,
+            TrainingRunState.CANCELLED,
+            TrainingRunState.FAILED,
+            TrainingRunState.DISPATCHING,
+            TrainingRunState.RECONCILE_REQUIRED,
+        } and next_step >= spec.max_steps:
+            raise TrainingCheckpointError("training checkpoint step is inconsistent with state")
+        if state is TrainingRunState.COMPLETED and next_step == 0:
+            raise TrainingCheckpointError("completed training checkpoint has no completed step")
+        if state is TrainingRunState.EXHAUSTED and next_step != spec.max_steps:
+            raise TrainingCheckpointError("exhausted training checkpoint step is inconsistent")
 
-        return state, next_step, dict(resume_state), candidate_sha256, reason
+        try:
+            restored_step = TrainingStepResult(
+                resume_state=resume_state,
+                completed=state is TrainingRunState.COMPLETED,
+                candidate_sha256=candidate_sha256,
+            )
+        except (TypeError, ValueError) as exc:
+            raise TrainingCheckpointError("invalid training checkpoint result evidence") from exc
+
+        return state, next_step, dict(restored_step.resume_state), candidate_sha256, reason
