@@ -346,6 +346,7 @@ class CaseBenchmarkResult:
     accelerator_before: AcceleratorSnapshot | None
     accelerator_after: AcceleratorSnapshot | None
     evaluation_weight: float = 1.0
+    pass_score: float = 1.0
 
     def __post_init__(self) -> None:
         _identity(self.candidate_id, "candidate_id")
@@ -364,6 +365,11 @@ class CaseBenchmarkResult:
         evaluation_weight = float(self.evaluation_weight)
         if not isfinite(evaluation_weight) or evaluation_weight <= 0:
             raise ValueError("evaluation_weight must be finite and greater than zero")
+        if type(self.pass_score) not in (int, float):
+            raise TypeError("pass_score must be numeric")
+        pass_score = float(self.pass_score)
+        if not isfinite(pass_score) or not 0 <= pass_score <= 1:
+            raise ValueError("pass_score must be finite and in [0, 1]")
         if type(self.latency_ms) not in (int, float):
             raise TypeError("latency_ms must be numeric")
         latency = float(self.latency_ms)
@@ -394,6 +400,10 @@ class CaseBenchmarkResult:
         ):
             raise TypeError("error_code must be a ModelErrorCode")
         if self.completion_succeeded:
+            if self.passed is not (score >= pass_score):
+                raise ValueError(
+                    "passed must match successful score and pass_score evidence"
+                )
             if self.error_code is not None:
                 raise ValueError("successful completion cannot carry error_code")
             if self.response_sha256 is None:
@@ -502,6 +512,8 @@ def validate_candidate_benchmark_report(report: CandidateBenchmarkReport) -> Non
     if type(report) is not CandidateBenchmarkReport:
         raise TypeError("report must be an exact CandidateBenchmarkReport")
     results = report.case_results
+    for item in results:
+        item.__post_init__()
     total_weight = sum(float(item.evaluation_weight) for item in results)
     expected_quality = sum(
         float(item.score) * float(item.evaluation_weight)
