@@ -4,9 +4,11 @@ import json
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
-    ArtifactKind, ExperimentDefinition, ExperimentEngine, ExperimentStatus,
+    ArtifactKind, ExperimentDefinition, ExperimentEngine, ExperimentSnapshot, ExperimentStatus,
     InMemoryExperimentRepository, MetricObservation, MetricRule, PromotionPolicy,
+    SQLiteExperimentRepository,
     ReplayCase, StrategyRef,
 )
 from nika_core.experiments.repository import _decode_definition, _encode_definition
@@ -115,3 +117,41 @@ def test_guardrail_regression_overflow_cannot_promote():
     with pytest.raises(ValueError, match="regression is not finite"):
         engine.complete("numeric-safety")
     assert repo.get("numeric-safety").status is ExperimentStatus.RUNNING
+
+
+def test_valid_integer_evidence_remains_usable():
+    observation = MetricObservation("champion", "r1", "quality", 1)
+    policy = PromotionPolicy("quality", minimum_improvement=0)
+    rule = MetricRule("safety", max_regression=0)
+    assert observation.value == 1.0 and type(observation.value) is float
+    assert policy.minimum_improvement == 0.0
+    assert rule.max_regression == 0.0
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [("minimum_replays", True), ("primary_higher_is_better", "false")],
+)
+def test_sqlite_restart_rejects_corrupt_policy_without_transition(tmp_path, field, bad):
+    store = SQLiteStore(tmp_path / "M8 дані з пробілами.db")
+    store.initialize()
+    repository = SQLiteExperimentRepository(store)
+    repository.create(ExperimentSnapshot(_definition()))
+    with store.connection() as conn:
+        data = json.loads(_encode_definition(_definition()))
+        data["policy"][field] = bad
+        conn.execute(
+            "UPDATE experiments SET definition_json = ? WHERE experiment_id = ?",
+            (json.dumps(data), "numeric-safety"),
+        )
+    with pytest.raises(ValueError):
+        repository.get("numeric-safety")
+    with store.connection() as conn:
+        status = conn.execute(
+            "SELECT status FROM experiments WHERE experiment_id = ?", ("numeric-safety",)
+        ).fetchone()["status"]
+        events = conn.execute(
+            "SELECT count(*) AS n FROM experiment_events WHERE experiment_id = ?",
+            ("numeric-safety",),
+        ).fetchone()["n"]
+    assert status == "draft" and events == 1
