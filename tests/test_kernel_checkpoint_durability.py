@@ -427,6 +427,44 @@ def test_save_rejects_behavioral_container_subclasses_before_hooks(
     assert count == 0
 
 
+def test_save_rejects_scalar_subclasses_before_json_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+
+    class TextSubclass(str):
+        pass
+
+    class IntegerSubclass(int):
+        pass
+
+    def unexpected_encoder(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("scalar subclass reached json.dumps")
+
+    monkeypatch.setattr(checkpoint_module.json, "dumps", unexpected_encoder)
+    payloads: tuple[dict[object, object], ...] = (
+        {"value": TextSubclass("payload")},
+        {TextSubclass("key"): 1},
+        {"value": IntegerSubclass(7)},
+        {IntegerSubclass(7): "value"},
+    )
+    for index, payload in enumerate(payloads):
+        with pytest.raises(ValueError, match="must be built-in types"):
+            checkpoints.save(
+                task_id=task_id,
+                stage=f"hostile-scalar-{index}",
+                payload=payload,  # type: ignore[arg-type]
+            )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
 def test_save_rejects_invalid_utf8_text_before_persistence(tmp_path: Path) -> None:
     store, task_id, checkpoints = _build_service(tmp_path)
 
