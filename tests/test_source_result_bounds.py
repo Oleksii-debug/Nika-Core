@@ -159,3 +159,91 @@ def test_bool_rank_still_fails_as_non_numeric_after_resigning() -> None:
     _resign(output)
     with pytest.raises(SourceResultBindingError, match="result rank must be numeric"):
         decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+
+def test_encode_rejects_oversized_text_before_digest_hashing() -> None:
+    assignment, result = _case()
+    forged = replace(
+        result,
+        items=(replace(result.items[0], snippet="x" * 1_048_577),),
+    )
+    with pytest.raises(SourceResultBindingError, match="bounded JSON"):
+        encode_source_result(assignment, forged)
+
+
+def test_decode_rejects_oversized_text_before_digest_hashing() -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    items = result_data["items"]
+    assert isinstance(items, list)
+    items[0]["snippet"] = "x" * 1_048_577
+    output["result_digest"] = "0" * 64
+    with pytest.raises(SourceResultBindingError, match="bounded JSON"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+def test_encode_rejects_unbounded_evidence_fanout_before_serialization() -> None:
+    assignment, result = _case()
+    evidence = result.items[0].evidence * 10_001
+    forged = replace(
+        result,
+        items=(replace(result.items[0], evidence=evidence),),
+    )
+    with pytest.raises(SourceResultBindingError, match="bounded JSON"):
+        encode_source_result(assignment, forged)
+
+
+def test_decode_rejects_evidence_node_fanout_before_digest_hashing() -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    items = result_data["items"]
+    assert isinstance(items, list)
+    evidence = items[0]["evidence"]
+    assert isinstance(evidence, list)
+    items[0]["evidence"] = evidence * 2_000
+    output["result_digest"] = "0" * 64
+    with pytest.raises(SourceResultBindingError, match="bounded JSON"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+def test_decode_rejects_oversized_integer_before_digest_hashing() -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    items = result_data["items"]
+    assert isinstance(items, list)
+    items[0]["ordinal"] = 1 << 4_097
+    output["result_digest"] = "0" * 64
+    with pytest.raises(SourceResultBindingError, match="bounded JSON"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+def test_decode_rejects_cyclic_worker_value_without_recursion_leak() -> None:
+    assignment, result = _case()
+    output = encode_source_result(assignment, result)
+    result_data = output["result_set"]
+    assert isinstance(result_data, dict)
+    items = result_data["items"]
+    assert isinstance(items, list)
+    cycle: list[object] = []
+    cycle.append(cycle)
+    items[0]["snippet"] = cycle
+    output["result_digest"] = "0" * 64
+    with pytest.raises(SourceResultBindingError, match="canonical JSON"):
+        decode_source_result(assignment, member_id=assignment.member_id, output=output)
+
+
+def test_encode_rejects_invalid_utf8_text_before_digest_hashing() -> None:
+    assignment, result = _case()
+    forged = replace(
+        result,
+        items=(replace(result.items[0], snippet="bad\ud800text"),),
+    )
+    with pytest.raises(SourceResultBindingError, match="valid UTF-8"):
+        encode_source_result(assignment, forged)
