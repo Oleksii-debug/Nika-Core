@@ -221,6 +221,22 @@ def test_javascript_preserves_edit_shortcuts_and_wires_keymap_transfer() -> None
     assert "globalThis.pywebview.api.import_keymap" in script
 
 
+def test_keymap_bridge_messages_reach_live_status_region() -> None:
+    script = index_path().with_name("app.js").read_text(encoding="utf-8")
+    assert 'statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite")' in script
+    assert 'statusNode.textContent = message || "Готово."' in script
+
+    for api_call in (
+        "globalThis.pywebview.api.set_binding",
+        "globalThis.pywebview.api.restore_default",
+        "globalThis.pywebview.api.export_keymap",
+        "globalThis.pywebview.api.import_keymap",
+    ):
+        call_index = script.index(api_call)
+        announce_index = script.index("announce(response.message, !response.ok);", call_index)
+        assert announce_index - call_index < 300
+
+
 def test_packaged_uia_gate_waits_for_bridge_readiness_before_hotkeys() -> None:
     proof = Path(__file__).parents[1] / "scripts" / "m5_uia_proof.ps1"
     script = proof.read_text(encoding="utf-8")
