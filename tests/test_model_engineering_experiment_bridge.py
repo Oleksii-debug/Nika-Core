@@ -800,3 +800,129 @@ def test_observation_bridge_rejects_pass_score_substitution() -> None:
             definition=definition,
             evaluation_set=evaluation,
         )
+
+
+def test_definition_bridge_revalidates_mutated_candidate_identity() -> None:
+    champion = _candidate("champion", "m1")
+    object.__setattr__(champion, "provider_id", " padded-provider ")
+
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        build_experiment_definition(
+            experiment_id="candidate-revalidation",
+            champion=champion,
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=_evaluation(),
+            execution_config=_execution_config(),
+            policy=PromotionPolicy(
+                primary_metric=QUALITY_METRIC,
+                minimum_replays=2,
+            ),
+            permission_fingerprint="permissions-v1",
+        )
+
+
+def test_definition_bridge_revalidates_nested_evaluation_message() -> None:
+    evaluation = _evaluation()
+    message = evaluation.cases[0].messages[0]
+    object.__setattr__(message, "role", "forged-role")
+
+    with pytest.raises(ValueError, match="unsupported message role"):
+        build_experiment_definition(
+            experiment_id="evaluation-revalidation",
+            champion=_candidate("champion", "m1"),
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=evaluation,
+            execution_config=_execution_config(),
+            policy=PromotionPolicy(
+                primary_metric=QUALITY_METRIC,
+                minimum_replays=2,
+            ),
+            permission_fingerprint="permissions-v1",
+        )
+
+
+def test_definition_bridge_revalidates_execution_config_and_policy() -> None:
+    config = _execution_config()
+    object.__setattr__(config, "timeout_seconds", 0.0)
+    policy = PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2)
+
+    with pytest.raises(ValueError, match="greater than zero"):
+        build_experiment_definition(
+            experiment_id="config-revalidation",
+            champion=_candidate("champion", "m1"),
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=_evaluation(),
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="permissions-v1",
+        )
+
+    config = _execution_config()
+    object.__setattr__(policy, "minimum_replays", 0)
+    with pytest.raises(ValueError, match="minimum_replays"):
+        build_experiment_definition(
+            experiment_id="policy-revalidation",
+            champion=_candidate("champion", "m1"),
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=_evaluation(),
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="permissions-v1",
+        )
+
+
+def test_observation_bridge_revalidates_supplied_evaluation_graph() -> None:
+    candidate = _candidate("candidate", "m1")
+    evaluation = _evaluation()
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 20.0),
+    )
+    definition = build_experiment_definition(
+        experiment_id="observation-evaluation-revalidation",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=_execution_config(),
+        policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+        permission_fingerprint="permissions-v1",
+    )
+    message = evaluation.cases[0].messages[0]
+    object.__setattr__(message, "role", "forged-role")
+
+    with pytest.raises(ValueError, match="unsupported message role"):
+        benchmark_observations(
+            report,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
+
+
+def test_observation_bridge_revalidates_mutated_promotion_policy() -> None:
+    candidate = _candidate("candidate", "m1")
+    evaluation = _evaluation()
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 20.0),
+    )
+    definition = build_experiment_definition(
+        experiment_id="observation-policy-revalidation",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=_execution_config(),
+        policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+        permission_fingerprint="permissions-v1",
+    )
+    object.__setattr__(definition.policy, "minimum_replays", 0)
+
+    with pytest.raises(ValueError, match="minimum_replays"):
+        benchmark_observations(
+            report,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
