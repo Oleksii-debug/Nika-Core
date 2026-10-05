@@ -255,8 +255,16 @@ class MemoryService:
                 if expiry is not None and _as_utc(expiry) <= current:
                     conn.execute(
                         "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
-                        "AND namespace = ? AND memory_key = ?",
-                        (scope.value, owner_id, namespace, record.key),
+                        "AND namespace = ? AND memory_key = ? AND updated_at = ? "
+                        "AND expires_at = ?",
+                        (
+                            scope.value,
+                            owner_id,
+                            namespace,
+                            record.key,
+                            row["updated_at"],
+                            row["expires_at"],
+                        ),
                     )
                 else:
                     records.append(record)
@@ -356,12 +364,15 @@ class MemoryService:
                 if expiry is not None and _as_utc(expiry) <= current:
                     cursor = conn.execute(
                         "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
-                        "AND namespace = ? AND memory_key = ?",
+                        "AND namespace = ? AND memory_key = ? AND updated_at = ? "
+                        "AND expires_at = ?",
                         (
                             record.scope.value,
                             record.owner_id,
                             record.namespace,
                             record.key,
+                            row["updated_at"],
+                            row["expires_at"],
                         ),
                     )
                     deleted += cursor.rowcount
