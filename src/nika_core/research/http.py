@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 from collections.abc import Callable
+from math import isfinite
 from dataclasses import dataclass
 from ipaddress import ip_address
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -144,7 +145,7 @@ def _retry_after(headers: httpx.Headers, *, maximum: float) -> float | None:
         seconds = float(value.strip())
     except ValueError:
         return None
-    if seconds < 0:
+    if not isfinite(seconds) or seconds < 0:
         return None
     return min(seconds, maximum)
 
