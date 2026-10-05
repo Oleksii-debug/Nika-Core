@@ -204,6 +204,60 @@ def test_requirement_link_rejects_proposed_and_stale_decisions(tmp_path) -> None
     assert projects.get("p1").spec_version == 1
 
 
+@pytest.mark.parametrize(
+    "invalid_version",
+    [False, True, 0.0, "0", -1],
+)
+def test_decision_record_requires_exact_nonnegative_row_version(
+    tmp_path,
+    invalid_version,
+) -> None:
+    _, projects, decisions = _repos(tmp_path)
+    _handoff(projects)
+
+    with pytest.raises(
+        ProductProjectError,
+        match="expected_row_version must be a non-negative integer",
+    ):
+        decisions.record(
+            "p1",
+            _decision(),
+            expected_row_version=invalid_version,
+            idempotency_key="decision:invalid-row-version",
+        )
+
+    assert projects.get("p1").row_version == 0
+    with pytest.raises(KeyError):
+        decisions.get("p1", "decision-1")
+
+
+def test_requirement_link_rejects_float_row_version_without_spec_mutation(tmp_path) -> None:
+    _, projects, decisions = _repos(tmp_path)
+    _handoff(projects)
+    decisions.record(
+        "p1",
+        _decision(),
+        expected_row_version=0,
+        idempotency_key="decision:approve:exact",
+    )
+    before = projects.get("p1")
+
+    with pytest.raises(
+        ProductProjectError,
+        match="expected_row_version must be a non-negative integer",
+    ):
+        decisions.link_requirement(
+            "p1",
+            requirement_id="req-1",
+            decision_id="decision-1",
+            expected_row_version=1.0,
+        )
+
+    after = projects.get("p1")
+    assert after == before
+    assert after.spec.requirements[0].decision_ids == ()
+
+
 def test_decision_stale_write_and_idempotency_conflict_fail_closed(tmp_path) -> None:
     _, projects, decisions = _repos(tmp_path)
     _handoff(projects)
