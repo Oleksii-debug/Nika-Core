@@ -135,6 +135,7 @@ def build_windows_bridge(
         prepare_task_payload=prepare_task_payload,
         admit_created_task=cloud_permissions.admit_created_task,
         admit_resumed_task=cloud_permissions.admit_resumed_task,
+        admit_recovered_task=cloud_permissions.admit_recovered_task,
         autostart_service=(
             WindowsAutostartService(Path(sys.executable))
             if sys.platform == "win32" and getattr(sys, "frozen", False)
