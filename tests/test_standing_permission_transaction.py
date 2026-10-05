@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -90,6 +91,11 @@ def test_grant_transaction_keeps_commit_control_inside_store(
             assert not hasattr(transaction, "commit")
             assert not hasattr(transaction, "rollback")
             assert not hasattr(transaction, "close")
+            cursor = transaction.execute("SELECT 1 AS value")
+            assert not hasattr(cursor, "connection")
+            assert cursor.fetchone()["value"] == 1
+            with pytest.raises(sqlite3.DatabaseError):
+                transaction.execute("COMMIT")
             transaction.execute(
                 "CREATE TABLE dependent_atomicity_probe(value TEXT NOT NULL)"
             )
