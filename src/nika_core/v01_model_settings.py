@@ -1120,8 +1120,11 @@ class V01ModelSettings:
                 "Не вдалося підготувати модель. Завдання не створено."
             ) from exc
 
-    def for_task(self, task_id: str) -> ModelSelection:
-        """Return the exact route accepted with the task and bind it once."""
+    def for_task_binding(
+        self,
+        task_id: str,
+    ) -> tuple[ModelSelection, TaskModelArtifactPin | None]:
+        """Return the exact route and artifact pin from one durable task snapshot."""
 
         if not isinstance(task_id, str) or not task_id.strip():
             raise ModelSetupError("Немає коректного ідентифікатора завдання.")
@@ -1160,7 +1163,7 @@ class V01ModelSettings:
                     raise ModelSetupError(
                         "Збережена модель завдання не збігається з прийнятою конфігурацією."
                     )
-                return bound
+                return bound, accepted_pin
             conn.execute(
                 "INSERT INTO v01_task_model_bindings("
                 "task_id, selection_id, selection_json, created_at, artifact_pin_sha256"
@@ -1196,38 +1199,19 @@ class V01ModelSettings:
                     "artifact_pin_sha256": accepted_pin_sha256,
                 },
             )
-            return accepted
+            return accepted, accepted_pin
+
+    def for_task(self, task_id: str) -> ModelSelection:
+        """Return the exact route accepted with the task and bind it once."""
+
+        selection, _ = self.for_task_binding(task_id)
+        return selection
 
     def artifact_pin_for_task(self, task_id: str) -> TaskModelArtifactPin | None:
         """Return the immutable digest pin accepted with a task, when present."""
 
-        self.for_task(task_id)
-        try:
-            payload = TaskQueue(self._store).get(task_id).payload
-        except KeyError as exc:
-            raise ModelSetupError("Завдання для вибраної моделі не знайдено.") from exc
-        selection_id = payload.get(_TASK_SELECTION_FIELD)
-        with self._store.connection() as conn:
-            pin = self._task_artifact_pin(
-                conn,
-                payload=payload,
-                selection_id=selection_id,
-            )
-            row = conn.execute(
-                "SELECT selection_id, artifact_pin_sha256 "
-                "FROM v01_task_model_bindings WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-            if row is None or row["selection_id"] != selection_id:
-                raise ModelSetupError(
-                    "Не вдалося відновити прив'язку артефакту моделі завдання."
-                )
-            expected_pin = pin.pin_sha256 if pin is not None else None
-            if row["artifact_pin_sha256"] != expected_pin:
-                raise ModelSetupError(
-                    "Збережена прив'язка артефакту моделі завдання пошкоджена."
-                )
-            return pin
+        _, artifact_pin = self.for_task_binding(task_id)
+        return artifact_pin
 
 
 class _TaskBoundCloudEffectAuthorizer:
@@ -1322,8 +1306,7 @@ class V01BoundModelRuntimeFactory:
         self._cloud_execution_authority_resolver = cloud_execution_authority_resolver
 
     def for_task(self, task_id: str) -> ModelGatewayAgentRuntime | None:
-        selection = self._settings.for_task(task_id)
-        artifact_pin = self._settings.artifact_pin_for_task(task_id)
+        selection, artifact_pin = self._settings.for_task_binding(task_id)
         if selection.route_kind == "deterministic":
             if artifact_pin is not None:
                 raise ModelSetupError(
@@ -1350,8 +1333,7 @@ class V01BoundModelRuntimeFactory:
         silently falling back to the supervisor's unrelated default.
         """
 
-        selection = self._settings.for_task(task_id)
-        artifact_pin = self._settings.artifact_pin_for_task(task_id)
+        selection, artifact_pin = self._settings.for_task_binding(task_id)
         if selection.route_kind == "deterministic":
             raise ModelSetupError(
                 "Детермінований режим виконується packaged runtime без ModelGateway."
