@@ -237,3 +237,81 @@ def test_download_broker_does_not_follow_linked_destination(tmp_path: Path) -> N
         broker.handle(_FakeDownload("alias.txt", "unapproved replacement"))
     assert victim.read_text(encoding="utf-8") == "protected"
     assert broker.saved == []
+
+@pytest.mark.parametrize(
+    "suggested_filename",
+    [
+        "NUL.txt",
+        "con",
+        "COM1.log",
+        "lPt9.data",
+        "CONIN$",
+        "report.txt:private-stream",
+        "bad?.txt",
+        "bad*.txt",
+        "bad|name.txt",
+        "trailing.",
+        "trailing ",
+        "control\x01.txt",
+        "delete\x7f.txt",
+        "surrogate-\ud800.txt",
+        ("a" * 256) + ".txt",
+    ],
+)
+def test_download_broker_rejects_nonordinary_windows_component_before_save(
+    tmp_path: Path,
+    suggested_filename: str,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    download = _FakeDownload(suggested_filename, "must not be written")
+
+    with pytest.raises(UnsupportedInteractionError, match="safe filename"):
+        broker.handle(download)
+
+    assert download.destination is None
+    assert broker.saved == []
+    assert list(broker.approved_root.iterdir()) == []
+
+
+def test_download_broker_treats_backslash_parent_text_as_basename(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    download = _FakeDownload(r"..\parent\доказ.txt", "UTF-8 доказ")
+
+    broker.handle(download)
+
+    assert broker.saved == [(broker.approved_root / "доказ.txt").resolve()]
+    assert broker.saved[0].read_text(encoding="utf-8") == "UTF-8 доказ"
+
+
+def test_download_broker_accepts_255_utf16_unit_unicode_component(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    filename = ("а" * 251) + ".txt"
+    download = _FakeDownload(filename, "boundary")
+
+    broker.handle(download)
+
+    assert broker.saved == [(broker.approved_root / filename).resolve()]
+    assert broker.saved[0].read_text(encoding="utf-8") == "boundary"
+
+
+def test_download_filename_subclass_is_rejected_without_behavior(
+    tmp_path: Path,
+) -> None:
+    class BehavioralFilename(str):
+        def replace(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("filename subclass behavior must not execute")
+
+    broker = DownloadBroker(tmp_path / "downloads")
+    download = _FakeDownload("placeholder.txt")
+    download.suggested_filename = BehavioralFilename("evidence.txt")
+
+    with pytest.raises(UnsupportedInteractionError, match="safe filename"):
+        broker.handle(download)
+
+    assert download.destination is None
+    assert broker.saved == []
+
