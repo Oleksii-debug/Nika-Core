@@ -8,14 +8,6 @@ from .accounting import AccountSnapshot
 from .orders import SimulatedFill
 
 _TRADER_SCHEMA_VERSION = 3
-_V3_FILL_COLUMNS = (
-    ("venue_id", "TEXT NOT NULL DEFAULT ''"),
-    ("venue_timezone", "TEXT NOT NULL DEFAULT ''"),
-    ("currency", "TEXT NOT NULL DEFAULT ''"),
-    ("workspace_id", "TEXT NOT NULL DEFAULT ''"),
-    ("run_id", "TEXT NOT NULL DEFAULT ''"),
-    ("order_id", "TEXT NOT NULL DEFAULT ''"),
-)
 
 
 class TradingStateRepository:
@@ -59,24 +51,24 @@ class TradingStateRepository:
         run_id = fill.authority.run_id
         with self._store.connection() as conn:
             existing = conn.execute(
-                "SELECT 1 FROM trading_research_fills "
+                "SELECT 1 FROM trading_research_run_fills "
                 "WHERE workspace_id = ? AND run_id = ? AND fill_id = ?",
                 (workspace_id, run_id, fill.fill_id),
             ).fetchone()
             if existing is not None:
                 return False
             conn.execute(
-                "INSERT INTO trading_research_fills("
-                "fill_id, approval_id, intent_id, workspace_id, run_id, order_id, "
+                "INSERT INTO trading_research_run_fills("
+                "workspace_id, run_id, fill_id, approval_id, intent_id, order_id, "
                 "venue_id, venue_timezone, instrument_id, currency, side, quantity, "
                 "price, fee, filled_at, filled_slice) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
+                    workspace_id,
+                    run_id,
                     fill.fill_id,
                     fill.approval_id,
                     fill.intent_id,
-                    workspace_id,
-                    run_id,
                     fill.authority.order_id,
                     fill.instrument.venue.venue_id,
                     fill.instrument.venue.timezone,
@@ -103,7 +95,7 @@ class TradingStateRepository:
         _validate_scope(workspace_id, run_id)
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS count FROM trading_research_fills "
+                "SELECT COUNT(*) AS count FROM trading_research_run_fills "
                 "WHERE workspace_id = ? AND run_id = ?",
                 (workspace_id, run_id),
             ).fetchone()
@@ -115,7 +107,7 @@ class TradingStateRepository:
             raise ValueError("fill_id must be nonblank text")
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT 1 FROM trading_research_fills "
+                "SELECT 1 FROM trading_research_run_fills "
                 "WHERE workspace_id = ? AND run_id = ? AND fill_id = ?",
                 (workspace_id, run_id, fill_id),
             ).fetchone()
@@ -139,13 +131,14 @@ class TradingStateRepository:
 
 def _create_v3_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
-        "CREATE TABLE IF NOT EXISTS trading_research_fills ("
-        "fill_id TEXT PRIMARY KEY, approval_id TEXT NOT NULL, intent_id TEXT NOT NULL, "
-        "workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, order_id TEXT NOT NULL, "
+        "CREATE TABLE IF NOT EXISTS trading_research_run_fills ("
+        "workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, fill_id TEXT NOT NULL, "
+        "approval_id TEXT NOT NULL, intent_id TEXT NOT NULL, order_id TEXT NOT NULL, "
         "venue_id TEXT NOT NULL, venue_timezone TEXT NOT NULL, instrument_id TEXT NOT NULL, "
         "currency TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, "
         "price TEXT NOT NULL, fee TEXT NOT NULL, filled_at TEXT NOT NULL, "
-        "filled_slice INTEGER NOT NULL)"
+        "filled_slice INTEGER NOT NULL, "
+        "PRIMARY KEY(workspace_id, run_id, fill_id))"
     )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS trading_research_run_account_state ("
@@ -166,26 +159,20 @@ def _upgrade_empty_legacy(conn: sqlite3.Connection, current: int) -> None:
         raise RuntimeError(
             f"legacy trading state lacks {missing}; export/reset it before upgrade"
         )
-    columns = _fill_columns(conn)
-    for name, definition in _V3_FILL_COLUMNS:
-        if name not in columns:
-            conn.execute(
-                f"ALTER TABLE trading_research_fills ADD COLUMN {name} {definition}"
-            )
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS trading_research_run_account_state ("
-        "workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, payload TEXT NOT NULL, "
-        "last_fill_id TEXT NOT NULL, PRIMARY KEY(workspace_id, run_id))"
-    )
+    _create_v3_tables(conn)
 
 
 def _verify_v3_schema(conn: sqlite3.Connection) -> None:
+    fill_rows = conn.execute(
+        "PRAGMA table_info(trading_research_run_fills)"
+    ).fetchall()
+    fill_columns = {str(row["name"]) for row in fill_rows}
     required_fill = {
+        "workspace_id",
+        "run_id",
         "fill_id",
         "approval_id",
         "intent_id",
-        "workspace_id",
-        "run_id",
         "order_id",
         "venue_id",
         "venue_timezone",
@@ -198,19 +185,14 @@ def _verify_v3_schema(conn: sqlite3.Connection) -> None:
         "filled_at",
         "filled_slice",
     }
-    if _fill_columns(conn) != required_fill:
-        raise RuntimeError("invalid trading research fill schema")
-    rows = conn.execute(
+    if fill_columns != required_fill:
+        raise RuntimeError("invalid trading research run fill schema")
+    account_rows = conn.execute(
         "PRAGMA table_info(trading_research_run_account_state)"
     ).fetchall()
-    run_columns = {str(row["name"]) for row in rows}
-    if run_columns != {"workspace_id", "run_id", "payload", "last_fill_id"}:
+    account_columns = {str(row["name"]) for row in account_rows}
+    if account_columns != {"workspace_id", "run_id", "payload", "last_fill_id"}:
         raise RuntimeError("invalid trading research run account schema")
-
-
-def _fill_columns(conn: sqlite3.Connection) -> set[str]:
-    rows = conn.execute("PRAGMA table_info(trading_research_fills)").fetchall()
-    return {str(row["name"]) for row in rows}
 
 
 def _validate_scope(workspace_id: str, run_id: str) -> None:
