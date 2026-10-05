@@ -24,7 +24,7 @@ def test_conflicting_database_aliases_fail_before_default_or_adoption(
         "nika_core.config.user_data_path",
         lambda *_args, **_kwargs: pytest.fail("default location was consulted"),
     )
-    with pytest.raises(ValueError, match="conflicting NIKA database path"):
+    with pytest.raises(ValueError, match="Суперечливі змінні середовища"):
         AppConfig.from_environment()
     assert not first.exists() and not second.exists()
 
@@ -60,4 +60,15 @@ def test_relative_path_is_still_rejected_when_aliases_agree(
     monkeypatch.setenv("NIKA_DB_PATH", "relative/nika.db")
     monkeypatch.setenv("NIKA_DATABASE_PATH", "relative/nika.db")
     with pytest.raises(ValueError, match="database_path must be absolute"):
+        AppConfig.from_environment()
+
+
+def test_case_insensitive_alias_name_conflict_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("NIKA_DB_PATH", raising=False)
+    monkeypatch.delenv("NIKA_DATABASE_PATH", raising=False)
+    monkeypatch.setenv("nika_db_path", str(tmp_path / "one.db"))
+    monkeypatch.setenv("NIKA_DATABASE_PATH", str(tmp_path / "two.db"))
+    with pytest.raises(ValueError, match="Суперечливі змінні середовища"):
         AppConfig.from_environment()
