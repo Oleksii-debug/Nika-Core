@@ -177,7 +177,7 @@ def test_malformed_catalog_identity_is_unknown_not_absent() -> None:
 
 def test_oversized_catalog_fails_closed_without_runtime_inventory_probe() -> None:
     calls: list[str] = []
-    payload = {"models": [{"name": "other-model:1"}] * 10_001}
+    payload = {"models": [{"name": "other-model:1"}] * 4097}
 
     snapshot = OllamaModelHealthProbe(
         model_id="local-model:1",
