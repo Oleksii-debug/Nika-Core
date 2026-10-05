@@ -1632,6 +1632,22 @@ def test_training_runtime_registry_metadata_rejects_invalid_versions() -> None:
         training_runtime_registry_metadata(malformed)
 
 
+def test_registry_runtime_injection_respects_effective_environment_limit(
+    tmp_path: Path,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    environment = {f"NIKA_FIELD_{index}": "value" for index in range(122)}
+
+    with pytest.raises(ValueError, match="too many entries"):
+        _worker(
+            tmp_path,
+            trainer,
+            trainer_metadata=metadata,
+            environment=environment,
+        )
+
+
 def test_resume_identity_binds_runtime_execution_limits(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
