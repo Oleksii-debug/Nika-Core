@@ -30,6 +30,15 @@ def _valid_stored_text(value: object) -> bool:
     return True
 
 
+def _decode_stored_utf8(value: object) -> str:
+    if type(value) is not bytes:
+        raise ProductProjectError("stored research handoff is malformed")
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProductProjectError("stored research handoff is malformed") from exc
+
+
 def _now() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -420,7 +429,7 @@ class ProductDecisionRepository:
             "length(CAST(payload_json AS BLOB)) AS payload_bytes "
             "FROM product_research_handoffs WHERE project_id=?",
             (project_id,),
-        ).fetchall()
+        )
         matches: list[tuple[str, ...]] = []
         for row in rows:
             if (
@@ -433,15 +442,16 @@ class ProductDecisionRepository:
             ):
                 raise ProductProjectError("stored research handoff is malformed")
             hydrated = conn.execute(
-                "SELECT package_id,payload_json FROM product_research_handoffs "
-                "WHERE rowid=? AND project_id=?",
+                "SELECT CAST(package_id AS BLOB) AS package_utf8,"
+                "CAST(payload_json AS BLOB) AS payload_utf8 "
+                "FROM product_research_handoffs WHERE rowid=? AND project_id=?",
                 (row["handoff_rowid"], project_id),
             ).fetchone()
             if hydrated is None:
                 raise ProductProjectError("stored research handoff is malformed")
-            row = hydrated
-            raw = row["payload_json"]
-            if not _valid_stored_text(row["package_id"]) or type(raw) is not str:
+            row_package_id = _decode_stored_utf8(hydrated["package_utf8"])
+            raw = _decode_stored_utf8(hydrated["payload_utf8"])
+            if not _valid_stored_text(row_package_id):
                 raise ProductProjectError("stored research handoff is malformed")
             try:
                 payload = json.loads(
@@ -455,7 +465,7 @@ class ProductDecisionRepository:
             if (
                 type(payload) is not dict
                 or not _valid_stored_text(payload.get("package_id"))
-                or payload["package_id"] != row["package_id"]
+                or payload["package_id"] != row_package_id
                 or type(payload.get("options")) is not list
                 or type(payload.get("evidence")) is not list
                 or not payload["evidence"]
@@ -489,7 +499,7 @@ class ProductDecisionRepository:
                         for package_id in package_ids
                     )
                     or len(package_ids) != len(set(package_ids))
-                    or row["package_id"] not in package_ids
+                    or row_package_id not in package_ids
                 ):
                     raise ProductProjectError("stored product option evidence is malformed")
                 if option["option_id"] == option_id:
