@@ -666,3 +666,54 @@ def test_reconciliation_requires_uncertain_state_inside_writer_transaction(tmp_p
 
     with pytest.raises(IdempotencyConflictError, match="only uncertain"):
         ledger.reconcile_completed("effect:1", {"remote_id": "r-1"})
+
+
+@pytest.mark.parametrize("depth", [129, 256])
+def test_nested_completion_fails_before_changing_durable_state(tmp_path, depth) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+    before = ledger.require("effect:1")
+    nested: object = 0
+    for _ in range(depth):
+        nested = [nested]
+
+    with pytest.raises(ValueError, match="JSON serializable") as failure:
+        ledger.complete("effect:1", {"output": nested})
+    assert failure.value.__cause__ is not None
+    assert "nesting depth" in str(failure.value.__cause__)
+
+    assert ledger.require("effect:1") == before
+    raw = _raw_record(store, "effect:1")
+    assert raw is not None and raw["result_json"] is None
+
+
+@pytest.mark.parametrize("depth", [129, 512])
+def test_deep_persisted_result_fails_closed_without_rewrite(tmp_path, depth) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+    forged = '{"output": ' + "[" * depth + "0" + "]" * depth + "}"
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE idempotency_records SET result_json = ? WHERE operation_key = ?",
+            (forged, "effect:1"),
+        )
+
+    with pytest.raises(RuntimeError, match="result_json is invalid"):
+        ledger.require("effect:1")
+    raw = _raw_record(store, "effect:1")
+    assert raw is not None and raw["result_json"] == forged
+
+
+def test_supported_nested_result_survives_durable_reopen(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+    nested: object = "accepted"
+    for _ in range(64):
+        nested = [nested]
+    expected = {"output": nested}
+
+    assert ledger.complete("effect:1", expected).result == expected
+    assert IdempotencyLedger(store).require("effect:1").result == expected

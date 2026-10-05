@@ -33,6 +33,10 @@ class IdempotencyConflictError(RuntimeError):
     pass
 
 
+# Replayed external-effect evidence must not exhaust the Windows runtime stack.
+_MAX_RESULT_DEPTH = 128
+
+
 def _require_exact_text(value: object, *, field_name: str) -> str:
     if type(value) is not str:
         raise TypeError(f"{field_name} must be exact text")
@@ -92,7 +96,10 @@ def _snapshot_json_value(
     value: Any,
     *,
     active_containers: set[int] | None = None,
+    depth: int = 0,
 ) -> Any:
+    if depth > _MAX_RESULT_DEPTH:
+        raise ValueError("idempotency result exceeds maximum nesting depth")
     value_type = type(value)
     if value_type not in {dict, list, tuple}:
         if isinstance(value, (dict, list, tuple)):
@@ -121,15 +128,16 @@ def _snapshot_json_value(
                 copied[key] = _snapshot_json_value(
                     item,
                     active_containers=active_containers,
+                    depth=depth + 1,
                 )
             return copied
         if value_type is list:
             return [
-                _snapshot_json_value(item, active_containers=active_containers)
+                _snapshot_json_value(item, active_containers=active_containers, depth=depth + 1)
                 for item in value
             ]
         return tuple(
-            _snapshot_json_value(item, active_containers=active_containers)
+            _snapshot_json_value(item, active_containers=active_containers, depth=depth + 1)
             for item in value
         )
     finally:
@@ -141,8 +149,8 @@ def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
         return None
     if not isinstance(result, Mapping):
         raise TypeError("idempotency result must be a mapping when provided")
-    payload = _snapshot_json_value(dict(result))
     try:
+        payload = _snapshot_json_value(dict(result))
         serialized = json.dumps(
             payload,
             ensure_ascii=False,
@@ -167,13 +175,13 @@ def _stored_result(row: sqlite3.Row) -> Mapping[str, Any] | None:
         )
     try:
         decoded = json.loads(raw)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise RuntimeError("persisted idempotency result_json is invalid") from exc
     if type(decoded) is not dict:
         raise RuntimeError("persisted idempotency result_json must be an object")
     try:
         canonical = _serialize_result(decoded)
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError, RecursionError) as exc:
         raise RuntimeError("persisted idempotency result_json is invalid") from exc
     if canonical != raw:
         raise RuntimeError("persisted idempotency result_json is not canonical")
