@@ -3153,3 +3153,128 @@ def test_reconcile_rejects_in_memory_result_without_durable_checkpoint(
     assert durable.state is WorkState.RUNNING
     assert durable.result is None
 
+def test_review_waits_for_durable_result_reconciliation(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host, operation_key = _seed_durable_result_pending_for_reconcile(
+        store,
+        binding,
+        task_id,
+        coordinator,
+    )
+    decision = ReviewDecision(
+        reviewer_id="independent-reviewer",
+        accepted=True,
+        reason="evidence accepted",
+        evidence_refs=("review:evidence",),
+    )
+
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="operation must be completed before downstream transition",
+    ):
+        host.review_and_checkpoint(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            component_id="component-0",
+            decision=decision,
+        )
+
+    assert _record(coordinator, "component-0").state is WorkState.REVIEW_REQUIRED
+    assert IdempotencyLedger(store).require(
+        operation_key
+    ).status is IdempotencyStatus.PENDING
+
+    assert host.reconcile_durable_results(
+        host_task_id=task_id,
+        coordinator=coordinator,
+    ) == (operation_key,)
+    updated = host.review_and_checkpoint(
+        host_task_id=task_id,
+        binding=binding,
+        coordinator=coordinator,
+        component_id="component-0",
+        decision=decision,
+    )
+
+    assert updated.state is WorkState.ACCEPTED
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    assert _record(restored, "component-0").state is WorkState.ACCEPTED
+
+
+def test_prepare_repair_waits_for_failed_result_reconciliation(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host = ProductFactoryProgramHost(
+        store,
+        FakeProgramWorker(),
+        owner_id="program-host:repair-reconciliation",
+    )
+    request = coordinator.start("component-0")
+    lease = host._acquire(request)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(lease,),
+        )
+        operation, created = host._reserve_effect(
+            host_task_id=task_id,
+            request=request,
+            lease=lease,
+        )
+        assert created is True
+        assert operation.status is IdempotencyStatus.PENDING
+        updated = coordinator.record_result(
+            _envelope(
+                request,
+                902,
+                failure=WorkerFailure(
+                    WorkerFailureKind.PROCESS_FAILED,
+                    "tests failed",
+                    retryable=True,
+                ),
+            )
+        )
+        assert updated.state is WorkState.REPAIR_REQUIRED
+        host._save_fenced(task_id, binding, coordinator, lease)
+    finally:
+        host._release_best_effort(lease)
+
+    operation_key = f"pf-worker:{request.work_id}"
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="operation must be completed before downstream transition",
+    ):
+        host.prepare_repair_and_checkpoint(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            component_id=request.component_id,
+            base_sha=SHA_B,
+            reason="repair deterministic test failure",
+        )
+
+    assert _record(coordinator, request.component_id).state is WorkState.REPAIR_REQUIRED
+    assert IdempotencyLedger(store).require(
+        operation_key
+    ).status is IdempotencyStatus.PENDING
+
+    assert host.reconcile_durable_results(
+        host_task_id=task_id,
+        coordinator=coordinator,
+    ) == (operation_key,)
+    repaired = host.prepare_repair_and_checkpoint(
+        host_task_id=task_id,
+        binding=binding,
+        coordinator=coordinator,
+        component_id=request.component_id,
+        base_sha=SHA_B,
+        reason="repair deterministic test failure",
+    )
+
+    assert repaired.attempt == request.attempt + 1
+    assert repaired.work_id != request.work_id
+    assert _record(coordinator, request.component_id).state is WorkState.READY
+
