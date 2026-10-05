@@ -76,7 +76,9 @@ def test_bridge_contains_unexpected_state_failure_without_exposing_details(
     assert "OSError" in caplog.text
 
 
-def test_restore_default_expected_conflict_returns_bounded_error(tmp_path: Path, monkeypatch) -> None:
+def test_restore_default_expected_conflict_returns_bounded_error(
+    tmp_path: Path, monkeypatch
+) -> None:
     bridge = _bridge(tmp_path)
 
     def reject_restore(_self: Keymap, _action_id: str) -> None:
