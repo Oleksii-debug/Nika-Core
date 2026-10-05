@@ -502,7 +502,7 @@ def test_restart_rejects_different_worker_execution_plan_before_effect(
     assert paused.state is TrainingRunState.PAUSED
 
     replacement = _Worker(complete_at=1, execution_plan_sha256="b" * 64)
-    with pytest.raises(TrainingCheckpointError, match="identity mismatch"):
+    with pytest.raises(TrainingScaleError, match="exact training job"):
         _runtime(SQLiteStore(store.path)).run(spec, replacement)
 
     assert replacement.calls == []
@@ -522,7 +522,9 @@ def test_malformed_worker_execution_plan_fails_before_checkpoint_or_effect(
     assert worker.calls == []
 
 
-def test_checkpoint_identity_mismatch_fails_closed(tmp_path: Path) -> None:
+def test_scale_authority_rejects_base_identity_change_before_restore(
+    tmp_path: Path,
+) -> None:
     store = _store_with_task(tmp_path / "nika.db")
     original = _spec()
     _runtime(store).run(
@@ -532,7 +534,7 @@ def test_checkpoint_identity_mismatch_fails_closed(tmp_path: Path) -> None:
     )
     changed = _spec(base_artifact=ArtifactIdentity("models/base", "c" * 64))
 
-    with pytest.raises(TrainingCheckpointError, match="identity mismatch"):
+    with pytest.raises(TrainingScaleError, match="base artifact does not match package"):
         _runtime(store).run(changed, _Worker(complete_at=0))
 
 
@@ -749,7 +751,7 @@ def test_frozen_package_identity_is_bound_across_restart(tmp_path: Path) -> None
     )
 
     changed = _spec(frozen_package_sha256="e" * 64)
-    with pytest.raises(TrainingCheckpointError, match="identity mismatch"):
+    with pytest.raises(TrainingScaleError, match="exact training job"):
         _runtime(SQLiteStore(store.path)).run(changed, _Worker(complete_at=0))
 
 
@@ -776,6 +778,7 @@ def test_waiting_evidence_binds_frozen_package_identity(tmp_path: Path) -> None:
     assert waiting.state is TrainingRunState.WAITING
     assert waiting.frozen_package_sha256 == spec.frozen_package_sha256
     assert waiting.training_material_sha256 == spec.training_material_sha256
+    assert waiting.scale_authorization_sha256 == spec.scale_authorization_sha256
 
 
 def test_completed_checkpoint_requires_candidate_digest_on_restore(tmp_path: Path) -> None:
@@ -838,8 +841,45 @@ def test_material_digest_is_bound_across_restart(tmp_path: Path) -> None:
     )
 
     changed = _spec(training_material_sha256="e" * 64)
-    with pytest.raises(TrainingCheckpointError, match="identity mismatch"):
+    with pytest.raises(TrainingScaleError, match="exact training job"):
         _runtime(SQLiteStore(store.path)).run(changed, _Worker(complete_at=0))
+
+
+def test_checkpoint_rejects_scale_authorization_tamper(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    _runtime(store).run(
+        spec,
+        _Worker(complete_at=2),
+        control=_scripted_control(TrainingControl.PAUSE),
+    )
+    _replace_latest_checkpoint_field(
+        store,
+        field_name="scale_authorization_sha256",
+        value="e" * 64,
+    )
+
+    with pytest.raises(
+        TrainingCheckpointError,
+        match="training scale authorization mismatch",
+    ):
+        _runtime(SQLiteStore(store.path)).run(spec, _Worker(complete_at=0))
+
+
+def test_legacy_checkpoint_without_scale_authority_fails_closed(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    CheckpointService(store).save(
+        task_id=spec.task_id,
+        stage="training_runtime/v3/paused",
+        payload={"legacy": True},
+    )
+
+    with pytest.raises(
+        TrainingCheckpointError,
+        match="predates scale authorization",
+    ):
+        _runtime(SQLiteStore(store.path)).run(spec, _Worker(complete_at=0))
 
 
 def test_checkpoint_rejects_material_digest_tamper(tmp_path: Path) -> None:
