@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
 
 
 class ToolGrant(BaseModel):
@@ -11,7 +11,7 @@ class ToolGrant(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     tool_id: Annotated[str, Field(min_length=3, pattern=r"^[a-z0-9_.-]+$")]
-    max_risk: Annotated[int, Field(ge=0, le=4)] = 0
+    max_risk: Annotated[StrictInt, Field(ge=0, le=4)] = 0
     scopes: tuple[str, ...] = ()
 
     @field_validator("scopes")
