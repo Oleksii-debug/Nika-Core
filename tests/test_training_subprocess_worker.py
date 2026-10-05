@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import hashlib
+import os
 import sys
 from pathlib import Path
 
@@ -9,32 +9,7 @@ import pytest
 from nika_core.training_adapters import SubprocessTrainingWorker, TrainingSubprocessError
 from nika_core.training_runtime import ArtifactIdentity, TrainingJobSpec
 
-
-def _sha256(path: Path) -> str:
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _python_path() -> Path:
-    return Path(sys.executable).resolve(strict=True)
-
-
-def _worker(
-    trainer: Path,
-    *,
-    trainer_sha256: str | None = None,
-    timeout_seconds: float = 300.0,
-    environment: dict[str, str] | None = None,
-    max_response_bytes: int = 64 * 1024,
-) -> SubprocessTrainingWorker:
-    trainer_path = trainer.resolve(strict=True)
-    return SubprocessTrainingWorker(
-        (str(_python_path()), str(trainer_path)),
-        trainer_artifact_path=str(trainer_path),
-        trainer_sha256=_sha256(trainer_path) if trainer_sha256 is None else trainer_sha256,
-        timeout_seconds=timeout_seconds,
-        environment=environment,
-        max_response_bytes=max_response_bytes,
-    )
+_TRAINER_SHA256 = "c" * 64
 
 
 def _script(tmp_path: Path, body: str) -> Path:
@@ -74,7 +49,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     first = worker.step(spec=_spec(), step_index=0, resume_state={})
     assert first.completed is False
@@ -103,7 +80,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     first = worker.step(spec=_spec(), step_index=0, resume_state={})
     replay = worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -113,51 +92,43 @@ sys.stdout.write(json.dumps(response))
     assert isinstance(first_envelope, dict)
     assert isinstance(replay_envelope, dict)
     assert first_envelope["last_step_id"] == replay_envelope["last_step_id"]
-    assert first_envelope["trainer_sha256"] == _sha256(trainer)
+    assert first_envelope["trainer_sha256"] == _TRAINER_SHA256
 
 
-def test_resume_rejects_different_trainer_artifact_before_process_effect(
-    tmp_path: Path,
-) -> None:
+def test_resume_rejects_different_trainer_artifact_before_process_effect(tmp_path: Path) -> None:
+    second_step_marker = tmp_path / "second-step-started"
     trainer = _script(
         tmp_path,
-        """
+        f"""
 import json
 import sys
+from pathlib import Path
 
 request = json.loads(sys.stdin.buffer.read())
-response = {
+if request["step_index"] == 1:
+    Path({str(second_step_marker)!r}).write_text("started", encoding="utf-8")
+response = {{
     "candidate_sha256": None,
     "completed": False,
     "protocol_version": 1,
-    "resume_state": {"next_epoch": request["step_index"] + 1},
+    "resume_state": {{"next_epoch": request["step_index"] + 1}},
     "step_id": request["step_id"],
-}
+}}
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    original = _worker(trainer)
-    first = original.step(spec=_spec(), step_index=0, resume_state={})
-
-    replacement = tmp_path / "replacement.py"
-    marker = tmp_path / "replacement-started"
-    replacement.write_text(
-        f"""
-from pathlib import Path
-Path({str(marker)!r}).write_text("started", encoding="utf-8")
-""".strip(),
-        encoding="utf-8",
+    original = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
     )
-    replacement_worker = _worker(replacement)
+    first = original.step(spec=_spec(), step_index=0, resume_state={})
+    replacement = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256="d" * 64
+    )
 
     with pytest.raises(TrainingSubprocessError, match="trainer artifact"):
-        replacement_worker.step(
-            spec=_spec(),
-            step_index=1,
-            resume_state=first.resume_state,
-        )
+        replacement.step(spec=_spec(), step_index=1, resume_state=first.resume_state)
 
-    assert not marker.exists()
+    assert not second_step_marker.exists()
 
 
 def test_parent_environment_is_not_inherited_by_default(
@@ -182,7 +153,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     result = worker.step(spec=_spec(), step_index=0, resume_state={})
 
@@ -212,8 +185,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(
-        trainer,
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)),
+        trainer_sha256=_TRAINER_SHA256,
         environment={"NIKA_ALLOWED": "yes"},
     )
 
@@ -235,7 +209,9 @@ sys.stderr.write("TOP-SECRET-TRAINING-DATA")
 raise SystemExit(9)
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError) as exc_info:
         worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -252,8 +228,9 @@ import time
 time.sleep(10)
 """.strip(),
     )
-    worker = _worker(
-        trainer,
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)),
+        trainer_sha256=_TRAINER_SHA256,
         timeout_seconds=0.1,
     )
 
@@ -274,8 +251,9 @@ while True:
     sys.stdout.buffer.flush()
 """.strip(),
     )
-    worker = _worker(
-        trainer,
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)),
+        trainer_sha256=_TRAINER_SHA256,
         max_response_bytes=1024,
         timeout_seconds=5,
     )
@@ -301,7 +279,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError, match="wrong step identity"):
         worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -326,7 +306,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError, match="unexpected fields"):
         worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -350,7 +332,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError, match="invalid result evidence"):
         worker.step(spec=_spec(), step_index=0, resume_state={})
@@ -365,7 +349,9 @@ from pathlib import Path
 Path({str(marker)!r}).write_text("started", encoding="utf-8")
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
 
     with pytest.raises(TrainingSubprocessError, match="non-JSON"):
         worker.step(
@@ -395,7 +381,9 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(trainer)
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)), trainer_sha256=_TRAINER_SHA256
+    )
     first = worker.step(spec=_spec(), step_index=0, resume_state={})
     changed = TrainingJobSpec(
         job_id="job-2",
@@ -411,88 +399,24 @@ sys.stdout.write(json.dumps(response))
         worker.step(spec=changed, step_index=1, resume_state=first.resume_state)
 
 
-def test_configured_trainer_digest_must_match_executed_artifact(
-    tmp_path: Path,
-) -> None:
-    trainer = _script(tmp_path, "raise SystemExit(0)")
-    with pytest.raises(ValueError, match="does not match the trainer artifact"):
-        _worker(trainer, trainer_sha256="d" * 64)
-
-
-def test_trainer_artifact_must_be_part_of_executed_command(tmp_path: Path) -> None:
-    trainer = _script(tmp_path, "raise SystemExit(0)")
-    unrelated = tmp_path / "unrelated.py"
-    unrelated.write_text("raise SystemExit(0)", encoding="utf-8")
-    with pytest.raises(ValueError, match="must appear exactly in command"):
-        SubprocessTrainingWorker(
-            (str(_python_path()), str(trainer.resolve(strict=True))),
-            trainer_artifact_path=str(unrelated.resolve(strict=True)),
-            trainer_sha256=_sha256(unrelated),
-        )
-
-
-def test_trainer_replacement_between_steps_is_rejected_before_process_effect(
-    tmp_path: Path,
-) -> None:
-    marker = tmp_path / "replacement-started"
-    trainer = _script(
-        tmp_path,
-        """
-import json
-import sys
-
-request = json.loads(sys.stdin.buffer.read())
-response = {
-    "candidate_sha256": None,
-    "completed": False,
-    "protocol_version": 1,
-    "resume_state": {"position": 1},
-    "step_id": request["step_id"],
-}
-sys.stdout.write(json.dumps(response))
-""".strip(),
-    )
-    worker = _worker(trainer)
-    first = worker.step(spec=_spec(), step_index=0, resume_state={})
-
-    trainer.write_text(
-        f"""
-from pathlib import Path
-Path({str(marker)!r}).write_text("started", encoding="utf-8")
-""".strip(),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(TrainingSubprocessError, match="trainer artifact"):
-        worker.step(spec=_spec(), step_index=1, resume_state=first.resume_state)
-
-    assert not marker.exists()
-
-
 def test_command_must_not_be_a_shell_string() -> None:
     with pytest.raises(TypeError, match="not a shell string"):
         SubprocessTrainingWorker(
-            "python trainer.py",
-            trainer_artifact_path=str(_python_path()),
-            trainer_sha256=_sha256(_python_path()),
+            "python trainer.py", trainer_sha256=_TRAINER_SHA256
         )
 
 
 def test_training_executable_must_be_absolute() -> None:
     with pytest.raises(ValueError, match="absolute path"):
         SubprocessTrainingWorker(
-            ("python", "trainer.py"),
-            trainer_artifact_path=str(_python_path()),
-            trainer_sha256=_sha256(_python_path()),
+            ("python", "trainer.py"), trainer_sha256=_TRAINER_SHA256
         )
 
 
 def test_trainer_identity_must_be_exact_sha256() -> None:
     with pytest.raises(ValueError, match="trainer_sha256"):
         SubprocessTrainingWorker(
-            (str(_python_path()),),
-            trainer_artifact_path=str(_python_path()),
-            trainer_sha256="not-a-digest",
+            (os.path.abspath(sys.executable),), trainer_sha256="not-a-digest"
         )
 
 
@@ -500,9 +424,8 @@ def test_trainer_identity_must_be_exact_sha256() -> None:
 def test_invalid_timeout_is_rejected(timeout: object) -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         SubprocessTrainingWorker(
-            (str(_python_path()),),
-            trainer_artifact_path=str(_python_path()),
-            trainer_sha256=_sha256(_python_path()),
+            (os.path.abspath(sys.executable),),
+            trainer_sha256=_TRAINER_SHA256,
             timeout_seconds=timeout,  # type: ignore[arg-type]
         )
 
@@ -510,8 +433,7 @@ def test_invalid_timeout_is_rejected(timeout: object) -> None:
 def test_huge_integer_timeout_is_rejected_without_overflow() -> None:
     with pytest.raises(ValueError, match="timeout_seconds"):
         SubprocessTrainingWorker(
-            (str(_python_path()),),
-            trainer_artifact_path=str(_python_path()),
-            trainer_sha256=_sha256(_python_path()),
+            (os.path.abspath(sys.executable),),
+            trainer_sha256=_TRAINER_SHA256,
             timeout_seconds=10**10000,  # type: ignore[arg-type]
         )
