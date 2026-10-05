@@ -81,7 +81,7 @@ def _json_key_utf8_size(key: object) -> int:
         if not math.isfinite(key):
             raise ValueError("Checkpoint payload must contain finite key values")
         return len(repr(key)) + 2
-    return 0
+    raise ValueError("Checkpoint payload keys must use canonical built-in JSON types")
 
 
 def _validate_payload_resources(payload: object) -> None:
@@ -116,7 +116,7 @@ def _validate_payload_resources(payload: object) -> None:
         if type(value) is str:
             json_bytes = _checked_json_bytes(json_bytes, _json_string_utf8_size(value))
             continue
-        if isinstance(value, dict):
+        if type(value) is dict:
             if len(value) > _JSON_MAX_NODES - nodes:
                 raise ValueError("Checkpoint payload exceeds the JSON node limit")
             punctuation = 2 + len(value) + max(0, len(value) - 1)
@@ -125,13 +125,15 @@ def _validate_payload_resources(payload: object) -> None:
                 json_bytes = _checked_json_bytes(json_bytes, _json_key_utf8_size(key))
                 stack.append((item, depth + 1))
             continue
-        if isinstance(value, (list, tuple)):
+        if type(value) in (list, tuple):
             if len(value) > _JSON_MAX_NODES - nodes:
                 raise ValueError("Checkpoint payload exceeds the JSON node limit")
             punctuation = 2 + max(0, len(value) - 1)
             json_bytes = _checked_json_bytes(json_bytes, punctuation)
             for item in value:
                 stack.append((item, depth + 1))
+            continue
+        raise ValueError("Checkpoint payload must use canonical built-in JSON types")
 
 
 def _canonical_json(payload: dict[str, object]) -> str:
