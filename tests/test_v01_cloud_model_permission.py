@@ -18,7 +18,7 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
-from nika_core.security.standing_permission import StandingPermissionScope
+from nika_core.security.standing_permission import PermissionContext, StandingPermissionScope
 from nika_core.v01_cloud_model_permission import (
     CloudModelGrantRequest,
     CloudModelPermissionDenied,
@@ -1233,3 +1233,85 @@ def test_recovered_running_task_with_corrupt_bound_selection_fails_before_reprom
         assert conn.execute(
             "SELECT COUNT(*) FROM standing_permissions"
         ).fetchone()[0] == 1
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ("context", "action", "provider", "host", "model"),
+)
+def test_recovered_running_task_reconsents_when_live_grant_scope_mismatches(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    authority = service.execution_authority_for_task(record.task_id)
+    assert authority is not None
+    selection = settings.for_task(record.task_id)
+    request = service._grant_request(record, selection)
+
+    context = authority.context
+    action_class = "model.cloud.complete"
+    provider_id = request.provider_id
+    network_host = request.network_host
+    model = request.model
+    if mismatch == "context":
+        context = PermissionContext(
+            user_id=context.user_id,
+            project_id=context.project_id,
+            task_id=f"{context.task_id}-other",
+        )
+    elif mismatch == "action":
+        action_class = "model.cloud.other"
+    elif mismatch == "provider":
+        provider_id = "other-provider"
+    elif mismatch == "host":
+        network_host = "other.example.test"
+    elif mismatch == "model":
+        model = "other-model"
+    else:  # pragma: no cover - parametrization is closed above
+        raise AssertionError(f"unexpected mismatch: {mismatch}")
+
+    wrong_permission_id = service._new_permission_id(record.task_id)
+    service._permissions.grant(
+        permission_id=wrong_permission_id,
+        scope=StandingPermissionScope(
+            subject_id=authority.subject_id,
+            context=context,
+            action_class=action_class,
+            targets=(provider_id,),
+            sites=(network_host,),
+            resources=(model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_cloud_model_permission_bindings "
+            "SET permission_id = ?, updated_at = ? WHERE task_id = ?",
+            (wrong_permission_id, NOW.isoformat(), record.task_id),
+        )
+
+    assert service.execution_authority_for_task(record.task_id) is None
+
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 2
+    assert prompts[1] == prompts[0]
+    assert service._bound_permission_id(record.task_id, strict=True) != wrong_permission_id
+    assert service.execution_authority_for_task(record.task_id) is not None
+    _authorize(service, record.task_id)

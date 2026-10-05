@@ -23,6 +23,7 @@ from nika_core.security.standing_permission import (
     StandingPermissionBinding,
     StandingPermissionScope,
     StandingPermissionStore,
+    standing_permission_scope_fingerprint,
 )
 from nika_core.tools import ToolRisk
 from nika_core.v01_model_settings import ModelSelection, V01ModelSettings
@@ -137,7 +138,7 @@ class V01CloudModelPermissionService:
             return
         previous_id = self._bound_permission_id(current.task_id, strict=True)
         now = self._utc_now()
-        if self._active_bound_permission(current.task_id, now=now) is not None:
+        if self._active_bound_permission(current, selection, now=now) is not None:
             return
         self._confirm_and_grant(
             current,
@@ -161,7 +162,7 @@ class V01CloudModelPermissionService:
             return
         previous_id = self._bound_permission_id(current.task_id, strict=True)
         now = self._utc_now()
-        if self._active_bound_permission(current.task_id, now=now) is not None:
+        if self._active_bound_permission(current, selection, now=now) is not None:
             return
         self._confirm_and_grant(
             current,
@@ -189,7 +190,7 @@ class V01CloudModelPermissionService:
         if selection.route_kind != "openai_compatible":
             return None
         try:
-            permission = self._active_bound_permission(task_id, now=self._utc_now())
+            permission = self._active_bound_permission(record, selection, now=self._utc_now())
         except Exception:  # noqa: BLE001 - corrupt binding/clock fails closed
             return None
         if permission is None:
@@ -272,14 +273,9 @@ class V01CloudModelPermissionService:
         try:
             with self._permissions.grant_transaction(
                 permission_id=permission_id,
-                scope=StandingPermissionScope(
-                    subject_id=_CLOUD_SUBJECT_ID,
-                    context=self._context(record),
-                    action_class=_CLOUD_ACTION_CLASS,
-                    targets=(request.provider_id,),
-                    sites=(request.network_host,),
-                    resources=(request.model,),
-                    risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+                scope=self._scope_for_request(
+                    record,
+                    request,
                     granted_at=instant,
                     expires_at=instant + _GRANT_TTL,
                 ),
@@ -316,8 +312,12 @@ class V01CloudModelPermissionService:
         if authority.context != expected_context:
             return None
         try:
-            permission = self._active_bound_permission(record.task_id, now=self._utc_now())
             selection = self._settings.for_task(record.task_id)
+            permission = self._active_bound_permission(
+                record,
+                selection,
+                now=self._utc_now(),
+            )
             request = self._grant_request(record, selection)
         except Exception:  # noqa: BLE001 - durable authority reconstruction fails closed
             return None
@@ -572,14 +572,34 @@ class V01CloudModelPermissionService:
             return None
         return self._binding_id_from_row(task_id, row, strict=strict)
 
-    def _active_bound_permission(self, task_id: str, *, now: datetime):
-        permission_id = self._bound_permission_id(task_id, strict=False)
+    def _active_bound_permission(
+        self,
+        record: TaskRecord,
+        selection: ModelSelection,
+        *,
+        now: datetime,
+    ):
+        permission_id = self._bound_permission_id(record.task_id, strict=False)
         if permission_id is None:
             return None
         permission = self._permissions.get(permission_id)
         if permission is None or permission.revoked_at is not None:
             return None
         if now < permission.granted_at or now >= permission.expires_at:
+            return None
+        request = self._grant_request(record, selection)
+        expected_scope = self._scope_for_request(
+            record,
+            request,
+            granted_at=permission.granted_at,
+            expires_at=permission.expires_at,
+        )
+        if permission.parent_permission_id is not None:
+            return None
+        if (
+            permission.scope_fingerprint
+            != standing_permission_scope_fingerprint(expected_scope)
+        ):
             return None
         return permission
 
@@ -662,6 +682,26 @@ class V01CloudModelPermissionService:
     @classmethod
     def _new_permission_id(cls, task_id: str) -> str:
         return f"{cls._permission_prefix(task_id)}{uuid4().hex}"
+
+    @staticmethod
+    def _scope_for_request(
+        record: TaskRecord,
+        request: CloudModelGrantRequest,
+        *,
+        granted_at: datetime,
+        expires_at: datetime,
+    ) -> StandingPermissionScope:
+        return StandingPermissionScope(
+            subject_id=_CLOUD_SUBJECT_ID,
+            context=V01CloudModelPermissionService._context(record),
+            action_class=_CLOUD_ACTION_CLASS,
+            targets=(request.provider_id,),
+            sites=(request.network_host,),
+            resources=(request.model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=granted_at,
+            expires_at=expires_at,
+        )
 
     @staticmethod
     def _grant_request(

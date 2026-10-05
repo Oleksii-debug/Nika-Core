@@ -108,6 +108,14 @@ class StandingPermissionScope:
         object.__setattr__(self, "expires_at", expires_at)
 
 
+def standing_permission_scope_fingerprint(scope: StandingPermissionScope) -> str:
+    """Return the canonical fingerprint for one exact standing-permission scope."""
+
+    if type(scope) is not StandingPermissionScope:
+        raise TypeError("scope fingerprint requires an exact StandingPermissionScope value")
+    return _material(_snapshot_scope(scope)).fingerprint
+
+
 @dataclass(frozen=True, slots=True)
 class StandingPermissionUse:
     subject_id: str
