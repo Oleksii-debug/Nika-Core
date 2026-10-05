@@ -27,13 +27,52 @@ from nika_core.product_project import (
     StaleProjectVersionError,
 )
 from nika_core.product_project_lifecycle import ProductProjectState
+from nika_core.security import ApprovalAuthority
+
+
+class _AuthorizingProductProjectCommandService(ProductProjectCommandService):
+    def __init__(self, repository: ProductProjectRepository) -> None:
+        self._authority = ApprovalAuthority(issuer_id="test-product-command-owner")
+        super().__init__(
+            repository,
+            approval_verifier=self._authority.verifier(),
+        )
+
+    def record_decision(
+        self,
+        project_id: str,
+        decision: ProductDecision,
+        *,
+        expected_row_version: int,
+        idempotency_key: str,
+        approval=None,
+        approval_task_id: str | None = None,
+    ):
+        if decision.state is not ProductDecisionState.PROPOSED and approval is None:
+            approval_task_id = f"test-product-command:{decision.decision_id}"
+            intent = self.decision_approval_intent(
+                project_id,
+                decision,
+                expected_row_version=expected_row_version,
+                task_id=approval_task_id,
+            )
+            request = self._authority.request(intent)
+            approval = self._authority.approve(request.request_id)
+        return super().record_decision(
+            project_id,
+            decision,
+            expected_row_version=expected_row_version,
+            idempotency_key=idempotency_key,
+            approval=approval,
+            approval_task_id=approval_task_id,
+        )
 
 
 def _service(tmp_path):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     projects = ProductProjectRepository(store)
-    return ProductProjectCommandService(projects), projects, store
+    return _AuthorizingProductProjectCommandService(projects), projects, store
 
 
 def _spec(goal: str = "Build accessible expense app") -> ProductProjectSpec:
