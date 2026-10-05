@@ -409,14 +409,31 @@ class EvaluatorConfig:
             _fail("evaluator.switches must use simple --option tokens")
         if len(set(switches)) != len(switches):
             _fail("evaluator.switches contains duplicates")
+        provenance_ref = _require_text(
+            value["provenance_ref"], name="evaluator.provenance_ref"
+        )
+        license_ref = _require_text(value["license_ref"], name="evaluator.license_ref")
+        try:
+            ModelArtifactDescriptor(
+                kind=ModelArtifactKind.EXTERNAL_LOCAL,
+                provider_id="evaluation-runtime",
+                model_id="evaluator-authority",
+                source_reference=provenance_ref,
+                license_reference=license_ref,
+                integrity_basis=ModelIntegrityBasis.SHA256,
+                sha256="0" * 64,
+                size_bytes=1,
+            )
+        except (TypeError, ValueError) as exc:
+            raise PhysicalEvaluationDriverError(
+                "evaluator provenance must be public and secret-free"
+            ) from exc
         return cls(
             executable=_require_absolute_path(value["executable"], name="evaluator.executable"),
             command_files=files,
             switches=switches,
-            provenance_ref=_require_text(
-                value["provenance_ref"], name="evaluator.provenance_ref"
-            ),
-            license_ref=_require_text(value["license_ref"], name="evaluator.license_ref"),
+            provenance_ref=provenance_ref,
+            license_ref=license_ref,
         )
 
 
