@@ -6,6 +6,9 @@ from nika_core.resources.contracts import (
     ResourceBudget,
     ResourceCapacityStatus,
     ResourceObserverPort,
+    ResourceOwnerProbePort,
+    ResourceProcessIdentity,
+    ResourceRequestIdentity,
     ResourceSnapshot,
 )
 from nika_core.resources.manager import ResourceDecision, ResourceManager
@@ -20,6 +23,9 @@ __all__ = [
     "ResourceDecision",
     "ResourceManager",
     "ResourceObserverPort",
+    "ResourceOwnerProbePort",
+    "ResourceProcessIdentity",
+    "ResourceRequestIdentity",
     "ResourceSnapshot",
 ]
 
