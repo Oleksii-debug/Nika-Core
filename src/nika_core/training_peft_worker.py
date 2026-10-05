@@ -274,6 +274,10 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
         job["candidate_artifact_ref"],
         field="candidate_artifact_ref",
     )
+    if _looks_like_private_local_path(base_artifact_ref) or _looks_like_private_local_path(
+        candidate_ref
+    ):
+        _fail("artifact_ref_private_path")
     max_steps = job["max_steps"]
     if type(max_steps) is not int or not 1 <= max_steps <= 100_000:
         _fail("max_steps_invalid")
@@ -1509,6 +1513,127 @@ def _candidate_manifest_json(
     return _canonical_json_bytes(payload).decode("utf-8")
 
 
+def _validate_candidate_manifest_payload(
+    value: dict[str, object],
+) -> dict[str, object]:
+    expected = {
+        "adapter_config",
+        "base_artifact_ref",
+        "base_artifact_sha256",
+        "candidate_artifact_ref",
+        "consumed_materials_sha256",
+        "job_fingerprint",
+        "model_dir_manifest_sha256",
+        "schema",
+        "step_number",
+        "trainer_parameters",
+    }
+    if set(value) != expected or value.get("schema") != "nika-peft-candidate-v1":
+        _fail("candidate_manifest_invalid")
+
+    base_ref = value["base_artifact_ref"]
+    candidate_ref = value["candidate_artifact_ref"]
+    if type(base_ref) is not str or type(candidate_ref) is not str:
+        _fail("candidate_manifest_invalid")
+    try:
+        base_ref_bytes = base_ref.encode("utf-8", errors="strict")
+        candidate_ref_bytes = candidate_ref.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        _fail("candidate_manifest_invalid")
+    if (
+        not base_ref
+        or not candidate_ref
+        or base_ref != base_ref.strip()
+        or candidate_ref != candidate_ref.strip()
+        or len(base_ref_bytes) > 4096
+        or len(candidate_ref_bytes) > 4096
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in base_ref)
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in candidate_ref)
+        or _looks_like_private_local_path(base_ref)
+        or _looks_like_private_local_path(candidate_ref)
+    ):
+        _fail("candidate_manifest_invalid")
+    for field in (
+        "base_artifact_sha256",
+        "consumed_materials_sha256",
+        "job_fingerprint",
+        "model_dir_manifest_sha256",
+    ):
+        if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
+            _fail("candidate_manifest_invalid")
+
+    step_number = value["step_number"]
+    if type(step_number) is not int or not 1 <= step_number <= 100_000:
+        _fail("candidate_manifest_invalid")
+
+    parameters = value["trainer_parameters"]
+    parameter_keys = {
+        "learning_rate",
+        "lora_alpha",
+        "lora_dropout",
+        "lora_r",
+        "lora_target_modules",
+        "max_records",
+        "max_sequence_length",
+        "seed",
+    }
+    if type(parameters) is not dict or set(parameters) != parameter_keys:
+        _fail("candidate_manifest_invalid")
+    learning_rate = parameters["learning_rate"]
+    lora_dropout = parameters["lora_dropout"]
+    lora_alpha = parameters["lora_alpha"]
+    lora_r = parameters["lora_r"]
+    max_records = parameters["max_records"]
+    max_sequence_length = parameters["max_sequence_length"]
+    seed = parameters["seed"]
+    targets = parameters["lora_target_modules"]
+    if (
+        type(learning_rate) is not float
+        or not math.isfinite(learning_rate)
+        or not 1e-8 <= learning_rate <= 1.0
+        or type(lora_dropout) is not float
+        or not math.isfinite(lora_dropout)
+        or not 0.0 <= lora_dropout <= 1.0
+        or type(lora_alpha) is not int
+        or not 1 <= lora_alpha <= 65_536
+        or type(lora_r) is not int
+        or not 1 <= lora_r <= 1024
+        or type(max_records) is not int
+        or not 2 <= max_records <= _MAX_RECORDS_LIMIT
+        or type(max_sequence_length) is not int
+        or not 32 <= max_sequence_length <= _MAX_SEQUENCE_LENGTH_LIMIT
+        or type(seed) is not int
+        or not 0 <= seed <= (1 << 31) - 1
+        or type(targets) is not list
+        or not targets
+        or len(targets) > 64
+        or any(type(item) is not str or _TOKEN_RE.fullmatch(item) is None for item in targets)
+        or len(set(targets)) != len(targets)
+    ):
+        _fail("candidate_manifest_invalid")
+
+    adapter = value["adapter_config"]
+    if type(adapter) is not dict:
+        _fail("candidate_manifest_invalid")
+    adapter_targets = adapter.get("target_modules")
+    if (
+        adapter.get("base_model_name_or_path") != base_ref
+        or "revision" in adapter
+        or adapter.get("r") != lora_r
+        or adapter.get("lora_alpha") != lora_alpha
+        or adapter.get("lora_dropout") != lora_dropout
+        or adapter.get("bias") != "none"
+        or adapter.get("task_type") != "CAUSAL_LM"
+        or type(adapter_targets) is not list
+        or any(type(item) is not str for item in adapter_targets)
+        or len(set(adapter_targets)) != len(adapter_targets)
+        or set(adapter_targets) != set(targets)
+    ):
+        _fail("candidate_manifest_invalid")
+    _reject_private_adapter_config_paths(adapter)
+    return dict(value)
+
+
 def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
     """Read and strictly validate the self-contained manifest bound into a PEFT candidate."""
     try:
@@ -1538,11 +1663,11 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
         _bounded_json_tree(value)
     except (json.JSONDecodeError, RecursionError, ValueError):
         _fail("candidate_manifest_invalid")
-    if type(value) is not dict or value.get("schema") != "nika-peft-candidate-v1":
+    if type(value) is not dict:
         _fail("candidate_manifest_invalid")
     if _canonical_json_bytes(value).decode("utf-8") != raw:
         _fail("candidate_manifest_not_canonical")
-    return dict(value)
+    return _validate_candidate_manifest_payload(value)
 
 
 def _response(
