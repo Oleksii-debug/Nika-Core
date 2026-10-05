@@ -157,6 +157,11 @@ class NetworkPolicy:
     def __post_init__(self) -> None:
         if type(self.mode) is not NetworkMode:
             raise ValueError("network policy mode must be a NetworkMode value")
+        if type(self.approved_hosts) is not tuple or any(
+            type(host) is not str or not host or host != host.strip()
+            for host in self.approved_hosts
+        ):
+            raise ValueError("network approved hosts must be a tuple of nonempty canonical text")
         if self.mode is NetworkMode.DENY and self.approved_hosts:
             raise ValueError("DENY network policy cannot contain approved hosts")
         if self.mode is NetworkMode.APPROVED_HOSTS and not self.approved_hosts:
