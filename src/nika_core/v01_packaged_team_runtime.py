@@ -75,7 +75,6 @@ _WORKER_A_ID = "v01.source-a"
 _WORKER_B_ID = "v01.source-b"
 _GRANT = ToolGrant(tool_id="file.read", max_risk=0, scopes=("workspace",))
 _MAX_MODEL_ANALYSIS_CHARS = 2000
-_MODEL_SELECTION_FIELD = "v01_model_selection"
 
 
 class V01PackagedThreeAgentRuntime(AgentRuntimePort):
