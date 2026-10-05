@@ -12,34 +12,21 @@ from pathlib import Path
 from nika_core.packaging.notices import build_third_party_notices, verify_third_party_notices
 from nika_core.packaging.release import (
     build_release_manifest,
+    require_product_version,
     verify_release_manifest,
     write_release_manifest,
 )
 from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
-_SAFE_RELEASE_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.!+_-]*$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
 
 
 def _require_release_version_text(value: object, *, authority: str) -> str:
-    if type(value) is not str:
-        raise RuntimeError(f"{authority} must be exact text")
-    if not value or value != value.strip():
-        raise RuntimeError(f"{authority} must be non-empty canonical text")
     try:
-        encoded = value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise RuntimeError(f"{authority} must be valid UTF-8 text") from exc
-    if (
-        len(encoded) > 128
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
-        or _SAFE_RELEASE_VERSION_RE.fullmatch(value) is None
-    ):
-        raise RuntimeError(
-            f"{authority} exceeds the bounded release-version text contract"
-        )
-    return value
+        return require_product_version(value, authority=authority)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def project_version(project_root: Path) -> str:
