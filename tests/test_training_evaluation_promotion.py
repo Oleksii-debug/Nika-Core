@@ -631,8 +631,8 @@ async def test_conflicting_partial_observation_fails_closed() -> None:
         permission_fingerprint="permissions:v1",
     )
     conflicting = replace(
-        observations[0],
-        value=float(observations[0].value) + 0.25,
+        observations[-1],
+        value=float(observations[-1].value) + 0.25,
     )
     engine = ExperimentEngine(repository)
     engine.create(definition)
@@ -656,6 +656,7 @@ async def test_conflicting_partial_observation_fails_closed() -> None:
 
     persisted = repository.get(definition.experiment_id)
     assert persisted.observations == (conflicting,)
+    assert persisted.status is ExperimentStatus.RUNNING
 
 
 @pytest.mark.asyncio
