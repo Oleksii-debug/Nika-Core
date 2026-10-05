@@ -74,3 +74,36 @@ def test_attestation_verification_accepts_exact_byte_limit(
     path = tmp_path / "verification.json"
     path.write_bytes(b"[" + b" " * (2 * 1024 * 1024 - 4) + b"{}]")
     assert _read_verification(path) == [{}]
+
+
+def test_attestation_verification_ignores_quoted_brackets_and_escapes(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "verification.json"
+    evidence = [{"meta": ('["\\\\' * 512) + ('"]' * 512)}]
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    assert _read_verification(path) == evidence
+
+
+def test_attestation_verification_accepts_exact_nesting_limit(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "verification.json"
+    nested: object = {}
+    for _ in range(62):
+        nested = [nested]
+    evidence = [{"meta": nested}]
+    path.write_text(json.dumps(evidence), encoding="utf-8")
+    assert _read_verification(path) == evidence
+
+
+def test_attestation_verification_rejects_excess_nesting(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "verification.json"
+    nested: object = {}
+    for _ in range(63):
+        nested = [nested]
+    path.write_text(json.dumps([{"meta": nested}]), encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid or oversized JSON"):
+        _read_verification(path)
