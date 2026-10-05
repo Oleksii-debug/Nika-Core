@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -394,3 +395,71 @@ def test_numeric_overflow_is_reported_as_driver_error(tmp_path: Path) -> None:
         match="must be a finite number",
     ):
         driver.PhysicalEvaluationConfig.from_json(json.dumps(payload))
+
+
+def test_run_releases_exclusive_effect_lock_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    output_root = config.physical_pilot_output_root
+    output_root.mkdir()
+    events: list[object] = []
+
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+
+    def fake_open(path: Path) -> int:
+        events.append(("open", path))
+        return 123
+
+    def fake_close(handle: int | None) -> None:
+        events.append(("close", handle))
+
+    def fail_locked_run(
+        supplied: driver.PhysicalEvaluationConfig,
+        *,
+        output_root: Path,
+    ) -> dict[str, object]:
+        assert supplied is config
+        events.append(("run", output_root))
+        raise driver.PhysicalEvaluationDriverError("synthetic downstream failure")
+
+    monkeypatch.setattr(driver, "_open_windows_execution_lock", fake_open)
+    monkeypatch.setattr(driver, "_close_windows_execution_lock", fake_close)
+    monkeypatch.setattr(
+        driver,
+        "_run_locked_physical_evaluation_from_config",
+        fail_locked_run,
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="synthetic downstream failure",
+    ):
+        driver.run_physical_evaluation_from_config(config)
+
+    assert events == [
+        ("open", output_root / ".physical-old-new-evaluation.lock"),
+        ("run", output_root),
+        ("close", 123),
+    ]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics are required")
+def test_windows_execution_lock_is_exclusive_and_recoverable(tmp_path: Path) -> None:
+    lock_path = tmp_path / ".physical-old-new-evaluation.lock"
+
+    first = driver._open_windows_execution_lock(lock_path)
+    try:
+        with pytest.raises(
+            driver.PhysicalEvaluationDriverError,
+            match="already active",
+        ):
+            driver._open_windows_execution_lock(lock_path)
+    finally:
+        driver._close_windows_execution_lock(first)
+
+    second = driver._open_windows_execution_lock(lock_path)
+    driver._close_windows_execution_lock(second)
+
+    assert lock_path.is_file()
