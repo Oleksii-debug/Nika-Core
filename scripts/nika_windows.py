@@ -16,13 +16,13 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.default_actions import build_default_action_registry
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.workspace_registry import WorkspaceRegistry
-from nika_core.product_command.command_center import ProductCommandCenter
-from nika_core.product_command.product_project_adapter import ProductProjectCommandService
-from nika_core.product_command.routing import route_command
 from nika_core.packaged_agent_builder import (
     PackagedAgentBuilderDraftHandler,
     PackagedAgentBuilderStateProjector,
 )
+from nika_core.product_command.command_center import ProductCommandCenter
+from nika_core.product_command.product_project_adapter import ProductProjectCommandService
+from nika_core.product_command.routing import route_command
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductSelectionStore,
