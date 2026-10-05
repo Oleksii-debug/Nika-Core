@@ -589,6 +589,7 @@ class V01ModelSettings:
         self,
         *,
         decision_sha256: str,
+        binding_sha256: str,
         expected_revision: int,
     ) -> ModelPromotionReceipt:
         """Restore the exact pre-promotion route if the promotion still owns it."""
@@ -596,6 +597,10 @@ class V01ModelSettings:
         decision_digest = self._require_promotion_digest(
             decision_sha256,
             field="SHA-256 рішення",
+        )
+        binding_digest = self._require_promotion_digest(
+            binding_sha256,
+            field="SHA-256 зв'язування",
         )
         if (
             type(expected_revision) is not int
@@ -612,6 +617,10 @@ class V01ModelSettings:
                 if row is None:
                     raise ModelSetupError("Запис просування моделі не знайдено.")
                 receipt = self._promotion_receipt(row)
+                if receipt.binding_sha256 != binding_digest:
+                    raise ModelSetupError(
+                        "Запис відкату належить іншому навчальному доказу."
+                    )
                 if receipt.rollback_revision is not None:
                     return receipt
 
