@@ -39,6 +39,7 @@ from nika_core.toolsmith.contracts import RecoveryState
 
 _OPERATION_TYPE = "product_factory.coding_worker"
 _EFFECT_CANCEL_GRACE_SECONDS = 0.1
+_MAX_RECOVERY_STATE_TEXT_UTF8_BYTES = 4096
 _T = TypeVar("_T")
 
 
@@ -695,14 +696,7 @@ class ProductFactoryProgramHost:
                         detail="worker state is missing; duplicate execution is forbidden",
                     )
                 try:
-                    if type(state) is not RecoveryState:
-                        raise TypeError("invalid recovery state carrier")
-                    phase, token = state.phase, state.opaque_token
-                    if type(phase) is not str or not phase.strip():
-                        raise ValueError("invalid recovery phase")
-                    if token is not None and type(token) is not str:
-                        raise TypeError("invalid recovery token")
-                    recovery_state = RecoveryState(phase, token)
+                    recovery_state = _snapshot_recovery_state(state)
                 except (AttributeError, TypeError, ValueError):
                     durable_status, marker_detail = (
                         self._mark_uncertain_and_release_recovery_claim(
@@ -1412,6 +1406,31 @@ async def _cancel_effect_task(task: asyncio.Future) -> None:
 def _consume_detached_task_result(task: asyncio.Future) -> None:
     with suppress(asyncio.CancelledError, Exception):
         task.result()
+
+
+def _canonical_recovery_text(value: object, *, label: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or len(value.encode("utf-8")) > _MAX_RECOVERY_STATE_TEXT_UTF8_BYTES
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{label} must be canonical bounded single-line text")
+    return value
+
+
+def _snapshot_recovery_state(state: object) -> RecoveryState:
+    if type(state) is not RecoveryState:
+        raise TypeError("invalid recovery state carrier")
+    phase = _canonical_recovery_text(state.phase, label="recovery phase")
+    token_value = state.opaque_token
+    token = (
+        None
+        if token_value is None
+        else _canonical_recovery_text(token_value, label="recovery token")
+    )
+    return RecoveryState(phase, token)
 
 
 def _operation_key(request: ComponentWorkRequest) -> str:
