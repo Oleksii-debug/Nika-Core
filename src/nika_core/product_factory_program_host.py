@@ -327,6 +327,11 @@ class ProductFactoryProgramHost:
                 with self.store.connection() as connection:
                     connection.execute("BEGIN IMMEDIATE")
                     self._assert_lease(connection, lease)
+                    self._require_checkpointed_result(
+                        connection,
+                        host_task_id=host_task_id,
+                        record=record,
+                    )
                     self._clear_stale_recovery_claim_for_reconciliation(
                         connection,
                         operation_key,
@@ -1230,6 +1235,35 @@ class ProductFactoryProgramHost:
             checkpoint=binding.checkpoint(coordinator),
         )
 
+    def _require_checkpointed_result(
+        self,
+        connection,
+        *,
+        host_task_id: str,
+        record: WorkRecord,
+    ) -> None:
+        borrowed = _BorrowedSQLiteStore(self.store, connection)
+        durable = ProductFactoryCheckpointHost(borrowed).latest(
+            host_task_id=host_task_id,
+            project_id=record.request.project_id,
+        )
+        if durable is None:
+            raise ProductFactoryProgramError(
+                "worker result has no durable Product Factory checkpoint"
+            )
+        durable_record = next(
+            (
+                candidate
+                for candidate in durable.checkpoint.coordinator.records
+                if candidate.request.work_id == record.request.work_id
+            ),
+            None,
+        )
+        if durable_record != record:
+            raise ProductFactoryProgramError(
+                "worker result does not match the latest durable Product Factory checkpoint"
+            )
+
     def _require_matching_operation(
         self,
         connection,
@@ -1273,16 +1307,6 @@ class ProductFactoryProgramHost:
             )
             if current.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain_with_connection(connection, operation_key)
-
-    def _durable_operation_status(
-        self,
-        operation_key: str,
-    ) -> IdempotencyStatus | None:
-        try:
-            current = self._ledger.get(operation_key)
-        except Exception:  # noqa: BLE001 - status must not be fabricated on read failure
-            return None
-        return current.status if current is not None else None
 
     def _matching_operation_status(
         self,
