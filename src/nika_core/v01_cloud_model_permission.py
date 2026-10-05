@@ -52,12 +52,16 @@ class CloudModelGrantRequest:
 CloudModelPermissionConfirm = Callable[[CloudModelGrantRequest], bool]
 
 
+class _SQLCursor(Protocol):
+    def fetchone(self) -> sqlite3.Row | None: ...
+
+
 class _SQLExecutor(Protocol):
     def execute(
         self,
         sql: str,
         parameters: tuple[object, ...] = (),
-    ) -> sqlite3.Cursor: ...
+    ) -> _SQLCursor: ...
 
 
 class V01CloudModelPermissionService:
