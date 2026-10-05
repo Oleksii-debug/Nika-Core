@@ -35,7 +35,7 @@ def _finite_json_float(raw: str) -> float:
     return number
 
 
-def _decode_task_payload(raw: object) -> dict[str, object]:
+def decode_task_payload(raw: object) -> dict[str, object]:
     error = "Збережені дані завдання пошкоджені."
     # SQLite TEXT affinity does not prevent external writes of BLOB values.
     if type(raw) is not str:
@@ -182,5 +182,5 @@ class TaskQueue:
             workspace_id=row["workspace_id"],
             agent_id=row["agent_id"],
             state=TaskState(row["state"]),
-            payload=_decode_task_payload(row["payload_json"]),
+            payload=decode_task_payload(row["payload_json"]),
         )
