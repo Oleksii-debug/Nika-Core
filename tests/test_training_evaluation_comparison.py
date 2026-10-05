@@ -507,3 +507,52 @@ async def test_comparison_resumes_partial_evidence_after_sqlite_restart(tmp_path
     assert len(result.experiment_snapshot.observations) == 4
     recovered = reopened_repository.get(definition.experiment_id)
     assert recovered == result.experiment_snapshot
+
+@pytest.mark.asyncio
+async def test_comparison_revalidation_rejects_mutated_champion_training_authority(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new",
+        repository=InMemoryExperimentRepository(),
+    )
+    object.__setattr__(
+        result.champion_benchmark.binding,
+        "training_binding_sha256",
+        "0" * 64,
+    )
+
+    with pytest.raises(ValueError, match="challenger training authority"):
+        result.evidence_payload()
+
+
+@pytest.mark.asyncio
+async def test_comparison_hash_properties_are_derived_from_nested_authorities(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new",
+        repository=InMemoryExperimentRepository(),
+    )
+
+    assert result.training_binding_sha256 == challenger_result.binding.binding_sha256
+    assert result.champion_binding_sha256 == champion_result.binding.binding_sha256
+    assert result.champion_benchmark_sha256 == champion_result.evidence_sha256
+    assert result.challenger_benchmark_sha256 == challenger_result.evidence_sha256
+    with pytest.raises(AttributeError):
+        object.__setattr__(result, "training_binding_sha256", "0" * 64)
+
