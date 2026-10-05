@@ -62,7 +62,7 @@ def _corrupt(payload, case):
     if case == "scalar":
         return "null"
     if case == "deep-json":
-        return '{"nested":' + "[" * 2000 + "0" + "]" * 2000 + "}"
+        return '{"nested":' + "[" * 10000 + "0" + "]" * 10000 + "}"
     if case == "exponent-overflow":
         return json.dumps(payload, ensure_ascii=False)[:-1] + ', "unused": 1e999}'
     if case == "blob":
