@@ -154,9 +154,67 @@ def _scale_material_evidence(
     )
 
 
+def _comparison_scale_plan(
+    evaluation_set: EvaluationSet,
+    material_evidence: TrainingMaterialSetEvidence,
+) -> TrainingScalePlan:
+    pilot_training = next(
+        item
+        for item in material_evidence.materials
+        if item.split is LearningDataSplit.TRAINING
+    )
+    pilot_validation = next(
+        item
+        for item in material_evidence.materials
+        if item.split is LearningDataSplit.VALIDATION
+    )
+    return TrainingScalePlan(
+        plan_id="comparison-scale",
+        evaluation_set_sha256=evaluation_set.content_sha256,
+        tiers=(
+            TrainingScaleTier(
+                tier_id="pilot",
+                max_training_records=pilot_training.record_count,
+                max_training_bytes=pilot_training.byte_count,
+                max_validation_records=pilot_validation.record_count,
+                max_validation_bytes=pilot_validation.byte_count,
+                max_steps=1,
+            ),
+            TrainingScaleTier(
+                tier_id="small",
+                max_training_records=8,
+                max_training_bytes=4096,
+                max_validation_records=8,
+                max_validation_bytes=4096,
+                max_steps=8,
+            ),
+        ),
+    )
+
+
+def _pilot_scale_authorization(
+    evaluation_set: EvaluationSet,
+    material_evidence: TrainingMaterialSetEvidence,
+):
+    return authorize_training_scale(
+        plan=_comparison_scale_plan(evaluation_set, material_evidence),
+        tier_id="pilot",
+        job_id="training-job-1",
+        base_artifact=ArtifactIdentity("models/base", _BASE_SHA256),
+        candidate_artifact_ref="models/challenger",
+        material_evidence=material_evidence,
+        execution_plan_sha256=_sha(b"training-execution-plan"),
+        max_steps=1,
+    )
+
+
 def _training_binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBinding:
     descriptor = _champion_descriptor()
     material_evidence = _scale_material_evidence(evaluation_set)
+    scale_authorization = _pilot_scale_authorization(
+        evaluation_set,
+        material_evidence,
+    )
     return TrainingEvaluationBinding(
         job_id="training-job-1",
         base_candidate_id="models/base",
@@ -169,6 +227,7 @@ def _training_binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBindin
         challenger_sha256=_CHALLENGER_SHA256,
         candidate_artifact_ref="models/challenger",
         frozen_package_sha256=material_evidence.package_manifest_sha256,
+        scale_authorization_sha256=scale_authorization.authorization_sha256,
         execution_plan_sha256=_sha(b"training-execution-plan"),
         evaluation_set_sha256=evaluation_set.content_sha256,
         base_descriptor_digest=descriptor.descriptor_digest,
@@ -868,48 +927,11 @@ async def _promoted_comparison(tmp_path):
 async def test_promoted_pilot_authorizes_exact_next_scale_tier(tmp_path) -> None:
     evaluation = _evaluation_set()
     pilot_materials = _scale_material_evidence(evaluation)
-    pilot_training = next(
-        item
-        for item in pilot_materials.materials
-        if item.split is LearningDataSplit.TRAINING
-    )
-    pilot_validation = next(
-        item
-        for item in pilot_materials.materials
-        if item.split is LearningDataSplit.VALIDATION
-    )
-    plan = TrainingScalePlan(
-        plan_id="comparison-scale",
-        evaluation_set_sha256=evaluation.content_sha256,
-        tiers=(
-            TrainingScaleTier(
-                tier_id="pilot",
-                max_training_records=pilot_training.record_count,
-                max_training_bytes=pilot_training.byte_count,
-                max_validation_records=pilot_validation.record_count,
-                max_validation_bytes=pilot_validation.byte_count,
-                max_steps=1,
-            ),
-            TrainingScaleTier(
-                tier_id="small",
-                max_training_records=8,
-                max_training_bytes=4096,
-                max_validation_records=8,
-                max_validation_bytes=4096,
-                max_steps=8,
-            ),
-        ),
-    )
+    plan = _comparison_scale_plan(evaluation, pilot_materials)
     execution_plan_sha256 = _sha(b"training-execution-plan")
-    pilot_authorization = authorize_training_scale(
-        plan=plan,
-        tier_id="pilot",
-        job_id="training-job-1",
-        base_artifact=ArtifactIdentity("models/base", _BASE_SHA256),
-        candidate_artifact_ref="models/challenger",
-        material_evidence=pilot_materials,
-        execution_plan_sha256=execution_plan_sha256,
-        max_steps=1,
+    pilot_authorization = _pilot_scale_authorization(
+        evaluation,
+        pilot_materials,
     )
     pilot_spec = TrainingJobSpec(
         job_id="training-job-1",
