@@ -130,6 +130,9 @@ def test_invalid_api_selection_does_not_replace_valid_route(
         {"base_url": "ftp://localhost"},
         {"base_url": "http://ollama.example.test:11434"},
         {"base_url": "https://192.0.2.10:11434"},
+        {"model": "qwen3:\u200b8b"},
+        {"model": "qwen3:\u00858b"},
+        {"model": "qwen3:\u00a08b"},
     ),
 )
 def test_invalid_ollama_selection_is_rejected(tmp_path: Path, change: dict[str, object]) -> None:
