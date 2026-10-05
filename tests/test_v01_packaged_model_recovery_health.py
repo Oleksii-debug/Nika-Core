@@ -327,3 +327,55 @@ def test_true_legacy_task_without_selection_or_binding_keeps_no_model_resume(tmp
 
     assert probe.status is RuntimeResumeProbeStatus.READY
 
+def test_bound_model_reference_loss_blocks_startup_recovery_execution(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "bound-reference-loss-recovery" / "nika.db")
+    store.initialize()
+    settings, queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    assert settings.for_task(task_id).model == "qwen3:8b"
+    queue.transition(task_id, TaskState.READY)
+    queue.transition(task_id, TaskState.RUNNING)
+    _remove_model_reference(store, task_id)
+
+    runtime = _TrackingRuntime(
+        store=store,
+        config=AppConfig(database_path=store.path),
+        model_settings=settings,
+        model_health_probe_factory=_UnexpectedHealthFactory(),
+    )
+    thread_id = f"desktop-{task_id}"
+    RuntimeSessionStore(store).record_active(
+        task_id=task_id,
+        runtime_id=runtime.runtime_id,
+        thread_id=thread_id,
+        resume_token=runtime.initial_resume_token(
+            task_id=task_id,
+            thread_id=thread_id,
+        ),
+    )
+    registry = RuntimeRegistry()
+    registry.register(runtime)
+    recovery = RuntimeRecoveryService(
+        queue=queue,
+        audit=AuditLog(store),
+        runtimes=registry,
+    )
+
+    executions = asyncio.run(recovery.resume_safe_crash_sessions())
+
+    assert len(executions) == 1
+    assert executions[0].candidate.disposition is RecoveryDisposition.CHECKPOINT_UNAVAILABLE
+    assert executions[0].result is None
+    assert runtime.resume_calls == 0
+    assert queue.get(task_id).state is TaskState.RUNNING
+
