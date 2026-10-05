@@ -15,8 +15,8 @@ from nika_core.artifacts import (
     ArtifactLocationKind,
     ArtifactRecord,
     ArtifactRegistry,
-    ArtifactVerification,
     ArtifactRegistryError,
+    ArtifactVerification,
     ArtifactVerificationState,
     initialize_artifact_registry_schema,
 )
