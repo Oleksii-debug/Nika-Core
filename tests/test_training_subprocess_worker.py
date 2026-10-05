@@ -892,6 +892,121 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
     assert not marker.exists()
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Win32 command-path lease requires Windows",
+)
+def test_windows_command_launch_lease_blocks_spawn_boundary_substitution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command_dir = tmp_path / "command"
+    command_dir.mkdir()
+    trainer = _script(
+        command_dir,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("raise SystemExit(91)", encoding="utf-8")
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    real_popen = subprocess.Popen
+    observed: list[str] = []
+
+    def racing_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        observed.append("popen")
+        with pytest.raises(OSError):
+            trainer.write_text("raise SystemExit(92)", encoding="utf-8")
+        with pytest.raises(OSError):
+            os.replace(replacement, trainer)
+        with pytest.raises(OSError):
+            command_dir.rename(tmp_path / "command-moved")
+        return real_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "nika_core.training_adapters.subprocess_worker.subprocess.Popen",
+        racing_popen,
+    )
+
+    result = worker.step(
+        spec=_spec(materials, max_steps=1),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    assert result.completed is False
+    assert observed == ["popen"]
+    assert trainer.exists()
+    assert replacement.exists()
+    assert command_dir.exists()
+    assert not (tmp_path / "command-moved").exists()
+
+
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="Win32 command-path lease requires Windows",
+)
+def test_windows_command_launch_lease_failure_is_no_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _script(
+        tmp_path,
+        "raise AssertionError('process must not start')",
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    def deny_lock(path: Path, *, directory: bool) -> int:
+        del path, directory
+        raise OSError("synthetic launch-lease failure")
+
+    def forbidden_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        del args, kwargs
+        raise AssertionError("Popen must not run without the command lease")
+
+    monkeypatch.setattr(
+        "nika_core.training_adapters.subprocess_worker._windows_open_launch_lock",
+        deny_lock,
+    )
+    monkeypatch.setattr(
+        "nika_core.training_adapters.subprocess_worker.subprocess.Popen",
+        forbidden_popen,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "command_artifact_launch_lease_failed"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="Windows launch lease blocks command mutation before process creation",
+)
 def test_command_tamper_during_spawn_is_unknown_and_process_is_reaped(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
