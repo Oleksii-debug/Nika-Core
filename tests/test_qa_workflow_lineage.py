@@ -110,6 +110,13 @@ def test_m11_release_version_is_validated_and_not_interpolated_into_powershell()
     assert "-DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}" not in m11
 
 
+def test_m12_release_version_reuses_validated_m11_authority() -> None:
+    m12 = M12_WORKFLOW.read_text(encoding="utf-8")
+
+    assert m12.count("from scripts.m11_release import project_version") == 2
+    assert "import tomllib; print(tomllib.load(" not in m12
+
+
 def test_release_gates_run_automatically_on_main_push() -> None:
     for path in RELEASE_WORKFLOWS:
         text = path.read_text(encoding="utf-8")
