@@ -228,6 +228,8 @@ class ExperienceLedger:
 
         if type(conn) is not sqlite3.Connection:
             raise TypeError("conn must be an exact sqlite3.Connection")
+        if conn.row_factory is not sqlite3.Row:
+            raise TypeError("conn must use the canonical sqlite3.Row row factory")
         if type(kind) is not ContinuityKind:
             raise TypeError("kind must be a ContinuityKind")
         if type(outcome) is not ContinuityOutcome:
