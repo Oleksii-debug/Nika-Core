@@ -127,6 +127,21 @@ def test_verifier_rejects_invalid_manifest_metadata(
     assert finding in verify_release_manifest(bundle, manifest)
 
 
+@pytest.mark.parametrize("alias", ["Release-Manifest.json", "RELEASE-MANIFEST.JSON"])
+def test_manifest_rejects_casefold_alias_of_reserved_root_file(
+    tmp_path: Path,
+    alias: str,
+) -> None:
+    bundle, _ = _bundle(tmp_path)
+    manifest = ReleaseManifest(
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+        files=(ReleaseFile(path=alias, size=1, sha256="0" * 64),),
+    )
+    assert verify_release_manifest(bundle, manifest) == ("manifest:path:0",)
+
+
 @pytest.mark.parametrize(
     "path",
     [
