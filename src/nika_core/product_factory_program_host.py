@@ -131,8 +131,14 @@ class ProductFactoryProgramHost:
         if type(self.lease_seconds) is not int or self.lease_seconds <= 0:
             raise ValueError("lease_seconds must be an exact positive integer")
         self._checkpoints = ProductFactoryCheckpointHost(self.store)
-        self._ledger = self.idempotency or IdempotencyLedger(self.store)
-        self._ownership = self.ownership or ProductFactoryWorkOwnership(self.store)
+        self._ledger = (
+            IdempotencyLedger(self.store) if self.idempotency is None else self.idempotency
+        )
+        self._ownership = (
+            ProductFactoryWorkOwnership(self.store)
+            if self.ownership is None
+            else self.ownership
+        )
 
     def restore_latest(
         self,
