@@ -14,15 +14,16 @@ Windows-only. A successful call must:
 2. execute one trainer step and persist a `PAUSED` checkpoint at `next_step == 1`;
 3. construct new runtime and worker objects through the supplied restart factories;
 4. require the restarted worker to expose the same execution-plan digest;
-5. run a no-worker-effect `PAUSE` probe on the restarted runtime and require it to
-   reopen the same job at `next_step == 1`;
-6. persist a distinct restart-probe checkpoint before any resumed trainer effect;
-7. fail closed on restart-probe state, reason, identity or checkpoint drift before a second trainer effect;
+5. issue an effect-free `PAUSE` probe and require the restarted runtime to reopen
+   the same job at `next_step == 1`;
+6. require that probe to stop before resource admission and trainer effects;
+7. persist a distinct restart-probe checkpoint;
 8. resume the same authorized job to `COMPLETED`;
 9. require a third distinct durable completion checkpoint;
-10. reverify the final candidate through the existing canonical
+10. build the final candidate descriptor only from detached canonical completion evidence;
+11. reverify the final candidate through the existing canonical
     `training_artifacts.verify_candidate_artifact` boundary; and
-11. require the verifier receipt SHA-256 to equal the completed runtime evidence.
+12. require the verifier receipt SHA-256 to equal the completed runtime evidence.
 
 The resulting `PhysicalTrainingPilotReport` is path-free. It contains bounded identifiers,
 SHA-256 identities, descriptor/registry digests, the original pause, restart-probe, and
@@ -43,12 +44,13 @@ the pilot-tier `TrainingScaleAuthorization` from the same material evidence and 
 `SubprocessTrainingWorker.execution_plan_sha256`. The job must use `max_steps >= 2`.
 
 The restart factory must reopen the same durable checkpoint state rather than returning the
-original `TrainingRuntime` object or a new runtime backed by empty storage. Before any resumed
-trainer effect, the harness issues a `PAUSE` probe through the new runtime and requires the
-same job identity at `next_step == 1`, the explicit `paused` reason, unchanged material/plan
-identity, and a distinct durable restart-probe checkpoint. A fresh or drifted store is rejected
-before step 0 can be replayed. The worker restart factory must construct a new
-`SubprocessTrainingWorker` from the same Registry-bound command and environment authority.
+original `TrainingRuntime` object or a new runtime backed by an empty store. The harness proves
+that reopen before any resumed trainer effect by issuing a `PAUSE` control probe. The new
+runtime must observe `next_step == 1`, persist a new checkpoint with
+`reason == "paused_before_admission"`, and preserve the exact job identity. A fresh or wrong
+store observes step 0 (or an identity mismatch) and is rejected. The worker restart factory must
+construct a new `SubprocessTrainingWorker` from the same Registry-bound command and environment
+authority.
 
 The final candidate descriptor cannot be known before a first real training run completes.
 Pass a `candidate_descriptor_factory` that receives detached canonical COMPLETED evidence.
@@ -82,8 +84,9 @@ report_path.write_text(report.to_json(), encoding="utf-8")
 print(report.evidence_sha256)
 ```
 
-The helper itself supplies both the one-step pause and the effect-free restart probe. Reports
-use schema version 2 because the durable reopen checkpoint is part of the evidence identity.
+The helper supplies both the control sequence required to create the one-step pause and the
+effect-free restart probe. Reports use schema version 2 because the durable-reopen checkpoint
+is now part of the evidence identity.
 
 ## Evidence boundaries
 
