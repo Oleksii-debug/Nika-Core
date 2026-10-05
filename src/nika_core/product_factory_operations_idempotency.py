@@ -75,19 +75,18 @@ class RuntimeIdempotencyMaintenanceJournal:
                 raise ProductOperationsError(
                     "maintenance effect adapter already owns a live created reservation"
                 )
-        try:
-            record, created = self._ledger.reserve_once(
-                operation_key=operation_key,
-                task_id=self._task_id,
-                operation_type=_OPERATION_TYPE,
-                input_fingerprint=fingerprint,
-            )
-        except (IdempotencyConflictError, sqlite3.Error, KeyError, ValueError) as exc:
-            raise ProductOperationsError(
-                "maintenance effect reservation conflicts with durable runtime authority"
-            ) from exc
-        if created:
-            with self._created_reservations_lock:
+            try:
+                record, created = self._ledger.reserve_once(
+                    operation_key=operation_key,
+                    task_id=self._task_id,
+                    operation_type=_OPERATION_TYPE,
+                    input_fingerprint=fingerprint,
+                )
+            except (IdempotencyConflictError, sqlite3.Error, KeyError, ValueError) as exc:
+                raise ProductOperationsError(
+                    "maintenance effect reservation conflicts with durable runtime authority"
+                ) from exc
+            if created:
                 self._created_reservations[operation_key] = (
                     fingerprint,
                     record.created_at,
