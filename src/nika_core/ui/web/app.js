@@ -183,6 +183,8 @@
   let keymapMutationPending = false;
   let stateUnavailableReported = false;
   const maxActivityItems = 200;
+  // Foreground reconciliation has priority over background state polling.
+  let foregroundStateRefreshPending = 0;
 
   function validDispatchResponse(response, expectedRequestId) {
     return Boolean(
@@ -209,6 +211,7 @@
 
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
+  let statePollPending = false;
   let stateRefreshGeneration = 0;
   let lastStateReady = false;
   let teamStateSignature = null;
@@ -1160,10 +1163,16 @@
         focusTarget.disabled = false;
       }
       const focusApplied = focusId ? focusElementById(focusId) : false;
-      const stateReady = await refreshState({
-        announceTeamTransitions: false,
-        requireCurrentGeneration: result === null,
-      });
+      let stateReady = false;
+      foregroundStateRefreshPending += 1;
+      try {
+        stateReady = await refreshState({
+          announceTeamTransitions: false,
+          requireCurrentGeneration: result === null,
+        });
+      } finally {
+        foregroundStateRefreshPending -= 1;
+      }
       document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
       if (!stateReady) {
         renderModelSettings(null);
@@ -1235,10 +1244,16 @@
     } finally {
       autostartPending = false;
       autostartGeneration += 1;
-      const stateReady = await refreshState({
-        announceTeamTransitions: false,
-        requireCurrentGeneration: uncertain,
-      });
+      let stateReady = false;
+      foregroundStateRefreshPending += 1;
+      try {
+        stateReady = await refreshState({
+          announceTeamTransitions: false,
+          requireCurrentGeneration: uncertain,
+        });
+      } finally {
+        foregroundStateRefreshPending -= 1;
+      }
       document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
       if (!stateReady) {
         renderAutostart(null);
@@ -1407,6 +1422,7 @@
       }
       trigger?.focus?.();
     };
+    foregroundStateRefreshPending += 1;
     try {
       const payload = {};
       if (actionId === "task.create") payload.command = commandInput.value.trim();
@@ -1471,6 +1487,7 @@
       if (focusId) focusElementById(focusId);
       else trigger?.focus?.();
     } finally {
+      foregroundStateRefreshPending -= 1;
       if (!keepLocked) inFlightActions.delete(lockKey);
     }
   }
@@ -1614,9 +1631,14 @@
   function startStatePolling() {
     if (statePollHandle !== null || typeof window.setInterval !== "function") return;
     statePollHandle = window.setInterval(async () => {
-      if (document.hidden) return;
-      const ready = await refreshState();
-      document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+      if (document.hidden || statePollPending || foregroundStateRefreshPending > 0) return;
+      statePollPending = true;
+      try {
+        const ready = await refreshState();
+        document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+      } finally {
+        statePollPending = false;
+      }
     }, 1500);
   }
 
