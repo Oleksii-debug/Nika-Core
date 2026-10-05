@@ -195,6 +195,7 @@ class _ChampionPort:
 class _ChallengerPort:
     def __init__(self, text: str) -> None:
         self.text = text
+        self.calls = 0
 
     async def complete_attested(
         self,
@@ -202,6 +203,7 @@ class _ChallengerPort:
         *,
         binding,
     ) -> AttestedModelCompletionResult:
+        self.calls += 1
         return AttestedModelCompletionResult(
             response=ModelResponse(
                 request_id=request.request_id,
@@ -693,10 +695,12 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         payload=settings.prepare_task_payload({"command": "keep old route"}),
     )
 
-    receipt = activate_attested_training_promotion(
+    activation_port = _ChallengerPort("activation-ok")
+    receipt = await activate_attested_training_promotion(
         result=result,
         settings=settings,
         expected_revision=1,
+        effect_port=activation_port,
     )
 
     assert receipt.decision_sha256 == result.evidence_sha256
@@ -706,6 +710,8 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     )
     assert receipt.activated_revision == 2
     assert receipt.rollback_revision is None
+    assert len(receipt.activation_request_sha256) == 64
+    assert len(receipt.activation_attestation_sha256) == 64
     training = result.challenger_benchmark.binding.revalidated()
     assert receipt.base_artifact_sha256 == training.base_sha256
     assert receipt.base_descriptor_digest == training.base_descriptor_digest
@@ -714,12 +720,13 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
 
-    retried = activate_attested_training_promotion(
+    retried = await activate_attested_training_promotion(
         result=result,
         settings=settings,
         expected_revision=1,
     )
     assert retried == receipt
+    assert activation_port.calls == 1
     assert settings.snapshot()["revision"] == 2
     assert settings.for_task(old_task.task_id).model == "base-model"
     new_task = TaskQueue(store).create(
@@ -732,6 +739,8 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     restarted = V01ModelSettings(SQLiteStore(store.path))
     assert restarted.snapshot()["model"] == "challenger-model"
     assert restarted.snapshot()["revision"] == 2
+    persisted = restarted.promotion_receipt(result.evidence_sha256)
+    assert persisted == receipt
 
     rolled_back = rollback_attested_training_promotion(
         result=result,
@@ -752,7 +761,7 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         TrainingModelActivationError,
         match="rejected by the active route authority",
     ):
-        activate_attested_training_promotion(
+        await activate_attested_training_promotion(
             result=result,
             settings=restarted,
             expected_revision=3,
@@ -806,7 +815,7 @@ async def test_non_promoted_attested_comparison_cannot_activate_model(tmp_path) 
         TrainingModelActivationError,
         match="requires a PROMOTED",
     ):
-        activate_attested_training_promotion(
+        await activate_attested_training_promotion(
             result=result,
             settings=settings,
             expected_revision=1,
@@ -822,9 +831,9 @@ async def test_activation_rejects_stale_current_champion_without_mutation(tmp_pa
 
     with pytest.raises(
         TrainingModelActivationError,
-        match="rejected by the active route authority",
+        match="current model route no longer matches",
     ):
-        activate_attested_training_promotion(
+        await activate_attested_training_promotion(
             result=result,
             settings=settings,
             expected_revision=1,
@@ -835,13 +844,68 @@ async def test_activation_rejects_stale_current_champion_without_mutation(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_activation_requires_fresh_loaded_model_attestation(tmp_path) -> None:
+    result = await _promoted_comparison(tmp_path)
+    _, settings = _configured_model_settings(tmp_path)
+
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="fresh loaded-model attestation is required",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=1,
+        )
+
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    _, settings = _configured_model_settings(tmp_path)
+
+    class _SwappedArtifactPort(_ChallengerPort):
+        async def complete_attested(self, request, *, binding):
+            attested = await super().complete_attested(request, binding=binding)
+            return replace(
+                attested,
+                attestation=replace(
+                    attested.attestation,
+                    artifact_sha256=_sha(b"swapped-after-evaluation"),
+                ),
+            )
+
+    port = _SwappedArtifactPort("activation-ok")
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="fresh loaded-model activation attestation failed",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=1,
+            effect_port=port,
+        )
+
+    assert port.calls == 1
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
 async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
     result = await _promoted_comparison(tmp_path)
     _, settings = _configured_model_settings(tmp_path)
-    activate_attested_training_promotion(
+    await activate_attested_training_promotion(
         result=result,
         settings=settings,
         expected_revision=1,
+        effect_port=_ChallengerPort("activation-ok"),
     )
     manual = settings.configure(
         {
@@ -855,6 +919,16 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
         }
     )
     assert manual.status == "completed"
+
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="rejected by the active route authority",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=3,
+        )
 
     with pytest.raises(
         TrainingModelActivationError,
@@ -888,11 +962,140 @@ def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path
             base_descriptor_digest=_sha(b"base-descriptor"),
             challenger_artifact_sha256=_sha(b"challenger-artifact"),
             challenger_descriptor_digest=_sha(b"challenger-descriptor"),
+            activation_request_sha256=_sha(b"activation-request"),
+            activation_attestation_sha256=_sha(b"activation-attestation"),
         )
 
     assert settings.snapshot()["model"] == "base-model"
     assert settings.snapshot()["revision"] == 1
 
+
+def test_direct_promotion_retry_keeps_first_committed_activation_proof(tmp_path) -> None:
+    _, settings = _configured_model_settings(tmp_path)
+    decision_sha256 = _sha(b"race-decision")
+    binding_sha256 = _sha(b"race-binding")
+    base_artifact_sha256 = _sha(b"race-base-artifact")
+    base_descriptor_digest = _sha(b"race-base-descriptor")
+    challenger_artifact_sha256 = _sha(b"race-challenger-artifact")
+    challenger_descriptor_digest = _sha(b"race-challenger-descriptor")
+    first_request = _sha(b"race-first-request")
+    first_attestation = _sha(b"race-first-attestation")
+
+    first = settings.activate_promoted_local_model(
+        expected_revision=1,
+        base_provider_id="ollama",
+        base_model_id="base-model",
+        challenger_provider_id="ollama",
+        challenger_model_id="challenger-model",
+        decision_sha256=decision_sha256,
+        binding_sha256=binding_sha256,
+        base_artifact_sha256=base_artifact_sha256,
+        base_descriptor_digest=base_descriptor_digest,
+        challenger_artifact_sha256=challenger_artifact_sha256,
+        challenger_descriptor_digest=challenger_descriptor_digest,
+        activation_request_sha256=first_request,
+        activation_attestation_sha256=first_attestation,
+    )
+    retried = settings.activate_promoted_local_model(
+        expected_revision=1,
+        base_provider_id="ollama",
+        base_model_id="base-model",
+        challenger_provider_id="ollama",
+        challenger_model_id="challenger-model",
+        decision_sha256=decision_sha256,
+        binding_sha256=binding_sha256,
+        base_artifact_sha256=base_artifact_sha256,
+        base_descriptor_digest=base_descriptor_digest,
+        challenger_artifact_sha256=challenger_artifact_sha256,
+        challenger_descriptor_digest=challenger_descriptor_digest,
+        activation_request_sha256=_sha(b"race-second-request"),
+        activation_attestation_sha256=_sha(b"race-second-attestation"),
+    )
+
+    assert retried == first
+    assert retried.activation_request_sha256 == first_request
+    assert retried.activation_attestation_sha256 == first_attestation
+    assert settings.snapshot()["revision"] == 2
+
+
+@pytest.mark.asyncio
+async def test_v2_promotion_database_migrates_without_fabricating_attestation(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    original = await activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_ChallengerPort("activation-ok"),
+    )
+    assert original.activated_revision == 2
+
+    with store.connection() as conn:
+        conn.execute(
+            "ALTER TABLE v01_model_promotions RENAME TO v01_model_promotions_v3"
+        )
+        conn.execute(
+            "CREATE TABLE v01_model_promotions ("
+            "decision_sha256 TEXT PRIMARY KEY, "
+            "binding_sha256 TEXT NOT NULL, "
+            "base_artifact_sha256 TEXT NOT NULL, "
+            "base_descriptor_digest TEXT NOT NULL, "
+            "challenger_artifact_sha256 TEXT NOT NULL, "
+            "challenger_descriptor_digest TEXT NOT NULL, "
+            "previous_selection_id TEXT NOT NULL, "
+            "activated_selection_id TEXT NOT NULL, "
+            "activated_revision INTEGER NOT NULL CHECK(activated_revision > 0), "
+            "rollback_revision INTEGER, "
+            "CHECK(rollback_revision IS NULL OR rollback_revision > activated_revision))"
+        )
+        conn.execute(
+            "INSERT INTO v01_model_promotions "
+            "(decision_sha256, binding_sha256, base_artifact_sha256, "
+            "base_descriptor_digest, challenger_artifact_sha256, "
+            "challenger_descriptor_digest, previous_selection_id, "
+            "activated_selection_id, activated_revision, rollback_revision) "
+            "SELECT decision_sha256, binding_sha256, base_artifact_sha256, "
+            "base_descriptor_digest, challenger_artifact_sha256, "
+            "challenger_descriptor_digest, previous_selection_id, "
+            "activated_selection_id, activated_revision, rollback_revision "
+            "FROM v01_model_promotions_v3"
+        )
+        conn.execute("DROP TABLE v01_model_promotions_v3")
+        conn.execute(
+            "DELETE FROM v01_model_settings_schema WHERE version = 3"
+        )
+
+    reopened = V01ModelSettings(SQLiteStore(store.path))
+    legacy = reopened.promotion_receipt(result.evidence_sha256)
+    assert legacy is not None
+    assert legacy.activation_request_sha256 is None
+    assert legacy.activation_attestation_sha256 is None
+    assert reopened.snapshot()["model"] == "challenger-model"
+    assert reopened.snapshot()["revision"] == 2
+
+    port = _ChallengerPort("must-not-run")
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="predates fresh loaded-model attestation",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=reopened,
+            expected_revision=2,
+            effect_port=port,
+        )
+    assert port.calls == 0
+
+    rolled_back = rollback_attested_training_promotion(
+        result=result,
+        settings=reopened,
+        expected_revision=2,
+    )
+    assert rolled_back.rollback_revision == 3
+    assert reopened.snapshot()["model"] == "base-model"
+    assert reopened.snapshot()["revision"] == 3
 
 
 def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
@@ -901,7 +1104,7 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     with store.connection() as conn:
         conn.execute("DROP TABLE v01_model_promotions")
         conn.execute(
-            "DELETE FROM v01_model_settings_schema WHERE version = 2"
+            "DELETE FROM v01_model_settings_schema WHERE version >= 2"
         )
 
     reopened = V01ModelSettings(SQLiteStore(store.path))
@@ -909,8 +1112,8 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     assert reopened.snapshot() == before
     with store.connection() as conn:
         assert conn.execute(
-            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version = 2"
-        ).fetchone()[0] == 1
+            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version IN (2, 3)"
+        ).fetchone()[0] == 2
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type = 'table' AND name = 'v01_model_promotions'"
@@ -923,10 +1126,11 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    receipt = activate_attested_training_promotion(
+    receipt = await activate_attested_training_promotion(
         result=result,
         settings=settings,
         expected_revision=1,
+        effect_port=_ChallengerPort("activation-ok"),
     )
     with store.connection() as conn:
         conn.execute(
@@ -947,7 +1151,6 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
-
 
 
 def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path) -> None:
@@ -981,6 +1184,8 @@ def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path
             base_descriptor_digest=_sha(b"foundry-base-descriptor"),
             challenger_artifact_sha256=_sha(b"foundry-challenger-artifact"),
             challenger_descriptor_digest=_sha(b"foundry-challenger-descriptor"),
+            activation_request_sha256=_sha(b"foundry-activation-request"),
+            activation_attestation_sha256=_sha(b"foundry-activation-attestation"),
         )
 
     assert settings.snapshot()["model"] == "base-model"
