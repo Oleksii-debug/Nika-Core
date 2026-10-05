@@ -813,6 +813,31 @@ def test_binding_schema_rejects_preexisting_table_without_migration(
         )
 
 
+def test_binding_schema_rejects_extra_migration_rows(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (0, NOW.isoformat()),
+        )
+
+    with pytest.raises(RuntimeError, match="migration history is invalid"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
 def test_binding_schema_rejects_noncanonical_migration_timestamp(
     tmp_path: Path,
 ) -> None:
