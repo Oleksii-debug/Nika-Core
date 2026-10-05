@@ -63,7 +63,7 @@
       <p id="model-settings-help">Вибір зберігається до створення нового завдання і не змінює режим уже прийнятого завдання. Детермінований режим працює без LLM. Foundry Local використовує вбудовану локальну модель без мережевої адреси. Ollama використовує лише локальну адресу. Для API вкажіть лише посилання на змінну середовища у форматі env:НАЗВА; сам ключ у це поле не вводьте.</p>
 
       <label for="model-route-kind">Тип маршруту моделі</label>
-      <select id="model-route-kind" aria-describedby="model-settings-help model-settings-status">
+      <select id="model-route-kind" aria-describedby="model-settings-help model-settings-status model-artifact-status">
         <option value="deterministic">Детермінований режим без LLM</option>
         <option value="foundry_local">Foundry Local</option>
         <option value="ollama">Локальний Ollama</option>
@@ -74,7 +74,7 @@
       <input id="model-provider" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
 
       <label for="model-name">Назва моделі</label>
-      <input id="model-name" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
+      <input id="model-name" type="text" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help model-artifact-status">
 
       <label for="model-base-url">Базова адреса постачальника</label>
       <input id="model-base-url" type="url" spellcheck="false" autocomplete="off" aria-describedby="model-settings-help">
@@ -93,6 +93,34 @@
       <input id="model-timeout" type="number" min="1" max="600" step="1" inputmode="decimal" aria-describedby="model-settings-help">
 
       <p id="model-settings-status">Перевірка збереженої моделі.</p>
+
+      <div id="model-artifact-panel" hidden>
+        <h3 id="model-artifact-heading">Походження вибраної моделі</h3>
+        <p id="model-artifact-status">Відомості про походження моделі ще не прочитано.</p>
+        <dl id="model-artifact-summary" hidden>
+          <dt>Тип артефакту</dt>
+          <dd id="model-artifact-kind"></dd>
+          <dt>Версія моделі</dt>
+          <dd id="model-artifact-version"></dd>
+          <dt>Основа цілісності</dt>
+          <dd id="model-artifact-integrity"></dd>
+          <dt>Записаний SHA-256 артефакту</dt>
+          <dd id="model-artifact-sha256"></dd>
+          <dt>Digest запису provenance</dt>
+          <dd id="model-artifact-descriptor-digest"></dd>
+          <dt>Джерело</dt>
+          <dd id="model-artifact-source"></dd>
+          <dt>Ліцензія</dt>
+          <dd id="model-artifact-license"></dd>
+          <dt>Розмір артефакту</dt>
+          <dd id="model-artifact-size"></dd>
+          <dt>Можливості</dt>
+          <dd id="model-artifact-capabilities"></dd>
+          <dt>Вимоги до ресурсів</dt>
+          <dd id="model-artifact-resources"></dd>
+        </dl>
+      </div>
+
       <div class="actions">
         <button type="button" id="model-save" data-action-id="settings.model.configure" data-error-focus-target="model-route-kind">Зберегти модель</button>
         <button type="button" id="model-reload" data-action-id="settings.model.refresh" data-error-focus-target="model-settings-heading">Перечитати модель</button>
