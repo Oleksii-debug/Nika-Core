@@ -6,6 +6,7 @@ on:
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
+      - "src/nika_core/config.py"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
       - "src/nika_core/reliability/recovery_lease.py"
@@ -25,6 +26,8 @@ on:
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_v01_stable_packaged_data_location.py"
+      - "tests/test_config_db_alias_conflict.py"
       - "tests/test_v01_legacy_database_adoption.py"
       - "tests/test_backup_restore_wal_stale_preview.py"
       - "tests/test_backup_restore_recovery_process_loss.py"
@@ -53,6 +56,7 @@ on:
       - "src/nika_core/packaging/**"
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
+      - "src/nika_core/config.py"
       - "src/nika_core/reliability/legacy_database.py"
       - "src/nika_core/reliability/backup.py"
       - "src/nika_core/reliability/recovery_lease.py"
@@ -72,6 +76,8 @@ on:
       - "scripts/v01_autostart_uia_proof.ps1"
       - "scripts/qa_assert_checkout_identity.py"
       - "tests/test_m11_m12_release.py"
+      - "tests/test_v01_stable_packaged_data_location.py"
+      - "tests/test_config_db_alias_conflict.py"
       - "tests/test_v01_legacy_database_adoption.py"
       - "tests/test_backup_restore_wal_stale_preview.py"
       - "tests/test_backup_restore_recovery_process_loss.py"
@@ -133,6 +139,8 @@ jobs:
         run: >-
           python -m pytest
           tests/test_m11_m12_release.py
+          tests/test_v01_stable_packaged_data_location.py
+          tests/test_config_db_alias_conflict.py
           tests/test_v01_legacy_database_adoption.py
           tests/test_backup_restore_wal_stale_preview.py
           tests/test_backup_restore_recovery_process_loss.py

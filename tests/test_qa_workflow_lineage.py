@@ -252,3 +252,19 @@ def test_m11_requalifies_backup_recovery_before_windows_package() -> None:
     regressions = regressions.split("- name: Build standalone", 1)[0]
     for path in paths[2:]:
         assert f"          {path}" in regressions, path
+
+
+def test_m11_requalifies_database_configuration_before_windows_package() -> None:
+    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    paths = (
+        "src/nika_core/config.py",
+        "tests/test_v01_stable_packaged_data_location.py",
+        "tests/test_config_db_alias_conflict.py",
+    )
+    for path in paths:
+        assert workflow.count(f'      - "{path}"') == 2, path
+
+    regressions = workflow.split("- name: Run M11 M12 source regressions", 1)[1]
+    regressions = regressions.split("- name: Build standalone", 1)[0]
+    for test in paths[1:]:
+        assert test in regressions, test
