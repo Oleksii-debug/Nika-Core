@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
 
+_SQLITE_MAX_INT64 = (1 << 63) - 1
+
 
 @dataclass(frozen=True, slots=True)
 class WorkspaceDefinition:
@@ -19,8 +21,10 @@ class WorkspaceDefinition:
             raise ValueError("workspace_id must not be empty")
         if not self.name.strip():
             raise ValueError("name must not be empty")
-        if self.version < 1:
-            raise ValueError("version must be >= 1")
+        if type(self.version) is not int or not 1 <= self.version <= _SQLITE_MAX_INT64:
+            raise ValueError("version must be a positive SQLite-sized integer")
+        if type(self.enabled) is not bool:
+            raise ValueError("enabled must be a boolean")
 
 
 class WorkspaceRegistry:
@@ -46,7 +50,7 @@ class WorkspaceRegistry:
                 "ORDER BY version DESC LIMIT 1",
                 (definition.workspace_id,),
             ).fetchone()
-            if row is not None and definition.version <= int(row["version"]):
+            if row is not None and definition.version <= _stored_version(row["version"]):
                 raise ValueError("workspace version must increase")
             conn.execute(
                 "INSERT INTO workspaces(workspace_id, version, name, description, enabled, created_at) "
@@ -80,9 +84,9 @@ class WorkspaceRegistry:
             WorkspaceDefinition(
                 workspace_id=row["workspace_id"],
                 name=row["name"],
-                version=int(row["version"]),
+                version=_stored_version(row["version"]),
                 description=row["description"],
-                enabled=bool(row["enabled"]),
+                enabled=_stored_enabled(row["enabled"]),
             )
             for row in rows
         )
@@ -99,7 +103,19 @@ class WorkspaceRegistry:
         return WorkspaceDefinition(
             workspace_id=row["workspace_id"],
             name=row["name"],
-            version=int(row["version"]),
+            version=_stored_version(row["version"]),
             description=row["description"],
-            enabled=bool(row["enabled"]),
+            enabled=_stored_enabled(row["enabled"]),
         )
+
+
+def _stored_version(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= _SQLITE_MAX_INT64:
+        raise ValueError("invalid persisted workspace version")
+    return value
+
+
+def _stored_enabled(value: object) -> bool:
+    if type(value) is not int or value not in (0, 1):
+        raise ValueError("invalid persisted workspace enabled flag")
+    return bool(value)
