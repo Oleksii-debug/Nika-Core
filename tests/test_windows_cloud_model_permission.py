@@ -198,3 +198,52 @@ def test_desktop_resume_admission_rejection_leaves_task_paused(
     assert queue.get(record.task_id).state is TaskState.PAUSED
     assert backend._active_futures == {}
     assert backend._active_threads == {}
+
+def test_windows_bridge_approved_cloud_consent_grants_before_runtime_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _configured_cloud_product(tmp_path)
+    prompts: list[CloudModelGrantRequest] = []
+    scheduled: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        DesktopBackend,
+        "_schedule_start",
+        lambda _self, task_id, command: scheduled.append((task_id, command)),
+    )
+    bridge, _products = nika_windows.build_windows_bridge(
+        config,
+        cloud_permission_confirm=lambda request: prompts.append(request) or True,
+    )
+    command = "Порівняй джерела через вибрану зовнішню модель."
+
+    result = bridge.dispatch(
+        {
+            "request_id": "allow-cloud-task",
+            "action_id": "task.create",
+            "payload": {"command": command},
+        }
+    )
+
+    assert result["status"] == "accepted"
+    store = SQLiteStore(config.database_path)
+    queue = TaskQueue(store)
+    task = queue.list_recent(limit=10)[0]
+    assert task.state is TaskState.READY
+    assert scheduled == [(task.task_id, command)]
+    assert len(prompts) == 1
+
+    with store.connection() as conn:
+        binding = conn.execute(
+            "SELECT permission_id FROM v01_cloud_model_permission_bindings "
+            "WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()
+        assert binding is not None
+        permission = conn.execute(
+            "SELECT revoked_at FROM standing_permissions WHERE permission_id = ?",
+            (binding["permission_id"],),
+        ).fetchone()
+    assert permission is not None
+    assert permission["revoked_at"] is None
+
