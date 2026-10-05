@@ -4,9 +4,9 @@ import hashlib
 import re
 import unicodedata
 from collections import Counter
-from uuid import UUID
 from collections.abc import Callable, Mapping
 from typing import Any
+from uuid import UUID
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.command_center import ProductCommandCenter
@@ -56,8 +56,6 @@ _TRAINING_STATUS_PREFIXES = (
     "покажи статус навчання",
     "статус навчання",
 )
-
-
 
 
 class PackagedProductJourneyError(ValueError):
