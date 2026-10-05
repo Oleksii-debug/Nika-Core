@@ -12,9 +12,10 @@ import httpx
 from nika_core.diagnostics.health import HealthCheck, HealthStatus
 
 _MAX_HEALTH_TIMEOUT_SECONDS = 30.0
+_MAX_HEALTH_RESPONSE_BYTES = 1024 * 1024
 _MAX_MODEL_ID_CHARS = 512
 _MAX_BASE_URL_CHARS = 2048
-_MAX_MODEL_CATALOG_ENTRIES = 10_000
+_MAX_MODEL_CATALOG_ENTRIES = 4096
 
 
 class ModelHealthFact(StrEnum):
@@ -165,9 +166,16 @@ class OllamaModelHealthProbe:
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                tags_response = client.get(f"{request_base_url}/api/tags")
+                tags_response = self._bounded_get(
+                    client,
+                    f"{request_base_url}/api/tags",
+                )
                 reachable = ModelHealthFact.YES
-                present = self._presence_from_response(tags_response)
+                present = (
+                    self._presence_from_response(tags_response)
+                    if tags_response is not None
+                    else ModelHealthFact.UNKNOWN
+                )
                 if present is ModelHealthFact.NO:
                     return ModelHealthSnapshot(
                         configured=configured,
@@ -185,11 +193,18 @@ class OllamaModelHealthProbe:
                         inference_proven=inference_proven,
                     )
                 try:
-                    running_response = client.get(f"{request_base_url}/api/ps")
+                    running_response = self._bounded_get(
+                        client,
+                        f"{request_base_url}/api/ps",
+                    )
                 except httpx.TransportError:
                     ready = ModelHealthFact.UNKNOWN
                 else:
-                    ready = self._readiness_from_response(running_response)
+                    ready = (
+                        self._readiness_from_response(running_response)
+                        if running_response is not None
+                        else ModelHealthFact.UNKNOWN
+                    )
         except httpx.TransportError:
             return ModelHealthSnapshot(
                 configured=configured,
@@ -288,6 +303,39 @@ class OllamaModelHealthProbe:
         if result is False:
             return ModelHealthFact.NO
         return ModelHealthFact.UNKNOWN
+
+    @staticmethod
+    def _bounded_get(client: httpx.Client, url: str) -> httpx.Response | None:
+        """Read provider metadata with a hard wire-byte budget before JSON decoding."""
+
+        stream = getattr(client, "stream", None)
+        if not callable(stream):
+            return client.get(url)
+        try:
+            with stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
+                if not OllamaModelHealthProbe._successful_response(response):
+                    return httpx.Response(status_code=response.status_code)
+                if response.headers.get("content-encoding", "identity").lower() != "identity":
+                    return None
+                declared = response.headers.get("content-length")
+                if declared is not None and (
+                    not declared.isascii()
+                    or not declared.isdecimal()
+                    or len(declared) > 7
+                    or int(declared) > _MAX_HEALTH_RESPONSE_BYTES
+                ):
+                    return None
+                payload = bytearray()
+                for chunk in response.iter_raw(chunk_size=16384):
+                    if len(chunk) > _MAX_HEALTH_RESPONSE_BYTES - len(payload):
+                        return None
+                    payload.extend(chunk)
+                return httpx.Response(
+                    status_code=response.status_code,
+                    content=bytes(payload),
+                )
+        except httpx.StreamError:
+            return None
 
     def _presence_from_response(self, response: httpx.Response) -> ModelHealthFact:
         if not self._successful_response(response):
