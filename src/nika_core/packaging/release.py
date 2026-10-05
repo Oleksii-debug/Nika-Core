@@ -25,9 +25,37 @@ _MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
-_SECRET_RELEASE_BASENAMES = frozenset({".env", "token.json", "cookies.txt"})
+_SECRET_RELEASE_BASENAMES = frozenset(
+    {
+        ".env",
+        "token.json",
+        "tokens.json",
+        "credentials.json",
+        "client_secret.json",
+        "client_secrets.json",
+        "oauth.json",
+        "oauth_credentials.json",
+        "cookies.txt",
+        "cookies.sqlite",
+        "cookies.db",
+    }
+)
+_SECRET_RELEASE_SUFFIXES = frozenset({".jks", ".keystore", ".p12", ".pfx", ".pkcs12", ".session"})
 _SECRET_CONTENT_SUFFIXES = frozenset(
-    {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties", ".txt", ".log"}
+    {
+        ".cfg",
+        ".conf",
+        ".ini",
+        ".json",
+        ".key",
+        ".log",
+        ".pem",
+        ".properties",
+        ".toml",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
 )
 _SECRET_SCAN_CHUNK_BYTES = 64 * 1024
 _SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
@@ -73,6 +101,12 @@ _PREHUMAN_EVIDENCE_KEYS = frozenset(
         *_PREHUMAN_REQUIRED_FALSE_FIELDS,
     }
 )
+_SECRET_ASSIGNMENT_KEY_PATTERN = rb"""
+    api[_-]?key|apikey|api[_-]?hash|access[_-]?token|auth[_-]?token|
+    refresh[_-]?token|id[_-]?token|session[_-]?token|token|authorization|
+    bearer[_-]?token|oauth[_-]?token|oauth[_-]?secret|client[_-]?secret|
+    secret[_-]?key|password|passwd|private[_-]?key
+"""
 _SECRET_ASSIGNMENT_RE = re.compile(
     rb"""
     [\r\n{,\[]
@@ -80,8 +114,9 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     [ \t-]*
     (?P<quote>["'])?
     (?:
-        api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|
-        secret[_-]?key|password|passwd|private[_-]?key
+    """
+    + _SECRET_ASSIGNMENT_KEY_PATTERN
+    + rb"""
     )
     (?(quote)(?P=quote))
     \s*[:=]\s*
@@ -93,6 +128,31 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE = re.compile(
+    rb"""
+    [\r\n{,\[]
+    (?:\xef\xbb\xbf)?
+    [ \t-]*
+    (?P<quote>["'])?
+    (?:
+    """
+    + _SECRET_ASSIGNMENT_KEY_PATTERN
+    + rb"""
+    )
+    (?(quote)(?P=quote))
+    \s*[:=]\s*
+    (?:
+        "(?:\\.|[^"\\\r\n]){4097}|
+        '(?:\\.|[^'\\\r\n]){4097}
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_PRIVATE_KEY_PEM_RE = re.compile(
+    rb"-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+
 _SECRET_PLACEHOLDER_VALUES = frozenset(
     {
         b"none",
@@ -188,6 +248,8 @@ def _release_path_is_secret(value: object) -> bool:
         identity = part.casefold()
         if identity in _SECRET_RELEASE_BASENAMES:
             return True
+        if any(identity.endswith(suffix) for suffix in _SECRET_RELEASE_SUFFIXES):
+            return True
         if identity.startswith(".env.") and identity != ".env.example":
             return True
     return False
@@ -209,6 +271,10 @@ def _valid_product_version(value: object) -> bool:
 
 def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
     normalized = value.strip().strip(b"\"'").strip().lower()
+    for prefix in (b"bearer ", b"basic "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].strip()
+            break
     if not normalized or normalized in _SECRET_PLACEHOLDER_VALUES:
         return True
     if normalized.startswith(b"${") and normalized.endswith(b"}"):
@@ -230,6 +296,10 @@ def _stream_contains_secret_assignment(handle: Any) -> bool:
         raw_window = overlap + chunk
         window = b"\n" + raw_window if first_window else raw_window
         first_window = False
+        if _PRIVATE_KEY_PEM_RE.search(window):
+            return True
+        if _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE.search(window):
+            return True
         for match in _SECRET_ASSIGNMENT_RE.finditer(window):
             if not _secret_assignment_value_is_placeholder(match.group("value")):
                 return True

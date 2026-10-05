@@ -69,6 +69,11 @@ def test_release_manifest_fails_closed_on_secret_content_under_benign_filename(
         ("bom.properties", b"\xef\xbb\xbfapi_key=" + CANARY.encode() + b"\n"),
         ("debug.txt", f'api_key = "{CANARY}"\n'.encode()),
         ("diagnostics.log", f"access_token={CANARY}\n".encode()),
+        ("identity.toml", f'refresh_token = "{CANARY}"\n'.encode()),
+        ("telegram.yaml", f"api_hash: {CANARY}\n".encode()),
+        ("headers.ini", f'authorization = "Bearer {CANARY}"\n'.encode()),
+        ("identity.cfg", f"id_token={CANARY}\n".encode()),
+        ("runtime.properties", f"token={CANARY}\n".encode()),
     ],
 )
 def test_release_manifest_rejects_high_confidence_secret_assignments(
@@ -109,10 +114,85 @@ def test_release_archive_rejects_secret_content_after_manifest_hash_binding(tmp_
 @pytest.mark.parametrize(
     "content",
     [
+        f'refresh_token = "{CANARY}"\n'.encode(),
+        f'authorization = "Bearer {CANARY}"\n'.encode(),
+        f"api_hash={CANARY}\n".encode(),
+    ],
+)
+def test_release_archive_rejects_additional_persistent_credential_assignments(
+    tmp_path: Path,
+    content: bytes,
+) -> None:
+    bundle = _bundle(tmp_path, "runtime.conf", content)
+    artifact = _archive_bundle(tmp_path, bundle)
+
+    findings = verify_release_archive(artifact, source_sha=SOURCE_SHA)
+
+    assert findings == ("archive:secret-content:runtime.conf",)
+    assert CANARY not in "\n".join(findings)
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "header"),
+    [
+        ("identity.pem", b"-----BEGIN PRIVATE KEY-----"),
+        ("legacy.key", b"-----BEGIN RSA PRIVATE KEY-----"),
+        ("ssh.key", b"-----BEGIN OPENSSH PRIVATE KEY-----"),
+        ("encrypted.pem", b"-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+    ],
+)
+def test_release_manifest_rejects_private_key_pem_material(
+    tmp_path: Path,
+    relative_path: str,
+    header: bytes,
+) -> None:
+    bundle = _bundle(tmp_path, relative_path, header + b"\n" + CANARY.encode() + b"\n")
+
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        f"secret-content:{relative_path}",
+    )
+
+
+def test_release_archive_rejects_private_key_pem_material(tmp_path: Path) -> None:
+    bundle = _bundle(
+        tmp_path,
+        "identity.pem",
+        b"-----BEGIN EC PRIVATE KEY-----\n" + CANARY.encode() + b"\n",
+    )
+    artifact = _archive_bundle(tmp_path, bundle)
+
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == (
+        "archive:secret-content:identity.pem",
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        ("ca.pem", b"-----BEGIN CERTIFICATE-----\npublic\n"),
+        ("public.key", b"-----BEGIN PUBLIC KEY-----\npublic\n"),
+    ],
+)
+def test_private_key_policy_allows_public_pem_material(
+    tmp_path: Path,
+    relative_path: str,
+    content: bytes,
+) -> None:
+    bundle = _bundle(tmp_path, relative_path, content)
+
+    assert verify_release_manifest(bundle, _manifest(bundle)) == ()
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
         b'{"api_key":"${NIKA_API_KEY}"}',
         b'{"client_secret":"{{ credential_ref }}"}',
         b'{"password":"%NIKA_PASSWORD%"}',
         b'{"access_token":"keyring:nika/token"}',
+        b'{"refresh_token":"credential-ref:nika/oauth"}',
+        b'{"authorization":"Bearer ${NIKA_API_TOKEN}"}',
+        b'{"token":"keyring:nika/runtime"}',
         b'{"secret_key":"REDACTED"}',
     ],
 )
@@ -180,6 +260,33 @@ def test_secret_assignment_across_scan_chunk_boundary_is_detected(tmp_path: Path
     bundle = _bundle(tmp_path, "settings.conf", content)
     assert verify_release_manifest(bundle, _manifest(bundle)) == (
         "secret-content:settings.conf",
+    )
+
+
+@pytest.mark.parametrize("quote", [b'"', b"'"])
+def test_oversized_quoted_secret_assignment_is_rejected(
+    tmp_path: Path,
+    quote: bytes,
+) -> None:
+    value = CANARY.encode() + b"x" * 5000
+    content = b"\nrefresh_token=" + quote + value + quote + b"\n"
+    bundle = _bundle(tmp_path, "oauth.conf", content)
+
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:oauth.conf",
+    )
+
+
+def test_oversized_quoted_secret_across_scan_chunk_boundary_is_rejected(
+    tmp_path: Path,
+) -> None:
+    prefix = b"x" * (64 * 1024 - 32)
+    value = CANARY.encode() + b"x" * 5000
+    content = prefix + b'\nrefresh_token="' + value + b'"\n'
+    bundle = _bundle(tmp_path, "oauth.conf", content)
+
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:oauth.conf",
     )
 
 
