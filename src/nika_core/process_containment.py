@@ -122,8 +122,6 @@ def process_group_popen_options() -> tuple[int, bool]:
 
 def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) -> None:
     """Terminate the contained process tree without raising cleanup-only failures."""
-    if process.poll() is not None:
-        return
     if os.name == "nt" and job.active:
         job.close()
         return
@@ -135,6 +133,8 @@ def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) ->
             return
         except OSError:
             pass
+    if process.poll() is not None:
+        return
     try:
         process.kill()
     except OSError:
