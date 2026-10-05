@@ -3041,3 +3041,59 @@ def test_recovery_ownership_collision_does_not_attribute_foreign_operation_statu
         work_id=request.work_id,
     ) == external_lease
 
+@pytest.mark.parametrize("mismatch", ("host", "fingerprint"))
+def test_recovery_rejects_foreign_operation_without_attributing_status(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.start("component-0")
+    operation_key = f"pf-worker:{request.work_id}"
+    seed_host = ProductFactoryProgramHost(
+        store,
+        FakeProgramWorker(),
+        owner_id="program-host:seed-foreign-operation",
+    )
+    seed_lease = seed_host._acquire(request)
+    try:
+        seed_host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(seed_lease,),
+        )
+    finally:
+        seed_host._release_best_effort(seed_lease)
+
+    IdempotencyLedger(store).reserve_once(
+        operation_key=operation_key,
+        task_id="foreign-task" if mismatch == "host" else task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint=(
+            program_host_module._request_fingerprint(request)
+            if mismatch == "host"
+            else "f" * 64
+        ),
+    )
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        owner_id="program-host:foreign-operation-reader",
+    )
+
+    outcomes = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+
+    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
+    assert outcomes[0].operation_status is None
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+    assert IdempotencyLedger(store).require(operation_key).status is IdempotencyStatus.PENDING
+
