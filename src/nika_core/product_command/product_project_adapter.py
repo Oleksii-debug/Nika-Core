@@ -98,6 +98,8 @@ class ProductProjectCommandService:
         desired_outcome: str | None = None,
         hypothesis: str | None = None,
     ) -> ProductProjectDetail:
+        if type(expected_spec_version) is not int or expected_spec_version < 1:
+            raise ValueError("expected_spec_version must be a positive integer")
         current = self._repository.get(project_id)
         if current.spec_version != expected_spec_version:
             raise StaleProjectVersionError(
