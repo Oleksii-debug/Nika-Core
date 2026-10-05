@@ -5,6 +5,8 @@ from dataclasses import replace
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -129,7 +131,7 @@ def _record_decision(
 
 def test_historical_integrity_reconciles_mixed_pf1_history_across_restart(tmp_path) -> None:
     store, projects, project = _repos(tmp_path)
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     lifecycle = ProductProjectLifecycleService(store)
     _handoff(projects, package_id="research-1", option_id="option-1")
     _record_decision(
@@ -219,7 +221,7 @@ def test_historical_spec_cannot_reference_research_created_in_its_future(tmp_pat
 def test_historical_spec_cannot_reference_decision_before_approval(tmp_path) -> None:
     store, projects, project = _repos(tmp_path)
     _handoff(projects, package_id="research-1", option_id="option-1")
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     _record_decision(
         decisions,
         decision_id="decision-1",
@@ -291,7 +293,7 @@ def test_causal_integrity_rejects_missing_decision_audit(tmp_path) -> None:
     store, projects, project = _repos(tmp_path)
     _handoff(projects, package_id="research-1", option_id="option-1")
     _record_decision(
-        ProductDecisionRepository(store),
+        AuthorizingProductDecisionRepository(store),
         decision_id="decision-1",
         option_id="option-1",
         state=ProductDecisionState.REJECTED,
@@ -358,7 +360,7 @@ def test_causal_integrity_rejects_missing_spec_or_research_audit(tmp_path) -> No
 
 def test_long_horizon_mixed_history_survives_many_restart_cycles(tmp_path) -> None:
     store, projects, project = _repos(tmp_path, count=120)
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     lifecycle = ProductProjectLifecycleService(store)
 
     _handoff(projects, package_id="research-approved", option_id="option-approved")
@@ -406,7 +408,7 @@ def test_long_horizon_mixed_history_survives_many_restart_cycles(tmp_path) -> No
         _handoff(projects, package_id=package_id, option_id=option_id)
         current = projects.get("p1")
         _record_decision(
-            ProductDecisionRepository(store),
+            AuthorizingProductDecisionRepository(store),
             decision_id=decision_id,
             option_id=option_id,
             state=ProductDecisionState.REJECTED,
@@ -416,7 +418,7 @@ def test_long_horizon_mixed_history_survives_many_restart_cycles(tmp_path) -> No
         store = SQLiteStore(store.path)
         store.initialize()
         projects = ProductProjectRepository(store)
-        decisions = ProductDecisionRepository(store)
+        decisions = AuthorizingProductDecisionRepository(store)
         lifecycle = ProductProjectLifecycleService(store)
         current = projects.get("p1")
         report = ProductProjectHistoricalIntegrityService(store).validate(
