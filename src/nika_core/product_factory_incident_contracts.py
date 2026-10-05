@@ -217,7 +217,8 @@ class RepairWorkOrder:
                 "repair work order requires normalized non-empty permission ceiling"
             )
         for permission in self.permission_ceiling:
-            if type(permission) is not str or not permission.strip() or permission != permission.strip():
+            _exact_text(permission, "repair work order permission")
+            if permission != permission.strip():
                 raise ProductIncidentError(
                     "repair work order requires normalized non-empty permission ceiling"
                 )
