@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
+from threading import Event, Timer
 from typing import Protocol
 from urllib.parse import urlsplit
 
@@ -162,14 +164,16 @@ class OllamaModelHealthProbe:
         request_base_url = self._request_base_url()
         inference_proven = self._inference_proven(route_identity=route_identity)
         try:
-            with self._client_factory(
+            client = self._client_factory(
                 timeout=self._timeout_seconds,
                 follow_redirects=False,
                 trust_env=False,
-            ) as client:
+            )
+            with client, self._health_deadline(client) as deadline_expired:
                 tags_response = self._bounded_get(
                     client,
                     f"{request_base_url}/api/tags",
+                    deadline_expired=deadline_expired,
                 )
                 reachable = ModelHealthFact.YES
                 present = (
@@ -197,6 +201,7 @@ class OllamaModelHealthProbe:
                     running_response = self._bounded_get(
                         client,
                         f"{request_base_url}/api/ps",
+                        deadline_expired=deadline_expired,
                     )
                 except httpx.TransportError:
                     ready = ModelHealthFact.UNKNOWN
@@ -305,15 +310,52 @@ class OllamaModelHealthProbe:
             return ModelHealthFact.NO
         return ModelHealthFact.UNKNOWN
 
-    @staticmethod
-    def _bounded_get(client: httpx.Client, url: str) -> httpx.Response | None:
-        """Read provider metadata with a hard wire-byte budget before JSON decoding."""
+    @contextmanager
+    def _health_deadline(self, client: httpx.Client) -> Iterator[Event]:
+        """Abort the active metadata transport at one total wall-clock deadline."""
 
+        deadline_expired = Event()
+        timer = Timer(
+            float(self._timeout_seconds),
+            self._expire_health_transport,
+            args=(client, deadline_expired),
+        )
+        timer.daemon = True
+        timer.start()
+        try:
+            yield deadline_expired
+        finally:
+            timer.cancel()
+            timer.join()
+
+    @staticmethod
+    def _expire_health_transport(client: httpx.Client, deadline_expired: Event) -> None:
+        deadline_expired.set()
+        try:
+            client.close()
+        except Exception:  # noqa: BLE001 - best-effort transport abort
+            return
+
+    @staticmethod
+    def _bounded_get(
+        client: httpx.Client,
+        url: str,
+        *,
+        deadline_expired: Event | None = None,
+    ) -> httpx.Response | None:
+        """Read provider metadata under wire-byte and total-deadline budgets."""
+
+        if deadline_expired is not None and deadline_expired.is_set():
+            return None
         stream = getattr(client, "stream", None)
         if not callable(stream):
+            if deadline_expired is not None and deadline_expired.is_set():
+                return None
             return client.get(url)
         try:
             with stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
+                if deadline_expired is not None and deadline_expired.is_set():
+                    return None
                 if not OllamaModelHealthProbe._successful_response(response):
                     return httpx.Response(status_code=response.status_code)
                 if response.headers.get("content-encoding", "identity").lower() != "identity":
@@ -329,11 +371,15 @@ class OllamaModelHealthProbe:
                 payload = bytearray()
                 try:
                     for chunk in response.iter_raw(chunk_size=16384):
+                        if deadline_expired is not None and deadline_expired.is_set():
+                            return None
                         if len(chunk) > _MAX_HEALTH_RESPONSE_BYTES - len(payload):
                             return None
                         payload.extend(chunk)
                 except httpx.TransportError:
                     # Headers arrived: keep reachability, but trust no partial catalog.
+                    return None
+                if deadline_expired is not None and deadline_expired.is_set():
                     return None
                 return httpx.Response(
                     status_code=response.status_code,
