@@ -128,3 +128,44 @@ def test_register_rejects_required_action_tampered_to_unbound() -> None:
         registry.register(definition)
 
     assert registry.all() == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("action_id", "test.\u202eaction"),
+        ("label", "Cafe\u0301"),
+        ("category", "Категорія\nприхована"),
+        ("scope", "\ud800"),
+    ],
+)
+def test_action_metadata_rejects_noncanonical_or_invisible_text(
+    field: str,
+    value: str,
+) -> None:
+    arguments = {
+        "action_id": "test.action",
+        "label": "Тестова дія",
+        "category": "Тест",
+        "default_binding": "Ctrl+1",
+        "scope": "app",
+        "may_be_unbound": False,
+    }
+    arguments[field] = value
+
+    with pytest.raises(ValueError, match="canonical UTF-8 text"):
+        ActionDefinition(**arguments)
+
+
+def test_action_metadata_accepts_composed_ukrainian_and_emoji() -> None:
+    definition = ActionDefinition(
+        "test.action",
+        "Дія Ніки 🧭",
+        "Навігація",
+        "Ctrl+Ї",
+        scope="вікно",
+    )
+
+    registry = ActionRegistry()
+    registry.register(definition)
+    assert registry.get("test.action") == definition

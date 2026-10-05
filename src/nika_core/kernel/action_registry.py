@@ -25,6 +25,18 @@ _MAX_KEYMAP_IMPORT_BYTES = 1_048_576
 _MAX_KEYMAP_BINDING_BYTES = 256
 
 
+def _require_canonical_action_text(value: str, *, field: str) -> str:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be canonical UTF-8 text") from exc
+    if unicodedata.normalize("NFC", value) != value:
+        raise ValueError(f"{field} must be canonical UTF-8 text")
+    if any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in value):
+        raise ValueError(f"{field} must be canonical UTF-8 text")
+    return value
+
+
 def _unique_json_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -60,6 +72,10 @@ class ActionDefinition:
             raise TypeError("default binding must be text or null")
         if type(self.may_be_unbound) is not bool:
             raise TypeError("may_be_unbound must be a boolean")
+        _require_canonical_action_text(self.action_id, field="action_id")
+        _require_canonical_action_text(self.label, field="action label")
+        _require_canonical_action_text(self.category, field="action category")
+        _require_canonical_action_text(self.scope, field="action scope")
         if not self.action_id.strip() or "." not in self.action_id:
             raise ValueError("action_id must be a stable dotted identifier")
         if not self.label.strip() or not self.category.strip() or not self.scope.strip():
