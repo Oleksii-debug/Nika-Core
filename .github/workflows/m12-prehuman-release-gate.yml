@@ -194,13 +194,13 @@ jobs:
             Remove-Item -LiteralPath $extractRoot -Recurse -Force
           }
           New-Item -ItemType Directory -Path $extractRoot -Force | Out-Null
-          python -c "from pathlib import Path; from nika_core.packaging.release import verify_release_archive; findings = verify_release_archive(Path(r'$zipPath'), source_sha='${{ env.NIKA_CANDIDATE_SHA }}', expected_product_version='${{ steps.release.outputs.version }}'); print('\n'.join(findings)); raise SystemExit(1 if findings else 0)"
+          python -c "from pathlib import Path; from nika_core.packaging.release import verify_release_archive; findings = verify_release_archive(Path(r'$zipPath'), source_sha='${{ env.NIKA_CANDIDATE_SHA }}', expected_product='NikaCore', expected_product_version='${{ steps.release.outputs.version }}'); print('\n'.join(findings)); raise SystemExit(1 if findings else 0)"
           if ($LASTEXITCODE -ne 0) {
             throw 'Exact final distributable ZIP failed canonical archive verification before extraction.'
           }
           Expand-Archive -LiteralPath $zipPath -DestinationPath $extractRoot -Force
           $env:NIKA_EXTRACTED_RELEASE_ROOT = $extractRoot
-          python -c "import os; from pathlib import Path; from nika_core.packaging.release import _decode_release_manifest, verify_release_manifest; root = Path(os.environ['NIKA_EXTRACTED_RELEASE_ROOT']); manifest = _decode_release_manifest((root / 'release-manifest.json').read_bytes()); assert manifest is not None, 'invalid extracted release manifest'; assert manifest.source_sha == '${{ env.NIKA_CANDIDATE_SHA }}', 'extracted release manifest source SHA mismatch'; assert manifest.version == '${{ steps.release.outputs.version }}', 'extracted release manifest product version mismatch'; findings = verify_release_manifest(root, manifest); print('\n'.join(findings)); raise SystemExit(1 if findings else 0)"
+          python -c "import os; from pathlib import Path; from nika_core.packaging.release import _decode_release_manifest, verify_release_manifest; root = Path(os.environ['NIKA_EXTRACTED_RELEASE_ROOT']); manifest = _decode_release_manifest((root / 'release-manifest.json').read_bytes()); assert manifest is not None, 'invalid extracted release manifest'; assert manifest.product == 'NikaCore', 'extracted release manifest product mismatch'; assert manifest.source_sha == '${{ env.NIKA_CANDIDATE_SHA }}', 'extracted release manifest source SHA mismatch'; assert manifest.version == '${{ steps.release.outputs.version }}', 'extracted release manifest product version mismatch'; findings = verify_release_manifest(root, manifest); print('\n'.join(findings)); raise SystemExit(1 if findings else 0)"
           if ($LASTEXITCODE -ne 0) {
             throw 'Extracted exact final distributable failed release-manifest verification.'
           }
