@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import math
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.resources.contracts import (
