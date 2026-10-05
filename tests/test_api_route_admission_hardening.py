@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 import httpx
 import pytest
@@ -273,3 +274,109 @@ def test_untyped_transport_exception_is_sanitized_without_secret_or_context() ->
     assert error.__cause__ is None
     assert error.__context__ is None
     assert canary not in str(error)
+
+class _BehavioralText(str):
+    def strip(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("str subclass behavior must not execute")
+
+
+def test_route_config_rejects_behavioral_text_before_string_operations() -> None:
+    with pytest.raises(TypeError, match="provider_id must be text"):
+        ApiModelRouteConfig(
+            provider_id=_BehavioralText("approved-api"),
+            base_url="https://api.example.test/v1",
+            default_model="model-a",
+            credential_ref=_REF,
+        )
+
+
+def test_provider_revalidates_preconstruction_tamper() -> None:
+    config = _config()
+    object.__setattr__(config, "base_url", "http://unapproved.example.test/v1")
+
+    with pytest.raises(ValueError, match="requires HTTPS"):
+        CredentialRefOpenAICompatibleProvider(
+            config=config,
+            credential_resolver=_Resolver("stable-token"),
+        )
+
+
+def test_provider_rejects_route_config_subclasses() -> None:
+    class DerivedConfig(ApiModelRouteConfig):
+        pass
+
+    config = DerivedConfig(
+        provider_id="approved-api",
+        base_url="https://api.example.test/v1",
+        default_model="model-a",
+        credential_ref=_REF,
+    )
+
+    with pytest.raises(TypeError, match="config must be an ApiModelRouteConfig"):
+        CredentialRefOpenAICompatibleProvider(
+            config=config,
+            credential_resolver=_Resolver("stable-token"),
+        )
+
+
+def test_provider_detaches_approved_config_from_later_alias_mutation() -> None:
+    config = _config()
+    seen: list[tuple[str, str, str]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content.decode("utf-8"))
+        seen.append(
+            (
+                str(request.url),
+                request.headers["Authorization"],
+                payload["model"],
+            )
+        )
+        return httpx.Response(
+            200,
+            json={
+                "model": "model-a",
+                "choices": [{"message": {"content": "ok"}}],
+            },
+        )
+
+    def client_factory(*, timeout: float) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            timeout=timeout,
+        )
+
+    provider = CredentialRefOpenAICompatibleProvider(
+        config=config,
+        credential_resolver=_Resolver("stable-token"),
+        client_factory=client_factory,
+    )
+
+    object.__setattr__(config, "provider_id", "mutated-provider")
+    object.__setattr__(config, "base_url", "https://mutated.example.test/v9")
+    object.__setattr__(config, "default_model", "mutated-model")
+    object.__setattr__(config, "credential_ref", "env:MUTATED_TOKEN")
+    object.__setattr__(config, "supports_private_data", True)
+    object.__setattr__(config, "supports_hard_cancellation", True)
+
+    request = ModelRequest(
+        request_id="config-snapshot",
+        provider_id="approved-api",
+        messages=(ModelMessage(role="user", content="safe fixture"),),
+    )
+    response = asyncio.run(provider.complete(request))
+
+    assert response.provider_id == "approved-api"
+    assert response.model == "model-a"
+    assert provider.credential_ref == _REF
+    assert provider.capabilities.provider_id == "approved-api"
+    assert provider.capabilities.supports_private_data is False
+    assert provider.capabilities.supports_hard_cancellation is False
+    assert seen == [
+        (
+            "https://api.example.test/v1/chat/completions",
+            "Bearer stable-token",
+            "model-a",
+        )
+    ]
+
