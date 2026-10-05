@@ -92,14 +92,18 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         model_health_probe_factory: Callable[[ModelSelection], ModelHealthProbePort] | None = None,
     ) -> None:
         self._sqlite = store
-        self._sources = source_settings or V01SourceSettings(store, config)
+        self._sources = (\n            V01SourceSettings(store, config) if source_settings is None else source_settings\n        )
         self._multi_store = MultiAgentStore(store)
         self._definitions = AgentDefinitionRepository(store)
-        self._model_settings = model_settings or V01ModelSettings(store)
-        self._model_factory = model_runtime_factory or V01BoundModelRuntimeFactory(
-            store=store,
-            definitions=self._definitions,
-            settings=self._model_settings,
+        self._model_settings = (\n            V01ModelSettings(store) if model_settings is None else model_settings\n        )
+        self._model_factory = (
+            V01BoundModelRuntimeFactory(
+                store=store,
+                definitions=self._definitions,
+                settings=self._model_settings,
+            )
+            if model_runtime_factory is None
+            else model_runtime_factory
         )
         self._model_health_probe_factory = (
             self._default_model_health_probe

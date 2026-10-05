@@ -57,6 +57,16 @@ class _BehavioralHealthFactory:
         return self.probe
 
 
+class _BehavioralDependency:
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self.truthiness_calls = 0
+
+    def __bool__(self) -> bool:
+        self.truthiness_calls += 1
+        raise AssertionError(f"{self.name} truthiness must not execute")
+
+
 class _RawHealthProbe:
     def __init__(self, snapshot: object) -> None:
         self._snapshot = snapshot
@@ -204,6 +214,26 @@ def test_ollama_resume_probe_requires_exact_route_health_ready(tmp_path) -> None
     assert health.selections[0].provider_id == "ollama"
     assert health.selections[0].model == "qwen3:8b"
     assert health.selections[0].base_url == "http://localhost:11434"
+
+
+def test_constructor_dependencies_do_not_execute_caller_truthiness(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "dependency-truthiness" / "nika.db")
+    store.initialize()
+    source_settings = _BehavioralDependency("source settings")
+    model_settings = _BehavioralDependency("model settings")
+    model_factory = _BehavioralDependency("model runtime factory")
+
+    V01PackagedThreeAgentRuntime(
+        store=store,
+        config=AppConfig(database_path=store.path),
+        source_settings=source_settings,  # type: ignore[arg-type]
+        model_settings=model_settings,  # type: ignore[arg-type]
+        model_runtime_factory=model_factory,  # type: ignore[arg-type]
+    )
+
+    assert source_settings.truthiness_calls == 0
+    assert model_settings.truthiness_calls == 0
+    assert model_factory.truthiness_calls == 0
 
 
 def test_health_factory_selection_does_not_execute_caller_truthiness(tmp_path) -> None:
