@@ -8,6 +8,7 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.trading_research.accounting import AccountSnapshot, PortfolioLedger, Position
 from nika_core.trading_research.contracts import (
+    Bar,
     EventTime,
     Instrument,
     Quote,
@@ -44,6 +45,7 @@ def _quote(
     bid: str = "99",
     ask: str = "100",
     size: str = "10",
+    source_sequence: int = 0,
 ) -> Quote:
     return Quote(
         instrument,
@@ -52,6 +54,7 @@ def _quote(
         Decimal(ask),
         Decimal(size),
         Decimal(size),
+        source_sequence,
     )
 
 
@@ -336,6 +339,74 @@ def test_empty_v1_state_upgrades_additively_to_identity_schema(tmp_path) -> None
         (Side.SELL, "101", "102"),
     ),
 )
+
+def test_bar_without_interval_authority_is_not_executable_market_data() -> None:
+    order = _approved(_INSTRUMENT_A)
+    bar = Bar(
+        _INSTRUMENT_A,
+        EventTime(_NOW, _NOW, _NOW),
+        Decimal(99),
+        Decimal(101),
+        Decimal(98),
+        Decimal(100),
+        Decimal(10),
+        1,
+    )
+
+    update = SimulationExecutionEngine().execute(
+        order,
+        TimeSlice(1, _NOW, (bar,)),
+    )
+
+    assert update.fill is None
+    assert update.reason == "no executable market data"
+
+
+def test_non_executable_bar_does_not_hide_authoritative_quote() -> None:
+    order = _approved(_INSTRUMENT_A)
+    quote = _quote(_INSTRUMENT_A, ask="101", source_sequence=1)
+    bar = Bar(
+        _INSTRUMENT_A,
+        EventTime(_NOW, _NOW, _NOW),
+        Decimal(90),
+        Decimal(200),
+        Decimal(80),
+        Decimal(150),
+        Decimal(10),
+        2,
+    )
+
+    update = SimulationExecutionEngine().execute(
+        order,
+        TimeSlice(1, _NOW, (quote, bar)),
+    )
+
+    assert update.fill is not None
+    assert update.fill.price == Decimal(101)
+
+
+def test_conflicting_equal_sequence_events_fail_closed() -> None:
+    first = _quote(_INSTRUMENT_A, ask="100", source_sequence=7)
+    second = _quote(_INSTRUMENT_A, ask="101", source_sequence=7)
+
+    with pytest.raises(TradingResearchError, match="ambiguous same-slice market chronology"):
+        TimeSlice(1, _NOW, (first, second))
+
+
+def test_source_sequence_is_explicit_same_timestamp_order_authority() -> None:
+    order = _approved(_INSTRUMENT_A)
+    earlier = _quote(_INSTRUMENT_A, ask="100", source_sequence=1)
+    later = _quote(_INSTRUMENT_A, ask="101", source_sequence=2)
+
+    update = SimulationExecutionEngine().execute(
+        order,
+        TimeSlice(1, _NOW, (later, earlier)),
+    )
+
+    assert update.fill is not None
+    assert update.fill.price == Decimal(101)
+
+
 def test_adverse_slippage_never_crosses_limit_price(
     side: Side,
     bid: str,
