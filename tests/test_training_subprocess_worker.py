@@ -1096,7 +1096,6 @@ time.sleep(30)
     assert not survived.exists(), "trainer descendant escaped timeout containment"
 
 
-@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object kill-on-close proof")
 def test_success_does_not_leave_trainer_descendant_running(tmp_path: Path) -> None:
     spawned = tmp_path / "success-descendant-spawned.txt"
     survived = tmp_path / "success-descendant-survived.txt"
@@ -1145,6 +1144,49 @@ sys.stdout.write(json.dumps(response))
     assert spawned.exists(), "test did not prove that a trainer descendant was started"
     time.sleep(1.3)
     assert not survived.exists(), "trainer descendant escaped successful-step containment"
+
+
+def test_success_fails_closed_when_tree_cleanup_is_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    monkeypatch.setattr(
+        "nika_core.training_adapters.subprocess_worker.terminate_process_tree",
+        lambda process, job: False,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_subprocess_containment_cleanup_failed"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
 
 
 def test_oversized_response_is_bounded_and_unknown_effect(tmp_path: Path) -> None:
