@@ -48,6 +48,18 @@ class ActionDefinition:
     may_be_unbound: bool = True
 
     def __post_init__(self) -> None:
+        if type(self.action_id) is not str:
+            raise TypeError("action_id must be text")
+        if (
+            type(self.label) is not str
+            or type(self.category) is not str
+            or type(self.scope) is not str
+        ):
+            raise TypeError("action metadata must be text")
+        if self.default_binding is not None and type(self.default_binding) is not str:
+            raise TypeError("default binding must be text or null")
+        if type(self.may_be_unbound) is not bool:
+            raise TypeError("may_be_unbound must be a boolean")
         if not self.action_id.strip() or "." not in self.action_id:
             raise ValueError("action_id must be a stable dotted identifier")
         if not self.label.strip() or not self.category.strip() or not self.scope.strip():
@@ -58,30 +70,43 @@ class ActionDefinition:
             _binding_key(self.default_binding)
 
 
+def _snapshot_action_definition(definition: ActionDefinition) -> ActionDefinition:
+    return ActionDefinition(
+        action_id=definition.action_id,
+        label=definition.label,
+        category=definition.category,
+        default_binding=definition.default_binding,
+        scope=definition.scope,
+        may_be_unbound=definition.may_be_unbound,
+    )
+
+
 class ActionRegistry:
     def __init__(self) -> None:
         self._actions: dict[str, ActionDefinition] = {}
 
     def register(self, definition: ActionDefinition) -> None:
-        if definition.action_id in self._actions:
-            raise ValueError(f"duplicate action_id: {definition.action_id}")
-        if definition.default_binding is not None:
-            conflict = self.find_by_binding(definition.default_binding, definition.scope)
+        snapshot = _snapshot_action_definition(definition)
+        if snapshot.action_id in self._actions:
+            raise ValueError(f"duplicate action_id: {snapshot.action_id}")
+        if snapshot.default_binding is not None:
+            conflict = self.find_by_binding(snapshot.default_binding, snapshot.scope)
             if conflict is not None:
                 raise ValueError(
-                    f"default binding conflict: {definition.default_binding} already belongs to "
+                    f"default binding conflict: {snapshot.default_binding} already belongs to "
                     f"{conflict.action_id}"
                 )
-        self._actions[definition.action_id] = definition
+        self._actions[snapshot.action_id] = snapshot
 
     def get(self, action_id: str) -> ActionDefinition:
         try:
-            return self._actions[action_id]
+            action = self._actions[action_id]
         except KeyError as exc:
             raise KeyError(f"Unknown action: {action_id}") from exc
+        return _snapshot_action_definition(action)
 
     def all(self) -> tuple[ActionDefinition, ...]:
-        return tuple(self._actions[key] for key in sorted(self._actions))
+        return tuple(_snapshot_action_definition(self._actions[key]) for key in sorted(self._actions))
 
     def find_by_binding(self, binding: str, scope: str) -> ActionDefinition | None:
         wanted = _binding_key(binding)
@@ -91,7 +116,7 @@ class ActionRegistry:
                 and action.default_binding is not None
                 and _binding_key(action.default_binding) == wanted
             ):
-                return action
+                return _snapshot_action_definition(action)
         return None
 
 
