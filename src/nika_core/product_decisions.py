@@ -285,6 +285,10 @@ class ProductDecisionRepository:
         # Exact durable replay is not a new privileged effect and must remain restart-safe
         # without asking the owner to approve the same already-committed effect again.
         with self.store.connection() as conn:
+            # Replay verification spans multiple durable authority reads. Keep them
+            # on one SQLite snapshot so a concurrent research refresh cannot make
+            # the fast path certify a torn evidence view.
+            conn.execute("BEGIN")
             replay = self._replay_conn(
                 conn,
                 project_id,
