@@ -111,6 +111,50 @@ def test_notice_symlink_is_not_followed(
     assert notices.verify_third_party_notices(bundle) == ("notices:unreadable",)
 
 
+def test_notice_descriptor_recheck_rejects_unstable_bytes(
+    notice_bundle: tuple[Path, Path, bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, _target, _valid = notice_bundle
+    original_fdopen = notices.os.fdopen
+
+    class UnstableReader:
+        def __init__(self, fd: int, mode: str, *, closefd: bool) -> None:
+            self._source = original_fdopen(fd, mode, closefd=closefd)
+            self._reads = 0
+
+        def __enter__(self) -> "UnstableReader":
+            self._source.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self._source.__exit__(*args)
+
+        def fileno(self) -> int:
+            return self._source.fileno()
+
+        def seek(self, offset: int) -> int:
+            return self._source.seek(offset)
+
+        def read(self, size: int = -1) -> bytes:
+            payload = self._source.read(size)
+            self._reads += 1
+            if self._reads == 2 and payload:
+                return bytes([payload[0] ^ 1]) + payload[1:]
+            return payload
+
+    def unstable_fdopen(
+        fd: int,
+        mode: str,
+        *,
+        closefd: bool = True,
+    ) -> UnstableReader:
+        return UnstableReader(fd, mode, closefd=closefd)
+
+    monkeypatch.setattr(notices.os, "fdopen", unstable_fdopen)
+    assert notices.verify_third_party_notices(bundle) == ("notices:unreadable",)
+
+
 def test_notice_open_failure_returns_sanitized_finding(
     notice_bundle: tuple[Path, Path, bytes],
     monkeypatch: pytest.MonkeyPatch,
@@ -249,14 +293,16 @@ def test_distribution_license_is_bounded_and_utf8_strict(
     payload: bytes,
 ) -> None:
     monkeypatch.setattr(notices, "_MAX_NOTICES_BYTES", 64)
-    license_file = tmp_path / "LICENSE"
+    dist_root = tmp_path / "dist"
+    dist_root.mkdir()
+    license_file = dist_root / "LICENSE"
     license_file.write_bytes(payload)
 
     class Distribution:
         files = ("LICENSE",)
 
-        def locate_file(self, _item: str) -> Path:
-            return license_file
+        def locate_file(self, item: str) -> Path:
+            return dist_root / item
 
     with pytest.raises(RuntimeError, match="license evidence is invalid"):
         notices._license_texts(Distribution())
@@ -265,14 +311,16 @@ def test_distribution_license_is_bounded_and_utf8_strict(
 def test_distribution_license_regular_utf8_is_preserved(
     tmp_path: Path,
 ) -> None:
-    license_file = tmp_path / "LICENSE"
+    dist_root = tmp_path / "dist"
+    dist_root.mkdir()
+    license_file = dist_root / "LICENSE"
     license_file.write_text("SPDX compatible text\n", encoding="utf-8")
 
     class Distribution:
         files = ("LICENSE",)
 
-        def locate_file(self, _item: str) -> Path:
-            return license_file
+        def locate_file(self, item: str) -> Path:
+            return dist_root / item
 
     assert notices._license_texts(Distribution()) == (
         ("LICENSE", "SPDX compatible text"),
@@ -319,10 +367,90 @@ def test_distribution_license_preserves_valid_nested_relative_path(tmp_path: Pat
         files = ("pkg/ліцензії/LICENSE.txt",)
 
         def locate_file(self, item: str) -> Path:
-            assert item == "pkg/ліцензії/LICENSE.txt"
-            return license_file
+            return tmp_path / item
 
     assert notices._license_texts(Distribution()) == (
         ("pkg/ліцензії/LICENSE.txt", "Nested license evidence"),
     )
 
+
+
+def test_distribution_license_rejects_located_path_outside_distribution_root(
+    tmp_path: Path,
+) -> None:
+    dist_root = tmp_path / "dist"
+    dist_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "LICENSE").write_text("private host text", encoding="utf-8")
+
+    class Distribution:
+        files = ("LICENSE",)
+
+        def locate_file(self, item: str) -> Path:
+            if item == "":
+                return dist_root
+            return outside / item
+
+    with pytest.raises(RuntimeError, match="path containment is invalid"):
+        notices._license_texts(Distribution())
+
+
+def test_distribution_license_rejects_intermediate_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    dist_root = tmp_path / "dist"
+    dist_root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "LICENSE").write_text("outside", encoding="utf-8")
+    linked = dist_root / "licenses"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("this host does not permit directory symlinks")
+
+    class Distribution:
+        files = ("licenses/LICENSE",)
+
+        def locate_file(self, item: str) -> Path:
+            return dist_root / item
+
+    with pytest.raises(RuntimeError, match="path containment is invalid"):
+        notices._license_texts(Distribution())
+
+
+def test_distribution_license_evidence_is_aggregate_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dist_root = tmp_path / "dist"
+    dist_root.mkdir()
+    monkeypatch.setattr(notices, "_MAX_NOTICES_BYTES", 48)
+    for name in ("LICENSE-A", "LICENSE-B"):
+        (dist_root / name).write_text("X" * 20, encoding="utf-8")
+
+    class Distribution:
+        files = ("LICENSE-A", "LICENSE-B")
+
+        def locate_file(self, item: str) -> Path:
+            return dist_root / item
+
+    with pytest.raises(RuntimeError, match="evidence exceeds the release size limit"):
+        notices._license_texts(Distribution())
+
+
+def test_distribution_license_rejects_overlong_path_identity_before_locate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notices, "_MAX_DISTRIBUTION_PATH_BYTES", 32)
+    item = "pkg/" + ("a" * 40) + "/LICENSE"
+
+    class Distribution:
+        files = (item,)
+
+        def locate_file(self, _item: str) -> Path:
+            raise AssertionError("overlong license path reached filesystem resolution")
+
+    with pytest.raises(RuntimeError, match="path identity is invalid"):
+        notices._license_texts(Distribution())
