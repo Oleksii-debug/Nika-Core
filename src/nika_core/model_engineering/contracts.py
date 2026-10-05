@@ -365,6 +365,7 @@ class CaseBenchmarkResult:
     resource_after: ResourceSnapshot | None
     accelerator_before: AcceleratorSnapshot | None
     accelerator_after: AcceleratorSnapshot | None
+    loaded_artifact_sha256: str | None = None
     evaluation_weight: float = 1.0
     pass_score: float = 1.0
 
@@ -396,6 +397,10 @@ class CaseBenchmarkResult:
         if not isfinite(latency) or latency < 0:
             raise ValueError("latency_ms must be finite and non-negative")
         _optional_sha256(self.response_sha256, "response_sha256")
+        _optional_sha256(
+            self.loaded_artifact_sha256,
+            "loaded_artifact_sha256",
+        )
         for snapshot, name in (
             (self.resource_before, "resource_before"),
             (self.resource_after, "resource_after"),
@@ -445,6 +450,10 @@ class CaseBenchmarkResult:
                 raise ValueError("failed completion cannot carry passing quality evidence")
             if self.response_sha256 is not None:
                 raise ValueError("failed completion cannot carry response_sha256")
+            if self.loaded_artifact_sha256 is not None:
+                raise ValueError(
+                    "failed completion cannot carry loaded artifact attestation"
+                )
             if any(
                 value is not None
                 for value in (self.input_tokens, self.output_tokens, self.total_tokens)
@@ -501,6 +510,21 @@ class CandidateBenchmarkReport:
             raise TypeError("case_results must use exact CaseBenchmarkResult values")
         if any(item.candidate_id != self.candidate.candidate_id for item in self.case_results):
             raise ValueError("case result candidate identity mismatch")
+        successful = tuple(
+            item for item in self.case_results if item.completion_succeeded
+        )
+        if self.candidate.model_sha256 is None:
+            if any(item.loaded_artifact_sha256 is not None for item in successful):
+                raise ValueError(
+                    "unpinned candidate cannot carry loaded artifact attestation"
+                )
+        elif any(
+            item.loaded_artifact_sha256 != self.candidate.model_sha256
+            for item in successful
+        ):
+            raise ValueError(
+                "successful benchmark case loaded artifact identity mismatch"
+            )
         case_ids = [item.case_id for item in self.case_results]
         if len(case_ids) != len(set(case_ids)):
             raise ValueError("case result IDs must be unique")
