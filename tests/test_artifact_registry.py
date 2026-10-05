@@ -780,6 +780,7 @@ def test_verify_rejects_post_registration_symlink_substitution(tmp_path: Path) -
     with pytest.raises(ArtifactRegistryError, match="link|substitution|escapes"):
         registry.verify(record.artifact_id)
 
+
 @pytest.mark.parametrize("field", ("workspace_id", "idempotency_key"))
 def test_registry_rejects_invalid_utf8_identity_before_persistence(
     tmp_path: Path,
@@ -972,3 +973,47 @@ def test_verification_rehydration_rejects_expected_metadata_drift(tmp_path: Path
 
     with pytest.raises(ArtifactRegistryError, match="expected metadata"):
         registry.verification_history(record.artifact_id)
+
+@pytest.mark.parametrize(
+    "operation",
+    (
+        lambda registry: registry.get("\ud800"),
+        lambda registry: registry.list(workspace_id="\ud800"),
+        lambda registry: registry.list(kind="\ud800"),
+        lambda registry: registry.list(producer_id="\ud800"),
+        lambda registry: registry.find_by_sha256("\ud800"),
+        lambda registry: registry.find_by_sha256("a" * 64, workspace_id="\ud800"),
+        lambda registry: registry.verification_history("\ud800"),
+    ),
+)
+def test_read_queries_reject_invalid_utf8_before_sql(
+    tmp_path: Path,
+    operation: object,
+) -> None:
+    registry = _registry(tmp_path / "state.sqlite3")
+
+    with pytest.raises(ValueError, match="UTF-8"):
+        operation(registry)
+
+
+@pytest.mark.parametrize("field", ("limit", "offset"))
+@pytest.mark.parametrize("value", (True, False, 1.0, "1"))
+def test_list_pagination_requires_exact_integer_carriers(
+    tmp_path: Path,
+    field: str,
+    value: object,
+) -> None:
+    registry = _registry(tmp_path / "state.sqlite3")
+    arguments = {field: value}
+
+    with pytest.raises(ValueError, match=f"{field} must be an integer"):
+        registry.list(**arguments)
+
+
+def test_read_queries_reject_oversized_text_before_sql(tmp_path: Path) -> None:
+    registry = _registry(tmp_path / "state.sqlite3")
+    oversized = "я" * 2049
+
+    with pytest.raises(ValueError, match="4096-byte query limit"):
+        registry.list(workspace_id=oversized)
+

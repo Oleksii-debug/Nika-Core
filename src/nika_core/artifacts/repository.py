@@ -15,6 +15,35 @@ from nika_core.data.sqlite import SQLiteStore
 
 
 _MAX_DURABLE_JSON_BYTES = 1_048_576
+_MAX_QUERY_TEXT_BYTES = 4096
+
+
+def _query_text(value: object, *, field: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{field} must be text")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8 text") from exc
+    if len(encoded) > _MAX_QUERY_TEXT_BYTES:
+        raise ValueError(f"{field} exceeds the {_MAX_QUERY_TEXT_BYTES}-byte query limit")
+    return value
+
+
+def _query_int(
+    value: object,
+    *,
+    field: str,
+    minimum: int,
+    maximum: int | None = None,
+) -> int:
+    if type(value) is not int:
+        raise ValueError(f"{field} must be an integer")
+    if value < minimum or (maximum is not None and value > maximum):
+        if maximum is None:
+            raise ValueError(f"{field} must be at least {minimum}")
+        raise ValueError(f"{field} must be between {minimum} and {maximum}")
+    return value
 
 
 def _sha256_text(value: str) -> str:
@@ -211,6 +240,7 @@ class SQLiteArtifactRepository:
             ) from None
 
     def get(self, artifact_id: str) -> ArtifactRecord:
+        artifact_id = _query_text(artifact_id, field="artifact_id")
         with self._store.connection() as conn:
             row = conn.execute(
                 f"SELECT {_RECORD_COLUMNS} FROM artifact_registry_records "
@@ -226,6 +256,8 @@ class SQLiteArtifactRepository:
         workspace_id: str,
         idempotency_key: str,
     ) -> ArtifactRecord | None:
+        workspace_id = _query_text(workspace_id, field="workspace_id")
+        idempotency_key = _query_text(idempotency_key, field="idempotency_key")
         with self._store.connection() as conn:
             row = conn.execute(
                 f"SELECT {_RECORD_COLUMNS} FROM artifact_registry_records "
@@ -245,10 +277,14 @@ class SQLiteArtifactRepository:
         limit: int = 100,
         offset: int = 0,
     ) -> tuple[ArtifactRecord, ...]:
-        if limit < 1 or limit > 1000:
-            raise ValueError("limit must be between 1 and 1000")
-        if offset < 0:
-            raise ValueError("offset must be non-negative")
+        limit = _query_int(limit, field="limit", minimum=1, maximum=1000)
+        offset = _query_int(offset, field="offset", minimum=0)
+        if workspace_id is not None:
+            workspace_id = _query_text(workspace_id, field="workspace_id")
+        if kind is not None:
+            kind = _query_text(kind, field="kind")
+        if producer_id is not None:
+            producer_id = _query_text(producer_id, field="producer_id")
 
         clauses: list[str] = []
         parameters: list[object] = []
@@ -290,6 +326,9 @@ class SQLiteArtifactRepository:
         *,
         workspace_id: str | None = None,
     ) -> tuple[ArtifactRecord, ...]:
+        sha256 = _query_text(sha256, field="sha256")
+        if workspace_id is not None:
+            workspace_id = _query_text(workspace_id, field="workspace_id")
         clauses = ["sha256 = ?"]
         parameters: list[object] = [sha256]
         if workspace_id is not None:
