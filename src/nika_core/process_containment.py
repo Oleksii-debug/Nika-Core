@@ -8,6 +8,11 @@ import threading
 from typing import Self
 
 
+_PROCESS_SET_QUOTA = 0x0100
+_PROCESS_TERMINATE = 0x0001
+_PROCESS_ASSIGN_JOB_ACCESS = _PROCESS_SET_QUOTA | _PROCESS_TERMINATE
+
+
 class ProcessContainmentError(RuntimeError):
     """Raised when the OS process-tree containment boundary cannot be established."""
 
@@ -112,8 +117,7 @@ class WindowsJob:
         close_handle.argtypes = (ctypes.c_void_p,)
         close_handle.restype = ctypes.c_int
 
-        # AssignProcessToJobObject requires PROCESS_SET_QUOTA | PROCESS_TERMINATE.
-        process_handle = open_process(0x00000101, False, pid)
+        process_handle = open_process(_PROCESS_ASSIGN_JOB_ACCESS, False, pid)
         if not process_handle:
             raise ProcessContainmentError(
                 f"OpenProcess failed with Win32 error {ctypes.get_last_error()}"
