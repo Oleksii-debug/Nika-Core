@@ -68,6 +68,16 @@ def _now() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _approval_time(value: object) -> datetime:
+    if value is None:
+        return datetime.now(UTC)
+    if type(value) is not datetime:
+        raise ValueError("product decision approval time must be an exact datetime")
+    if value.tzinfo is None:
+        raise ValueError("product decision approval time must be timezone-aware")
+    return value
+
+
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
@@ -357,9 +367,7 @@ class ProductDecisionRepository:
             if approval is None:
                 raise PermissionError("trusted product-owner approval evidence is required")
             approval_snapshot = _snapshot_approval(approval)
-            current_time = now or datetime.now(UTC)
-            if current_time.tzinfo is None:
-                raise ValueError("product decision approval time must be timezone-aware")
+            current_time = _approval_time(now)
         elif approval is not None:
             raise ProductProjectError(
                 "approval evidence is only valid for an APPROVED product decision"
