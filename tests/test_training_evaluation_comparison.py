@@ -1074,6 +1074,7 @@ def test_caller_cannot_inject_promoted_artifact_pin(tmp_path) -> None:
             }
         )
 
+
 @pytest.mark.asyncio
 async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_snapshot(
     tmp_path,
@@ -1089,7 +1090,9 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     task = TaskQueue(store).create(
         workspace_id="default",
         agent_id="nika.default",
-        payload=settings.prepare_task_payload({"command": "use one frozen model binding"}),
+        payload=settings.prepare_task_payload(
+            {"command": "use one frozen model binding"}
+        ),
     )
 
     def unexpected_legacy_read(*_args, **_kwargs):
