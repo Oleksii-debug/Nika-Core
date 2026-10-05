@@ -720,7 +720,7 @@ class StandingPermissionPolicy:
         clock: Callable[[], datetime] | None = None,
     ) -> None:
         if type(binding) is not StandingPermissionBinding:
-            raise TypeError("standing policy binding must be an exact StandingPermissionBinding value")
+            raise TypeError(\n                "standing policy binding must be an exact StandingPermissionBinding value"\n            )
         context = binding.context
         if type(context) is not PermissionContext:
             raise TypeError("binding context must be an exact PermissionContext value")
