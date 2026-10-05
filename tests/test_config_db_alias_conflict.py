@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from pydantic_settings import SettingsError
+
 from nika_core.config import AppConfig
 
 
@@ -24,7 +26,7 @@ def test_conflicting_database_aliases_fail_before_default_or_adoption(
         "nika_core.config.user_data_path",
         lambda *_args, **_kwargs: pytest.fail("default location was consulted"),
     )
-    with pytest.raises(ValueError, match="Суперечливі змінні середовища"):
+    with pytest.raises(SettingsError, match="Суперечливі змінні середовища"):
         AppConfig.from_environment()
     assert not first.exists() and not second.exists()
 
@@ -70,5 +72,5 @@ def test_case_insensitive_alias_name_conflict_fails_closed(
     monkeypatch.delenv("NIKA_DATABASE_PATH", raising=False)
     monkeypatch.setenv("nika_db_path", str(tmp_path / "one.db"))
     monkeypatch.setenv("NIKA_DATABASE_PATH", str(tmp_path / "two.db"))
-    with pytest.raises(ValueError, match="Суперечливі змінні середовища"):
+    with pytest.raises(SettingsError, match="Суперечливі змінні середовища"):
         AppConfig.from_environment()
