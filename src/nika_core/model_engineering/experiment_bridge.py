@@ -18,6 +18,7 @@ from nika_core.model_engineering.contracts import (
     EvaluationPurpose,
     EvaluationSet,
     ModelCandidate,
+    validate_candidate_benchmark_report,
 )
 
 QUALITY_METRIC = "model_quality_score"
@@ -184,6 +185,17 @@ def _validate_report_aggregates(
     report: CandidateBenchmarkReport,
     evaluation_set: EvaluationSet,
 ) -> None:
+    validate_candidate_benchmark_report(report)
+    for case, result in zip(
+        evaluation_set.cases,
+        report.case_results,
+        strict=True,
+    ):
+        if result.evaluation_weight != float(case.weight):
+            raise ValueError(
+                "benchmark case weight evidence does not match the evaluation set"
+            )
+
     total_weight = sum(float(case.weight) for case in evaluation_set.cases)
     expected_quality = sum(
         result.score * float(case.weight)
