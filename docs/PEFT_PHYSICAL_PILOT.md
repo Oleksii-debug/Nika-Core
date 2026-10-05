@@ -13,7 +13,8 @@ Windows-only. A successful call must:
    `SubprocessTrainingWorker`;
 2. execute one trainer step and persist a `PAUSED` checkpoint at `next_step == 1`;
 3. construct new runtime and worker objects through the supplied restart factories;
-4. require the restarted worker to expose the same execution-plan digest;
+4. require the restarted worker to expose the same execution-plan digest, trainer-protocol
+   job fingerprint, and Registry-verified trainer deployment identity;
 5. issue an effect-free `PAUSE` probe and require the restarted runtime to reopen
    the same job at `next_step == 1`;
 6. require that probe to stop before resource admission and trainer effects;
@@ -30,11 +31,13 @@ Windows-only. A successful call must:
     candidate manifest through `training_peft_worker.candidate_adapter_manifest`;
 15. require its base reference/digest and candidate reference to match canonical COMPLETED
     runtime evidence, require its trainer-protocol job fingerprint to match the exact
-    `SubprocessTrainingWorker` protocol identity, and require its final step number to match
-    the COMPLETED runtime boundary; and
+    `SubprocessTrainingWorker` protocol identity, require its trainer artifact ID and trainer
+    deployment SHA-256 to match the worker's canonical Registry-verified deployment identity,
+    and require its final step number to match the COMPLETED runtime boundary; and
 16. bind both the runtime job fingerprint and the distinct trainer-protocol job fingerprint,
-    plus the manifest digest, trainer deployment, trainer implementation, model directory,
-    consumed-material, and runtime-manifest identities into the report; and
+    plus the independently verified trainer deployment identity, manifest digest, trainer
+    implementation, model directory, consumed-material, and runtime-manifest identities into
+    the report; and
 17. when persisted, publish the canonical report through the provided atomic/no-clobber
     writer rather than a direct truncating file write.
 
@@ -66,7 +69,8 @@ runtime must observe `next_step == 1`, persist a new checkpoint with
 `reason == "paused_before_admission"`, and preserve the exact job identity. A fresh or wrong
 store observes step 0 (or an identity mismatch) and is rejected. The worker restart factory must
 construct a new `SubprocessTrainingWorker` from the same Registry-bound command and environment
-authority.
+authority. The harness re-verifies that trainer deployment through the worker's incumbent
+Artifact Registry before accepting its identity across the restart boundary.
 
 The final candidate descriptor cannot be known before a first real training run completes.
 Pass a `candidate_descriptor_factory` that receives detached canonical COMPLETED evidence.
