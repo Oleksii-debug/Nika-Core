@@ -298,3 +298,76 @@ def test_recovered_completion_leaves_only_the_remaining_step_budget() -> None:
     assert result.final_state.facts == frozenset({"prepared", "done"})
     assert planner.calls == 1
 
+@pytest.mark.parametrize(
+    "action_id",
+    [
+        " leading",
+        "trailing ",
+        "safe\u200bhidden",
+        "safe\u202e-hidden",
+        "safe\u2028hidden",
+        "Cafe\u0301",
+        "\ud800",
+        "x" * 513,
+        "😀" * 200,
+    ],
+)
+def test_invalid_action_identity_fails_before_journal_or_planner(action_id: str) -> None:
+    planner = CountingPlanner()
+    journal = GuardedJournal()
+    brain = DeterministicBrain(
+        planner=planner,
+        tools=ToolExecutor(),
+        effect_journal=journal,
+    )
+    action = DeterministicAction(action_id=action_id, adds=frozenset({"done"}))
+
+    with pytest.raises(ValueError, match=r"actions\[0\]\.action_id"):
+        _run(
+            brain,
+            task_id="task-1",
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(action,),
+        )
+
+    assert planner.calls == 0
+    assert journal.inspected is False
+
+
+def test_canonical_ukrainian_action_identity_remains_restart_compatible() -> None:
+    class UkrainianActionPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def plan(self, *, state, goal, actions) -> DeterministicPlan:
+            self.calls += 1
+            return DeterministicPlan(steps=(PlanStep(action_id="записати-результат"),))
+
+    planner = UkrainianActionPlanner()
+    action = DeterministicAction(
+        action_id="записати-результат",
+        adds=frozenset({"готово"}),
+    )
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+
+    first = _run(
+        brain,
+        goal=DeterministicGoal(required=frozenset({"готово"})),
+        actions=(action,),
+        max_steps=1,
+    )
+    assert first.ok
+    assert first.completed_actions == ("записати-результат",)
+
+    restarted = _run(
+        brain,
+        state=first.final_state,
+        goal=DeterministicGoal(required=frozenset({"готово"})),
+        actions=(action,),
+        previously_completed_action_ids=first.completed_actions,
+        max_steps=1,
+    )
+    assert restarted.ok
+    assert restarted.completed_actions == first.completed_actions
+    assert planner.calls == 1
+
