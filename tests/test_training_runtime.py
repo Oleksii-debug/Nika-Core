@@ -10,8 +10,16 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.checkpoint import CheckpointService
+from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
+from nika_core.research.blobs import ContentAddressedBlobStore
 from nika_core.resources.contracts import ResourceBudget, ResourceSnapshot
 from nika_core.resources.manager import ResourceManager
+from nika_core.training_materials import (
+    ResolvedTrainingPackage,
+    TrainingMaterialEvidence,
+    TrainingMaterialSetEvidence,
+    resolve_training_materials,
+)
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingCheckpointError,
@@ -23,6 +31,72 @@ from nika_core.training_runtime import (
     TrainingWorkerError,
     TrainingWorkerFailureEffect,
 )
+
+_WORKSPACE_ID = "runtime-training"
+_TRAINING_BODY = b'{"prompt":"train","response":"ok"}\n'
+_VALIDATION_BODY = b'{"prompt":"validate","response":"ok"}\n'
+
+
+def _sha256(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _frozen_package() -> FrozenLearningPackage:
+    training = LearningShard(
+        split=LearningDataSplit.TRAINING,
+        artifact_sha256=_sha256(_TRAINING_BODY),
+        provenance_sha256=_sha256(b"training-provenance"),
+        license_evidence_sha256=_sha256(b"training-license"),
+        record_count=1,
+        byte_count=len(_TRAINING_BODY),
+    )
+    validation = LearningShard(
+        split=LearningDataSplit.VALIDATION,
+        artifact_sha256=_sha256(_VALIDATION_BODY),
+        provenance_sha256=_sha256(b"validation-provenance"),
+        license_evidence_sha256=_sha256(b"validation-license"),
+        record_count=1,
+        byte_count=len(_VALIDATION_BODY),
+    )
+    return FrozenLearningPackage.freeze(
+        package_id="runtime-package",
+        package_version="1",
+        base_artifact_sha256=_sha256(b"base-model"),
+        selection_policy_sha256=_sha256(b"selection-policy"),
+        verification_sha256=_sha256(b"verification"),
+        evaluation_set_sha256=_sha256(b"held-out"),
+        shards=(training, validation),
+    )
+
+
+def _material_evidence(
+    *,
+    workspace_id: str = _WORKSPACE_ID,
+) -> TrainingMaterialSetEvidence:
+    package = _frozen_package()
+    materials = tuple(
+        TrainingMaterialEvidence.from_shard(shard) for shard in package.shards
+    )
+    return TrainingMaterialSetEvidence.from_package(
+        package,
+        workspace_sha256=_sha256(workspace_id.encode()),
+        materials=materials,
+    )
+
+
+def _resolved_materials(
+    root: Path,
+    *,
+    workspace_id: str = _WORKSPACE_ID,
+) -> ResolvedTrainingPackage:
+    blob_store = ContentAddressedBlobStore(root / f"materials-{_sha256(workspace_id.encode())}")
+    blob_store.put_bytes(workspace_id, _TRAINING_BODY)
+    blob_store.put_bytes(workspace_id, _VALIDATION_BODY)
+    return resolve_training_materials(
+        _frozen_package(),
+        workspace_id=workspace_id,
+        blob_store=blob_store,
+    )
 
 
 @dataclass
@@ -44,6 +118,7 @@ class _Worker:
     fail_once_at: int | None = None
     calls: list[int] = field(default_factory=list)
     seen_states: list[dict[str, object]] = field(default_factory=list)
+    seen_materials: list[ResolvedTrainingPackage] = field(default_factory=list)
     _failed: bool = False
 
     def step(
@@ -52,10 +127,12 @@ class _Worker:
         spec: TrainingJobSpec,
         step_index: int,
         resume_state: dict[str, object],
+        training_materials: ResolvedTrainingPackage,
     ) -> TrainingStepResult:
         del spec
         self.calls.append(step_index)
         self.seen_states.append(dict(resume_state))
+        self.seen_materials.append(training_materials)
         if self.fail_once_at == step_index and not self._failed:
             self._failed = True
             raise RuntimeError("simulated trainer failure")
@@ -78,8 +155,9 @@ class _TypedFailureWorker:
         spec: TrainingJobSpec,
         step_index: int,
         resume_state: dict[str, object],
+        training_materials: ResolvedTrainingPackage,
     ) -> TrainingStepResult:
-        del spec, resume_state
+        del spec, resume_state, training_materials
         self.calls.append(step_index)
         raise TrainingWorkerError("simulated_failure", effect=self.effect)
 
@@ -94,8 +172,9 @@ class _InvalidResultWorker:
         spec: TrainingJobSpec,
         step_index: int,
         resume_state: dict[str, object],
+        training_materials: ResolvedTrainingPackage,
     ) -> TrainingStepResult:
-        del spec, resume_state
+        del spec, resume_state, training_materials
         self.calls.append(step_index)
         return object()  # type: ignore[return-value]
 
@@ -120,8 +199,12 @@ def _spec(**overrides: object) -> TrainingJobSpec:
         "task_id": "training-task",
         "project_id": "project-1",
         "owner_id": "owner-1",
-        "base_artifact": ArtifactIdentity("models/base", "a" * 64),
-        "frozen_package_sha256": "f" * 64,
+        "base_artifact": ArtifactIdentity(
+            "models/base",
+            _frozen_package().base_artifact_sha256,
+        ),
+        "frozen_package_sha256": _frozen_package().manifest_sha256,
+        "training_material_sha256": _material_evidence().training_material_sha256,
         "candidate_artifact_ref": "models/candidate/job-1",
         "max_steps": 4,
     }
@@ -156,9 +239,19 @@ def _replace_latest_checkpoint_field(
         )
 
 
-def _runtime(store: SQLiteStore, observer: _Observer | None = None) -> TrainingRuntime:
+def _runtime(
+    store: SQLiteStore,
+    observer: _Observer | None = None,
+    *,
+    training_materials: ResolvedTrainingPackage | None = None,
+) -> TrainingRuntime:
     resources = ResourceManager(store, observer or _Observer())
-    return TrainingRuntime(resources=resources, checkpoints=CheckpointService(store))
+    materials = training_materials or _resolved_materials(store.path.parent)
+    return TrainingRuntime(
+        resources=resources,
+        checkpoints=CheckpointService(store),
+        training_materials=materials,
+    )
 
 
 def _scripted_control(*actions: TrainingControl):
@@ -308,7 +401,11 @@ def test_resource_pressure_waits_without_running_trainer(tmp_path: Path) -> None
             max_cpu_percent=25.0,
         )
     )
-    runtime = TrainingRuntime(resources=resources, checkpoints=CheckpointService(store))
+    runtime = TrainingRuntime(
+        resources=resources,
+        checkpoints=CheckpointService(store),
+        training_materials=_resolved_materials(store.path.parent),
+    )
     worker = _Worker(complete_at=0)
 
     waiting = runtime.run(_spec(), worker)
@@ -360,13 +457,18 @@ def test_waiting_evidence_binds_frozen_package_identity(tmp_path: Path) -> None:
             max_cpu_percent=25.0,
         )
     )
-    runtime = TrainingRuntime(resources=resources, checkpoints=CheckpointService(store))
+    runtime = TrainingRuntime(
+        resources=resources,
+        checkpoints=CheckpointService(store),
+        training_materials=_resolved_materials(store.path.parent),
+    )
     spec = _spec()
 
     waiting = runtime.run(spec, _Worker(complete_at=0))
 
     assert waiting.state is TrainingRunState.WAITING
     assert waiting.frozen_package_sha256 == spec.frozen_package_sha256
+    assert waiting.training_material_sha256 == spec.training_material_sha256
 
 
 def test_completed_checkpoint_requires_candidate_digest_on_restore(tmp_path: Path) -> None:
@@ -403,4 +505,142 @@ def test_control_callback_requires_exact_training_control(tmp_path: Path) -> Non
             _spec(),
             _Worker(complete_at=0),
             control=lambda: "continue",  # type: ignore[return-value]
+        )
+
+
+
+def test_worker_receives_exact_resolved_material_package(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    materials = _resolved_materials(tmp_path)
+    worker = _Worker(complete_at=0)
+
+    completed = _runtime(store, training_materials=materials).run(_spec(), worker)
+
+    assert completed.state is TrainingRunState.COMPLETED
+    assert worker.seen_materials == [materials]
+    assert completed.training_material_sha256 == materials.training_material_sha256
+
+
+def test_material_digest_is_bound_across_restart(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    original = _spec()
+    _runtime(store).run(
+        original,
+        _Worker(complete_at=2),
+        control=_scripted_control(TrainingControl.PAUSE),
+    )
+
+    changed = _spec(training_material_sha256="e" * 64)
+    with pytest.raises(TrainingCheckpointError, match="identity mismatch"):
+        _runtime(SQLiteStore(store.path)).run(changed, _Worker(complete_at=0))
+
+
+def test_checkpoint_rejects_material_digest_tamper(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    _runtime(store).run(
+        spec,
+        _Worker(complete_at=2),
+        control=_scripted_control(TrainingControl.PAUSE),
+    )
+    _replace_latest_checkpoint_field(
+        store,
+        field_name="training_material_sha256",
+        value="e" * 64,
+    )
+
+    with pytest.raises(TrainingCheckpointError, match="training material identity mismatch"):
+        _runtime(SQLiteStore(store.path)).run(spec, _Worker(complete_at=0))
+
+
+def test_physical_material_tamper_fails_before_worker_effect(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    materials = _resolved_materials(tmp_path)
+    target = materials.materials[0].path
+    target.write_bytes(b"x" * target.stat().st_size)
+    worker = _Worker(complete_at=0)
+
+    failed = _runtime(store, training_materials=materials).run(_spec(), worker)
+
+    assert failed.state is TrainingRunState.FAILED
+    assert failed.reason == "training_material_verification_failed"
+    assert failed.next_step == 0
+    assert worker.calls == []
+
+
+def test_wrong_workspace_material_identity_fails_before_worker_effect(
+    tmp_path: Path,
+) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    materials = _resolved_materials(tmp_path, workspace_id="different-workspace")
+    worker = _Worker(complete_at=0)
+
+    failed = _runtime(store, training_materials=materials).run(_spec(), worker)
+
+    assert failed.state is TrainingRunState.FAILED
+    assert failed.reason == "training_material_identity_mismatch"
+    assert worker.calls == []
+
+
+@dataclass
+class _TamperingWorker:
+    calls: list[int] = field(default_factory=list)
+
+    def step(
+        self,
+        *,
+        spec: TrainingJobSpec,
+        step_index: int,
+        resume_state: dict[str, object],
+        training_materials: ResolvedTrainingPackage,
+    ) -> TrainingStepResult:
+        del spec, resume_state
+        self.calls.append(step_index)
+        if step_index == 0:
+            target = training_materials.materials[0].path
+            target.write_bytes(b"z" * target.stat().st_size)
+        return TrainingStepResult(
+            resume_state={"last_step": step_index},
+            completed=False,
+        )
+
+
+def test_reverify_runs_before_every_training_effect(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    materials = _resolved_materials(tmp_path)
+    worker = _TamperingWorker()
+
+    failed = _runtime(store, training_materials=materials).run(_spec(), worker)
+
+    assert failed.state is TrainingRunState.FAILED
+    assert failed.reason == "training_material_verification_failed"
+    assert failed.next_step == 1
+    assert worker.calls == [0]
+
+
+def test_material_manifest_mismatch_fails_before_worker_effect(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    materials = _resolved_materials(tmp_path)
+    worker = _Worker(complete_at=0)
+    spec = _spec(
+        frozen_package_sha256="e" * 64,
+        training_material_sha256=materials.training_material_sha256,
+    )
+
+    failed = _runtime(store, training_materials=materials).run(spec, worker)
+
+    assert failed.state is TrainingRunState.FAILED
+    assert failed.reason == "training_material_identity_mismatch"
+    assert worker.calls == []
+
+
+def test_runtime_rejects_noncanonical_material_package(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    resources = ResourceManager(store, _Observer())
+
+    with pytest.raises(TypeError, match="exact ResolvedTrainingPackage"):
+        TrainingRuntime(
+            resources=resources,
+            checkpoints=CheckpointService(store),
+            training_materials=object(),  # type: ignore[arg-type]
         )
