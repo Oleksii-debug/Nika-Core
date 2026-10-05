@@ -69,12 +69,17 @@ class AgentRegistry:
             # previous version before one of them commits.
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT version FROM agents WHERE agent_id = ? "
+                "SELECT agent_id, name, version, goal FROM agents WHERE agent_id = ? "
                 "ORDER BY version DESC LIMIT 1",
                 (definition.agent_id,),
             ).fetchone()
-            if row is not None and definition.version <= _stored_version(row["version"]):
-                raise ValueError("agent version must increase")
+            if row is not None:
+                _stored_text(row["agent_id"], "agent_id", allow_blank=False)
+                _stored_text(row["name"], "name", allow_blank=False)
+                current_version = _stored_version(row["version"])
+                _stored_text(row["goal"], "goal", allow_blank=True)
+                if definition.version <= current_version:
+                    raise ValueError("agent version must increase")
             conn.execute(
                 "INSERT INTO agents(agent_id, version, name, goal, created_at) VALUES (?, ?, ?, ?, ?)",
                 (
