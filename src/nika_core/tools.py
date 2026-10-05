@@ -387,11 +387,12 @@ class ToolEffectGuard:
 
     @staticmethod
     def _reservation_text(value: object) -> str:
-        if type(value) is not str or not value:
+        try:
+            return _require_tool_identity(value, label="reservation authority")
+        except ValueError as exc:
             raise ToolEffectConflictError(
                 "tool effect finalization lacks reservation authority"
-            )
-        return value
+            ) from exc
 
     @staticmethod
     def _operation_key(*, task_id: str, call_id: str) -> str:
