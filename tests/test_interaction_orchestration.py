@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from nika_core.interaction import (
+    AmbiguousTargetError,
     ApplicationIdentity,
     ControlLocator,
     ControlNode,
@@ -14,17 +15,16 @@ from nika_core.interaction import (
     InteractionTarget,
     PermissionBlockedError,
     SemanticSnapshot,
-    TargetNotFoundError,
-    AmbiguousTargetError,
     StaleSnapshotError,
+    TargetNotFoundError,
 )
-from nika_core.interaction.resolver import resolve_strict
 from nika_core.interaction.orchestration import (
     InteractionReplayBlockedError,
     InteractionRequest,
     InteractionRisk,
     SemanticInteractionCoordinator,
 )
+from nika_core.interaction.resolver import resolve_strict
 from nika_core.runtime.idempotency import IdempotencyStatus
 from nika_core.security.policy import (
     ApprovalLedger,
@@ -111,7 +111,11 @@ class FakeAdapter:
         return self.verify_result
 
 
-def _policy(tmp_path: Path, *, granted: bool = True) -> tuple[SecurityPolicy, ExecutionBudgetLedger]:
+def _policy(
+    tmp_path: Path,
+    *,
+    granted: bool = True,
+) -> tuple[SecurityPolicy, ExecutionBudgetLedger]:
     policy = SecurityPolicy(
         granted_tools=frozenset({"interaction.invoke"} if granted else set()),
         sandbox=SandboxPolicy(workspace_root=tmp_path),
@@ -228,7 +232,9 @@ def test_failed_postcondition_marks_side_effect_uncertain(tmp_path: Path) -> Non
     assert ledger.uncertain is False
 
 
-def test_adapter_failure_after_local_action_propagates_without_false_success(tmp_path: Path) -> None:
+def test_adapter_failure_after_local_action_propagates_without_false_success(
+    tmp_path: Path,
+) -> None:
     save = ControlNode("save", "button", "Save")
     adapter = FakeAdapter([_snapshot(save), _snapshot(save)])
     adapter.fail_after_start = True

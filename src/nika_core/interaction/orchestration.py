@@ -104,7 +104,7 @@ def _detach_snapshot(snapshot: SemanticSnapshot) -> SemanticSnapshot:
         browser=browser,
     )
     controls = tuple(
-        replace(node, attributes=tuple(node.attributes))
+        replace(node, attributes=tuple((key, value) for key, value in node.attributes))
         for node in snapshot.controls
     )
     return replace(snapshot, target=detached_target, controls=controls)
@@ -211,7 +211,10 @@ class SemanticInteractionCoordinator:
         # Detach the request and nested locator before observing or authorizing.
         request = replace(
             request,
-            locator=replace(request.locator, attributes=tuple(request.locator.attributes)),
+            locator=replace(
+                request.locator,
+                attributes=tuple((key, value) for key, value in request.locator.attributes),
+            ),
         )
         observed = _detach_snapshot(self.adapter.observe())
         node = resolve_strict(observed, request.locator)
@@ -221,13 +224,15 @@ class SemanticInteractionCoordinator:
         current_node = resolve_strict(current, request.locator)
         validate_action_target(node, current_node)
 
+        # Freeze one canonical effect before durable state or trusted policy calls.
+        intent = request.approval_intent
         reserved = False
         if request.risk.durable_side_effect:
             record, created = self.idempotency.reserve_once(
                 operation_key=request.operation_key,
                 task_id=request.task_id,
                 operation_type="interaction.execute",
-                input_fingerprint=request.fingerprint,
+                input_fingerprint=intent.approval_fingerprint,
             )
             if not created:
                 if record.status is IdempotencyStatus.COMPLETED:
@@ -237,7 +242,6 @@ class SemanticInteractionCoordinator:
                 )
             reserved = True
 
-        intent = request.approval_intent
         try:
             authorize_action(
                 intent,
