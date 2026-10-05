@@ -89,6 +89,13 @@ class ProductFactoryProgramHost:
     _ledger: IdempotencyLedger = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
+        # Checkpoint and effect evidence must use the same store authority. A ledger
+        # backed by another SQLiteStore can reserve an external worker effect in a
+        # different database from the checkpoint and lose recovery/replay safety.
+        # Require the exact store instance; equal path strings do not establish
+        # stable file identity if either path is redirected or replaced later.
+        if self.idempotency is not None and self.idempotency._store is not self.store:
+            raise ValueError("Product Factory idempotency must use the host SQLiteStore instance")
         self._checkpoints = ProductFactoryCheckpointHost(self.store)
         self._ledger = self.idempotency or IdempotencyLedger(self.store)
 
