@@ -10,6 +10,16 @@ import pytest
 import nika_core.training_peft_worker as peft
 
 
+_RUNTIME_VERSIONS = {
+    "torch": "2.14.1",
+    "transformers": "5.18.2",
+    "peft": "0.21.2",
+    "accelerate": "1.15.3",
+    "gguf": "0.19.1",
+    "safetensors": "0.8.2",
+}
+
+
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -283,6 +293,18 @@ def test_candidate_path_is_stable_and_reference_specific(tmp_path: Path) -> None
     assert first != other
     assert first.name == "adapter_model.safetensors"
     assert root in first.parents
+
+
+def test_request_rejects_private_local_artifact_refs(tmp_path: Path) -> None:
+    raw_request, _ = _request(tmp_path)
+    raw_request["job"]["base_artifact"]["artifact_ref"] = "C:/private/base.gguf"
+    with pytest.raises(peft.PeftTrainerError, match="artifact_ref_private_path"):
+        peft._parse_request(raw_request)
+
+    raw_request, _ = _request(tmp_path)
+    raw_request["job"]["candidate_artifact_ref"] = "/private/candidate"
+    with pytest.raises(peft.PeftTrainerError, match="artifact_ref_private_path"):
+        peft._parse_request(raw_request)
 
 
 def test_base_gguf_copy_is_digest_bound(tmp_path: Path) -> None:
@@ -634,6 +656,11 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
 ) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
     environment = peft.build_trainer_environment(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
@@ -656,6 +683,8 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     )
     assert environment["NIKA_TRAINER_LORA_TARGET_MODULES"] == "q_proj,k_proj,v_proj"
     assert environment["NIKA_TRAINER_MAX_RECORDS"] == "123"
+    for distribution, environment_key in peft._TRAINING_RUNTIME_DISTRIBUTIONS:
+        assert environment[environment_key] == _RUNTIME_VERSIONS[distribution]
 
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
@@ -665,6 +694,136 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     ]
     assert loaded.lora_r == 16
     assert loaded.seed == 99
+
+
+
+def test_read_config_rejects_training_runtime_version_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+    )
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
+    drifted = dict(_RUNTIME_VERSIONS)
+    drifted["transformers"] = "5.18.3"
+    monkeypatch.setattr(peft.importlib.metadata, "version", drifted.__getitem__)
+
+    with pytest.raises(peft.PeftTrainerError, match="runtime_version_mismatch"):
+        peft._read_config()
+
+
+def test_environment_builder_rejects_missing_training_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+
+    def missing(distribution: str) -> str:
+        raise peft.importlib.metadata.PackageNotFoundError(distribution)
+
+    monkeypatch.setattr(peft.importlib.metadata, "version", missing)
+
+    with pytest.raises(ValueError, match="training runtime dependencies"):
+        peft.build_trainer_environment(
+            base_gguf=config.base_gguf,
+            model_dir=config.model_dir,
+            output_root=config.output_root,
+        )
+
+
+def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+    )
+    manifest = json.loads(raw)
+    assert peft._validate_candidate_manifest_payload(manifest) == manifest
+
+    bad_sha = json.loads(raw)
+    bad_sha["base_artifact_sha256"] = "0" * 63
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_sha)
+
+    bad_parameter = json.loads(raw)
+    bad_parameter["trainer_parameters"]["lora_r"] = config.lora_r + 1
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_parameter)
+
+    private_ref = json.loads(raw)
+    private_ref["base_artifact_ref"] = "C:/private/base.gguf"
+    private_ref["adapter_config"]["base_model_name_or_path"] = "C:/private/base.gguf"
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(private_ref)
+
+    unknown_field = json.loads(raw)
+    unknown_field["unexpected"] = True
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(unknown_field)
+
+    control_ref = json.loads(raw)
+    control_ref["candidate_artifact_ref"] = "models/candidate\nforged"
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(control_ref)
+
+    duplicate_adapter_target = json.loads(raw)
+    first_target = duplicate_adapter_target["adapter_config"]["target_modules"][0]
+    duplicate_adapter_target["adapter_config"]["target_modules"].append(first_target)
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(duplicate_adapter_target)
+
+
+def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    manifest = json.loads(
+        peft._candidate_manifest_json(
+            request=request,
+            config=config,
+            consumed=consumed,
+            adapter_config=adapter_config,
+        )
+    )
+    manifest["trainer_parameters"]["lora_target_modules"] = [["q_proj"]]
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(manifest)
 
 
 def test_adapter_config_snapshot_rejects_training_plan_mismatch(tmp_path: Path) -> None:
