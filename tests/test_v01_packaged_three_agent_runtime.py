@@ -1265,8 +1265,14 @@ def test_packaged_member_cancel_never_targets_unrelated_model(
         cancelled: list[tuple[str, str]] = []
 
         class ModelCanceller:
-            async def cancel(self, *, task_id: str, thread_id: str) -> bool:
-                cancelled.append((task_id, thread_id))
+            async def cancel(
+                self,
+                *,
+                task_id: str,
+                thread_id: str,
+                _cancelled: list[tuple[str, str]] = cancelled,
+            ) -> bool:
+                _cancelled.append((task_id, thread_id))
                 return True
 
         current._model_runtimes[task_id] = ModelCanceller()
@@ -1323,8 +1329,14 @@ def test_valid_member_cancel_survives_corrupt_queued_task(
         cancelled: list[tuple[str, str]] = []
 
         class ModelCanceller:
-            async def cancel(self, *, task_id: str, thread_id: str) -> bool:
-                cancelled.append((task_id, thread_id))
+            async def cancel(
+                self,
+                *,
+                task_id: str,
+                thread_id: str,
+                _cancelled: list[tuple[str, str]] = cancelled,
+            ) -> bool:
+                _cancelled.append((task_id, thread_id))
                 return True
 
         current._model_runtimes[task_id] = ModelCanceller()
