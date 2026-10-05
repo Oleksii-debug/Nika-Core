@@ -170,7 +170,14 @@ def test_binding_failure_rolls_back_newly_minted_permission(
     def reject_binding(**_kwargs: object) -> None:
         raise RuntimeError("simulated durable binding failure")
 
+    revoke_calls: list[str] = []
+
+    def reject_compensating_revoke(permission_id: str, **_kwargs: object) -> None:
+        revoke_calls.append(permission_id)
+        raise AssertionError("atomic grant failure must not use compensating revoke")
+
     monkeypatch.setattr(service, "_bind_permission", reject_binding)
+    monkeypatch.setattr(service._permissions, "revoke", reject_compensating_revoke)
 
     with pytest.raises(CloudModelPermissionDenied, match="зберегти дозвіл"):
         service.admit_created_task(record)
@@ -190,6 +197,7 @@ def test_binding_failure_rolls_back_newly_minted_permission(
     assert permissions == []
     assert binding_count == 0
     assert audit_count == 0
+    assert revoke_calls == []
 
 
 def test_abrupt_exit_during_binding_rolls_back_permission_binding_and_audit(
