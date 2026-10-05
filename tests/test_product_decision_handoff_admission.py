@@ -250,6 +250,39 @@ def test_oversized_handoff_fails_before_json_decode(tmp_path, monkeypatch):
     assert projects.get("p1").row_version == 0
 
 
+
+def test_approval_intent_reads_handoff_on_one_sqlite_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    _store, projects, decisions, decision = _setup(tmp_path)
+    original_option = decisions._option_evidence_conn
+    original_fingerprint = decisions._evidence_authority_fingerprint_conn
+    observed: list[str] = []
+
+    def checked_option(conn, project_id, option_id):
+        assert conn.in_transaction
+        observed.append("option")
+        return original_option(conn, project_id, option_id)
+
+    def checked_fingerprint(conn, project_id, evidence_package_ids):
+        assert conn.in_transaction
+        observed.append("fingerprint")
+        return original_fingerprint(conn, project_id, evidence_package_ids)
+
+    monkeypatch.setattr(decisions, "_option_evidence_conn", checked_option)
+    monkeypatch.setattr(
+        decisions,
+        "_evidence_authority_fingerprint_conn",
+        checked_fingerprint,
+    )
+
+    intent = _approval_intent(decisions, decision)
+
+    assert observed == ["option", "fingerprint"]
+    assert intent.action_id == "product_project.decision.approve"
+    assert projects.get("p1").row_version == 0
+
 def test_valid_handoff_still_builds_exact_owner_approval_intent(tmp_path):
     store, projects, decisions, decision = _setup(tmp_path)
     intent = _approval_intent(decisions, decision)
