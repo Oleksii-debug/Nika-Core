@@ -303,6 +303,39 @@ def test_mutated_policy_is_revalidated_before_gateway_call() -> None:
     assert provider.requests == []
 
 
+def test_mutated_non_utf8_message_fails_before_gateway_call() -> None:
+    provider = _FakeProvider(provider_id="teacher-local", kind=ProviderKind.LOCAL)
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    spec = _spec()
+    object.__setattr__(spec.messages[1], "content", "\ud800")
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        asyncio.run(service.consult(spec))
+
+    assert provider.requests == []
+
+
+def test_non_utf8_provider_response_fails_closed_without_cognition_text() -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        text="\ud800",
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+
+    result = asyncio.run(service.consult(_spec()))
+
+    assert result.text is None
+    assert result.evidence.status is TeacherConsultationStatus.FAILED
+    assert result.evidence.error_code is ModelErrorCode.PROVIDER_ERROR
+    assert result.evidence.response_sha256 is None
+    assert len(provider.requests) == 1
+
+
 def test_request_bound_fails_before_gateway_call() -> None:
     with pytest.raises(ValueError, match="max_request_chars"):
         _spec(
