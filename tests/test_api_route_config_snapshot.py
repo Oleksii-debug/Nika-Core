@@ -263,16 +263,11 @@ def test_provider_rejects_behavioral_credential_material_before_transport() -> N
     assert transport_calls == 0
 
 
-def test_provider_rejects_behavioral_route_identity_scalar() -> None:
-    config = ApiModelRouteConfig(
-        provider_id=_TextSubclass("approved-api"),
-        base_url="https://api.example.test/v1",
-        default_model="model-a",
-        credential_ref="env:NIKA_ROUTE_A",
-    )
-
-    with pytest.raises(TypeError, match="provider_id must be exact text"):
-        CredentialRefOpenAICompatibleProvider(
-            config=config,
-            credential_resolver=_RecordingResolver(),
+def test_route_config_rejects_behavioral_route_identity_scalar() -> None:
+    with pytest.raises(TypeError, match="provider_id must be text"):
+        ApiModelRouteConfig(
+            provider_id=_TextSubclass("approved-api"),
+            base_url="https://api.example.test/v1",
+            default_model="model-a",
+            credential_ref="env:NIKA_ROUTE_A",
         )
