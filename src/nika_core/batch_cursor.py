@@ -179,7 +179,14 @@ class BatchCursorState(BaseModel):
             elif target.attempt_state is not AttemptState.PENDING:
                 raise ValueError("only the first unfinished target may be active")
 
-        if sorted(input_positions) != list(range(self.input_count)):
+        ordered_input_positions = sorted(input_positions)
+        if (
+            len(ordered_input_positions) != self.input_count
+            or any(
+                position != expected
+                for expected, position in enumerate(ordered_input_positions)
+            )
+        ):
             raise ValueError("input positions do not match input_count")
         max_batch = self.targets[-1].batch_index if self.targets else 0
         if self.ready_batch_index > max_batch:
