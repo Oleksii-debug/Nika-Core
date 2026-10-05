@@ -35,6 +35,42 @@ RUNTIME_DISTRIBUTIONS = (
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
 _MAX_NOTICES_BYTES = 16 * 1024 * 1024
 _MAX_DISTRIBUTION_PATH_BYTES = 4096
+_MAX_SECTION_IDENTITY_BYTES = 4096
+
+
+def _bounded_metadata_value(value: object, *, field: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise RuntimeError(f"Runtime distribution {field} metadata is invalid")
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        encoded = text.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(f"Runtime distribution {field} metadata is invalid") from exc
+    if len(encoded) > _MAX_NOTICES_BYTES:
+        raise RuntimeError(
+            f"Runtime distribution {field} metadata exceeds the release size limit"
+        )
+    return text
+
+
+def _section_identity(value: object, *, field: str) -> str:
+    text = _bounded_metadata_value(value, field=field)
+    if text is None:
+        raise RuntimeError(f"Runtime distribution {field} identity is invalid")
+    encoded = text.encode("utf-8")
+    if (
+        len(encoded) > _MAX_SECTION_IDENTITY_BYTES
+        or any(
+            unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in text
+        )
+    ):
+        raise RuntimeError(f"Runtime distribution {field} identity is invalid")
+    return text
 
 
 def _python_license() -> str:
@@ -48,17 +84,36 @@ def _python_license() -> str:
 
 
 def _metadata_license(dist: metadata.Distribution) -> str | None:
-    expression = dist.metadata.get("License-Expression")
-    if expression and expression.strip():
-        return expression.strip()
-    license_value = dist.metadata.get("License")
-    if license_value and license_value.strip() and license_value.strip().upper() != "UNKNOWN":
-        return license_value.strip()
-    classifiers = [
-        value
-        for value in dist.metadata.get_all("Classifier", [])
-        if value.startswith("License ::")
-    ]
+    expression = _bounded_metadata_value(
+        dist.metadata.get("License-Expression"),
+        field="license",
+    )
+    if expression:
+        if any(_SECTION_RE.fullmatch(line.strip()) for line in expression.splitlines()):
+            raise RuntimeError("Runtime distribution license metadata is ambiguous")
+        return expression
+
+    license_value = _bounded_metadata_value(
+        dist.metadata.get("License"),
+        field="license",
+    )
+    if license_value and license_value.upper() != "UNKNOWN":
+        if any(_SECTION_RE.fullmatch(line.strip()) for line in license_value.splitlines()):
+            raise RuntimeError("Runtime distribution license metadata is ambiguous")
+        return license_value
+
+    classifiers: list[str] = []
+    classifier_bytes = 0
+    for raw_value in dist.metadata.get_all("Classifier", []) or ():
+        value = _bounded_metadata_value(raw_value, field="classifier")
+        if value is None or not value.startswith("License ::"):
+            continue
+        classifier_bytes += len(value.encode("utf-8"))
+        if classifier_bytes > _MAX_NOTICES_BYTES:
+            raise RuntimeError(
+                "Runtime distribution classifier metadata exceeds the release size limit"
+            )
+        classifiers.append(value)
     return "; ".join(classifiers) or None
 
 
@@ -90,11 +145,11 @@ def _canonical_distribution_file(item: object) -> str:
 
 def _located_distribution_file(
     dist: metadata.Distribution,
-    item: object,
+    relative_path: str,
 ) -> Path:
     try:
         root = Path(dist.locate_file("")).resolve(strict=True)
-        target = Path(dist.locate_file(item))
+        target = Path(dist.locate_file(relative_path))
         parent = target.parent.resolve(strict=True)
         common = os.path.commonpath((os.fspath(root), os.fspath(parent)))
     except (OSError, RuntimeError, ValueError) as exc:
@@ -117,9 +172,9 @@ def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
         leaf = relative_path.rsplit("/", 1)[-1].casefold()
         if not any(marker in leaf for marker in ("license", "licence", "copying", "notice")):
             continue
-        relative_path = _canonical_distribution_file(item)
+        relative_path = _canonical_distribution_file(relative_path)
         try:
-            path = _located_distribution_file(dist, item)
+            path = _located_distribution_file(dist, relative_path)
             text = _read_notices(path)
             if text is None:
                 raise RuntimeError("Runtime distribution license evidence is invalid")
@@ -141,30 +196,57 @@ def _distribution_section(
     distribution_name: str,
     dist: metadata.Distribution,
 ) -> tuple[str, str]:
-    package_name = dist.metadata.get("Name") or distribution_name
+    package_name = _section_identity(
+        dist.metadata.get("Name") or distribution_name,
+        field="name",
+    )
+    version = _section_identity(str(dist.version), field="version")
     declared_license = _metadata_license(dist)
     license_texts = _license_texts(dist)
     if not declared_license and not license_texts:
         raise RuntimeError(
             f"No license evidence found for runtime distribution: {distribution_name}"
         )
+
     body: list[str] = []
+    body_bytes = 0
+
+    def append_body(value: str) -> None:
+        nonlocal body_bytes
+        encoded_length = len(value.encode("utf-8"))
+        body_bytes += encoded_length + (1 if body else 0)
+        if body_bytes > _MAX_NOTICES_BYTES:
+            raise RuntimeError(
+                "Runtime distribution license evidence exceeds the release size limit"
+            )
+        body.append(value)
+
     if declared_license:
-        body.append(f"Declared license: {declared_license}")
+        append_body(f"Declared license: {declared_license}")
     for relative_path, text in license_texts:
         if body:
-            body.append("")
-        body.extend([f"--- {relative_path} ---", text])
-    return f"{package_name} {dist.version}", "\n".join(body).strip()
+            append_body("")
+        append_body(f"--- {relative_path} ---")
+        append_body(text)
+    return f"{package_name} {version}", "\n".join(body).strip()
 
 
 def build_third_party_notices(bundle_dir: Path) -> Path:
-    sections = [
-        "Nika Core third-party notices",
-        "",
-        "===== Python runtime =====",
-        _python_license(),
-    ]
+    sections: list[str] = []
+    payload_bytes = 0
+
+    def append_section(value: str) -> None:
+        nonlocal payload_bytes
+        encoded_length = len(value.encode("utf-8"))
+        payload_bytes += encoded_length + (1 if sections else 0)
+        if payload_bytes > _MAX_NOTICES_BYTES:
+            raise RuntimeError("Generated third-party notices exceed the release size limit")
+        sections.append(value)
+
+    append_section("Nika Core third-party notices")
+    append_section("")
+    append_section("===== Python runtime =====")
+    append_section(_python_license())
     for distribution_name in RUNTIME_DISTRIBUTIONS:
         try:
             dist = metadata.distribution(distribution_name)
@@ -173,7 +255,9 @@ def build_third_party_notices(bundle_dir: Path) -> Path:
                 f"Required runtime distribution is missing: {distribution_name}"
             ) from exc
         title, body = _distribution_section(distribution_name, dist)
-        sections.extend(["", f"===== {title} =====", body])
+        append_section("")
+        append_section(f"===== {title} =====")
+        append_section(body)
     payload = ("\n".join(sections).rstrip() + "\n").encode("utf-8")
     if len(payload) > _MAX_NOTICES_BYTES:
         raise RuntimeError("Generated third-party notices exceed the release size limit")
