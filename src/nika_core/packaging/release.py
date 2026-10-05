@@ -18,6 +18,8 @@ _RELEASE_MANIFEST_NAME = "release-manifest.json"
 _MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_PREHUMAN_EVIDENCE_BYTES = 1024 * 1024
 _MAX_RELEASE_JSON_DEPTH = 64
+_MAX_RELEASE_JSON_INTEGER_BITS = 4096
+_MAX_RELEASE_JSON_INTEGER_DECIMAL_CHARS = 1234
 _MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
@@ -414,6 +416,16 @@ def _finite_json_float(raw: str) -> float:
     return value
 
 
+def _bounded_json_int(raw: str) -> int:
+    digits = raw[1:] if raw.startswith("-") else raw
+    if len(digits) > _MAX_RELEASE_JSON_INTEGER_DECIMAL_CHARS:
+        raise ValueError("release JSON integer exceeds the digit limit")
+    value = int(raw)
+    if value.bit_length() > _MAX_RELEASE_JSON_INTEGER_BITS:
+        raise ValueError("release JSON integer exceeds the bit limit")
+    return value
+
+
 def _reject_json_constant(_raw: str) -> None:
     raise ValueError("non-JSON numeric constant")
 
@@ -449,6 +461,7 @@ def _decode_json_object(content: str) -> dict[str, Any] | None:
             content,
             object_pairs_hook=_unique_json_object,
             parse_float=_finite_json_float,
+            parse_int=_bounded_json_int,
             parse_constant=_reject_json_constant,
         )
     except (UnicodeError, ValueError, RecursionError):
