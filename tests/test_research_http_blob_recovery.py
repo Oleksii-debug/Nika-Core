@@ -122,3 +122,38 @@ def test_lost_blob_and_unconditional_304_cannot_mark_source_current(
     assert network.get_source("web-1").freshness is FreshnessState.STALE
     assert network.snapshot_count("web-1") == 1
     assert network.attempt_count("web-1") == 2
+
+@pytest.mark.parametrize("url", [
+    "https://example.com/page",
+    "https://example.com/another-page",
+])
+def test_http_source_identity_cannot_be_reassigned_across_workspaces(
+    tmp_path: Path, url: str,
+) -> None:
+    store, network, _, _, digest, _ = _session(tmp_path)
+    repository = ResearchRepository(store)
+    repository.upsert_workspace(ResearchWorkspace("other", "Other workspace"))
+    original = network.get_source("web-1")
+    assert original.workspace_id == "ws"
+
+    with pytest.raises(ValueError, match="different workspace"):
+        network.register_source(SourceSpec("web-1", "other", SourceKind.HTTP, url))
+
+    state = network.get_source("web-1")
+    assert state == original
+    assert state.current_raw_sha256 == digest
+    assert network.snapshot_count("web-1") == 1
+
+
+def test_same_workspace_http_reregistration_preserves_cached_identity(
+    tmp_path: Path,
+) -> None:
+    _, network, _, _, digest, _ = _session(tmp_path)
+    source = SourceSpec("web-1", "ws", SourceKind.HTTP, "https://example.com/page")
+
+    state = network.register_source(source)
+
+    assert state.workspace_id == "ws"
+    assert state.current_raw_sha256 == digest
+    assert state.freshness is FreshnessState.CURRENT
+    assert network.snapshot_count("web-1") == 1
