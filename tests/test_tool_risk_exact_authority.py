@@ -599,6 +599,61 @@ def test_durable_scope_scalar_type_is_not_string_coerced(tmp_path) -> None:
         restarted.get("perm-durable")
 
 
+def test_preexisting_standing_permission_table_without_migration_is_rejected(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "unversioned-standing-authority.db")
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE standing_permissions ("
+            "permission_id TEXT PRIMARY KEY, "
+            "parent_permission_id TEXT, "
+            "scope_json TEXT NOT NULL, "
+            "scope_fingerprint TEXT NOT NULL, "
+            "revoked_at TEXT, "
+            "FOREIGN KEY(parent_permission_id) "
+            "REFERENCES standing_permissions(permission_id))"
+        )
+
+    permissions = StandingPermissionStore(store)
+    with pytest.raises(
+        StandingPermissionIntegrityError,
+        match="exists without schema version",
+    ):
+        permissions.initialize()
+
+
+def test_negative_standing_permission_schema_version_is_rejected(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "negative-standing-schema.db")
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE standing_permission_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO standing_permission_schema_migrations(version, applied_at) "
+            "VALUES (?, ?)",
+            (-1, datetime(2026, 9, 27, tzinfo=UTC).isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE standing_permissions ("
+            "permission_id TEXT PRIMARY KEY, "
+            "parent_permission_id TEXT, "
+            "scope_json TEXT NOT NULL, "
+            "scope_fingerprint TEXT NOT NULL, "
+            "revoked_at TEXT, "
+            "FOREIGN KEY(parent_permission_id) "
+            "REFERENCES standing_permissions(permission_id))"
+        )
+
+    permissions = StandingPermissionStore(store)
+    with pytest.raises(
+        StandingPermissionIntegrityError,
+        match="schema version is invalid",
+    ):
+        permissions.initialize()
+
+
 def test_text_migration_schema_is_rejected_before_version_coercion(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "bad-migration.db")
     with store.connection() as conn:
