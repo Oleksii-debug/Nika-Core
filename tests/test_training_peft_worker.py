@@ -597,6 +597,13 @@ def _fake_safe_open(path: str, *, framework: str, device: str) -> _FakeSafeTenso
     return _FakeSafeTensorReader(path)
 
 
+def _fake_safe_serialize(tensors: dict[str, object]) -> bytes:
+    assert list(tensors) == ["lora.weight"]
+    tensor = tensors["lora.weight"]
+    assert isinstance(tensor, _FakeTensor)
+    return b"tensor-only-v1\x00lora.weight\x00" + tensor.payload
+
+
 def _fake_safe_save_file(
     tensors: dict[str, object],
     path: str,
@@ -719,6 +726,7 @@ def _fake_stack() -> tuple[object, ...]:
         _fake_get_peft_model,
         _fake_safe_open,
         _fake_safe_save_file,
+        _fake_safe_serialize,
         _FakeModelFactory,
         _FakeTokenizerFactory,
         _FakeCollator,
@@ -752,7 +760,7 @@ class _NonFiniteMutationFakeTrainer(_NoMutationFakeTrainer):
 
 def _trainer_variant_stack(trainer_type: type[_FakeTrainer]) -> tuple[object, ...]:
     stack = list(_fake_stack())
-    stack[10] = trainer_type
+    stack[11] = trainer_type
     return tuple(stack)
 
 
@@ -881,6 +889,14 @@ def test_new_job_can_warm_start_from_promoted_candidate(
         request.candidate_artifact_ref,
     )
     assert candidate_sha256 == _sha256(candidate.read_bytes())
+    manifest = peft.candidate_adapter_manifest(candidate)
+    assert manifest["foundation_model_sha256"] == config.base_gguf_sha256
+    assert manifest["previous_adapter_tensors_sha256"] is not None
+    assert manifest["trained_adapter_tensors_sha256"] is not None
+    assert (
+        manifest["previous_adapter_tensors_sha256"]
+        != manifest["trained_adapter_tensors_sha256"]
+    )
     job_root = config.output_root / peft._candidate_key(
         request.candidate_artifact_ref
     )
@@ -1473,6 +1489,8 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
         config=config,
         consumed=consumed,
         adapter_config=adapter_config,
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256="9" * 64,
     )
     manifest = json.loads(raw)
     assert peft._validate_candidate_manifest_payload(manifest) == manifest
@@ -1575,6 +1593,8 @@ def test_candidate_manifest_producer_rejects_reader_invalid_adapter_config(
             config=config,
             consumed=consumed,
             adapter_config=adapter_config,
+            previous_adapter_tensors_sha256=None,
+            trained_adapter_tensors_sha256="9" * 64,
         )
 
 
@@ -1599,6 +1619,8 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
         config=config,
         consumed=consumed,
         adapter_config=adapter_config,
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256="9" * 64,
     )
     candidate = tmp_path / "candidate.safetensors"
     candidate.write_bytes(b"persisted-candidate")
@@ -1609,6 +1631,9 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
 
         def __exit__(self, *args: object) -> None:
             return None
+
+        def keys(self) -> list[str]:
+            return ["lora.weight"]
 
         def metadata(self) -> dict[str, str]:
             return {"nika_adapter_manifest": raw}
@@ -1649,15 +1674,21 @@ def test_candidate_manifest_v2_binds_foundation_and_v1_remains_readable(
             config=config,
             consumed=consumed,
             adapter_config=adapter_config,
+            previous_adapter_tensors_sha256=None,
+            trained_adapter_tensors_sha256="9" * 64,
         )
     )
 
     assert current["schema"] == "nika-peft-candidate-v2"
     assert current["foundation_model_sha256"] == config.base_gguf_sha256
+    assert current["previous_adapter_tensors_sha256"] is None
+    assert current["trained_adapter_tensors_sha256"] == "9" * 64
     assert peft._validate_candidate_manifest_payload(current) == current
 
     legacy = dict(current)
     legacy.pop("foundation_model_sha256")
+    legacy.pop("previous_adapter_tensors_sha256")
+    legacy.pop("trained_adapter_tensors_sha256")
     legacy["schema"] = "nika-peft-candidate-v1"
     assert peft._validate_candidate_manifest_payload(legacy) == legacy
 
@@ -1676,8 +1707,11 @@ def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
         def __exit__(self, *args: object) -> None:
             return None
 
+        def keys(self) -> list[str]:
+            return ["lora.weight"]
+
         def metadata(self) -> dict[str, str]:
-            return {"nika_adapter_manifest": '{ "schema": "nika-peft-candidate-v1" }'}
+            return {"nika_adapter_manifest": '{ "schema": "nika-peft-candidate-v2" }'}
 
     def safe_open(path: str, *, framework: str, device: str) -> Reader:
         assert Path(path) == candidate
@@ -1710,6 +1744,8 @@ def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) ->
             config=config,
             consumed=consumed,
             adapter_config=adapter_config,
+            previous_adapter_tensors_sha256=None,
+            trained_adapter_tensors_sha256="9" * 64,
         )
     )
     manifest["trainer_parameters"]["lora_target_modules"] = [["q_proj"]]

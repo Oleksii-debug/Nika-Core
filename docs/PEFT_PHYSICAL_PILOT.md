@@ -32,14 +32,17 @@ Windows-only. A successful call must:
     `training_artifacts.verify_candidate_artifact` boundary;
 13. require the verifier receipt SHA-256 to equal the completed runtime evidence;
 14. under the same stability lock, re-read the canonical strict self-contained PEFT
-    candidate manifest through `training_peft_worker.candidate_adapter_manifest`;
+    candidate manifest v2 through `training_peft_worker.candidate_adapter_manifest`; this
+    manifest must carry a non-empty safetensors tensor set plus canonical SHA-256 identities
+    for the previous durable-checkpoint adapter tensor state and the newly trained tensor state;
 15. require its base reference/digest and candidate reference to match canonical COMPLETED
     runtime evidence, require its trainer-protocol job fingerprint to match the exact
     `SubprocessTrainingWorker` protocol identity, require its trainer artifact ID and trainer
     deployment SHA-256 to match the worker's canonical Registry-verified deployment identity,
     require its consumed-material attestation to match the exact attestation accepted by the
-    worker across the physical steps, and require its final step number to match the COMPLETED
-    runtime boundary; and
+    worker across the physical steps, require its previous/trained canonical tensor-state
+    digests to differ, and require its final step number to match the COMPLETED runtime boundary;
+    and
 16. bind both the runtime job fingerprint and the distinct trainer-protocol job fingerprint,
     plus the independently verified trainer deployment identity, manifest digest, trainer
     implementation, model directory, worker-accepted consumed-material, and runtime-manifest
@@ -52,7 +55,9 @@ SHA-256 identities, descriptor/registry digests, strict PEFT candidate-manifest 
 separate runtime and trainer-protocol job fingerprints, trainer deployment/implementation/runtime
 provenance, consumed-material and model-directory manifest digests, the original pause,
 restart-probe, and completion checkpoint IDs, candidate byte count, completed step count,
-schema version, and the literal platform value `windows`.
+schema version, and the literal platform value `windows`. The report keeps schema v4: the
+canonical previous/trained tensor-state digests live in candidate manifest v2 and are bound
+transitively by `candidate_manifest_sha256` after the physical pilot verifies that they differ.
 It does not
 serialize training/validation records, model paths, credentials, environment variables,
 prompts, responses, or checkpoint payloads.
@@ -212,7 +217,8 @@ The helper supplies both the control sequence required to create the one-step pa
 effect-free restart probe. Reports use schema version 4 because the runtime job fingerprint and
 the trainer-protocol job fingerprint are distinct authorities and are now recorded separately,
 alongside strict candidate-manifest and persisted trainer/runtime provenance plus the
-durable-reopen checkpoint.
+durable-reopen checkpoint. Candidate manifest v2 adds canonical previous-vs-trained adapter
+tensor-state digests without adding duplicate fields to the path-free report schema.
 
 ## Evidence boundaries
 
@@ -220,6 +226,8 @@ A unit test, green CI run, or merely constructing a report is not physical-train
 The physical acceptance claim requires an observed successful run on the intended Windows/CPU
 ML environment with the exact Registry/runtime/material authorities that the report binds.
 
-This harness never sets or implies `HUMAN_TESTED`, `NVDA_VERIFIED`,
+This harness never self-sets `HUMAN_TESTED`, `NVDA_VERIFIED`,
 `TRAINING_WEIGHTS_PROVEN`, old-vs-new model superiority, promotion eligibility, or
-`PRODUCTION_RELEASE_READY`. Those remain separate gates.
+`PRODUCTION_RELEASE_READY`. A successful observed physical run would provide concrete
+candidate-manifest evidence that canonical adapter tensor state changed across the durable
+restart boundary, but project truth flags remain separate explicit acceptance gates.

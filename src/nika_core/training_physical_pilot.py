@@ -186,6 +186,8 @@ class _CandidateManifestEvidence:
     trainer_job_fingerprint: str
     consumed_materials_sha256: str
     model_dir_manifest_sha256: str
+    previous_adapter_tensors_sha256: str
+    trained_adapter_tensors_sha256: str
     trainer_artifact_id: str
     trainer_deployment_sha256: str
     trainer_implementation_sha256: str
@@ -317,10 +319,7 @@ def _candidate_manifest_evidence(
         raise PhysicalTrainingPilotError(
             "canonical PEFT candidate manifest verification failed"
         ) from exc
-    if type(manifest) is not dict or manifest.get("schema") not in {
-        "nika-peft-candidate-v1",
-        "nika-peft-candidate-v2",
-    }:
+    if type(manifest) is not dict or manifest.get("schema") != "nika-peft-candidate-v2":
         _fail("canonical PEFT candidate manifest returned invalid evidence")
 
     if manifest.get("base_artifact_ref") != completed.base_artifact.artifact_ref:
@@ -331,16 +330,15 @@ def _candidate_manifest_evidence(
     )
     if not hmac.compare_digest(base_sha256, completed.base_artifact.sha256):
         _fail("PEFT candidate manifest changed base artifact digest")
-    if manifest.get("schema") == "nika-peft-candidate-v2":
-        foundation_model_sha256 = _require_sha256(
-            manifest.get("foundation_model_sha256"),
-            name="candidate manifest foundation_model_sha256",
-        )
-        if not hmac.compare_digest(
-            foundation_model_sha256,
-            completed.base_artifact.sha256,
-        ):
-            _fail("PEFT pilot candidate changed foundation model digest")
+    foundation_model_sha256 = _require_sha256(
+        manifest.get("foundation_model_sha256"),
+        name="candidate manifest foundation_model_sha256",
+    )
+    if not hmac.compare_digest(
+        foundation_model_sha256,
+        completed.base_artifact.sha256,
+    ):
+        _fail("PEFT pilot candidate changed foundation model digest")
     if manifest.get("candidate_artifact_ref") != completed.candidate_artifact_ref:
         _fail("PEFT candidate manifest changed candidate artifact reference")
     manifest_job_fingerprint = _require_sha256(
@@ -377,6 +375,19 @@ def _candidate_manifest_evidence(
         manifest.get("model_dir_manifest_sha256"),
         name="candidate manifest model_dir_manifest_sha256",
     )
+    previous_adapter_tensors_sha256 = _require_sha256(
+        manifest.get("previous_adapter_tensors_sha256"),
+        name="candidate manifest previous_adapter_tensors_sha256",
+    )
+    trained_adapter_tensors_sha256 = _require_sha256(
+        manifest.get("trained_adapter_tensors_sha256"),
+        name="candidate manifest trained_adapter_tensors_sha256",
+    )
+    if hmac.compare_digest(
+        previous_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256,
+    ):
+        _fail("PEFT candidate manifest does not prove adapter tensor mutation")
     if type(trainer_deployment_identity) is not ArtifactIdentity:
         raise TypeError("trainer_deployment_identity must be exact ArtifactIdentity")
     expected_trainer_artifact_id = _require_sha256(
@@ -430,6 +441,8 @@ def _candidate_manifest_evidence(
         trainer_job_fingerprint=expected_trainer_job_fingerprint,
         consumed_materials_sha256=consumed_materials_sha256,
         model_dir_manifest_sha256=model_dir_manifest_sha256,
+        previous_adapter_tensors_sha256=previous_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256=trained_adapter_tensors_sha256,
         trainer_artifact_id=trainer_artifact_id,
         trainer_deployment_sha256=trainer_deployment_sha256,
         trainer_implementation_sha256=trainer_implementation_sha256,
