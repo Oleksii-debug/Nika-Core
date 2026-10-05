@@ -201,6 +201,8 @@ class TrainingRunEvidence:
     base_artifact: ArtifactIdentity
     frozen_package_sha256: str
     training_material_sha256: str
+    execution_plan_sha256: str
+    job_fingerprint: str
     candidate_artifact_ref: str
     candidate_sha256: str | None = None
     checkpoint_id: str | None = None
@@ -210,6 +212,11 @@ class TrainingRunEvidence:
 
 class TrainingWorkerPort(Protocol):
     """Adapter boundary for an actual trainer (PEFT/LoRA/etc.)."""
+
+    @property
+    def execution_plan_sha256(self) -> str:
+        """Exact digest for the result-affecting trainer execution plan."""
+        ...
 
     def step(
         self,

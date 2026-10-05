@@ -191,6 +191,7 @@ sys.stdout.write(json.dumps(response))
     observed = json.loads(observed_path.read_text(encoding="utf-8"))
     record = registry.get(artifact_id)
     assert observed["protocol_version"] == 2
+    assert len(worker.execution_plan_sha256) == 64
     assert observed["trainer_artifact_id"] == artifact_id
     assert observed["trainer_sha256"] == record.sha256
     assert observed["command_sha256"] == observed["job"]["command_sha256"]
@@ -1014,6 +1015,66 @@ sys.stdout.write(json.dumps(response))
     trainer_state = envelope["trainer_state"]
     assert isinstance(trainer_state, dict)
     assert trainer_state["allowed"] == "yes"
+
+
+def test_resume_identity_binds_runtime_execution_limits(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {"step": request["step_index"]},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials)
+    registry, artifact_id, executable, script_artifact_id = _registry_for_python(
+        tmp_path,
+        trainer,
+    )
+    assert script_artifact_id is not None
+    first = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=artifact_id,
+        command_artifact_ids={1: script_artifact_id},
+        timeout_seconds=1.0,
+    )
+    replacement = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=artifact_id,
+        command_artifact_ids={1: script_artifact_id},
+        timeout_seconds=2.0,
+    )
+    assert first.execution_plan_sha256 != replacement.execution_plan_sha256
+
+    result = first.step(
+        spec=spec,
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        replacement.step(
+            spec=spec,
+            step_index=1,
+            resume_state=result.resume_state,
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "resume_state_job_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
 
 
 def test_resume_identity_binds_explicit_environment(tmp_path: Path) -> None:
