@@ -6,8 +6,8 @@ from decimal import Decimal
 from enum import IntEnum
 
 from .accounting import PortfolioLedger
-from .contracts import Bar, MarketEvent, Quote, TradingResearchError, require_aware_utc
-from .dataset import event_sort_key
+from .contracts import MarketEvent, Quote, TradingResearchError, require_aware_utc
+from .dataset import canonical_event_bytes, event_sort_key
 from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
 from .orders import (
     OrderState,
@@ -41,8 +41,10 @@ class TimeSlice:
         at = require_aware_utc(self.at, "at")
         if any(event.time.available_at > at for event in self.events):
             raise TradingResearchError("time slice cannot contain future-unavailable market data")
+        ordered = tuple(sorted(self.events, key=event_sort_key))
+        _validate_same_slice_chronology(ordered)
         object.__setattr__(self, "at", at)
-        object.__setattr__(self, "events", tuple(sorted(self.events, key=event_sort_key)))
+        object.__setattr__(self, "events", ordered)
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,32 +140,16 @@ class SimulationExecutionEngine:
         candidates = [
             event
             for event in time_slice.events
-            if instrument_identity(event.instrument) == identity
+            if isinstance(event, Quote) and instrument_identity(event.instrument) == identity
         ]
         if not candidates:
             return None
         event = candidates[-1]
-        if isinstance(event, Quote):
-            raw_price = event.ask if order.intent.side is Side.BUY else event.bid
-            available = event.ask_size if order.intent.side is Side.BUY else event.bid_size
-            if not self._limit_crosses(order, raw_price):
-                return None
-            return raw_price, available
-        if isinstance(event, Bar):
-            raw_price = event.open
-            if order.intent.order_type is OrderType.LIMIT:
-                limit = order.intent.limit_price
-                assert limit is not None
-                if order.intent.side is Side.BUY:
-                    if event.low > limit:
-                        return None
-                    raw_price = min(event.open, limit)
-                else:
-                    if event.high < limit:
-                        return None
-                    raw_price = max(event.open, limit)
-            return raw_price, event.volume
-        return None
+        raw_price = event.ask if order.intent.side is Side.BUY else event.bid
+        available = event.ask_size if order.intent.side is Side.BUY else event.bid_size
+        if not self._limit_crosses(order, raw_price):
+            return None
+        return raw_price, available
 
     @staticmethod
     def _limit_crosses(order: RiskApprovedOrder, market_price: Decimal) -> bool:
@@ -174,6 +160,23 @@ class SimulationExecutionEngine:
         if order.intent.side is Side.BUY:
             return market_price <= limit
         return market_price >= limit
+
+
+
+def _validate_same_slice_chronology(events: tuple[MarketEvent, ...]) -> None:
+    seen: dict[tuple[InstrumentIdentity, datetime, datetime, int], bytes] = {}
+    for event in events:
+        key = (
+            instrument_identity(event.instrument),
+            event.time.available_at,
+            event.time.event_at,
+            event.source_sequence,
+        )
+        payload = canonical_event_bytes(event)
+        previous = seen.get(key)
+        if previous is not None and previous != payload:
+            raise TradingResearchError("ambiguous same-slice market chronology")
+        seen[key] = payload
 
 
 def _legal_fill_price(order: RiskApprovedOrder, market_price: Decimal) -> Decimal:
