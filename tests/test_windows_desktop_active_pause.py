@@ -275,6 +275,47 @@ def test_running_pause_fails_before_effect_without_durable_resume_capability(
     backend.close()
 
 
+def test_stale_runtime_failure_cannot_clear_or_fail_newer_generation(
+    tmp_path: Path,
+) -> None:
+    runtime = DurableBlockingRuntime()
+    backend, queue, audit = _build_backend(tmp_path, runtime)
+    record = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "newer generation remains authoritative"},
+    )
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+
+    stale_runtime: Future[object] = Future()
+    newer_runtime: Future[object] = Future()
+    stale_runtime.set_exception(RuntimeError("stale runtime failure"))
+
+    with backend._active_lock:
+        backend._active_threads[record.task_id] = "newer-thread"
+        backend._active_futures[record.task_id] = newer_runtime
+
+    backend._runtime_done(record.task_id, stale_runtime)
+
+    with backend._active_lock:
+        assert backend._active_threads[record.task_id] == "newer-thread"
+        assert backend._active_futures[record.task_id] is newer_runtime
+    assert queue.get(record.task_id).state is TaskState.RUNNING
+    assert not any(
+        item.event_type == "desktop.runtime_host_failed"
+        for item in audit.list_for(entity_type="task", entity_id=record.task_id)
+    )
+
+    newer_runtime.set_result(None)
+    backend._runtime_done(record.task_id, newer_runtime)
+    with backend._active_lock:
+        assert record.task_id not in backend._active_threads
+        assert record.task_id not in backend._active_futures
+    assert queue.get(record.task_id).state is TaskState.RUNNING
+    backend.close()
+
+
 def test_stale_cancel_callback_does_not_remove_newer_cancel_generation(
     tmp_path: Path,
 ) -> None:
