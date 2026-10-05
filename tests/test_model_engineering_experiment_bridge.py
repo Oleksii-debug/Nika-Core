@@ -90,6 +90,7 @@ def _report(
             candidate_id=candidate.candidate_id,
             case_id=case.case_id,
             evaluation_weight=float(case.weight),
+            evaluation_pass_score=float(case.pass_score),
             score=score,
             passed=score >= case.pass_score,
             completion_succeeded=True,
@@ -473,7 +474,7 @@ def test_observation_bridge_rejects_case_weight_substitution() -> None:
         )
 
 
-def test_observation_bridge_rejects_pass_flag_that_conflicts_with_threshold() -> None:
+def test_observation_bridge_rejects_case_threshold_substitution() -> None:
     candidate = _candidate("candidate", "m")
     evaluation = _evaluation()
     report = _report(
@@ -482,8 +483,8 @@ def test_observation_bridge_rejects_pass_flag_that_conflicts_with_threshold() ->
         quality=(1.0, 0.0),
         latency=(10.0, 20.0),
     )
-    first = replace(report.case_results[0], passed=False)
-    forged = replace(report, case_results=(first, report.case_results[1]))
+    second = replace(report.case_results[1], evaluation_pass_score=0.5)
+    forged = replace(report, case_results=(report.case_results[0], second))
     definition = build_experiment_definition(
         experiment_id="threshold-binding",
         champion=candidate,
@@ -497,7 +498,7 @@ def test_observation_bridge_rejects_pass_flag_that_conflicts_with_threshold() ->
         permission_fingerprint="permissions-v1",
     )
 
-    with pytest.raises(ValueError, match="pass evidence"):
+    with pytest.raises(ValueError, match="threshold evidence"):
         benchmark_observations(
             forged,
             definition=definition,
