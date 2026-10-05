@@ -16,6 +16,7 @@ from nika_core.runtime.contracts import (
     AgentRuntimePort,
     RuntimeCapability,
     RuntimeRequest,
+    RuntimeResumeProbePort,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
 from nika_core.runtime.recovery import (
@@ -98,6 +99,8 @@ class DesktopBackend:
         audit: AuditLog,
         runtime: AgentRuntimePort | None = None,
         prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        admit_created_task: Callable[[TaskRecord], None] | None = None,
+        admit_resumed_task: Callable[[TaskRecord], None] | None = None,
         autostart_service: WindowsAutostartService | None = None,
     ) -> None:
         self._queue = queue
@@ -107,6 +110,8 @@ class DesktopBackend:
         self._coordinator = TaskRuntimeCoordinator(queue, audit)
         self._runtime = runtime or ReferenceRuntime()
         self._prepare_task_payload = prepare_task_payload
+        self._admit_created_task = admit_created_task
+        self._admit_resumed_task = admit_resumed_task
         self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.RLock()
@@ -115,6 +120,7 @@ class DesktopBackend:
         self._shutdown_pending = False
         self._active_threads: dict[str, str] = {}
         self._active_futures: dict[str, Future[Any]] = {}
+        self._pause_futures: dict[str, Future[bool]] = {}
         self._cancel_futures: dict[str, Future[bool]] = {}
         self._packaged_futures: set[Future[Any]] = set()
         self._startup_recovery_lock = threading.Lock()
@@ -152,6 +158,14 @@ class DesktopBackend:
             agent_id=_DEFAULT_AGENT_ID,
             payload=task_payload,
         )
+        try:
+            if self._admit_created_task is not None:
+                self._admit_created_task(record)
+            if self._queue.get(record.task_id).state is not TaskState.CREATED:
+                raise RuntimeError("task admission changed task state before READY")
+        except BaseException:
+            self._cancel_rejected_admission(record.task_id)
+            raise
         self._queue.transition(record.task_id, TaskState.READY)
         try:
             self._schedule_start(record.task_id, command)
@@ -176,20 +190,39 @@ class DesktopBackend:
         if record is None:
             raise ValueError("Немає активного завдання, яке можна призупинити.")
         if record.state == TaskState.RUNNING:
-            raise ValueError(
-                "Поточний runtime не підтримує безпечне активне призупинення. "
-                "Стан RUNNING не змінено; використайте зупинку або runtime із pause/resume."
+            with self._active_lock:
+                thread_id = self._active_threads.get(record.task_id)
+                if thread_id is None:
+                    session = self._coordinator.sessions.get(record.task_id)
+                    if session is None:
+                        raise ValueError(
+                            "Активне завдання не має збереженої runtime-сесії для "
+                            "безпечного призупинення."
+                        )
+                    if session.runtime_id != self._runtime.runtime_id:
+                        raise ValueError(
+                            "Активна runtime-сесія належить іншому runtime; "
+                            "безпечне призупинення відхилено."
+                        )
+                    thread_id = session.thread_id
+                pause_future = self._schedule_pause_locked(record.task_id, thread_id)
+            pause_future.add_done_callback(
+                lambda done: self._pause_done(record.task_id, done)
+            )
+            return UIResult(
+                request_id="desktop-handler",
+                status="accepted",
+                message="Запит на безпечне призупинення runtime прийнято.",
+                focus_id="tasks-heading",
             )
         if record.state != TaskState.READY:
             raise ValueError(f"Завдання у стані {record.state.value} не можна призупинити.")
         try:
             self._queue.transition(record.task_id, TaskState.PAUSED)
-        except ValueError as exc:
+        except ValueError:
             current = self._queue.get(record.task_id)
             if current.state == TaskState.RUNNING:
-                raise ValueError(
-                    "Runtime уже почав виконання; активне призупинення не підтримується."
-                ) from exc
+                return self.pause_task(_payload)
             raise
         return UIResult(
             request_id="desktop-handler",
@@ -208,6 +241,17 @@ class DesktopBackend:
         record = self._only_with_state(TaskState.PAUSED, action="продовження")
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
+        with self._active_lock:
+            pending_pause = self._pause_futures.get(record.task_id)
+            if pending_pause is not None and not pending_pause.done():
+                raise ValueError(
+                    "Runtime ще завершує безпечне призупинення; продовження поки недоступне."
+                )
+
+        if self._admit_resumed_task is not None:
+            self._admit_resumed_task(record)
+        if self._queue.get(record.task_id).state is not TaskState.PAUSED:
+            raise RuntimeError("task resume admission changed task state before submission")
 
         session = self._coordinator.sessions.get(record.task_id)
         if session is not None:
@@ -465,6 +509,7 @@ class DesktopBackend:
             self._shutdown_pending = True
             futures = [
                 *self._active_futures.values(),
+                *self._pause_futures.values(),
                 *self._cancel_futures.values(),
                 *self._packaged_futures,
             ]
@@ -504,6 +549,7 @@ class DesktopBackend:
             with self._active_lock:
                 self._active_threads.clear()
                 self._active_futures.clear()
+                self._pause_futures.clear()
                 self._cancel_futures.clear()
                 self._packaged_futures.clear()
             if self._runtime_loop is not None:
@@ -638,6 +684,24 @@ class DesktopBackend:
                 type(exc).__name__,
             )
 
+    def _cancel_rejected_admission(self, task_id: str) -> None:
+        """Fail closed before runtime dispatch when created-task admission is rejected."""
+
+        try:
+            if self._queue.get(task_id).state is TaskState.CREATED:
+                self._queue.transition(task_id, TaskState.CANCELLED)
+            self._audit.append(
+                event_type="desktop.task_admission_rejected",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"runtime_id": self._runtime.runtime_id},
+            )
+        except BaseException as exc:
+            _LOGGER.error(
+                "Desktop task-admission reconciliation failed; exception_type=%s",
+                type(exc).__name__,
+            )
+
     def _preserve_rejected_start(self, task_id: str) -> None:
         """Keep an unsubmitted READY task available for explicit manual resume.
 
@@ -683,11 +747,66 @@ class DesktopBackend:
                 return None
             raise
 
+    def _schedule_pause_locked(self, task_id: str, thread_id: str) -> Future[bool]:
+        if RuntimeCapability.DURABLE_RESUME not in self._runtime.capabilities:
+            raise ValueError(
+                "Поточний runtime не підтримує безпечне активне призупинення: "
+                "не заявлено durable resume."
+            )
+        if not isinstance(self._runtime, RuntimeResumeProbePort):
+            raise TypeError(
+                "Поточний runtime не підтримує безпечне активне призупинення: "
+                "відсутня перевірка checkpoint для durable resume."
+            )
+        if RuntimeCapability.CANCELLATION not in self._runtime.capabilities:
+            raise ValueError(
+                "Поточний runtime не заявляє безпечну зупинку для активного призупинення."
+            )
+        existing_pause = self._pause_futures.get(task_id)
+        if existing_pause is not None and not existing_pause.done():
+            raise ValueError("Запит на призупинення цього завдання вже виконується.")
+        existing_cancel = self._cancel_futures.get(task_id)
+        if existing_cancel is not None and not existing_cancel.done():
+            raise ValueError(
+                "Неможливо призупинити завдання, поки виконується запит на зупинку."
+            )
+        active_future = self._active_futures.get(task_id)
+        future = self._host().submit(
+            self._pause_active(
+                task_id=task_id,
+                thread_id=thread_id,
+                active_future=active_future,
+            )
+        )
+        self._pause_futures[task_id] = future
+        return future
+
+    async def _pause_active(
+        self,
+        *,
+        task_id: str,
+        thread_id: str,
+        active_future: Future[Any] | None,
+    ) -> bool:
+        applied = await self._coordinator.pause(
+            self._runtime,
+            task_id=task_id,
+            thread_id=thread_id,
+        )
+        if applied and active_future is not None and not active_future.done():
+            await asyncio.wrap_future(active_future)
+        return applied
+
     def _schedule_cancel_locked(self, task_id: str, thread_id: str) -> Future[bool]:
         if not self._accepting:
             raise RuntimeError("desktop runtime is shutting down")
         if RuntimeCapability.CANCELLATION not in self._runtime.capabilities:
             raise ValueError("Поточний runtime не заявляє безпечне скасування.")
+        existing_pause = self._pause_futures.get(task_id)
+        if existing_pause is not None and not existing_pause.done():
+            raise ValueError(
+                "Неможливо зупинити завдання, поки виконується запит на призупинення."
+            )
         existing = self._cancel_futures.get(task_id)
         if existing is not None and not existing.done():
             raise ValueError("Запит на зупинку цього завдання вже виконується.")
@@ -731,6 +850,21 @@ class DesktopBackend:
     def _packaged_done(self, future: Future[Any]) -> None:
         with self._active_lock:
             self._packaged_futures.discard(future)
+
+
+    def _pause_done(self, task_id: str, future: Future[bool]) -> None:
+        with self._active_lock:
+            if self._pause_futures.get(task_id) is future:
+                self._pause_futures.pop(task_id, None)
+        if future.cancelled():
+            self._record_background_failure(task_id, "desktop.runtime_pause_interrupted")
+            return
+        error = future.exception()
+        if error is not None:
+            self._record_background_failure(task_id, "desktop.runtime_pause_failed")
+            return
+        if future.result() is not True:
+            self._record_background_failure(task_id, "desktop.runtime_pause_rejected")
 
     def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:

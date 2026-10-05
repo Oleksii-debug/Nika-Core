@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import cast
@@ -12,6 +13,11 @@ from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition, ToolGrant
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.diagnostics import (
+    ModelHealthFact,
+    ModelHealthProbePort,
+    OllamaModelHealthProbe,
+)
 from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
@@ -47,8 +53,16 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
+from nika_core.security.model_cloud_authority import (
+    StandingPermissionCloudEffectAuthorizer,
+    StandingPermissionExecutionAuthority,
+)
 from nika_core.tools import ToolRisk, ToolSpec
-from nika_core.v01_model_settings import V01BoundModelRuntimeFactory
+from nika_core.v01_model_settings import (
+    ModelSelection,
+    V01BoundModelRuntimeFactory,
+    V01ModelSettings,
+)
 from nika_core.v01_source_settings import MAX_SOURCE_BYTES, V01SourceSettings
 from nika_core.v01_three_agent_supervisor import (
     V01ChildAssignment,
@@ -77,15 +91,36 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         store: SQLiteStore,
         config: AppConfig,
         source_settings: V01SourceSettings | None = None,
+        model_settings: V01ModelSettings | None = None,
         model_runtime_factory: V01BoundModelRuntimeFactory | None = None,
+        model_health_probe_factory: Callable[[ModelSelection], ModelHealthProbePort] | None = None,
+        cloud_effect_authorizer: StandingPermissionCloudEffectAuthorizer | None = None,
+        cloud_execution_authority_resolver: (
+            Callable[[str], StandingPermissionExecutionAuthority | None] | None
+        ) = None,
     ) -> None:
+        if model_runtime_factory is not None and (
+            cloud_effect_authorizer is not None
+            or cloud_execution_authority_resolver is not None
+        ):
+            raise TypeError(
+                "cloud authority must be configured on either the packaged runtime "
+                "or the custom model runtime factory, not both"
+            )
         self._sqlite = store
         self._sources = source_settings or V01SourceSettings(store, config)
         self._multi_store = MultiAgentStore(store)
         self._definitions = AgentDefinitionRepository(store)
+        self._model_settings = model_settings or V01ModelSettings(store)
         self._model_factory = model_runtime_factory or V01BoundModelRuntimeFactory(
             store=store,
             definitions=self._definitions,
+            settings=self._model_settings,
+            cloud_effect_authorizer=cloud_effect_authorizer,
+            cloud_execution_authority_resolver=cloud_execution_authority_resolver,
+        )
+        self._model_health_probe_factory = (
+            model_health_probe_factory or self._default_model_health_probe
         )
         self._model_runtimes: dict[str, ModelGatewayAgentRuntime] = {}
         self._coordinator = MultiAgentSupervisor(
@@ -128,6 +163,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
                 status=RuntimeResumeProbeStatus.INVALID,
                 reason="Persisted V0.1 runtime cursor does not match task identity.",
             )
+        model_health_block = await self._model_resume_health_block(task_id)
+        if model_health_block is not None:
+            return model_health_block
         checkpoint = hashlib.sha256(
             f"v01-packaged-checkpoint\0{expected}".encode()
         ).hexdigest()
@@ -135,6 +173,60 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             status=RuntimeResumeProbeStatus.READY,
             reason="Deterministic V0.1 team cursor is reconstructible from durable Nika state.",
             checkpoint_id=checkpoint,
+        )
+
+    async def _model_resume_health_block(
+        self,
+        task_id: str,
+    ) -> RuntimeResumeProbe | None:
+        try:
+            if not self._task_has_model_selection(task_id):
+                return None
+            selection = self._model_settings.for_task(task_id)
+        except Exception:  # noqa: BLE001 - recovery preflight must fail closed
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="Frozen model route cannot be verified for automatic resume.",
+            )
+
+        if selection.route_kind == "deterministic":
+            return None
+        if selection.route_kind != "ollama":
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason=(
+                    "This model route has no canonical automatic-resume health proof."
+                ),
+            )
+
+        try:
+            health_probe = self._model_health_probe_factory(selection)
+            snapshot = await asyncio.to_thread(health_probe.snapshot)
+        except Exception:  # noqa: BLE001 - provider/health failures are fail-closed
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="Selected Ollama model health could not be verified.",
+            )
+        if snapshot.model_ready is not ModelHealthFact.YES:
+            return RuntimeResumeProbe(
+                status=RuntimeResumeProbeStatus.UNVERIFIABLE,
+                reason="Selected Ollama model is not ready for automatic resume.",
+            )
+        return None
+
+    @staticmethod
+    def _default_model_health_probe(selection: ModelSelection) -> ModelHealthProbePort:
+        if (
+            selection.route_kind != "ollama"
+            or selection.provider_id != "ollama"
+            or selection.model is None
+            or selection.base_url is None
+        ):
+            raise ValueError("automatic-resume health probe requires an exact Ollama route")
+        return OllamaModelHealthProbe(
+            model_id=selection.model,
+            base_url=selection.base_url,
+            provider_id=selection.provider_id,
         )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:

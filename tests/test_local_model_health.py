@@ -101,6 +101,7 @@ def _probe(
     running: object | None = None,
     evidence: _Evidence | None = None,
     base_url: str = "http://localhost:11434",
+    model_id: str = "local-model:1",
 ) -> tuple[OllamaModelHealthProbe, list[str]]:
     base = base_url.rstrip("/")
     calls: list[str] = []
@@ -109,7 +110,7 @@ def _probe(
         responses[f"{base}/api/ps"] = running
     return (
         OllamaModelHealthProbe(
-            model_id="local-model:1",
+            model_id=model_id,
             base_url=base_url,
             evidence_port=evidence,
             client_factory=_factory(responses, calls),
@@ -192,6 +193,56 @@ def test_running_model_is_ready_but_not_inference_proven() -> None:
     assert snapshot.model_ready is ModelHealthFact.YES
     assert snapshot.inference_proven is ModelHealthFact.UNKNOWN
     assert snapshot.to_health_check().status is HealthStatus.WARN
+
+
+def test_conflicting_catalog_model_and_name_cannot_prove_presence() -> None:
+    probe, calls = _probe(
+        tags=_Response(
+            {"models": [{"model": "other-model:1", "name": "local-model:1"}]}
+        ),
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["http://localhost:11434/api/tags"]
+
+
+def test_conflicting_running_model_and_name_cannot_prove_readiness() -> None:
+    probe, calls = _probe(
+        tags=_Response({"models": [{"model": "local-model:1"}]}),
+        running=_Response(
+            {"models": [{"model": "other-model:1", "name": "local-model:1"}]}
+        ),
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == [
+        "http://localhost:11434/api/tags",
+        "http://localhost:11434/api/ps",
+    ]
+
+
+def test_model_and_name_default_tag_alias_remains_valid() -> None:
+    probe, _calls = _probe(
+        tags=_Response(
+            {"models": [{"model": "local-model:latest", "name": "local-model"}]}
+        ),
+        running=_Response(
+            {"models": [{"model": "local-model", "name": "local-model:latest"}]}
+        ),
+        model_id="local-model",
+    )
+
+    snapshot = probe.snapshot()
+
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.YES
 
 
 def test_exact_prior_inference_evidence_is_separate_from_readiness() -> None:
