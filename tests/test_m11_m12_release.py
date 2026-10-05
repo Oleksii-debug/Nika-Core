@@ -116,6 +116,33 @@ def test_release_version_rejects_non_text_and_noncanonical_authority(tmp_path: P
         resolve_release_version(tmp_path, "1.0.0 ")
 
 
+@pytest.mark.parametrize(
+    "version",
+    (
+        "../1.0.0",
+        r"1.0.0\\escape",
+        "1.0.0'; Write-Host injected; #",
+        "1.0.0$(Write-Host injected)",
+        "1.0.0:alternate-stream",
+        ".1.0.0",
+        "1.0.0🔒",
+    ),
+)
+def test_release_version_rejects_shell_or_filename_metacharacters(
+    tmp_path: Path,
+    version: str,
+) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    escaped = version.replace("\\", "\\\\").replace('"', '\\"')
+    pyproject.write_text(
+        f'[project]\\nname = "nika-core"\\nversion = "{escaped}"\\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="release-version text contract"):
+        project_version(tmp_path)
+
+
 def test_release_source_sha_requires_exact_full_commit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NIKA_SOURCE_SHA", raising=False)
     monkeypatch.delenv("GITHUB_SHA", raising=False)
