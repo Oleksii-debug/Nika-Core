@@ -23,6 +23,12 @@ from nika_core.experiments import (
     PromotionPolicy,
     SQLiteExperimentRepository,
 )
+from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyRecord,
+    IdempotencyStatus,
+)
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue, TaskRecord
 from nika_core.learning_package import FrozenLearningPackage
@@ -73,6 +79,29 @@ _MAX_MESSAGES_PER_CASE = 128
 _MAX_COMMAND_FILES = 16
 _MAX_SWITCHES = 16
 _SWITCH_RE = re.compile(r"^--[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_REPORT_KEYS = frozenset(
+    {
+        "schema_version",
+        "schema",
+        "physical_pilot_evidence_sha256",
+        "requested_experiment_id",
+        "evaluation_set_sha256",
+        "execution_config_sha256",
+        "comparison_evidence_sha256",
+        "experiment_id",
+        "experiment_status",
+        "selected_candidate_id",
+        "previous_champion_id",
+        "training_binding_sha256",
+        "champion_benchmark_sha256",
+        "challenger_benchmark_sha256",
+        "attestor_id",
+        "attestor_sha256",
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+    }
+)
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -891,7 +920,13 @@ def _policy_payload(policy: PromotionPolicy) -> dict[str, object]:
     }
 
 
-def _physical_attempt_id(
+def _sha256_text(value: object, *, name: str) -> str:
+    if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+        _fail(f"{name} must be an exact lowercase SHA-256 digest")
+    return value
+
+
+def _evaluation_effect_identity(
     *,
     requested_experiment_id: str,
     pilot: PhysicalTrainingPilotReport,
@@ -905,19 +940,15 @@ def _physical_attempt_id(
     permission_fingerprint: str,
     attestor_id: str,
     attestor_sha256: str,
-) -> str:
-    payload = {
-        "schema": "nika-physical-old-new-attempt-v1",
-        "requested_experiment_id": _require_text(
-            requested_experiment_id,
-            name="requested_experiment_id",
-        ),
+) -> tuple[str, str, str]:
+    effect_payload = {
+        "schema": "nika-physical-old-new-effect-v1",
         "physical_pilot_evidence_sha256": pilot.evidence_sha256,
-        "training_binding_sha256": _require_text(
+        "training_binding_sha256": _sha256_text(
             training_binding_sha256,
             name="training_binding_sha256",
         ),
-        "champion_binding_sha256": _require_text(
+        "champion_binding_sha256": _sha256_text(
             champion_binding_sha256,
             name="champion_binding_sha256",
         ),
@@ -925,27 +956,47 @@ def _physical_attempt_id(
         "challenger_candidate_sha256": challenger.evidence_sha256,
         "evaluation_set_sha256": evaluation_set.content_sha256,
         "execution_config_sha256": execution_config.evidence_sha256,
-        "policy": _policy_payload(policy),
-        "permission_fingerprint": _require_text(
-            permission_fingerprint,
-            name="permission_fingerprint",
-        ),
         "attestor_id": _require_text(attestor_id, name="attestor_id"),
-        "attestor_sha256": _require_text(
+        "attestor_sha256": _sha256_text(
             attestor_sha256,
             name="attestor_sha256",
         ),
     }
-    encoded = json.dumps(
-        payload,
+    effect_encoded = json.dumps(
+        effect_payload,
         allow_nan=False,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
-    return f"nika-physical-old-new-{hashlib.sha256(encoded).hexdigest()}"
+    effect_sha256 = hashlib.sha256(effect_encoded).hexdigest()
 
-
+    input_payload = {
+        "schema": "nika-physical-old-new-input-v1",
+        "effect_sha256": effect_sha256,
+        "requested_experiment_id": _require_text(
+            requested_experiment_id,
+            name="requested_experiment_id",
+        ),
+        "policy": _policy_payload(policy),
+        "permission_fingerprint": _require_text(
+            permission_fingerprint,
+            name="permission_fingerprint",
+        ),
+    }
+    input_encoded = json.dumps(
+        input_payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    input_sha256 = hashlib.sha256(input_encoded).hexdigest()
+    return (
+        f"physical-old-new-effect:{effect_sha256}",
+        f"sha256:{input_sha256}",
+        f"nika-physical-old-new-{input_sha256}",
+    )
 def _claim_evaluation_attempt(
     *,
     repository: SQLiteExperimentRepository,
@@ -1034,6 +1085,98 @@ def _canonical_report_payload(
     }
 
 
+def _validate_recovered_report_payload(
+    result: object,
+    *,
+    pilot: PhysicalTrainingPilotReport,
+    requested_experiment_id: str,
+    evaluation_set: EvaluationSet,
+    execution_config: BenchmarkExecutionConfig,
+    experiment_id: str,
+    training_binding_sha256: str,
+    attestor_id: str,
+    attestor_sha256: str,
+) -> dict[str, object]:
+    if type(result) is not dict or frozenset(result) != _REPORT_KEYS:
+        _fail("completed evaluation ledger result is not a canonical report payload")
+    if (
+        result["schema_version"] != _REPORT_SCHEMA_VERSION
+        or result["schema"] != "nika-physical-old-new-evaluation-report-v1"
+        or result["physical_pilot_evidence_sha256"] != pilot.evidence_sha256
+        or result["requested_experiment_id"] != requested_experiment_id
+        or result["evaluation_set_sha256"] != evaluation_set.content_sha256
+        or result["execution_config_sha256"] != execution_config.evidence_sha256
+        or result["experiment_id"] != experiment_id
+        or result["training_binding_sha256"] != training_binding_sha256
+        or result["attestor_id"] != attestor_id
+        or result["attestor_sha256"] != attestor_sha256
+    ):
+        _fail("completed evaluation ledger result does not match current physical authority")
+    for key in (
+        "physical_pilot_evidence_sha256",
+        "evaluation_set_sha256",
+        "execution_config_sha256",
+        "comparison_evidence_sha256",
+        "training_binding_sha256",
+        "champion_benchmark_sha256",
+        "challenger_benchmark_sha256",
+        "attestor_sha256",
+    ):
+        _sha256_text(result[key], name=f"ledger result {key}")
+    for key in (
+        "champion_provider_manifest_sha256",
+        "challenger_provider_manifest_sha256",
+    ):
+        value = result[key]
+        if value is not None:
+            _sha256_text(value, name=f"ledger result {key}")
+    if result["experiment_status"] not in {"completed", "promoted"}:
+        _fail("completed evaluation ledger result is not terminal")
+    for key in ("selected_candidate_id", "previous_champion_id", "attestor_id"):
+        _require_text(result[key], name=f"ledger result {key}")
+    return dict(result)
+
+
+def _reserve_evaluation_effect(
+    *,
+    ledger: IdempotencyLedger,
+    task_id: str,
+    operation_key: str,
+    input_fingerprint: str,
+) -> tuple[IdempotencyRecord, bool]:
+    try:
+        return ledger.reserve_once(
+            operation_key=operation_key,
+            task_id=task_id,
+            operation_type="training.physical_old_new_evaluation",
+            input_fingerprint=input_fingerprint,
+        )
+    except IdempotencyConflictError as exc:
+        raise PhysicalEvaluationDriverError(
+            "the same physical benchmark effects are already bound to different "
+            "experiment/policy/permission input; refusing to replay them"
+        ) from exc
+
+
+def _mark_evaluation_uncertain(
+    ledger: IdempotencyLedger,
+    record: IdempotencyRecord,
+) -> None:
+    try:
+        ledger.mark_pending_uncertain_if_matches(
+            operation_key=record.operation_key,
+            task_id=record.task_id,
+            operation_type=record.operation_type,
+            input_fingerprint=record.input_fingerprint,
+            created_at=record.created_at,
+        )
+    except (IdempotencyConflictError, KeyError, RuntimeError, TypeError, ValueError):
+        _LOG.exception(
+            "failed to mark interrupted physical evaluation as uncertain; "
+            "its existing ledger reservation still blocks automatic replay"
+        )
+
+
 def _write_report(path: Path, payload: dict[str, object]) -> None:
     try:
         body = (
@@ -1107,7 +1250,7 @@ async def _run_attested_comparison(
     base_descriptor: ModelArtifactDescriptor,
     candidate_descriptor: ModelArtifactDescriptor,
     output_root: Path,
-) -> AttestedTrainingComparisonResult:
+) -> dict[str, object]:
     registry, command, evaluator_artifact_id, command_artifact_ids = _register_evaluator(
         store=store,
         workspace_id=config.workspace_id,
@@ -1140,7 +1283,7 @@ async def _run_attested_comparison(
         _fail("champion and challenger evaluator commands do not share one attestor authority")
 
     _verify_completed_checkpoint(store, task=task, report=pilot)
-    experiment_id = _physical_attempt_id(
+    operation_key, input_fingerprint, experiment_id = _evaluation_effect_identity(
         requested_experiment_id=config.experiment_id,
         pilot=pilot,
         training_binding_sha256=training_binding.binding_sha256,
@@ -1154,56 +1297,101 @@ async def _run_attested_comparison(
         attestor_id=champion_attestor.attestor_id,
         attestor_sha256=champion_attestor.attestor_sha256,
     )
+    ledger = IdempotencyLedger(store)
+    reservation, created = _reserve_evaluation_effect(
+        ledger=ledger,
+        task_id=task.task_id,
+        operation_key=operation_key,
+        input_fingerprint=input_fingerprint,
+    )
+    if not created:
+        if reservation.status is IdempotencyStatus.COMPLETED:
+            return _validate_recovered_report_payload(
+                reservation.result,
+                pilot=pilot,
+                requested_experiment_id=config.experiment_id,
+                evaluation_set=evaluation_set,
+                execution_config=config.benchmark,
+                experiment_id=experiment_id,
+                training_binding_sha256=training_binding.binding_sha256,
+                attestor_id=champion_attestor.attestor_id,
+                attestor_sha256=champion_attestor.attestor_sha256,
+            )
+        raise PhysicalEvaluationDriverError(
+            "physical evaluation already has a durable "
+            f"{reservation.status.value} side-effect reservation; automatic model-effect "
+            "replay is forbidden until that reservation is reconciled"
+        )
+
     repository = SQLiteExperimentRepository(store)
-    _claim_evaluation_attempt(
-        repository=repository,
-        experiment_id=experiment_id,
-        champion=champion,
-        challenger=challenger,
-        evaluation_set=evaluation_set,
-        execution_config=config.benchmark,
-        policy=config.policy,
-        permission_fingerprint=config.permission_fingerprint,
-    )
+    try:
+        _claim_evaluation_attempt(
+            repository=repository,
+            experiment_id=experiment_id,
+            champion=champion,
+            challenger=challenger,
+            evaluation_set=evaluation_set,
+            execution_config=config.benchmark,
+            policy=config.policy,
+            permission_fingerprint=config.permission_fingerprint,
+        )
 
-    _verify_completed_checkpoint(store, task=task, report=pilot)
-    champion_result = await run_attested_champion_benchmark(
-        binding=champion_binding,
-        champion=champion,
-        evaluation_set=evaluation_set,
-        effect_port=champion_attestor,
-        expected_attestor_id=champion_attestor.attestor_id,
-        expected_attestor_sha256=champion_attestor.attestor_sha256,
-        timeout_seconds=config.benchmark.timeout_seconds,
-        temperature=config.benchmark.temperature,
-        scorer_id=config.benchmark.scorer_id,
-    )
+        _verify_completed_checkpoint(store, task=task, report=pilot)
+        champion_result = await run_attested_champion_benchmark(
+            binding=champion_binding,
+            champion=champion,
+            evaluation_set=evaluation_set,
+            effect_port=champion_attestor,
+            expected_attestor_id=champion_attestor.attestor_id,
+            expected_attestor_sha256=champion_attestor.attestor_sha256,
+            timeout_seconds=config.benchmark.timeout_seconds,
+            temperature=config.benchmark.temperature,
+            scorer_id=config.benchmark.scorer_id,
+        )
 
-    _verify_completed_checkpoint(store, task=task, report=pilot)
-    challenger_result = await run_attested_challenger_benchmark(
-        binding=training_binding,
-        challenger=challenger,
-        evaluation_set=evaluation_set,
-        effect_port=challenger_attestor,
-        expected_attestor_id=challenger_attestor.attestor_id,
-        expected_attestor_sha256=challenger_attestor.attestor_sha256,
-        timeout_seconds=config.benchmark.timeout_seconds,
-        temperature=config.benchmark.temperature,
-        scorer_id=config.benchmark.scorer_id,
-    )
+        _verify_completed_checkpoint(store, task=task, report=pilot)
+        challenger_result = await run_attested_challenger_benchmark(
+            binding=training_binding,
+            challenger=challenger,
+            evaluation_set=evaluation_set,
+            effect_port=challenger_attestor,
+            expected_attestor_id=challenger_attestor.attestor_id,
+            expected_attestor_sha256=challenger_attestor.attestor_sha256,
+            timeout_seconds=config.benchmark.timeout_seconds,
+            temperature=config.benchmark.temperature,
+            scorer_id=config.benchmark.scorer_id,
+        )
 
-    _verify_completed_checkpoint(store, task=task, report=pilot)
-    return run_attested_old_vs_new_comparison(
-        champion_result=champion_result,
-        challenger_result=challenger_result,
-        evaluation_set=evaluation_set,
-        execution_config=config.benchmark,
-        policy=config.policy,
-        permission_fingerprint=config.permission_fingerprint,
-        experiment_id=experiment_id,
-        repository=repository,
-    )
-
+        _verify_completed_checkpoint(store, task=task, report=pilot)
+        comparison = run_attested_old_vs_new_comparison(
+            champion_result=champion_result,
+            challenger_result=challenger_result,
+            evaluation_set=evaluation_set,
+            execution_config=config.benchmark,
+            policy=config.policy,
+            permission_fingerprint=config.permission_fingerprint,
+            experiment_id=experiment_id,
+            repository=repository,
+        )
+        payload = _canonical_report_payload(
+            requested_experiment_id=config.experiment_id,
+            pilot=pilot,
+            evaluation_set=evaluation_set,
+            execution_config=config.benchmark,
+            comparison=comparison,
+        )
+        ledger.complete_pending_if_matches(
+            operation_key=reservation.operation_key,
+            task_id=reservation.task_id,
+            operation_type=reservation.operation_type,
+            input_fingerprint=reservation.input_fingerprint,
+            created_at=reservation.created_at,
+            result=payload,
+        )
+        return payload
+    except Exception:
+        _mark_evaluation_uncertain(ledger, reservation)
+        raise
 
 def run_physical_evaluation_from_config(
     config: PhysicalEvaluationConfig,
@@ -1336,7 +1524,7 @@ def run_physical_evaluation_from_config(
             "physical training evidence could not be bound to old-vs-new evaluation"
         ) from exc
 
-    comparison = asyncio.run(
+    payload = asyncio.run(
         _run_attested_comparison(
             config=config,
             store=store,
@@ -1351,13 +1539,6 @@ def run_physical_evaluation_from_config(
             candidate_descriptor=candidate_descriptor,
             output_root=output_root,
         )
-    )
-    payload = _canonical_report_payload(
-        requested_experiment_id=config.experiment_id,
-        pilot=pilot,
-        evaluation_set=evaluation_set,
-        execution_config=config.benchmark,
-        comparison=comparison,
     )
     _write_report(report_path, payload)
     _LOG.info(
