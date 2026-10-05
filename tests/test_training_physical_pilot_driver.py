@@ -315,6 +315,45 @@ def test_output_root_cannot_mutate_input_authority(
     assert not config.output_root.exists()
 
 
+
+def test_candidate_descriptor_uses_only_completed_digest_and_materialized_size(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    candidate_path = tmp_path / "adapter_model.safetensors"
+    payload = b"candidate-adapter-bytes"
+    candidate_path.write_bytes(payload)
+    completed = SimpleNamespace(candidate_sha256="a" * 64)
+
+    descriptor = driver._candidate_descriptor(
+        config=config,
+        candidate_path=candidate_path,
+        completed=completed,
+    )
+
+    assert descriptor.sha256 == "a" * 64
+    assert descriptor.model_version == "a" * 64
+    assert descriptor.size_bytes == len(payload)
+    assert descriptor.model_id == config.candidate_descriptor.model_id
+    assert descriptor.source_reference == config.candidate_descriptor.source_reference
+    assert descriptor.license_reference == config.candidate_descriptor.license_reference
+
+
+def test_candidate_descriptor_rejects_missing_completed_digest(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    candidate_path = tmp_path / "adapter_model.safetensors"
+    candidate_path.write_bytes(b"candidate-adapter-bytes")
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="missing candidate digest",
+    ):
+        driver._candidate_descriptor(
+            config=config,
+            candidate_path=candidate_path,
+            completed=SimpleNamespace(candidate_sha256=None),
+        )
+
 def test_duplicate_json_field_is_rejected(tmp_path: Path) -> None:
     payload = json.dumps(_payload(tmp_path))
     duplicate = payload[:-1] + ',"job_id":"other"}'

@@ -29,8 +29,8 @@ from nika_core.training_runtime import (
 )
 from nika_core.training_scale import TrainingScaleAuthorization
 
-_SCHEMA_VERSION = 4
-_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v4\x00"
+_SCHEMA_VERSION = 5
+_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v5\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_CANDIDATE_MANIFEST_BYTES = 512 * 1024
 _MAX_TEXT_BYTES = 1024
@@ -53,6 +53,8 @@ _REQUIRED_REPORT_FIELDS = {
     "candidate_manifest_sha256",
     "consumed_materials_sha256",
     "model_dir_manifest_sha256",
+    "previous_adapter_tensors_sha256",
+    "trained_adapter_tensors_sha256",
     "trainer_artifact_id",
     "trainer_deployment_sha256",
     "trainer_implementation_sha256",
@@ -186,6 +188,8 @@ class _CandidateManifestEvidence:
     trainer_job_fingerprint: str
     consumed_materials_sha256: str
     model_dir_manifest_sha256: str
+    previous_adapter_tensors_sha256: str
+    trained_adapter_tensors_sha256: str
     trainer_artifact_id: str
     trainer_deployment_sha256: str
     trainer_implementation_sha256: str
@@ -317,7 +321,7 @@ def _candidate_manifest_evidence(
         raise PhysicalTrainingPilotError(
             "canonical PEFT candidate manifest verification failed"
         ) from exc
-    if type(manifest) is not dict or manifest.get("schema") != "nika-peft-candidate-v1":
+    if type(manifest) is not dict or manifest.get("schema") != "nika-peft-candidate-v2":
         _fail("canonical PEFT candidate manifest returned invalid evidence")
 
     if manifest.get("base_artifact_ref") != completed.base_artifact.artifact_ref:
@@ -364,6 +368,19 @@ def _candidate_manifest_evidence(
         manifest.get("model_dir_manifest_sha256"),
         name="candidate manifest model_dir_manifest_sha256",
     )
+    previous_adapter_tensors_sha256 = _require_sha256(
+        manifest.get("previous_adapter_tensors_sha256"),
+        name="candidate manifest previous_adapter_tensors_sha256",
+    )
+    trained_adapter_tensors_sha256 = _require_sha256(
+        manifest.get("trained_adapter_tensors_sha256"),
+        name="candidate manifest trained_adapter_tensors_sha256",
+    )
+    if hmac.compare_digest(
+        previous_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256,
+    ):
+        _fail("PEFT candidate manifest does not prove adapter tensor mutation")
     if type(trainer_deployment_identity) is not ArtifactIdentity:
         raise TypeError("trainer_deployment_identity must be exact ArtifactIdentity")
     expected_trainer_artifact_id = _require_sha256(
@@ -417,6 +434,8 @@ def _candidate_manifest_evidence(
         trainer_job_fingerprint=expected_trainer_job_fingerprint,
         consumed_materials_sha256=consumed_materials_sha256,
         model_dir_manifest_sha256=model_dir_manifest_sha256,
+        previous_adapter_tensors_sha256=previous_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256=trained_adapter_tensors_sha256,
         trainer_artifact_id=trainer_artifact_id,
         trainer_deployment_sha256=trainer_deployment_sha256,
         trainer_implementation_sha256=trainer_implementation_sha256,
@@ -447,6 +466,8 @@ class PhysicalTrainingPilotReport:
     candidate_manifest_sha256: str
     consumed_materials_sha256: str
     model_dir_manifest_sha256: str
+    previous_adapter_tensors_sha256: str
+    trained_adapter_tensors_sha256: str
     trainer_artifact_id: str
     trainer_deployment_sha256: str
     trainer_implementation_sha256: str
@@ -482,6 +503,11 @@ class PhysicalTrainingPilotReport:
             (self.candidate_manifest_sha256, "candidate_manifest_sha256"),
             (self.consumed_materials_sha256, "consumed_materials_sha256"),
             (self.model_dir_manifest_sha256, "model_dir_manifest_sha256"),
+            (
+                self.previous_adapter_tensors_sha256,
+                "previous_adapter_tensors_sha256",
+            ),
+            (self.trained_adapter_tensors_sha256, "trained_adapter_tensors_sha256"),
             (self.trainer_artifact_id, "trainer_artifact_id"),
             (self.trainer_deployment_sha256, "trainer_deployment_sha256"),
             (self.trainer_implementation_sha256, "trainer_implementation_sha256"),
@@ -491,6 +517,11 @@ class PhysicalTrainingPilotReport:
             ),
         ):
             _require_sha256(value, name=name)
+        if hmac.compare_digest(
+            self.previous_adapter_tensors_sha256,
+            self.trained_adapter_tensors_sha256,
+        ):
+            _fail("physical pilot did not prove adapter tensor-state mutation")
         if len(
             {
                 self.paused_checkpoint_id,
@@ -523,6 +554,8 @@ class PhysicalTrainingPilotReport:
             "candidate_manifest_sha256": self.candidate_manifest_sha256,
             "consumed_materials_sha256": self.consumed_materials_sha256,
             "model_dir_manifest_sha256": self.model_dir_manifest_sha256,
+            "previous_adapter_tensors_sha256": self.previous_adapter_tensors_sha256,
+            "trained_adapter_tensors_sha256": self.trained_adapter_tensors_sha256,
             "trainer_artifact_id": self.trainer_artifact_id,
             "trainer_deployment_sha256": self.trainer_deployment_sha256,
             "trainer_implementation_sha256": self.trainer_implementation_sha256,
@@ -591,6 +624,10 @@ class PhysicalTrainingPilotReport:
             candidate_manifest_sha256=value["candidate_manifest_sha256"],
             consumed_materials_sha256=value["consumed_materials_sha256"],
             model_dir_manifest_sha256=value["model_dir_manifest_sha256"],
+            previous_adapter_tensors_sha256=value[
+                "previous_adapter_tensors_sha256"
+            ],
+            trained_adapter_tensors_sha256=value["trained_adapter_tensors_sha256"],
             trainer_artifact_id=value["trainer_artifact_id"],
             trainer_deployment_sha256=value["trainer_deployment_sha256"],
             trainer_implementation_sha256=value["trainer_implementation_sha256"],
@@ -992,6 +1029,10 @@ def build_physical_training_pilot_report(
         candidate_manifest_sha256=manifest_evidence.candidate_manifest_sha256,
         consumed_materials_sha256=manifest_evidence.consumed_materials_sha256,
         model_dir_manifest_sha256=manifest_evidence.model_dir_manifest_sha256,
+        previous_adapter_tensors_sha256=(
+            manifest_evidence.previous_adapter_tensors_sha256
+        ),
+        trained_adapter_tensors_sha256=manifest_evidence.trained_adapter_tensors_sha256,
         trainer_artifact_id=manifest_evidence.trainer_artifact_id,
         trainer_deployment_sha256=manifest_evidence.trainer_deployment_sha256,
         trainer_implementation_sha256=manifest_evidence.trainer_implementation_sha256,

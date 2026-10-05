@@ -66,6 +66,8 @@ def _candidate_manifest() -> dict[str, object]:
         "consumed_materials_sha256": "1" * 64,
         "job_fingerprint": _TRAINER_JOB_FINGERPRINT,
         "model_dir_manifest_sha256": "2" * 64,
+        "previous_adapter_tensors_sha256": "7" * 64,
+        "trained_adapter_tensors_sha256": "8" * 64,
         "trainer_artifact_id": "3" * 64,
         "trainer_implementation_sha256": "4" * 64,
         "trainer_sha256": "5" * 64,
@@ -78,7 +80,7 @@ def _candidate_manifest() -> dict[str, object]:
             "torch": "1.0",
             "transformers": "1.0",
         },
-        "schema": "nika-peft-candidate-v1",
+        "schema": "nika-peft-candidate-v2",
         "step_number": 2,
         "trainer_parameters": {
             "learning_rate": 0.0002,
@@ -262,13 +264,15 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     )
 
     assert report.platform == "windows"
-    assert report.schema_version == 4
+    assert report.schema_version == 5
     assert report.completed_steps == 2
     assert report.job_fingerprint == "f" * 64
     assert report.trainer_job_fingerprint == _TRAINER_JOB_FINGERPRINT
     assert report.job_fingerprint != report.trainer_job_fingerprint
     assert report.consumed_materials_sha256 == "1" * 64
     assert report.model_dir_manifest_sha256 == "2" * 64
+    assert report.previous_adapter_tensors_sha256 == "7" * 64
+    assert report.trained_adapter_tensors_sha256 == "8" * 64
     assert report.trainer_artifact_id == "3" * 64
     assert report.trainer_implementation_sha256 == "4" * 64
     assert report.trainer_deployment_sha256 == "5" * 64
@@ -281,6 +285,37 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     assert report.paused_checkpoint_id == "checkpoint-paused"
     assert report.restart_checkpoint_id == "checkpoint-restart"
     assert report.completed_checkpoint_id == "checkpoint-completed"
+
+
+def test_build_report_rejects_manifest_without_tensor_state_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    manifest = _candidate_manifest()
+    manifest["trained_adapter_tensors_sha256"] = manifest[
+        "previous_adapter_tensors_sha256"
+    ]
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", lambda _: manifest)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="tensor mutation"):
+        build_physical_training_pilot_report(
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
+            trainer_consumed_materials_sha256="1" * 64,
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
 
 
 def test_report_round_trip_is_canonical_and_digest_stable(tmp_path: Path) -> None:
@@ -929,6 +964,8 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             candidate_manifest_sha256=report.candidate_manifest_sha256,
             consumed_materials_sha256=report.consumed_materials_sha256,
             model_dir_manifest_sha256=report.model_dir_manifest_sha256,
+            previous_adapter_tensors_sha256=report.previous_adapter_tensors_sha256,
+            trained_adapter_tensors_sha256=report.trained_adapter_tensors_sha256,
             trainer_artifact_id=report.trainer_artifact_id,
             trainer_deployment_sha256=report.trainer_deployment_sha256,
             trainer_implementation_sha256=report.trainer_implementation_sha256,

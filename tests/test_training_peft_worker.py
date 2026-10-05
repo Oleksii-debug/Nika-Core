@@ -596,6 +596,13 @@ def _fake_safe_save_file(
     Path(path).write_bytes(payload)
 
 
+def _fake_safe_serialize(tensors: dict[str, object]) -> bytes:
+    assert list(tensors) == ["lora.weight"]
+    tensor = tensors["lora.weight"]
+    assert isinstance(tensor, _FakeTensor)
+    return b"fake-canonical-tensor-state\x00" + tensor.payload
+
+
 class _FakeModelFactory:
     @staticmethod
     def from_pretrained(*args: object, **kwargs: object) -> _FakeModel:
@@ -702,6 +709,7 @@ def _fake_stack() -> tuple[object, ...]:
         _fake_get_peft_model,
         _fake_safe_open,
         _fake_safe_save_file,
+        _fake_safe_serialize,
         _FakeModelFactory,
         _FakeTokenizerFactory,
         _FakeCollator,
@@ -735,7 +743,7 @@ class _NonFiniteMutationFakeTrainer(_NoMutationFakeTrainer):
 
 def _trainer_variant_stack(trainer_type: type[_FakeTrainer]) -> tuple[object, ...]:
     stack = list(_fake_stack())
-    stack[10] = trainer_type
+    stack[11] = trainer_type
     return tuple(stack)
 
 
@@ -889,6 +897,7 @@ def test_adapter_weight_snapshot_fails_closed_and_cleans_temporary_directory(
             _EmptyAdapterSnapshotModel(),
             job_root,
             safe_open=_fake_safe_open,
+            safe_serialize=_fake_safe_serialize,
             torch=_fake_stack()[0],
         )
 
@@ -1247,9 +1256,14 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
         config=config,
         consumed=consumed,
         adapter_config=adapter_config,
+        previous_adapter_tensors_sha256="7" * 64,
+        trained_adapter_tensors_sha256="8" * 64,
     )
     manifest = json.loads(raw)
     assert peft._validate_candidate_manifest_payload(manifest) == manifest
+    assert manifest["schema"] == "nika-peft-candidate-v2"
+    assert manifest["previous_adapter_tensors_sha256"] == "7" * 64
+    assert manifest["trained_adapter_tensors_sha256"] == "8" * 64
     assert manifest["trainer_artifact_id"] == request.trainer_artifact_id
     assert manifest["trainer_sha256"] == request.trainer_sha256
     assert manifest["trainer_implementation_sha256"] == config.trainer_implementation_sha256
@@ -1263,6 +1277,18 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     bad_sha["base_artifact_sha256"] = "0" * 63
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(bad_sha)
+
+    equal_tensor_state = json.loads(raw)
+    equal_tensor_state["trained_adapter_tensors_sha256"] = (
+        equal_tensor_state["previous_adapter_tensors_sha256"]
+    )
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(equal_tensor_state)
+
+    bad_previous_tensor_sha = json.loads(raw)
+    bad_previous_tensor_sha["previous_adapter_tensors_sha256"] = "0" * 63
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_previous_tensor_sha)
 
     bad_trainer_sha = json.loads(raw)
     bad_trainer_sha["trainer_sha256"] = "0" * 63
@@ -1349,6 +1375,8 @@ def test_candidate_manifest_producer_rejects_reader_invalid_adapter_config(
             config=config,
             consumed=consumed,
             adapter_config=adapter_config,
+            previous_adapter_tensors_sha256="7" * 64,
+            trained_adapter_tensors_sha256="8" * 64,
         )
 
 
@@ -1373,6 +1401,8 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
         config=config,
         consumed=consumed,
         adapter_config=adapter_config,
+        previous_adapter_tensors_sha256="7" * 64,
+        trained_adapter_tensors_sha256="8" * 64,
     )
     candidate = tmp_path / "candidate.safetensors"
     candidate.write_bytes(b"persisted-candidate")
@@ -1399,6 +1429,8 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
 
     assert manifest["trainer_artifact_id"] == request.trainer_artifact_id
     assert manifest["trainer_sha256"] == request.trainer_sha256
+    assert manifest["previous_adapter_tensors_sha256"] == "7" * 64
+    assert manifest["trained_adapter_tensors_sha256"] == "8" * 64
     assert manifest["training_runtime_versions"] == _RUNTIME_VERSIONS
 
 
@@ -1417,7 +1449,7 @@ def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
             return None
 
         def metadata(self) -> dict[str, str]:
-            return {"nika_adapter_manifest": '{ "schema": "nika-peft-candidate-v1" }'}
+            return {"nika_adapter_manifest": '{ "schema": "nika-peft-candidate-v2" }'}
 
     def safe_open(path: str, *, framework: str, device: str) -> Reader:
         assert Path(path) == candidate
@@ -1450,6 +1482,8 @@ def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) ->
             config=config,
             consumed=consumed,
             adapter_config=adapter_config,
+            previous_adapter_tensors_sha256="7" * 64,
+            trained_adapter_tensors_sha256="8" * 64,
         )
     )
     manifest["trainer_parameters"]["lora_target_modules"] = [["q_proj"]]
