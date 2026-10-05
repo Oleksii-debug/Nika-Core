@@ -325,5 +325,26 @@ class OllamaModelHealthProbe:
                 item_identities.append(value)
             if not item_identities:
                 return None
+            if len(item_identities) == 2 and not OllamaModelHealthProbe._same_model_identity(
+                item_identities[0],
+                item_identities[1],
+            ):
+                return None
             identities.update(item_identities)
         return identities
+
+    @staticmethod
+    def _same_model_identity(left: str, right: str) -> bool:
+        if left == right:
+            return True
+        return (
+            OllamaModelHealthProbe._latest_alias(left) == right
+            or OllamaModelHealthProbe._latest_alias(right) == left
+        )
+
+    @staticmethod
+    def _latest_alias(model_id: str) -> str | None:
+        leaf = model_id.rsplit("/", 1)[-1]
+        if ":" in leaf or "@" in leaf:
+            return None
+        return f"{model_id}:latest"
