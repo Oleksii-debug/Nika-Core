@@ -231,3 +231,62 @@ def test_corrupt_registry_identity_storage_class_fails_list(tmp_path: Path) -> N
         agents.list_latest()
     with pytest.raises(ValueError, match="invalid persisted workspace workspace_id"):
         spaces.list_latest()
+
+
+def test_tampered_agent_definition_is_readmitted_before_sqlite_write(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    registry = AgentRegistry(store)
+    definition = AgentDefinition("worker", "Worker", 1, "Work")
+    object.__setattr__(definition, "version", True)
+
+    with pytest.raises(ValueError, match="positive SQLite-sized integer"):
+        registry.register(definition)
+
+    assert registry.count == 0
+
+
+def test_tampered_workspace_definition_is_readmitted_before_sqlite_write(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    registry = WorkspaceRegistry(store)
+    definition = WorkspaceDefinition("research", "Research", 1)
+    object.__setattr__(definition, "enabled", 1)
+
+    with pytest.raises(ValueError, match="enabled must be a boolean"):
+        registry.register(definition)
+
+    assert registry.count == 0
+
+
+def test_tampered_definition_text_is_rejected_before_durable_write(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    registry = AgentRegistry(store)
+    definition = AgentDefinition("worker", "Worker", 1, "Work")
+    object.__setattr__(definition, "goal", _SpoofedText("forged"))
+
+    with pytest.raises(ValueError, match="goal must be text"):
+        registry.register(definition)
+
+    assert registry.count == 0
+
+
+def test_in_memory_agent_registry_detaches_input_and_read_aliases() -> None:
+    registry = AgentRegistry()
+    definition = AgentDefinition("worker", "Worker", 1, "Work")
+    registry.register(definition)
+
+    object.__setattr__(definition, "name", "caller-mutated")
+    assert registry.get("worker").name == "Worker"
+
+    returned = registry.get("worker")
+    object.__setattr__(returned, "goal", "read-alias-mutated")
+    assert registry.get("worker").goal == "Work"
+
+    listed = registry.list_latest()[0]
+    object.__setattr__(listed, "version", 0)
+    assert registry.get("worker").version == 1
