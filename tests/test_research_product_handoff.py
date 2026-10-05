@@ -5,9 +5,10 @@ import json
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
-from nika_core.security import ApprovalAuthority
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
@@ -28,51 +29,6 @@ from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.query_results import ScopedResearchResultWriter
 from nika_core.research.repository import ResearchRepository
 from nika_core.research_product_handoff import ResearchProductHandoffService
-
-
-_TEST_APPROVAL_SECRET = b"nika-product-decision-test-authority-seed-0001"
-
-
-class _AuthorizingProductDecisionRepository(ProductDecisionRepository):
-    def __init__(self, store: SQLiteStore) -> None:
-        self._authority = ApprovalAuthority(
-            issuer_id="test-product-owner-authority",
-            secret=_TEST_APPROVAL_SECRET,
-        )
-        super().__init__(store, approval_verifier=self._authority.verifier())
-
-    def record(
-        self,
-        project_id: str,
-        decision: ProductDecision,
-        *,
-        expected_row_version: int,
-        idempotency_key: str,
-    ):
-        if decision.state is ProductDecisionState.PROPOSED:
-            return super().record(
-                project_id,
-                decision,
-                expected_row_version=expected_row_version,
-                idempotency_key=idempotency_key,
-            )
-        task_id = f"test-product-decision:{decision.decision_id}"
-        intent = self.approval_intent(
-            project_id,
-            decision,
-            expected_row_version=expected_row_version,
-            task_id=task_id,
-        )
-        request = self._authority.request(intent)
-        approval = self._authority.approve(request.request_id)
-        return super().record(
-            project_id,
-            decision,
-            expected_row_version=expected_row_version,
-            idempotency_key=idempotency_key,
-            approval=approval,
-            approval_task_id=task_id,
-        )
 
 
 def _environment(tmp_path):
@@ -337,7 +293,7 @@ def test_sealed_handoff_tampering_fails_before_product_decision(tmp_path) -> Non
             (json.dumps(payload),),
         )
 
-    decisions = _AuthorizingProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     with pytest.raises(ProductProjectError, match="research handoff integrity mismatch"):
         decisions.record(
             "p1",
@@ -378,7 +334,7 @@ def test_requirement_inherits_approved_decision_evidence_and_survives_restart(tm
         package_id="research-1",
         options=_options(),
     )
-    decisions = _AuthorizingProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     decisions.record(
         "p1",
         _approved_decision(),
@@ -421,7 +377,7 @@ def test_decision_rejects_formal_handoff_when_remote_source_becomes_stale(tmp_pa
             "UPDATE research_http_sources SET freshness='stale' WHERE source_id='http-1'"
         )
 
-    decisions = _AuthorizingProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     with pytest.raises(ProductProjectError, match="remote research source is not current"):
         decisions.record(
             "p1",
@@ -441,7 +397,7 @@ def test_source_content_update_invalidates_handoff_and_decision_replay(tmp_path)
         package_id="research-1",
         options=_options(),
     )
-    decisions = _AuthorizingProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     decision = _approved_decision()
     decisions.record(
         "p1",
