@@ -56,6 +56,16 @@ _SAFE_FALLBACK_CODES = frozenset(
     }
 )
 _MAX_DURABLE_TOKEN_COUNT = (1 << 63) - 1
+_SHA256_HEX = frozenset("0123456789abcdef")
+
+
+def _is_canonical_sha256(value: object) -> bool:
+    return (
+        type(value) is str
+        and len(value) == 64
+        and all(char in _SHA256_HEX for char in value)
+    )
+
 
 _SAFE_PROVIDER_MESSAGES = {
     ModelErrorCode.INVALID_REQUEST: "model provider rejected the request",
@@ -369,6 +379,7 @@ class ModelGateway:
             model = response.model
             raw_usage = response.usage
             latency_ms = response.latency_ms
+            loaded_artifact_sha256 = response.loaded_artifact_sha256
             if not isinstance(raw_usage, ModelUsage):
                 return None, invalid_error
             input_tokens = raw_usage.input_tokens
@@ -419,6 +430,13 @@ class ModelGateway:
                 if not finite_latency or latency_ms < 0:
                     invalid = True
 
+        if (
+            not invalid
+            and loaded_artifact_sha256 is not None
+            and not _is_canonical_sha256(loaded_artifact_sha256)
+        ):
+            invalid = True
+
         if invalid:
             return None, invalid_error
         usage = ModelUsage(
@@ -435,6 +453,7 @@ class ModelGateway:
                 model=model,
                 usage=usage,
                 latency_ms=latency_ms,
+                loaded_artifact_sha256=loaded_artifact_sha256,
             ),
             None,
         )
