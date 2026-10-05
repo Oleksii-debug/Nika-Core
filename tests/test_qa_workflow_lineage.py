@@ -24,6 +24,26 @@ M12_UPSTREAM_WORKFLOW_PATHS = (
     '      - ".github/workflows/ci.yml"',
     '      - ".github/workflows/m11-windows-release.yml"',
 )
+M11_MODEL_RECOVERY_FILTERS = (
+    '      - "src/nika_core/diagnostics/**"',
+    '      - "src/nika_core/v01_packaged_team_runtime.py"',
+    '      - "tests/test_diagnostics_health*.py"',
+    '      - "tests/test_local_model_health*.py"',
+    '      - "tests/test_v01_packaged_model_recovery_health.py"',
+)
+M11_MODEL_RECOVERY_TESTS = (
+    "tests/test_diagnostics_health.py",
+    "tests/test_diagnostics_health_multi_agent_migration.py",
+    "tests/test_diagnostics_health_rollback_journal.py",
+    "tests/test_diagnostics_health_schema_constraints.py",
+    "tests/test_diagnostics_health_value_authority.py",
+    "tests/test_local_model_health.py",
+    "tests/test_local_model_health_default_tag.py",
+    "tests/test_local_model_health_provider_identity.py",
+    "tests/test_local_model_health_string_authority.py",
+    "tests/test_local_model_health_timeout_contract.py",
+    "tests/test_v01_packaged_model_recovery_health.py",
+)
 
 
 def _checkout_indexes(text: str) -> list[int]:
@@ -110,3 +130,14 @@ def test_m12_runs_when_upstream_release_workflows_change() -> None:
 
     for workflow_path in M12_UPSTREAM_WORKFLOW_PATHS:
         assert m12.count(workflow_path) == 2, workflow_path
+
+def test_m11_requalifies_model_recovery_health_changes() -> None:
+    m11 = (ROOT / ".github" / "workflows" / "m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    for path_filter in M11_MODEL_RECOVERY_FILTERS:
+        assert m11.count(path_filter) == 2, path_filter
+    for test_path in M11_MODEL_RECOVERY_TESTS:
+        assert f"          {test_path}" in m11, test_path
+
