@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
+import httpx
 import pytest
 
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ExperimentEngine,
@@ -37,6 +40,7 @@ from nika_core.model_gateway.contracts import (
     PrivacyClass,
     ProviderKind,
 )
+from nika_core.model_gateway.providers import OllamaProvider as CanonicalOllamaProvider
 from nika_core.training_evaluation_champion import (
     bind_champion_for_attested_evaluation,
 )
@@ -56,12 +60,10 @@ from nika_core.training_model_activation import (
     activate_attested_training_promotion,
     rollback_attested_training_promotion,
 )
-from nika_core.training_scale import (
-    TrainingScaleError,
-    TrainingScalePlan,
-    TrainingScaleTier,
-    authorize_training_scale,
-    build_scale_progression_proof,
+from nika_core.training_ollama_manifest import (
+    OllamaManifestAuthority,
+    OllamaPreparedModelBinding,
+    OllamaPromotionManifestStore,
 )
 from nika_core.training_runtime import (
     ArtifactIdentity,
@@ -70,7 +72,18 @@ from nika_core.training_runtime import (
     TrainingRunState,
     training_job_fingerprint,
 )
-from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
+from nika_core.training_scale import (
+    TrainingScaleError,
+    TrainingScalePlan,
+    TrainingScaleTier,
+    authorize_training_scale,
+    build_scale_progression_proof,
+)
+from nika_core.v01_model_settings import (
+    ModelSetupError,
+    V01BoundModelRuntimeFactory,
+    V01ModelSettings,
+)
 
 
 def _sha(value: bytes) -> str:
@@ -84,6 +97,8 @@ _CHAMPION_ATTESTOR_ID = "test-shared-attestor"
 _CHAMPION_ATTESTOR_SHA256 = _sha(b"shared-attestor")
 _CHALLENGER_ATTESTOR_ID = _CHAMPION_ATTESTOR_ID
 _CHALLENGER_ATTESTOR_SHA256 = _CHAMPION_ATTESTOR_SHA256
+_BASE_PROVIDER_MANIFEST_SHA256 = _sha(b"base-provider-manifest")
+_CHALLENGER_PROVIDER_MANIFEST_SHA256 = _sha(b"challenger-provider-manifest")
 
 
 def _evaluation_set() -> EvaluationSet:
@@ -284,8 +299,14 @@ def _champion_descriptor() -> ModelArtifactDescriptor:
 
 
 class _ChampionPort:
-    def __init__(self, text: str) -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        provider_manifest_sha256: str | None = None,
+    ) -> None:
         self.text = text
+        self.provider_manifest_sha256 = provider_manifest_sha256
 
     async def complete_attested(
         self,
@@ -311,13 +332,20 @@ class _ChampionPort:
                 descriptor_digest=binding.descriptor_digest,
                 attestor_id=_CHAMPION_ATTESTOR_ID,
                 attestor_sha256=_CHAMPION_ATTESTOR_SHA256,
+                provider_manifest_sha256=self.provider_manifest_sha256,
             ),
         )
 
 
 class _ChallengerPort:
-    def __init__(self, text: str) -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        provider_manifest_sha256: str | None = None,
+    ) -> None:
         self.text = text
+        self.provider_manifest_sha256 = provider_manifest_sha256
         self.calls = 0
 
     async def complete_attested(
@@ -345,11 +373,17 @@ class _ChallengerPort:
                 descriptor_digest=binding.descriptor_digest,
                 attestor_id=_CHALLENGER_ATTESTOR_ID,
                 attestor_sha256=_CHALLENGER_ATTESTOR_SHA256,
+                provider_manifest_sha256=self.provider_manifest_sha256,
             ),
         )
 
 
-async def _attested_results(tmp_path):
+async def _attested_results(
+    tmp_path,
+    *,
+    champion_provider_manifest_sha256: str | None = None,
+    challenger_provider_manifest_sha256: str | None = None,
+):
     evaluation = _evaluation_set()
     training_binding = _training_binding(evaluation)
     base_path = tmp_path / "base-model.bin"
@@ -365,7 +399,10 @@ async def _attested_results(tmp_path):
         binding=champion_binding,
         champion=_champion(),
         evaluation_set=evaluation,
-        effect_port=_ChampionPort("old-answer"),
+        effect_port=_ChampionPort(
+            "old-answer",
+            provider_manifest_sha256=champion_provider_manifest_sha256,
+        ),
         expected_attestor_id=_CHAMPION_ATTESTOR_ID,
         expected_attestor_sha256=_CHAMPION_ATTESTOR_SHA256,
         timeout_seconds=5,
@@ -375,7 +412,10 @@ async def _attested_results(tmp_path):
         binding=training_binding,
         challenger=_challenger(),
         evaluation_set=evaluation,
-        effect_port=_ChallengerPort("answer"),
+        effect_port=_ChallengerPort(
+            "answer",
+            provider_manifest_sha256=challenger_provider_manifest_sha256,
+        ),
         expected_attestor_id=_CHALLENGER_ATTESTOR_ID,
         expected_attestor_sha256=_CHALLENGER_ATTESTOR_SHA256,
         timeout_seconds=5,
@@ -427,6 +467,70 @@ async def test_attested_old_vs_new_comparison_promotes_only_from_both_attested_r
     assert payload["attestor_id"] == _CHAMPION_ATTESTOR_ID
     assert payload["attestor_sha256"] == _CHAMPION_ATTESTOR_SHA256
     assert len(result.evidence_sha256) == 64
+    assert result.champion_provider_manifest_sha256 is None
+    assert result.challenger_provider_manifest_sha256 is None
+
+
+@pytest.mark.asyncio
+async def test_comparison_binds_distinct_old_new_provider_manifests(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(
+        tmp_path,
+        champion_provider_manifest_sha256=_BASE_PROVIDER_MANIFEST_SHA256,
+        challenger_provider_manifest_sha256=_CHALLENGER_PROVIDER_MANIFEST_SHA256,
+    )
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new-manifests",
+        repository=InMemoryExperimentRepository(),
+    )
+
+    assert (
+        result.champion_provider_manifest_sha256
+        == _BASE_PROVIDER_MANIFEST_SHA256
+    )
+    assert (
+        result.challenger_provider_manifest_sha256
+        == _CHALLENGER_PROVIDER_MANIFEST_SHA256
+    )
+    assert (
+        result.champion_provider_manifest_sha256
+        != result.challenger_provider_manifest_sha256
+    )
+    payload = result.evidence_payload()
+    assert (
+        payload["champion_provider_manifest_sha256"]
+        == _BASE_PROVIDER_MANIFEST_SHA256
+    )
+    assert (
+        payload["challenger_provider_manifest_sha256"]
+        == _CHALLENGER_PROVIDER_MANIFEST_SHA256
+    )
+
+
+@pytest.mark.asyncio
+async def test_comparison_legacy_evidence_omits_provider_manifests(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new-legacy-manifests",
+        repository=InMemoryExperimentRepository(),
+    )
+
+    payload = result.evidence_payload()
+    assert "champion_provider_manifest_sha256" not in payload
+    assert "challenger_provider_manifest_sha256" not in payload
 
 
 @pytest.mark.asyncio
@@ -910,8 +1014,155 @@ def _configured_model_settings(tmp_path, *, model: str = "base-model"):
     return store, settings
 
 
+def _downgrade_task_binding_schema_without_artifact_pin(conn) -> None:
+    conn.execute(
+        "ALTER TABLE v01_task_model_bindings "
+        "RENAME TO v01_task_model_bindings_v4"
+    )
+    conn.execute(
+        "CREATE TABLE v01_task_model_bindings ("
+        "task_id TEXT PRIMARY KEY, selection_id TEXT NOT NULL, "
+        "selection_json TEXT NOT NULL, created_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO v01_task_model_bindings("
+        "task_id, selection_id, selection_json, created_at"
+        ") SELECT task_id, selection_id, selection_json, created_at "
+        "FROM v01_task_model_bindings_v4"
+    )
+    conn.execute("DROP TABLE v01_task_model_bindings_v4")
+
+
+def _prepared_ollama_binding(
+    *,
+    model_id: str,
+    artifact_sha256: str,
+    descriptor_digest: str,
+    manifest_sha256: str,
+    base_url: str = "http://localhost:11434",
+) -> OllamaPreparedModelBinding:
+    create_request = {
+        "model": model_id,
+        "files": {"model.gguf": "sha256:" + artifact_sha256},
+        "stream": False,
+    }
+    create_request_sha256 = _sha(
+        json.dumps(
+            create_request,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    payload = {
+        "schema": "nika.training.ollama-prepared-model.v1",
+        "provider_id": "ollama",
+        "route_model_id": model_id,
+        "manifest_model_id": model_id,
+        "artifact_sha256": artifact_sha256,
+        "descriptor_digest": descriptor_digest,
+        "provider_manifest_sha256": manifest_sha256,
+        "endpoint_sha256": _sha(base_url.encode("utf-8")),
+        "create_request_sha256": create_request_sha256,
+    }
+    return OllamaPreparedModelBinding(
+        route_model_id=model_id,
+        manifest_model_id=model_id,
+        artifact_sha256=artifact_sha256,
+        descriptor_digest=descriptor_digest,
+        provider_manifest_sha256=manifest_sha256,
+        endpoint_sha256=payload["endpoint_sha256"],
+        create_request_sha256=create_request_sha256,
+        preparation_sha256=_sha(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ),
+    )
+
+
+def _promotion_manifest_args(result, store: SQLiteStore) -> dict[str, object]:
+    training = result.challenger_benchmark.binding.revalidated()
+    base = _prepared_ollama_binding(
+        model_id=training.base_model_id,
+        artifact_sha256=training.base_sha256,
+        descriptor_digest=training.base_descriptor_digest,
+        manifest_sha256=_sha(b"base-provider-manifest"),
+    )
+    challenger = _prepared_ollama_binding(
+        model_id=training.challenger_model_id,
+        artifact_sha256=training.challenger_sha256,
+        descriptor_digest=training.descriptor_digest,
+        manifest_sha256=_sha(b"challenger-provider-manifest"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/api/tags":
+            raise AssertionError(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "name": base.route_model_id,
+                        "model": base.route_model_id,
+                        "digest": base.provider_manifest_sha256,
+                    },
+                    {
+                        "name": challenger.route_model_id,
+                        "model": challenger.route_model_id,
+                        "digest": challenger.provider_manifest_sha256,
+                    },
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs):
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    return {
+        "manifest_store": OllamaPromotionManifestStore(store),
+        "manifest_authority": OllamaManifestAuthority(client_factory=client_factory),
+        "base_prepared_model": base,
+        "challenger_prepared_model": challenger,
+    }
+
+
+async def _activate_with_manifests(
+    *,
+    result,
+    store: SQLiteStore,
+    settings: V01ModelSettings,
+    expected_revision: int,
+    effect_port=None,
+):
+    return await activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=expected_revision,
+        effect_port=effect_port,
+        **_promotion_manifest_args(result, store),
+    )
+
+
+def _activation_port(text: str = "activation-ok") -> _ChallengerPort:
+    return _ChallengerPort(
+        text,
+        provider_manifest_sha256=_CHALLENGER_PROVIDER_MANIFEST_SHA256,
+    )
+
+
 async def _promoted_comparison(tmp_path):
-    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    evaluation, champion_result, challenger_result = await _attested_results(
+        tmp_path,
+        champion_provider_manifest_sha256=_BASE_PROVIDER_MANIFEST_SHA256,
+        challenger_provider_manifest_sha256=_CHALLENGER_PROVIDER_MANIFEST_SHA256,
+    )
     return run_attested_old_vs_new_comparison(
         champion_result=champion_result,
         challenger_result=challenger_result,
@@ -1073,9 +1324,10 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         payload=settings.prepare_task_payload({"command": "keep old route"}),
     )
 
-    activation_port = _ChallengerPort("activation-ok")
-    receipt = await activate_attested_training_promotion(
+    activation_port = _activation_port()
+    receipt = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=activation_port,
@@ -1098,8 +1350,9 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
 
-    retried = await activate_attested_training_promotion(
+    retried = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
     )
@@ -1126,6 +1379,11 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         expected_revision=2,
     )
     assert rolled_back.rollback_revision == 3
+    assert rolled_back.activation_request_sha256 == receipt.activation_request_sha256
+    assert (
+        rolled_back.activation_attestation_sha256
+        == receipt.activation_attestation_sha256
+    )
     assert restarted.snapshot()["model"] == "base-model"
     assert restarted.snapshot()["revision"] == 3
 
@@ -1139,8 +1397,9 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         TrainingModelActivationError,
         match="rejected by the active route authority",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=restarted,
             expected_revision=3,
         )
@@ -1241,11 +1500,271 @@ async def test_activation_requires_fresh_loaded_model_attestation(tmp_path) -> N
 
 
 @pytest.mark.asyncio
+async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    training = result.challenger_benchmark.binding.revalidated()
+    await _activate_with_manifests(
+        result=result,
+        store=store,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_activation_port(),
+    )
+
+    promoted_payload = settings.prepare_task_payload({"command": "promoted task"})
+    promoted_pin = promoted_payload["v01_model_artifact_pin"]
+    assert promoted_pin["role"] == "challenger"
+    assert promoted_pin["route_revision"] == 2
+    assert promoted_pin["artifact_sha256"] == training.challenger_sha256
+    assert promoted_pin["descriptor_digest"] == training.descriptor_digest
+    assert "challenger-model" not in repr(promoted_pin)
+
+    promoted_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=promoted_payload,
+    )
+    assert settings.for_task(promoted_task.task_id).model == "challenger-model"
+    frozen_pin = settings.artifact_pin_for_task(promoted_task.task_id)
+    assert frozen_pin is not None
+    assert frozen_pin.artifact_sha256 == training.challenger_sha256
+
+    tampered = dict(promoted_payload)
+    tampered_pin = dict(promoted_pin)
+    tampered_pin["artifact_sha256"] = _sha(b"substituted-task-artifact")
+    tampered["v01_model_artifact_pin"] = tampered_pin
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (
+                json.dumps(tampered, ensure_ascii=False, sort_keys=True),
+                promoted_task.task_id,
+            ),
+        )
+    with pytest.raises(ModelSetupError, match="Артефакт"):
+        settings.for_task(promoted_task.task_id)
+
+    rollback_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=2,
+    )
+    rollback_payload = settings.prepare_task_payload({"command": "rollback task"})
+    rollback_pin = rollback_payload["v01_model_artifact_pin"]
+    assert rollback_pin["role"] == "rollback"
+    assert rollback_pin["route_revision"] == 3
+    assert rollback_pin["artifact_sha256"] == training.base_sha256
+    assert rollback_pin["descriptor_digest"] == training.base_descriptor_digest
+
+    rollback_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=rollback_payload,
+    )
+    assert settings.for_task(rollback_task.task_id).model == "base-model"
+    restored_pin = settings.artifact_pin_for_task(rollback_task.task_id)
+    assert restored_pin is not None
+    assert restored_pin.artifact_sha256 == training.base_sha256
+
+
+def test_caller_cannot_inject_promoted_artifact_pin(tmp_path) -> None:
+    _, settings = _configured_model_settings(tmp_path)
+
+    with pytest.raises(ModelSetupError, match="лише Nika"):
+        settings.prepare_task_payload(
+            {
+                "command": "forged",
+                "v01_model_artifact_pin": {
+                    "schema": "nika.v01.model-artifact-pin.v1",
+                },
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    await _activate_with_manifests(
+        result=result,
+        store=store,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_activation_port(),
+    )
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload(
+            {"command": "use one frozen model binding"}
+        ),
+    )
+
+    def unexpected_legacy_read(*_args, **_kwargs):
+        raise AssertionError("runtime factory split the task route and artifact-pin read")
+
+    monkeypatch.setattr(settings, "for_task", unexpected_legacy_read)
+    monkeypatch.setattr(settings, "artifact_pin_for_task", unexpected_legacy_read)
+    monkeypatch.setattr(TaskQueue, "get", unexpected_legacy_read)
+
+    seen_provider_args: list[dict[str, object]] = []
+
+    def observing_provider(**kwargs):
+        seen_provider_args.append(dict(kwargs))
+        return CanonicalOllamaProvider(**kwargs)
+
+    monkeypatch.setattr(
+        "nika_core.v01_model_settings.OllamaProvider",
+        observing_provider,
+    )
+    factory = V01BoundModelRuntimeFactory(
+        store=store,
+        definitions=AgentDefinitionRepository(store),
+        settings=settings,
+    )
+
+    assert factory.for_task(task.task_id) is not None
+    assert len(seen_provider_args) == 1
+    assert seen_provider_args[0]["default_model"] == "challenger-model"
+    assert (
+        seen_provider_args[0]["expected_manifest_sha256"]
+        == _CHALLENGER_PROVIDER_MANIFEST_SHA256
+    )
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_fails_closed_when_promoted_manifest_mapping_is_missing(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    await _activate_with_manifests(
+        result=result,
+        store=store,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_activation_port(),
+    )
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload(
+            {"command": "must retain provider manifest authority"}
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM training_ollama_promotion_manifests "
+            "WHERE decision_sha256 = ? AND role = 'challenger'",
+            (result.evidence_sha256,),
+        )
+
+    factory = V01BoundModelRuntimeFactory(
+        store=store,
+        definitions=AgentDefinitionRepository(store),
+        settings=settings,
+    )
+    with pytest.raises(ModelSetupError, match="provider manifest"):
+        factory.for_task(task.task_id)
+
+
+@pytest.mark.asyncio
+async def test_activation_rejects_prepared_manifest_that_differs_from_evaluation(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    args = _promotion_manifest_args(result, store)
+    challenger = args["challenger_prepared_model"]
+    assert isinstance(challenger, OllamaPreparedModelBinding)
+    args["challenger_prepared_model"] = _prepared_ollama_binding(
+        model_id=challenger.route_model_id,
+        artifact_sha256=challenger.artifact_sha256,
+        descriptor_digest=challenger.descriptor_digest,
+        manifest_sha256=_sha(b"substituted-provider-manifest"),
+    )
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="prepared Ollama manifests do not match evaluated",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=1,
+            effect_port=_activation_port(),
+            **args,
+        )
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_activation_rejects_fresh_manifest_that_differs_from_prepared_authority(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    wrong_effect = _ChallengerPort(
+        "activation-ok",
+        provider_manifest_sha256=_sha(b"fresh-substituted-provider-manifest"),
+    )
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="fresh loaded-model provider manifest does not match prepared",
+    ):
+        await _activate_with_manifests(
+            result=result,
+            store=store,
+            settings=settings,
+            expected_revision=1,
+            effect_port=wrong_effect,
+        )
+    assert wrong_effect.calls == 1
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_activation_rejects_legacy_comparison_without_provider_manifests(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:legacy-activation",
+        experiment_id="training-job-1-legacy-activation",
+        repository=InMemoryExperimentRepository(),
+    )
+    store, settings = _configured_model_settings(tmp_path)
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="comparison lacks provider manifest evidence",
+    ):
+        await _activate_with_manifests(
+            result=result,
+            store=store,
+            settings=settings,
+            expected_revision=1,
+            effect_port=_activation_port(),
+        )
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
 async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
     tmp_path,
 ) -> None:
     result = await _promoted_comparison(tmp_path)
-    _, settings = _configured_model_settings(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
 
     class _SwappedArtifactPort(_ChallengerPort):
         async def complete_attested(self, request, *, binding):
@@ -1258,13 +1777,17 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
                 ),
             )
 
-    port = _SwappedArtifactPort("activation-ok")
+    port = _SwappedArtifactPort(
+        "activation-ok",
+        provider_manifest_sha256=_CHALLENGER_PROVIDER_MANIFEST_SHA256,
+    )
     with pytest.raises(
         TrainingModelActivationError,
         match="fresh loaded-model activation attestation failed",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=settings,
             expected_revision=1,
             effect_port=port,
@@ -1278,12 +1801,13 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
 @pytest.mark.asyncio
 async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
     result = await _promoted_comparison(tmp_path)
-    _, settings = _configured_model_settings(tmp_path)
-    await activate_attested_training_promotion(
+    store, settings = _configured_model_settings(tmp_path)
+    await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
     manual = settings.configure(
         {
@@ -1302,8 +1826,9 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
         TrainingModelActivationError,
         match="rejected by the active route authority",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=settings,
             expected_revision=3,
         )
@@ -1402,11 +1927,12 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    original = await activate_attested_training_promotion(
+    original = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
     assert original.activated_revision == 2
 
@@ -1441,8 +1967,9 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
             "FROM v01_model_promotions_v3"
         )
         conn.execute("DROP TABLE v01_model_promotions_v3")
+        _downgrade_task_binding_schema_without_artifact_pin(conn)
         conn.execute(
-            "DELETE FROM v01_model_settings_schema WHERE version = 3"
+            "DELETE FROM v01_model_settings_schema WHERE version >= 3"
         )
 
     reopened = V01ModelSettings(SQLiteStore(store.path))
@@ -1481,6 +2008,7 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     before = settings.snapshot()
     with store.connection() as conn:
         conn.execute("DROP TABLE v01_model_promotions")
+        _downgrade_task_binding_schema_without_artifact_pin(conn)
         conn.execute(
             "DELETE FROM v01_model_settings_schema WHERE version >= 2"
         )
@@ -1490,8 +2018,8 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     assert reopened.snapshot() == before
     with store.connection() as conn:
         assert conn.execute(
-            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version IN (2, 3)"
-        ).fetchone()[0] == 2
+            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version IN (2, 3, 4)"
+        ).fetchone()[0] == 3
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type = 'table' AND name = 'v01_model_promotions'"
@@ -1504,11 +2032,12 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    receipt = await activate_attested_training_promotion(
+    receipt = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
     with store.connection() as conn:
         conn.execute(

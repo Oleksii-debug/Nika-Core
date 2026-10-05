@@ -34,6 +34,7 @@ def _sha(payload: bytes) -> str:
 
 
 _HELD_OUT_SHA256 = _sha(b"held-out")
+_PROVIDER_MANIFEST_SHA256 = _sha(b"ollama-provider-manifest")
 
 
 def _script(tmp_path: Path, body: str, *, name: str = "evaluator.py") -> Path:
@@ -113,9 +114,15 @@ def _success_script(
     size_expression: str = "len(candidate)",
     descriptor_expression: str = 'request["binding"]["descriptor_digest"]',
     total_tokens_expression: str = "5",
+    provider_manifest_expression: str | None = None,
     extra_prefix: str = "",
     name: str = "evaluator.py",
 ) -> Path:
+    provider_manifest_line = (
+        f'    "provider_manifest_sha256": {provider_manifest_expression},\n'
+        if provider_manifest_expression is not None
+        else ""
+    )
     return _script(
         tmp_path,
         f"""
@@ -137,7 +144,7 @@ response = {{
     "loaded_artifact_sha256": {digest_expression},
     "loaded_artifact_size_bytes": {size_expression},
     "descriptor_digest": {descriptor_expression},
-    "usage": {{
+{provider_manifest_line}    "usage": {{
         "input_tokens": 2,
         "output_tokens": 3,
         "total_tokens": {total_tokens_expression},
@@ -233,6 +240,61 @@ async def test_real_subprocess_hashes_candidate_in_same_effect_and_gateway_accep
     assert response.usage.input_tokens == 2
     assert response.usage.output_tokens == 3
     assert response.usage.total_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_same_effect_provider_manifest_is_carried_separately(
+    tmp_path: Path,
+) -> None:
+    script = _success_script(
+        tmp_path,
+        provider_manifest_expression=repr(_PROVIDER_MANIFEST_SHA256),
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert result.attestation.artifact_sha256 == descriptor.sha256
+    assert result.attestation.provider_manifest_sha256 == _PROVIDER_MANIFEST_SHA256
+    assert result.attestation.provider_manifest_sha256 != descriptor.sha256
+
+
+@pytest.mark.asyncio
+async def test_legacy_evaluator_response_keeps_provider_manifest_absent(
+    tmp_path: Path,
+) -> None:
+    script = _success_script(tmp_path)
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert result.attestation.provider_manifest_sha256 is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "manifest_expression",
+    (
+        repr("not-a-sha256"),
+        repr("A" * 64),
+        "None",
+    ),
+)
+async def test_invalid_provider_manifest_is_unknown_after_evaluator_effect(
+    tmp_path: Path,
+    manifest_expression: str,
+) -> None:
+    script = _success_script(
+        tmp_path,
+        provider_manifest_expression=manifest_expression,
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 @pytest.mark.asyncio

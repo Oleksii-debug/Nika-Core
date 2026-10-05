@@ -48,6 +48,7 @@ def _sha(value: bytes) -> str:
 
 _ATTESTOR_ID = "fixture-attestor"
 _ATTESTOR_SHA256 = _sha(b"fixture-attestor-binary")
+_PROVIDER_MANIFEST_SHA256 = _sha(b"champion-provider-manifest")
 
 
 def _evaluation() -> EvaluationSet:
@@ -140,9 +141,15 @@ def _fixture(
 
 
 class _AttestedEffect:
-    def __init__(self, *, wrong_artifact: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        wrong_artifact: bool = False,
+        provider_manifest_sha256: str | None = None,
+    ) -> None:
         self.calls: list[str] = []
         self._wrong_artifact = wrong_artifact
+        self._provider_manifest_sha256 = provider_manifest_sha256
 
     async def complete_attested(
         self,
@@ -183,6 +190,7 @@ class _AttestedEffect:
                 descriptor_digest=binding.descriptor_digest,
                 attestor_id=_ATTESTOR_ID,
                 attestor_sha256=_ATTESTOR_SHA256,
+                provider_manifest_sha256=self._provider_manifest_sha256,
             ),
         )
 
@@ -214,6 +222,33 @@ async def test_complete_champion_benchmark_reuses_attested_runner(
     assert all(
         item.binding_sha256 == binding.binding_sha256
         for item in result.case_receipts
+    )
+    assert result.provider_manifest_sha256 is None
+    assert "provider_manifest_sha256" not in result.evidence_payload()
+
+
+@pytest.mark.asyncio
+async def test_champion_evidence_preserves_provider_manifest(
+    tmp_path: Path,
+) -> None:
+    binding, champion, evaluation = _fixture(tmp_path)
+    result = await run_attested_champion_benchmark(
+        binding=binding,
+        champion=champion,
+        evaluation_set=evaluation,
+        effect_port=_AttestedEffect(
+            provider_manifest_sha256=_PROVIDER_MANIFEST_SHA256,
+        ),
+        expected_attestor_id=_ATTESTOR_ID,
+        expected_attestor_sha256=_ATTESTOR_SHA256,
+    )
+
+    assert result.provider_manifest_sha256 == _PROVIDER_MANIFEST_SHA256
+    payload = result.evidence_payload()
+    assert payload["provider_manifest_sha256"] == _PROVIDER_MANIFEST_SHA256
+    assert all(
+        item["provider_manifest_sha256"] == _PROVIDER_MANIFEST_SHA256
+        for item in payload["case_receipts"]
     )
 
 

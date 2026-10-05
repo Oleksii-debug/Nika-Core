@@ -461,6 +461,16 @@ class AttestedTrainingComparisonResult:
         return challenger.evidence_sha256
 
     @property
+    def champion_provider_manifest_sha256(self) -> str | None:
+        champion, _, _ = self._canonical_authorities()
+        return champion.provider_manifest_sha256
+
+    @property
+    def challenger_provider_manifest_sha256(self) -> str | None:
+        _, challenger, _ = self._canonical_authorities()
+        return challenger.provider_manifest_sha256
+
+    @property
     def attestor_id(self) -> str:
         champion, _, _ = self._canonical_authorities()
         return champion.attestor_id
@@ -473,7 +483,7 @@ class AttestedTrainingComparisonResult:
     def evidence_payload(self) -> dict[str, object]:
         result = self.revalidated()
         snapshot = result.experiment_snapshot
-        return {
+        payload: dict[str, object] = {
             "schema": "nika-attested-training-comparison-v1",
             "experiment_id": snapshot.definition.experiment_id,
             "experiment_status": snapshot.status.value,
@@ -489,6 +499,15 @@ class AttestedTrainingComparisonResult:
             "observations_sha256": result.observations_sha256,
             "observation_count": len(snapshot.observations),
         }
+        if result.champion_provider_manifest_sha256 is not None:
+            payload["champion_provider_manifest_sha256"] = (
+                result.champion_provider_manifest_sha256
+            )
+        if result.challenger_provider_manifest_sha256 is not None:
+            payload["challenger_provider_manifest_sha256"] = (
+                result.challenger_provider_manifest_sha256
+            )
+        return payload
 
     @property
     def evidence_sha256(self) -> str:

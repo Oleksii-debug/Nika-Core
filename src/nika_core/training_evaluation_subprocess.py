@@ -569,6 +569,11 @@ class RegistrySubprocessLoadedModelAttestor:
                 total_tokens=usage["total_tokens"],
             ),
         )
+        provider_manifest_sha256 = response_data.get("provider_manifest_sha256")
+        assert (
+            provider_manifest_sha256 is None
+            or type(provider_manifest_sha256) is str
+        )
         attestation = LoadedModelArtifactAttestation(
             request_id=canonical_request.request_id,
             binding_sha256=canonical_binding.binding_sha256,
@@ -578,6 +583,7 @@ class RegistrySubprocessLoadedModelAttestor:
             descriptor_digest=response_data["descriptor_digest"],
             attestor_id=self._attestor_id,
             attestor_sha256=self._attestor_sha256,
+            provider_manifest_sha256=provider_manifest_sha256,
         )
         return AttestedModelCompletionResult(
             response=model_response,
@@ -937,7 +943,14 @@ class RegistrySubprocessLoadedModelAttestor:
             "descriptor_digest",
             "usage",
         }
-        if type(response) is not dict or set(response) != expected_keys:
+        if type(response) is not dict:
+            response_keys: set[str] = set()
+        else:
+            response_keys = set(response)
+        if (
+            response_keys != expected_keys
+            and response_keys != expected_keys | {"provider_manifest_sha256"}
+        ):
             raise _error(
                 ModelErrorCode.PROVIDER_ERROR,
                 "evaluation subprocess returned an invalid response schema",
@@ -976,6 +989,20 @@ class RegistrySubprocessLoadedModelAttestor:
                 provider_id=binding.challenger_provider_id,
                 effect=ModelFailureEffect.UNKNOWN,
             )
+
+        if "provider_manifest_sha256" in response:
+            try:
+                response["provider_manifest_sha256"] = _validate_sha256(
+                    response["provider_manifest_sha256"],
+                    name="provider_manifest_sha256",
+                )
+            except ValueError as exc:
+                raise _error(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "evaluation subprocess returned an invalid provider manifest",
+                    provider_id=binding.challenger_provider_id,
+                    effect=ModelFailureEffect.UNKNOWN,
+                ) from exc
 
         response_text = response["text"]
         if type(response_text) is not str or not response_text:
