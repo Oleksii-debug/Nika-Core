@@ -1191,6 +1191,7 @@ class SubprocessTrainingWorker:
         writer.start()
 
         timed_out: subprocess.TimeoutExpired | None = None
+        containment_established = True
         try:
             returncode = process.wait(timeout=remaining_timeout)
         except subprocess.TimeoutExpired as exc:
@@ -1200,6 +1201,8 @@ class SubprocessTrainingWorker:
                 returncode = process.wait(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 returncode = process.returncode
+        else:
+            containment_established = terminate_process_tree(process, job)
 
         reader.join(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
         writer.join(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
@@ -1250,8 +1253,12 @@ class SubprocessTrainingWorker:
                 "training_subprocess_request_write_failed",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
+        if not containment_established:
+            raise _error(
+                "training_subprocess_containment_cleanup_failed",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
 
-        terminate_process_tree(process, job)
         return bytes(captured)
 
     def _parse_response(
