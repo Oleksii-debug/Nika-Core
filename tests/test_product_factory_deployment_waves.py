@@ -274,3 +274,94 @@ def test_sixty_service_three_wave_restart_scale_is_deterministic() -> None:
     assert sum(item.state is OperationState.SUCCEEDED for item in second.services) == 40
     assert third.state is RolloutState.SUCCEEDED
     assert all(item.state is OperationState.SUCCEEDED for item in third.services)
+
+
+@pytest.mark.parametrize("wave", [True, False, 1.5, float("nan"), float("inf"), "1"])
+def test_plan_rejects_ambiguous_wave_index(wave: object) -> None:
+    with pytest.raises(DeploymentWaveError, match="nonnegative integer"):
+        replace(_execution("api"), wave=wave)
+
+
+def test_restore_rejects_swapped_service_ids_before_mutating_execution() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"), _execution("db")))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    original = snapshot.plans[0]
+    first, second = original.services
+    swapped = (
+        replace(first, service_id=second.service_id),
+        replace(second, service_id=first.service_id),
+    )
+    corrupted = replace(snapshot, plans=(replace(original, services=swapped),))
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+    with pytest.raises(DeploymentWaveError, match="service identity"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert all(record.state is OperationState.PENDING for record in executions.records.values())
+
+
+def test_restore_rejects_changed_wave_for_correct_operation() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    coordinator, _ = _coordinator()
+    coordinator.submit(plan)
+    snapshot = coordinator.snapshot()
+    record = snapshot.plans[0]
+    bad = replace(record.services[0], wave=1)
+    corrupted = replace(snapshot, plans=(replace(record, services=(bad,)),))
+
+    target, _ = _coordinator()
+    with pytest.raises(DeploymentWaveError, match="service identity"):
+        target.restore(corrupted)
+
+
+def test_restore_rejects_changed_execution_spec_with_same_operation_id() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    coordinator, _ = _coordinator()
+    coordinator.submit(plan)
+    snapshot = coordinator.snapshot()
+    execution = snapshot.execution.records[0]
+    corrupted_spec = replace(execution.spec, credential_scope="unapproved:scope")
+    corrupted_execution = replace(execution, spec=corrupted_spec)
+    corrupted = replace(
+        snapshot,
+        execution=replace(snapshot.execution, records=(corrupted_execution,)),
+    )
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+    with pytest.raises(DeploymentWaveError, match="execution specification"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert all(record.state is OperationState.PENDING for record in executions.records.values())
+
+
+def test_restore_rejects_forged_successful_summary_with_pending_service() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    coordinator, _ = _coordinator()
+    coordinator.submit(plan)
+    snapshot = coordinator.snapshot()
+    forged = replace(snapshot.plans[0], state=RolloutState.SUCCEEDED)
+    corrupted = replace(snapshot, plans=(forged,))
+
+    target, _ = _coordinator()
+    with pytest.raises(DeploymentWaveError, match="summary"):
+        target.restore(corrupted)
+
+
+def test_restore_rejects_ambiguous_attempt_even_when_python_equality_matches() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    coordinator, _ = _coordinator()
+    coordinator.submit(plan)
+    snapshot = coordinator.snapshot()
+    record = snapshot.plans[0]
+    forged = replace(record.services[0], attempt=False)
+    corrupted = replace(snapshot, plans=(replace(record, services=(forged,)),))
+
+    target, _ = _coordinator()
+    with pytest.raises(DeploymentWaveError, match="execution snapshot"):
+        target.restore(corrupted)

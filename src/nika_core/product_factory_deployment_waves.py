@@ -34,8 +34,8 @@ class ServiceRolloutSpec:
     def __post_init__(self) -> None:
         if not self.service_id.strip():
             raise DeploymentWaveError("service identity must not be empty")
-        if self.wave < 0:
-            raise DeploymentWaveError("wave index must not be negative")
+        if type(self.wave) is not int or self.wave < 0:
+            raise DeploymentWaveError("wave index must be a nonnegative integer")
         if len(self.depends_on) != len(set(self.depends_on)):
             raise DeploymentWaveError("service dependencies must not contain duplicates")
         if self.service_id in self.depends_on:
@@ -178,6 +178,12 @@ class DeploymentWaveCoordinator:
         return DeploymentWaveSnapshot(tuple(plans), execution)
 
     def restore(self, snapshot: DeploymentWaveSnapshot) -> None:
+        if type(snapshot) is not DeploymentWaveSnapshot:
+            raise DeploymentWaveError("invalid rollout snapshot")
+        if type(snapshot.plans) is not tuple or type(snapshot.execution) is not DeploymentExecutionSnapshot:
+            raise DeploymentWaveError("invalid rollout snapshot structure")
+        if any(type(record) is not DeploymentWaveRecord for record in snapshot.plans):
+            raise DeploymentWaveError("invalid rollout snapshot plan record")
         plan_ids = [record.plan.plan_id for record in snapshot.plans]
         if len(plan_ids) != len(set(plan_ids)):
             raise DeploymentWaveError("rollout snapshot contains duplicate plans")
@@ -187,6 +193,9 @@ class DeploymentWaveCoordinator:
         }
         restored: dict[str, DeploymentWaveRecord] = {}
         for record in snapshot.plans:
+            if type(record.plan) is not DeploymentWavePlan or type(record.services) is not tuple:
+                raise DeploymentWaveError("invalid rollout snapshot plan structure")
+            planned = {service.service_id: service for service in record.plan.services}
             expected = {service.execution.operation_id for service in record.plan.services}
             actual = {service.operation_id for service in record.services}
             if expected != actual:
@@ -196,13 +205,29 @@ class DeploymentWaveCoordinator:
             if len(record.services) != len(record.plan.services):
                 raise DeploymentWaveError("rollout snapshot service set is inconsistent")
             for service in record.services:
-                execution_record = execution_records[service.operation_id]
+                if type(service) is not ServiceRolloutRecord:
+                    raise DeploymentWaveError("invalid rollout snapshot service record")
+                spec = planned.get(service.service_id)
                 if (
-                    service.state != execution_record.state
+                    spec is None
+                    or service.operation_id != spec.execution.operation_id
+                    or type(service.wave) is not int
+                    or service.wave != spec.wave
+                ):
+                    raise DeploymentWaveError("rollout snapshot service identity is inconsistent")
+                execution_record = execution_records[service.operation_id]
+                if execution_record.spec != spec.execution:
+                    raise DeploymentWaveError("rollout snapshot execution specification changed")
+                if (
+                    type(service.state) is not OperationState
+                    or service.state is not execution_record.state
+                    or type(service.attempt) is not int
                     or service.attempt != execution_record.attempt
                     or service.evidence_refs != execution_record.evidence_refs
                 ):
                     raise DeploymentWaveError("rollout snapshot disagrees with execution snapshot")
+            if record.state is not self._summarize(record).state:
+                raise DeploymentWaveError("rollout snapshot summary is inconsistent")
             restored[record.plan.plan_id] = record
 
         self.executions.restore(snapshot.execution)
