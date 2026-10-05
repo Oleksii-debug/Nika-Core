@@ -193,7 +193,7 @@ async def _bind_promotion_manifests(
     manifest_authority: OllamaManifestAuthority,
     base_prepared_model: OllamaPreparedModelBinding,
     challenger_prepared_model: OllamaPreparedModelBinding,
-) -> None:
+) -> tuple[OllamaPreparedModelBinding, OllamaPreparedModelBinding]:
     if type(manifest_store) is not OllamaPromotionManifestStore:
         raise TypeError("manifest_store must be an exact OllamaPromotionManifestStore")
     if type(manifest_authority) is not OllamaManifestAuthority:
@@ -217,6 +217,22 @@ async def _bind_promotion_manifests(
             "prepared Ollama manifest evidence does not match the training binding"
         )
     if (
+        canonical.champion_provider_manifest_sha256 is None
+        or canonical.challenger_provider_manifest_sha256 is None
+    ):
+        raise TrainingModelActivationError(
+            "comparison lacks provider manifest evidence required for activation"
+        )
+    if (
+        base.provider_manifest_sha256
+        != canonical.champion_provider_manifest_sha256
+        or challenger.provider_manifest_sha256
+        != canonical.challenger_provider_manifest_sha256
+    ):
+        raise TrainingModelActivationError(
+            "prepared Ollama manifests do not match evaluated provider manifests"
+        )
+    if (
         base.endpoint_sha256 != challenger.endpoint_sha256
         or base.endpoint_sha256 != manifest_authority.endpoint_sha256
     ):
@@ -236,6 +252,7 @@ async def _bind_promotion_manifests(
         raise TrainingModelActivationError(
             "prepared Ollama provider manifest could not be revalidated"
         ) from exc
+    return base, challenger
 
 
 def _require_persisted_promotion_manifests(
@@ -258,7 +275,7 @@ def _require_persisted_promotion_manifests(
             "active Ollama endpoint is unavailable for provider manifest recovery"
         )
     try:
-        manifest_store.resolve(
+        base = manifest_store.resolve(
             decision_sha256=canonical.evidence_sha256,
             binding_sha256=training.binding_sha256,
             role="rollback",
@@ -267,7 +284,7 @@ def _require_persisted_promotion_manifests(
             route_model_id=training.base_model_id,
             base_url=base_url,
         )
-        manifest_store.resolve(
+        challenger = manifest_store.resolve(
             decision_sha256=canonical.evidence_sha256,
             binding_sha256=training.binding_sha256,
             role="challenger",
@@ -280,6 +297,17 @@ def _require_persisted_promotion_manifests(
         raise TrainingModelActivationError(
             "existing promotion lacks valid durable Ollama provider manifest authority"
         ) from exc
+    if (
+        canonical.champion_provider_manifest_sha256 is None
+        or canonical.challenger_provider_manifest_sha256 is None
+        or base.provider_manifest_sha256
+        != canonical.champion_provider_manifest_sha256
+        or challenger.provider_manifest_sha256
+        != canonical.challenger_provider_manifest_sha256
+    ):
+        raise TrainingModelActivationError(
+            "durable Ollama manifests do not match evaluated provider manifests"
+        )
 
 
 async def activate_attested_training_promotion(
@@ -370,7 +398,7 @@ async def activate_attested_training_promotion(
         raise TrainingModelActivationError(
             "prepared Ollama provider manifest authority is required before activation"
         )
-    await _bind_promotion_manifests(
+    _, prepared_challenger = await _bind_promotion_manifests(
         canonical=canonical,
         training=training,
         manifest_store=manifest_store,
@@ -395,6 +423,13 @@ async def activate_attested_training_promotion(
         raise TrainingModelActivationError(
             "fresh loaded-model activation attestation failed"
         ) from exc
+    if (
+        attested.attestation.revalidated().provider_manifest_sha256
+        != prepared_challenger.provider_manifest_sha256
+    ):
+        raise TrainingModelActivationError(
+            "fresh loaded-model provider manifest does not match prepared authority"
+        )
 
     return _apply_promotion(
         canonical=canonical,
