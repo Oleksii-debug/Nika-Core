@@ -524,3 +524,38 @@ def test_outer_evidence_rejects_duplicate_json_keys(tmp_path: Path) -> None:
         artifact_reference="ref",
         expected_product_version=PRODUCT_VERSION,
     ) == ("distributable:invalid-evidence",)
+
+def test_snapshot_open_uses_nonblocking_descriptor_flag(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = tmp_path / "payload.bin"
+    payload.write_bytes(b"payload")
+    original_open = release_module.os.open
+    observed_flags: list[int] = []
+
+    def capture_open(
+        path: str | bytes | Path,
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        observed_flags.append(flags)
+        if dir_fd is None:
+            return original_open(path, flags, mode)
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(release_module.os, "open", capture_open)
+
+    snapshot = release_module._stable_release_file_snapshot(
+        payload,
+        scan_secrets=False,
+    )
+
+    assert snapshot is not None
+    assert observed_flags
+    nonblock = getattr(release_module.os, "O_NONBLOCK", 0)
+    if nonblock:
+        assert observed_flags[0] & nonblock
+
