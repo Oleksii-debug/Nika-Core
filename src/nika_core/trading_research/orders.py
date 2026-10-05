@@ -148,7 +148,10 @@ class RiskApprovedOrder:
             raise TradingResearchError("approval cannot precede authority slice")
         if approved_at < self.authority.submitted_at:
             raise TradingResearchError("approval cannot precede authority time")
-        if self.intent.expires_at is not None and self.intent.expires_at <= self.authority.submitted_at:
+        if (
+            self.intent.expires_at is not None
+            and self.intent.expires_at <= self.authority.submitted_at
+        ):
             raise TradingResearchError("intent expiry must be later than host submission")
         object.__setattr__(self, "approved_at", approved_at)
 
