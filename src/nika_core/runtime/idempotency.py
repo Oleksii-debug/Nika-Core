@@ -139,9 +139,9 @@ def _snapshot_json_value(
 def _serialize_result(result: Mapping[str, Any] | None) -> str | None:
     if result is None:
         return None
-    if not isinstance(result, Mapping):
-        raise TypeError("idempotency result must be a mapping when provided")
-    payload = _snapshot_json_value(dict(result))
+    if type(result) is not dict:
+        raise TypeError("idempotency result must use an exact built-in dict when provided")
+    payload = _snapshot_json_value(result)
     try:
         serialized = json.dumps(
             payload,

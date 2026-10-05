@@ -24,6 +24,16 @@ class _BehavioralDict(dict):
     def items(self):
         raise AssertionError("behavioral dict.items() must not execute")
 
+    def keys(self):
+        raise AssertionError("behavioral dict.keys() must not execute")
+
+    def __iter__(self):
+        raise AssertionError("behavioral dict.__iter__() must not execute")
+
+    def __getitem__(self, key):
+        del key
+        raise AssertionError("behavioral dict.__getitem__() must not execute")
+
 
 class _BehavioralList(list):
     def __iter__(self):
@@ -138,6 +148,20 @@ def test_complete_rejects_behavioral_json_containers_without_executing_them(
 
     with pytest.raises(ValueError, match="containers must use exact built-in types"):
         ledger.complete("effect:1", result)
+
+    persisted = ledger.require("effect:1")
+    assert persisted.status is IdempotencyStatus.PENDING
+    assert persisted.result is None
+
+
+def test_complete_rejects_behavioral_root_mapping_without_executing_it(tmp_path) -> None:
+    store, task_id = _store_with_task(tmp_path)
+    ledger = IdempotencyLedger(store)
+    _reserve(ledger, task_id)
+    hostile = _BehavioralDict({"safe": "value"})
+
+    with pytest.raises(TypeError, match="exact built-in dict"):
+        ledger.complete("effect:1", hostile)
 
     persisted = ledger.require("effect:1")
     assert persisted.status is IdempotencyStatus.PENDING
