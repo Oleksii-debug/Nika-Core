@@ -392,9 +392,16 @@ class ProductFactoryProgramHost:
         request = _request_for_component(coordinator, component_id)
         lease = self._acquire(request)
         before = coordinator.snapshot()
+        prior_record = _record_for_component_snapshot(before, component_id)
         try:
             updated = coordinator.review(component_id, decision)
-            self._save_fenced(host_task_id, binding, coordinator, lease)
+            self._save_after_completed_result(
+                host_task_id=host_task_id,
+                binding=binding,
+                coordinator=coordinator,
+                lease=lease,
+                prior_record=prior_record,
+            )
         except Exception:
             coordinator.restore(before)
             raise
@@ -415,9 +422,16 @@ class ProductFactoryProgramHost:
         prior_request = _request_for_component(coordinator, component_id)
         lease = self._acquire(prior_request)
         before = coordinator.snapshot()
+        prior_record = _record_for_component_snapshot(before, component_id)
         try:
             request = coordinator.prepare_repair(component_id, base_sha=base_sha, reason=reason)
-            self._save_fenced(host_task_id, binding, coordinator, lease)
+            self._save_after_completed_result(
+                host_task_id=host_task_id,
+                binding=binding,
+                coordinator=coordinator,
+                lease=lease,
+                prior_record=prior_record,
+            )
         except Exception:
             coordinator.restore(before)
             raise
@@ -1190,6 +1204,45 @@ class ProductFactoryProgramHost:
                 coordinator=coordinator,
             )
 
+    def _save_after_completed_result(
+        self,
+        *,
+        host_task_id: str,
+        binding: ProductProjectCoordinatorBinding,
+        coordinator: ProductFactoryCoordinator,
+        lease: WorkOwnershipLease,
+        prior_record: WorkRecord,
+    ) -> None:
+        if prior_record.result is None:
+            raise ProductFactoryProgramError(
+                "downstream Product Factory transition requires durable worker result"
+            )
+        operation_key = _operation_key(prior_record.request)
+        with self.store.connection() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            self._assert_lease(connection, lease)
+            current = self._require_matching_operation(
+                connection,
+                operation_key=operation_key,
+                host_task_id=host_task_id,
+                request=prior_record.request,
+            )
+            if current.status is not IdempotencyStatus.COMPLETED:
+                raise ProductFactoryProgramError(
+                    "worker operation must be completed before downstream transition"
+                )
+            self._require_checkpointed_result(
+                connection,
+                host_task_id=host_task_id,
+                record=prior_record,
+            )
+            self._checkpoint_on_connection(
+                connection,
+                host_task_id=host_task_id,
+                binding=binding,
+                coordinator=coordinator,
+            )
+
     def _save_and_mark_uncertain(
         self,
         *,
@@ -1555,6 +1608,22 @@ class _BorrowedSQLiteStore:
     @contextmanager
     def connection(self) -> Iterator:
         yield self._connection
+
+
+def _record_for_component_snapshot(
+    snapshot,
+    component_id: str,
+) -> WorkRecord:
+    try:
+        return next(
+            record
+            for record in snapshot.records
+            if record.request.component_id == component_id
+        )
+    except StopIteration as exc:
+        raise ProductFactoryProgramError(
+            f"unknown Product Factory component: {component_id}"
+        ) from exc
 
 
 def _request_for_component(
