@@ -77,6 +77,28 @@ def test_config_rejects_unknown_top_level_field(tmp_path: Path) -> None:
         driver.PhysicalPilotConfig.from_json(json.dumps(payload))
 
 
+def test_config_rejects_identifier_beyond_runtime_bound(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    payload["job_id"] = "j" * 513
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="incompatible with TrainingJobSpec",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_rejects_candidate_equal_to_base(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    payload["candidate_artifact_ref"] = payload["base_artifact_ref"]
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="incompatible with TrainingJobSpec",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
 def test_config_rejects_missing_runtime_distribution(tmp_path: Path) -> None:
     payload = _payload(tmp_path)
     runtime_versions = payload["runtime_versions"]

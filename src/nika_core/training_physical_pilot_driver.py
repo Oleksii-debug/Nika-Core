@@ -369,7 +369,7 @@ class PhysicalPilotConfig:
             )
             for key in sorted(_RUNTIME_VERSION_KEYS)
         )
-        return cls(
+        config = cls(
             workspace_id=_require_text(value["workspace_id"], name="workspace_id"),
             project_id=_require_text(value["project_id"], name="project_id"),
             owner_id=_require_text(value["owner_id"], name="owner_id"),
@@ -404,6 +404,24 @@ class PhysicalPilotConfig:
             resource_budget=ResourceBudgetConfig.from_value(value["resource_budget"]),
             trainer_parameters=TrainerParameters.from_value(value["trainer_parameters"]),
         )
+        try:
+            TrainingJobSpec(
+                job_id=config.job_id,
+                task_id="physical-pilot-preflight",
+                project_id=config.project_id,
+                owner_id=config.owner_id,
+                base_artifact=ArtifactIdentity(config.base_artifact_ref, "0" * 64),
+                frozen_package_sha256=config.frozen_package_sha256,
+                training_material_sha256="0" * 64,
+                scale_authorization_sha256="0" * 64,
+                candidate_artifact_ref=config.candidate_artifact_ref,
+                max_steps=2,
+            )
+        except (TypeError, ValueError) as exc:
+            raise PhysicalPilotDriverError(
+                "physical pilot identifiers are incompatible with TrainingJobSpec"
+            ) from exc
+        return config
 
 
 def _is_windows() -> bool:
