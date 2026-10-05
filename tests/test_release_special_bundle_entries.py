@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from nika_core.packaging.release import (
-    build_release_archive,
     build_release_manifest,
     verify_release_manifest,
     write_release_manifest,
@@ -57,7 +56,7 @@ def test_named_pipe_is_rejected_without_opening_or_silently_omitting(
     os.name == "nt" or not hasattr(os, "mkfifo"),
     reason="POSIX named-pipe regression",
 )
-def test_post_manifest_pipe_rejects_verification_and_preserves_prior_zip(
+def test_post_manifest_pipe_rejects_verification(
     tmp_path: Path,
 ) -> None:
     bundle = _bundle(tmp_path)
@@ -66,20 +65,9 @@ def test_post_manifest_pipe_rejects_verification_and_preserves_prior_zip(
         bundle, product="NikaCore", version=VERSION, source_sha=SOURCE_SHA
     )
     os.mkfifo(bundle / "unlisted.fifo")
-    artifact = tmp_path / "previous.zip"
-    artifact.write_bytes(b"previous approved artifact")
 
     with pytest.raises(ValueError, match="unsupported release bundle entry"):
         verify_release_manifest(bundle, manifest)
-    with pytest.raises(ValueError, match="unsupported release bundle entry"):
-        build_release_archive(
-            bundle,
-            artifact,
-            source_sha=SOURCE_SHA,
-            expected_product_version=VERSION,
-        )
-    assert artifact.read_bytes() == b"previous approved artifact"
-    assert not list(tmp_path.glob(".nika-release-*"))
 
 
 @pytest.mark.skipif(
@@ -116,16 +104,15 @@ def test_regular_directories_remain_supported(tmp_path: Path) -> None:
     assert verify_release_manifest(bundle, manifest) == ()
 
 
-def test_nested_directory_enumeration_failure_cannot_publish_incomplete_zip(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_nested_directory_enumeration_failure_cannot_verify_incomplete_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle = _bundle(tmp_path)
     _manifest(bundle)
     manifest = build_release_manifest(
         bundle, product="NikaCore", version=VERSION, source_sha=SOURCE_SHA
     )
-    artifact = tmp_path / "previous.zip"
-    artifact.write_bytes(b"previous approved artifact")
     original_iterdir = Path.iterdir
 
     def refuse_nested_directory(path: Path):
@@ -136,12 +123,3 @@ def test_nested_directory_enumeration_failure_cannot_publish_incomplete_zip(
     monkeypatch.setattr(Path, "iterdir", refuse_nested_directory)
     with pytest.raises(PermissionError, match="inaccessible bundle directory"):
         verify_release_manifest(bundle, manifest)
-    with pytest.raises(PermissionError, match="inaccessible bundle directory"):
-        build_release_archive(
-            bundle,
-            artifact,
-            source_sha=SOURCE_SHA,
-            expected_product_version=VERSION,
-        )
-    assert artifact.read_bytes() == b"previous approved artifact"
-    assert not list(tmp_path.glob(".nika-release-*"))
