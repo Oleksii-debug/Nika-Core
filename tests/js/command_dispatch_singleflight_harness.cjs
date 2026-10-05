@@ -65,7 +65,7 @@ async function main() {
     focusElementById: (id) => {focusIds.push(id); return true;},
     dispatchAutostart: async () => {throw Error("autostart is a separate command boundary");},
   };
-  const ui = factory(context);
+  let ui = factory(context);
   let completeFirst;
   bridge = () => new Promise((resolve) => {completeFirst = resolve;});
   const first = ui.dispatch("task.create", trigger);
@@ -130,27 +130,39 @@ async function main() {
   assert(messages.at(-1)[0].includes("Попередню команду"));
   finishStateReconcile(true);
   await uncertainDispatch;
-  assert(messages.at(-1)[0].includes("Стан перечитано"));
+  assert(messages.at(-1)[0].includes("Повтор заблоковано до перезапуску"));
   assert.equal(stateReadOptions.at(-1).requireCurrentGeneration, true);
   assert(!JSON.stringify(messages).includes("SECRET_CONNECTION_DETAIL"));
   assert(focusCount > 0, "keyboard focus restored after uncertain reconciliation");
-  console.log("PASS: transport-uncertain task remains locked until successful state reconciliation");
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(requests.length, 6, "current-generation state reread must not authorize a fresh durable task mutation");
+  assert(messages.at(-1)[0].includes("Попередню команду"));
+  console.log("PASS: transport-uncertain durable task remains locked after current-generation reread");
+  ui = factory(context);
 
   stateRead = async () => true;
   bridge = async () => ({status: "unexpected", message: "false success"});
   await ui.dispatch("task.create", trigger);
   assert.equal(requests.length, 7, "malformed acknowledgement must not blind-retry");
-  assert(messages.at(-1)[0].includes("Стан перечитано"));
+  assert(messages.at(-1)[0].includes("Повтор заблоковано до перезапуску"));
   assert(!logs.includes("false success"), "malformed acknowledgement message is not trusted");
-  console.log("PASS: malformed acknowledgement reconciles current state before retry");
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(requests.length, 7, "malformed durable acknowledgement must remain locked after current-generation reread");
+  console.log("PASS: malformed durable acknowledgement remains locked after reconciliation");
+  ui = factory(context);
 
-  bridge = async () => ({status: "completed", message: "Записано."});
+  bridge = async () => ({status: "accepted", message: "Записано."});
   stateRead = async () => false;
   await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, 8);
   assert.equal(context.document.documentElement.dataset.nikaReady, "false");
-  assert(messages.at(-1)[0].includes("Дію підтверджено"));
+  assert(messages.at(-1)[0].includes("Повтор заблоковано до перезапуску"));
   assert(logs.includes("Записано."));
-  console.log("PASS: confirmed effect distinguished from stale projection");
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, 8, "confirmed accepted effect with stale projection must not mint a new request");
+  assert(messages.at(-1)[0].includes("Попередню команду"));
+  console.log("PASS: confirmed accepted effect with stale projection retains durable mutation lock");
+  ui = factory(context);
 
   const requestsBeforeStrictFailure = requests.length;
   bridge = async () => {throw Error("UNCERTAIN_AFTER_READY_STATE");};
