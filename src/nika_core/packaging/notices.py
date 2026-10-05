@@ -331,9 +331,7 @@ def _sections(text: str) -> tuple[dict[str, str], tuple[str, ...]]:
                 raise ValueError("empty third-party notice section")
             continue
         if title is None:
-            if line:
-                raise ValueError("content before first third-party notice section")
-            continue
+            raise ValueError("content before first third-party notice section")
         if body.tell():
             body.write("\n")
         body.write(line)
