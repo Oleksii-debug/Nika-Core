@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import os
 import sqlite3
 import stat
@@ -27,6 +28,10 @@ from nika_core.reliability.recovery_lease import (
 _MANIFEST_VERSION = 1
 _RESTORE_MARKER_VERSION = 1
 _RESTORE_STATE_VERSION = b"nika-sqlite-restore-state-v2\x00"
+_RECOVERY_METADATA_MAX_BYTES = 1024 * 1024
+_RECOVERY_METADATA_MAX_DEPTH = 64
+_RECOVERY_METADATA_MAX_NODES = 10_000
+_RECOVERY_METADATA_MAX_INT_BITS = 4096
 
 
 class BackupRecoveryError(RuntimeError):
@@ -208,15 +213,24 @@ class SQLiteRecoveryManager:
         }
         if set(manifest) != expected:
             raise BackupVerificationError("backup manifest has unexpected or missing fields")
-        if manifest["format_version"] != _MANIFEST_VERSION:
+        format_version = manifest["format_version"]
+        if (
+            not isinstance(format_version, int)
+            or isinstance(format_version, bool)
+            or format_version != _MANIFEST_VERSION
+        ):
             raise BackupVerificationError("unsupported backup manifest format")
         if manifest["database_file"] != database.name:
             raise BackupVerificationError("backup manifest does not match database filename")
-        try:
-            size = int(manifest["size_bytes"])
-            schema = int(manifest["schema_version"])
-        except (TypeError, ValueError) as exc:
-            raise BackupVerificationError("backup manifest numeric fields are invalid") from exc
+        size = manifest["size_bytes"]
+        schema = manifest["schema_version"]
+        if (
+            not isinstance(size, int)
+            or isinstance(size, bool)
+            or not isinstance(schema, int)
+            or isinstance(schema, bool)
+        ):
+            raise BackupVerificationError("backup manifest numeric fields are invalid")
         if size <= 0 or database.stat().st_size != size:
             raise BackupVerificationError("backup database size does not match manifest")
 
@@ -728,7 +742,12 @@ class SQLiteRecoveryManager:
             raise RestoreSafetyError(
                 "interrupted restore marker has unexpected or missing fields"
             )
-        if marker["format_version"] != _RESTORE_MARKER_VERSION:
+        format_version = marker["format_version"]
+        if (
+            not isinstance(format_version, int)
+            or isinstance(format_version, bool)
+            or format_version != _RESTORE_MARKER_VERSION
+        ):
             raise RestoreSafetyError("unsupported interrupted restore marker format")
         if marker["target_file"] != target.name:
             raise RestoreSafetyError("interrupted restore marker targets another database")
@@ -1189,9 +1208,62 @@ class SQLiteRecoveryManager:
 
     @staticmethod
     def _read_json(path: Path) -> dict[str, Any]:
+        def reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate JSON object key: {key}")
+                result[key] = value
+            return result
+
+        def reject_non_finite(token: str) -> None:
+            raise ValueError(f"non-finite JSON number: {token}")
+
+        def parse_int(token: str) -> int:
+            value = int(token)
+            if value.bit_length() > _RECOVERY_METADATA_MAX_INT_BITS:
+                raise ValueError("JSON integer exceeds recovery metadata limit")
+            return value
+
+        def parse_float(token: str) -> float:
+            value = float(token)
+            if not math.isfinite(value):
+                raise ValueError("non-finite JSON number")
+            return value
+
         try:
-            content = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            with path.open("rb") as handle:
+                raw = handle.read(_RECOVERY_METADATA_MAX_BYTES + 1)
+            if len(raw) > _RECOVERY_METADATA_MAX_BYTES:
+                raise ValueError("JSON recovery metadata exceeds byte limit")
+            text = raw.decode("utf-8")
+            content = json.loads(
+                text,
+                object_pairs_hook=reject_duplicate_pairs,
+                parse_constant=reject_non_finite,
+                parse_int=parse_int,
+                parse_float=parse_float,
+            )
+            nodes = 0
+            pending: list[tuple[Any, int]] = [(content, 1)]
+            while pending:
+                value, depth = pending.pop()
+                nodes += 1
+                if nodes > _RECOVERY_METADATA_MAX_NODES:
+                    raise ValueError("JSON recovery metadata exceeds node limit")
+                if depth > _RECOVERY_METADATA_MAX_DEPTH:
+                    raise ValueError("JSON recovery metadata exceeds nesting limit")
+                if isinstance(value, dict):
+                    pending.extend((child, depth + 1) for child in value.values())
+                elif isinstance(value, list):
+                    pending.extend((child, depth + 1) for child in value)
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            RecursionError,
+            ValueError,
+        ) as exc:
             raise BackupVerificationError(
                 f"JSON recovery metadata is unreadable: {path.name}"
             ) from exc
