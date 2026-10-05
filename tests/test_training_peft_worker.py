@@ -151,6 +151,7 @@ def _config(tmp_path: Path, request: peft.ParsedRequest, base: bytes) -> peft.Tr
         lora_alpha=8,
         lora_dropout=0.0,
         lora_target_modules=("q_proj", "v_proj"),
+        torch_num_threads=2,
         seed=7,
     )
 
@@ -468,6 +469,11 @@ class _FakeTrainingArguments:
     def __init__(self, **kwargs: object) -> None:
         self.output_dir = kwargs["output_dir"]
         self.max_steps = kwargs["max_steps"]
+        assert kwargs["use_cpu"] is True
+        assert kwargs["full_determinism"] is True
+        assert kwargs["dataloader_num_workers"] == 0
+        assert kwargs["dataloader_pin_memory"] is False
+        assert kwargs["optim"] == "adamw_torch"
 
 
 class _FakeTrainer:
@@ -497,7 +503,11 @@ def _fake_stack() -> tuple[object, ...]:
         cuda=SimpleNamespace(
             is_available=lambda: False,
             empty_cache=lambda: None,
-        )
+        ),
+        set_num_threads=lambda value: value == 2
+        or (_ for _ in ()).throw(AssertionError("unexpected torch thread count")),
+        use_deterministic_algorithms=lambda enabled: enabled is True
+        or (_ for _ in ()).throw(AssertionError("determinism must be enabled")),
     )
     return (
         torch,
@@ -599,6 +609,7 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
         lora_alpha=32,
         lora_dropout=0.1,
         lora_target_modules=("q_proj", "k_proj", "v_proj"),
+        torch_num_threads=3,
         seed=99,
     )
 
@@ -610,6 +621,7 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     )
     assert environment["NIKA_TRAINER_LORA_TARGET_MODULES"] == "q_proj,k_proj,v_proj"
     assert environment["NIKA_TRAINER_MAX_RECORDS"] == "123"
+    assert environment["NIKA_TRAINER_TORCH_NUM_THREADS"] == "3"
     for distribution, environment_key in peft._TRAINING_RUNTIME_DISTRIBUTIONS:
         assert environment[environment_key] == _RUNTIME_VERSIONS[distribution]
 
@@ -620,7 +632,29 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
         "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"
     ]
     assert loaded.lora_r == 16
+    assert loaded.torch_num_threads == 3
     assert loaded.seed == 99
+
+
+def test_environment_builder_rejects_invalid_torch_thread_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
+
+    with pytest.raises(ValueError, match="torch_num_threads"):
+        peft.build_trainer_environment(
+            base_gguf=config.base_gguf,
+            model_dir=config.model_dir,
+            output_root=config.output_root,
+            torch_num_threads=0,
+        )
 
 
 def test_read_config_rejects_training_runtime_version_drift(
