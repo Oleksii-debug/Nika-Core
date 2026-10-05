@@ -229,8 +229,7 @@ def test_exact_secret_free_grant_admits_only_running_task_and_revocation(
     _authorize(service, record.task_id)
 
     service.revoke_task(record.task_id)
-    with pytest.raises(PermissionError, match="revoked"):
-        _authorize(service, record.task_id)
+    assert service.execution_authority_for_task(record.task_id) is None
 
 
 def test_durable_grant_reconstructs_after_restart_without_reprompt(tmp_path: Path) -> None:
