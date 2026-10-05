@@ -5,7 +5,8 @@ import json
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from math import isfinite
+from math import ceil, isfinite
+from statistics import fmean
 from typing import Protocol
 
 from nika_core.model_gateway.contracts import (
@@ -344,6 +345,7 @@ class CaseBenchmarkResult:
     resource_after: ResourceSnapshot | None
     accelerator_before: AcceleratorSnapshot | None
     accelerator_after: AcceleratorSnapshot | None
+    evaluation_weight: float = 1.0
 
     def __post_init__(self) -> None:
         _identity(self.candidate_id, "candidate_id")
@@ -357,6 +359,11 @@ class CaseBenchmarkResult:
         score = float(self.score)
         if not isfinite(score) or not 0 <= score <= 1:
             raise ValueError("score must be finite and in [0, 1]")
+        if type(self.evaluation_weight) not in (int, float):
+            raise TypeError("evaluation_weight must be numeric")
+        evaluation_weight = float(self.evaluation_weight)
+        if not isfinite(evaluation_weight) or evaluation_weight <= 0:
+            raise ValueError("evaluation_weight must be finite and greater than zero")
         if type(self.latency_ms) not in (int, float):
             raise TypeError("latency_ms must be numeric")
         latency = float(self.latency_ms)
@@ -487,6 +494,97 @@ class CandidateBenchmarkReport:
         ):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer")
+
+
+def validate_candidate_benchmark_report(report: CandidateBenchmarkReport) -> None:
+    """Reject report aggregates that disagree with the exact case evidence."""
+
+    if type(report) is not CandidateBenchmarkReport:
+        raise TypeError("report must be an exact CandidateBenchmarkReport")
+    results = report.case_results
+    total_weight = sum(float(item.evaluation_weight) for item in results)
+    expected_quality = sum(
+        float(item.score) * float(item.evaluation_weight)
+        for item in results
+    ) / total_weight
+    expected_pass_rate = sum(item.passed for item in results) / len(results)
+    expected_completion_rate = (
+        sum(item.completion_succeeded for item in results) / len(results)
+    )
+    successful_latencies = [
+        float(item.latency_ms)
+        for item in results
+        if item.completion_succeeded
+    ]
+    expected_mean_latency = (
+        fmean(successful_latencies) if successful_latencies else None
+    )
+    expected_p95_latency = None
+    if successful_latencies:
+        ordered = sorted(successful_latencies)
+        index = max(0, ceil(0.95 * len(ordered)) - 1)
+        expected_p95_latency = ordered[index]
+
+    resource_snapshots = tuple(
+        snapshot
+        for item in results
+        for snapshot in (item.resource_before, item.resource_after)
+        if snapshot is not None
+    )
+    accelerator_snapshots = tuple(
+        snapshot
+        for item in results
+        for snapshot in (item.accelerator_before, item.accelerator_after)
+        if snapshot is not None
+    )
+    accelerator_utilization = tuple(
+        float(snapshot.utilization_percent)
+        for snapshot in accelerator_snapshots
+        if snapshot.utilization_percent is not None
+    )
+    accelerator_memory = tuple(
+        snapshot.memory_used_bytes
+        for snapshot in accelerator_snapshots
+        if snapshot.memory_used_bytes is not None
+    )
+
+    expected = (
+        expected_quality,
+        expected_pass_rate,
+        expected_completion_rate,
+        expected_mean_latency,
+        expected_p95_latency,
+        max(
+            (float(snapshot.cpu_percent) for snapshot in resource_snapshots),
+            default=None,
+        ),
+        max(
+            (float(snapshot.memory_percent) for snapshot in resource_snapshots),
+            default=None,
+        ),
+        min(
+            (snapshot.available_memory_bytes for snapshot in resource_snapshots),
+            default=None,
+        ),
+        max(accelerator_utilization, default=None),
+        max(accelerator_memory, default=None),
+    )
+    actual = (
+        report.weighted_quality_score,
+        report.task_pass_rate,
+        report.completion_rate,
+        report.mean_latency_ms,
+        report.p95_latency_ms,
+        report.peak_cpu_percent,
+        report.peak_memory_percent,
+        report.min_available_memory_bytes,
+        report.peak_accelerator_percent,
+        report.peak_accelerator_memory_bytes,
+    )
+    if actual != expected:
+        raise ValueError(
+            "benchmark report aggregate metrics do not match case evidence"
+        )
 
 
 @dataclass(frozen=True, slots=True)
