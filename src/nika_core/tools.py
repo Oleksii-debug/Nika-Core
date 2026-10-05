@@ -231,12 +231,16 @@ class ToolEffectGuard:
             # ToolExecutor will convert this finalize failure into UNCERTAIN.
             raise ValueError("durable tool result must be JSON-compatible") from exc
 
-        task_id, operation_type, input_fingerprint, created_at = self._reservation_identity(
-            reservation
-        )
+        (
+            operation_key,
+            task_id,
+            operation_type,
+            input_fingerprint,
+            created_at,
+        ) = self._reservation_identity(reservation)
         try:
             self._ledger.complete_pending_if_matches(
-                operation_key=reservation.operation_key,
+                operation_key=operation_key,
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
@@ -249,12 +253,16 @@ class ToolEffectGuard:
             ) from exc
 
     def mark_uncertain(self, reservation: ToolEffectReservation) -> None:
-        task_id, operation_type, input_fingerprint, created_at = self._reservation_identity(
-            reservation
-        )
+        (
+            operation_key,
+            task_id,
+            operation_type,
+            input_fingerprint,
+            created_at,
+        ) = self._reservation_identity(reservation)
         try:
             self._ledger.mark_pending_uncertain_if_matches(
-                operation_key=reservation.operation_key,
+                operation_key=operation_key,
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
@@ -280,24 +288,30 @@ class ToolEffectGuard:
             created_at=record.created_at,
         )
 
-    @staticmethod
+    @classmethod
     def _reservation_identity(
+        cls,
         reservation: ToolEffectReservation,
-    ) -> tuple[str, str, str, str]:
-        task_id = reservation.task_id
-        operation_type = reservation.operation_type
-        input_fingerprint = reservation.input_fingerprint
-        created_at = reservation.created_at
-        if (
-            not task_id
-            or not operation_type
-            or not input_fingerprint
-            or not created_at
-        ):
+    ) -> tuple[str, str, str, str, str]:
+        if type(reservation) is not ToolEffectReservation:
             raise ToolEffectConflictError(
                 "tool effect finalization lacks reservation authority"
             )
-        return task_id, operation_type, input_fingerprint, created_at
+        return (
+            cls._reservation_text(reservation.operation_key),
+            cls._reservation_text(reservation.task_id),
+            cls._reservation_text(reservation.operation_type),
+            cls._reservation_text(reservation.input_fingerprint),
+            cls._reservation_text(reservation.created_at),
+        )
+
+    @staticmethod
+    def _reservation_text(value: object) -> str:
+        if type(value) is not str or not value:
+            raise ToolEffectConflictError(
+                "tool effect finalization lacks reservation authority"
+            )
+        return value
 
     @staticmethod
     def _operation_key(*, task_id: str, call_id: str) -> str:

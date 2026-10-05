@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -144,3 +145,79 @@ def test_tool_executor_cannot_finalize_rebound_external_effect(tmp_path) -> None
     assert len(rebound) == 1
     assert rebound[0].created_at == _REBOUND_CREATED_AT
     assert rebound[0].status is IdempotencyStatus.PENDING
+
+
+class _BoolTrap:
+    def __init__(self) -> None:
+        self.called = False
+
+    def __bool__(self) -> bool:
+        self.called = True
+        raise AssertionError("reservation carrier truthiness must not run")
+
+
+@pytest.mark.parametrize("mutation_name", ["complete", "mark_uncertain"])
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "operation_key",
+        "task_id",
+        "operation_type",
+        "input_fingerprint",
+        "created_at",
+    ],
+)
+def test_tool_guard_rejects_behavioral_reservation_identity_before_truthiness(
+    tmp_path,
+    mutation_name: str,
+    field_name: str,
+) -> None:
+    task, _store, ledger, guard = _guard_bundle(tmp_path)
+    reservation = guard.reserve(spec=_spec(), call=_call(task.task_id))
+    trap = _BoolTrap()
+    forged = replace(reservation, **{field_name: trap})
+
+    with pytest.raises(
+        ToolEffectConflictError,
+        match="finalization lacks reservation authority",
+    ):
+        if mutation_name == "complete":
+            guard.complete(forged, {"published": True})
+        else:
+            guard.mark_uncertain(forged)
+
+    assert not trap.called
+    assert ledger.require(reservation.operation_key).status is IdempotencyStatus.PENDING
+
+
+@pytest.mark.parametrize("mutation_name", ["complete", "mark_uncertain"])
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "operation_key",
+        "task_id",
+        "operation_type",
+        "input_fingerprint",
+        "created_at",
+    ],
+)
+def test_tool_guard_rejects_truthy_non_text_reservation_identity_at_boundary(
+    tmp_path,
+    mutation_name: str,
+    field_name: str,
+) -> None:
+    task, _store, ledger, guard = _guard_bundle(tmp_path)
+    reservation = guard.reserve(spec=_spec(), call=_call(task.task_id))
+    forged = replace(reservation, **{field_name: 1})
+
+    with pytest.raises(
+        ToolEffectConflictError,
+        match="finalization lacks reservation authority",
+    ):
+        if mutation_name == "complete":
+            guard.complete(forged, {"published": True})
+        else:
+            guard.mark_uncertain(forged)
+
+    assert ledger.require(reservation.operation_key).status is IdempotencyStatus.PENDING
+
