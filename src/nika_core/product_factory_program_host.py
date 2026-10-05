@@ -17,6 +17,7 @@ from nika_core.product_factory_checkpoint_host import (
 )
 from nika_core.product_factory_coordinator import (
     ComponentWorkRequest,
+    CoordinatorSnapshot,
     ProductFactoryCoordinator,
     ReviewDecision,
     WorkerResultEnvelope,
@@ -1611,7 +1612,7 @@ class _BorrowedSQLiteStore:
 
 
 def _record_for_component_snapshot(
-    snapshot,
+    snapshot: CoordinatorSnapshot,
     component_id: str,
 ) -> WorkRecord:
     try:
