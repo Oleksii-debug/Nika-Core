@@ -427,12 +427,17 @@ class V01ModelSettings:
                 "CREATE TABLE IF NOT EXISTS v01_model_settings_schema ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
-            current = (
-                conn.execute("SELECT MAX(version) FROM v01_model_settings_schema").fetchone()[0]
-                or 0
-            )
-            if type(current) is not int or current < 0:
+            version_rows = conn.execute(
+                "SELECT version FROM v01_model_settings_schema ORDER BY version"
+            ).fetchall()
+            versions = [row["version"] for row in version_rows]
+            if any(type(version) is not int or version <= 0 for version in versions):
                 raise ModelSetupError("Версія налаштувань моделі некоректна.")
+            current = versions[-1] if versions else 0
+            if versions != list(range(1, current + 1)):
+                raise ModelSetupError(
+                    "Історія оновлень налаштувань моделі пошкоджена."
+                )
             if current > _SCHEMA_VERSION:
                 raise ModelSetupError("Версія налаштувань моделі новіша за цю програму.")
             for version in range(current + 1, _SCHEMA_VERSION + 1):
