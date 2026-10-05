@@ -138,6 +138,33 @@
     );
   }
 
+  function validDispatchResponse(response, expectedRequestId) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && response.request_id === expectedRequestId
+      && ["completed", "failed", "rejected"].includes(response.status)
+      && typeof response.message === "string"
+      && (response.focus_id == null || typeof response.focus_id === "string"),
+    );
+  }
+
+  async function reportDispatchBridgeFailure(focusTarget) {
+    const message = "Немає підтвердження виконання дії. Перечитую поточний стан; не повторюйте дію до перевірки результату.";
+    document.documentElement.dataset.nikaReady = "false";
+    announce(message, true);
+    appendLog(message);
+    let stateReady = false;
+    try {
+      stateReady = await refreshState({ announceTeamTransitions: false });
+    } catch {
+      reportStateUnavailable();
+    }
+    document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+    focusTarget?.focus?.();
+  }
+
   function requestId() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -597,6 +624,14 @@
       announce("Міст Nika ще не готовий.", true);
       return;
     }
+    if (document.documentElement.dataset.nikaReady !== "true") {
+      announce(
+        "Стан Nika Core не підтверджено. Дочекайтеся успішного перечитування перед новою дією.",
+        true,
+      );
+      trigger?.focus?.();
+      return;
+    }
     if (["settings.autostart.configure", "settings.autostart.refresh"].includes(actionId)) {
       await dispatchAutostart(actionId, trigger);
       return;
@@ -607,7 +642,21 @@
       payload.revision = sourceRevision;
       for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
     }
-    const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
+    const dispatchRequestId = requestId();
+    let result;
+    try {
+      result = await globalThis.pywebview.api.dispatch({
+        request_id: dispatchRequestId,
+        action_id: actionId,
+        payload,
+      });
+      if (!validDispatchResponse(result, dispatchRequestId)) {
+        throw new Error("Invalid action acknowledgement");
+      }
+    } catch {
+      await reportDispatchBridgeFailure(trigger);
+      return;
+    }
     const failed = result.status === "failed" || result.status === "rejected";
     if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
     announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
