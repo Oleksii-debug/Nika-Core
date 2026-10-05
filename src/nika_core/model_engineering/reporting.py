@@ -264,6 +264,7 @@ def _case_payload(result: CaseBenchmarkResult) -> dict[str, Any]:
         "completion_succeeded": result.completion_succeeded,
         "latency_ms": result.latency_ms,
         "response_sha256": result.response_sha256,
+        "loaded_artifact_sha256": result.loaded_artifact_sha256,
         "error_code": result.error_code.value if result.error_code is not None else None,
         "input_tokens": result.input_tokens,
         "output_tokens": result.output_tokens,
