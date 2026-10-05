@@ -22,6 +22,7 @@ from nika_core.packaging.release import (
 from nika_core.product_project import ProductProjectRepository
 
 _INSTALLER_NAME = "install_nika_core.ps1"
+_RELEASE_PRODUCT = "NikaCore"
 _UPGRADE_PROBE_NAME = "m12-byte-distinct-upgrade-proof.txt"
 _MAX_RUNTIME_EVIDENCE_JSON_BYTES = 1024 * 1024
 _MAX_RUNTIME_EVIDENCE_JSON_DEPTH = 64
@@ -740,6 +741,7 @@ def main() -> int:
             findings = verify_release_archive(
                 snapshot,
                 source_sha=args.source_sha,
+                expected_product=_RELEASE_PRODUCT,
                 expected_product_version=args.product_version,
             )
         if findings:
