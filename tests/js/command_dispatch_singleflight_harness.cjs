@@ -68,6 +68,8 @@ async function main() {
   await ui.dispatch("task.create", trigger);
   await ui.dispatch("task.pause", trigger);
   assert.equal(requests.length, 1, "duplicate task and parallel control must not dispatch");
+  assert(messages.at(-1)[0].includes("Попередню команду"));
+  console.log("PASS: blocked task control gives an accessible pending explanation");
   assert.equal(requests[0].payload.command, "Створити завдання");
   assert.equal(requests[0].request_id, "req-1");
   completeFirst({status: "completed", message: "Створено.", focus_id: null});
@@ -128,6 +130,8 @@ async function main() {
   );
   await ui.mutateKeymap(() => {throw Error("duplicate mutation");}, null, keymapInput);
   assert.equal(keymapReads, 0, "keymap must not refresh before its first ACK");
+  assert(messages.at(-1)[0].includes("Зміна карти клавіш ще виконується"));
+  console.log("PASS: blocked keymap mutation gives an accessible pending explanation");
   finishKeymap({ok: true, message: "Клавіші збережено."});
   await saveKeymap;
   assert.equal(keymapReads, 1);
