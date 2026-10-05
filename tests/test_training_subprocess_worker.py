@@ -824,6 +824,7 @@ time.sleep(30)
     assert not survived.exists(), "trainer descendant escaped timeout containment"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object kill-on-close proof")
 def test_success_does_not_leave_trainer_descendant_running(tmp_path: Path) -> None:
     spawned = tmp_path / "success-descendant-spawned.txt"
     survived = tmp_path / "success-descendant-survived.txt"
