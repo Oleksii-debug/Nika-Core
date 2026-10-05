@@ -116,6 +116,8 @@ class WorkspaceCatalog:
             plugin = plugins.get(plugin_id)
             if plugin is None:
                 raise WorkspaceCompatibilityError(f"missing required plugin: {plugin_id}")
+            if not requirement.api_min <= CURRENT_PLUGIN_API <= requirement.api_max:
+                raise WorkspaceCompatibilityError(f"incompatible plugin API: {plugin_id}")
             try:
                 plugin.assert_compatible(CURRENT_PLUGIN_API)
             except ValueError as exc:
