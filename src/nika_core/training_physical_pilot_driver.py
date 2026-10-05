@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import stat
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
@@ -594,26 +595,44 @@ def _candidate_descriptor(
 
 
 def _write_report(path: Path, report: PhysicalTrainingPilotReport) -> None:
-    payload = (report.to_json() + "
-").encode("utf-8")
+    payload = (report.to_json() + "\n").encode("utf-8")
     if len(payload) > _MAX_REPORT_BYTES:
         _fail("physical pilot report exceeds the output byte limit")
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    descriptor: int | None = None
+    if path.exists():
+        _fail("physical pilot report already exists")
+    temporary: Path | None = None
     try:
-        descriptor = os.open(path, flags, 0o600)
-        written = 0
-        while written < len(payload):
-            count = os.write(descriptor, payload[written:])
-            if count <= 0:
-                raise OSError("short report write")
-            written += count
-        os.fsync(descriptor)
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=".physical-pilot-report.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if _is_windows():
+            os.rename(temporary, path)
+        else:
+            os.link(temporary, path, follow_symlinks=False)
+            temporary.unlink()
+        temporary = None
+    except FileExistsError as exc:
+        raise PhysicalPilotDriverError(
+            "physical pilot report already exists"
+        ) from exc
     except OSError as exc:
-        raise PhysicalPilotDriverError("physical pilot report could not be persisted") from exc
+        raise PhysicalPilotDriverError(
+            "physical pilot report could not be persisted"
+        ) from exc
     finally:
-        if descriptor is not None:
-            os.close(descriptor)
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def run_physical_pilot_from_config(
