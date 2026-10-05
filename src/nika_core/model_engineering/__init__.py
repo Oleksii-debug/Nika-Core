@@ -19,6 +19,8 @@ from nika_core.model_engineering.experiment_bridge import (
     build_experiment_definition,
 )
 from nika_core.model_engineering.reporting import (
+    benchmark_accessible_report_json,
+    benchmark_accessible_report_payload,
     benchmark_report_json,
     benchmark_report_sha256,
     benchmark_suite_json,
@@ -54,6 +56,8 @@ __all__ = [
     "ModelCandidate",
     "ModelCompletionPort",
     "ModelScoringPort",
+    "benchmark_accessible_report_json",
+    "benchmark_accessible_report_payload",
     "benchmark_observations",
     "benchmark_report_json",
     "benchmark_report_sha256",
