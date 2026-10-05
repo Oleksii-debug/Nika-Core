@@ -827,3 +827,42 @@ def test_final_candidate_rejects_extra_hardlink_alias(
     assert not candidate.exists()
     assert alias.exists()
 
+def test_final_candidate_rejects_checkpoint_change_during_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    checkpoint = peft._checkpoint_dir(peft._job_root(config, request), 1)
+    adapter_file = checkpoint / "adapter" / "adapter_model.safetensors"
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+
+    def _mutating_safe_save_file(
+        tensors: dict[str, object],
+        path: str,
+        *,
+        metadata: dict[str, str],
+    ) -> None:
+        adapter_file.write_bytes(adapter_file.read_bytes() + b"-tampered")
+        _fake_safe_save_file(tensors, path, metadata=metadata)
+
+    def _mutating_stack() -> tuple[object, ...]:
+        values = list(_fake_stack())
+        values[6] = _mutating_safe_save_file
+        return tuple(values)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _mutating_stack)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="checkpoint_payload_changed_during_candidate",
+    ):
+        peft._train_one_step(request, config, consumed)
+
+    assert not candidate.exists()
+
