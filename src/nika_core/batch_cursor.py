@@ -798,7 +798,11 @@ def _validate_json_value(value: Any) -> None:
             raise TypeError("batch cursor values must be JSON-native")
 
 
-def _json_copy(value: Any) -> Any:
+def _json_copy(value: Any) -> dict[str, Any]:
+    # Payload, completion and uncertainty evidence are all JSON objects.
+    # Reject incorrect top-level carriers before a ledger status transition.
+    if type(value) is not dict:
+        raise BatchCursorStateError("batch cursor value must be a JSON object")
     try:
         _validate_json_value(value)
         serialized = _canonical_json(value)
