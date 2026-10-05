@@ -6,6 +6,7 @@ import math
 import re
 import stat
 import tempfile
+import unicodedata
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -156,6 +157,14 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
 
 def _canonical_relative_path(value: object) -> bool:
     if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        return False
+    if unicodedata.normalize("NFC", value) != value:
+        return False
+    if any(unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"} for character in value):
         return False
     if "\\" in value or ":" in value or value in {".", ".."}:
         return False
