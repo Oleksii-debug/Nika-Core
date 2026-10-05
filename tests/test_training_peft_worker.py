@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -1132,6 +1133,85 @@ def test_candidate_manifest_producer_rejects_reader_invalid_adapter_config(
             consumed=consumed,
             adapter_config=adapter_config,
         )
+
+
+def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+    )
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": raw}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(safe_open=safe_open))
+
+    manifest = peft.candidate_adapter_manifest(candidate.resolve())
+
+    assert manifest["trainer_artifact_id"] == request.trainer_artifact_id
+    assert manifest["trainer_sha256"] == request.trainer_sha256
+    assert manifest["training_runtime_versions"] == _RUNTIME_VERSIONS
+
+
+def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": '{ "schema": "nika-peft-candidate-v1" }'}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(safe_open=safe_open))
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_not_canonical"):
+        peft.candidate_adapter_manifest(candidate.resolve())
 
 
 def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:
