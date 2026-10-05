@@ -1190,3 +1190,65 @@ def test_benchmark_suite_requires_exact_evaluation_envelope() -> None:
                 _HostileBenchmarkEnvelope(),  # type: ignore[arg-type]
             )
         )
+
+
+def test_model_lab_evidence_identities_reject_nonprintable_text() -> None:
+    with pytest.raises(ValueError, match="control characters"):
+        _candidate(candidate_id="bad\x00candidate")
+
+    with pytest.raises(ValueError, match="control characters"):
+        BenchmarkExecutionConfig(scorer_id="bad\x00scorer")
+
+
+def test_evaluation_case_rejects_non_utf8_prompt_and_expected_text() -> None:
+    invalid_utf8 = chr(0xD800)
+
+    with pytest.raises(ValueError, match="message content must be valid UTF-8"):
+        EvaluationCase(
+            case_id="bad-prompt",
+            messages=(ModelMessage("user", invalid_utf8),),
+            expected_text="answer",
+        )
+
+    with pytest.raises(ValueError, match="expected_text must be valid UTF-8"):
+        EvaluationCase(
+            case_id="bad-expected",
+            messages=(ModelMessage("user", "prompt"),),
+            expected_text=invalid_utf8,
+        )
+
+
+class _NonUtf8ResponseGateway:
+    async def complete(self, request):
+        return ModelResponse(
+            request_id=request.request_id,
+            text=chr(0xD800),
+            provider_id=request.provider_id,
+            provider_kind=request.provider_kind,
+            model=request.model,
+        )
+
+
+def test_runner_rejects_non_utf8_response_before_hashing() -> None:
+    evaluation = EvaluationSet(
+        evaluation_set_id="one",
+        version="1",
+        provenance_ref="dataset:one",
+        license_ref="license:one",
+        purpose=EvaluationPurpose.DEVELOPMENT,
+        privacy=PrivacyClass.PUBLIC,
+        cases=(
+            EvaluationCase(
+                case_id="case",
+                messages=(ModelMessage("user", "prompt"),),
+                expected_text="answer",
+            ),
+        ),
+    )
+    runner = ModelBenchmarkRunner(
+        _NonUtf8ResponseGateway(),
+        clock=_Clock((1.0,)),
+    )
+
+    with pytest.raises(ModelBenchmarkError, match="response text must be valid UTF-8"):
+        asyncio.run(runner.benchmark(_candidate(), evaluation))
