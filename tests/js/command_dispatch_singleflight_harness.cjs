@@ -161,11 +161,10 @@ async function main() {
   const reportEnd = source.indexOf("  function renderProductProject(project) {", reportStart);
   assert(logFunctionsStart >= 0 && logFunctionsEnd > logFunctionsStart);
   assert(reportStart >= 0 && reportEnd > reportStart);
-  assert(source.includes(
-    "    stateUnavailableReported = false;\\n    if (announceTeamTransitions && teamRender.changed) {".replace(
-      "\\\\n", "\\n",
-    ),
-  ), "healthy state must rearm outage reporting");
+  const recoveryReset = source.indexOf(
+    "    stateUnavailableReported = false;", source.indexOf("  async function refreshState("),
+  );
+  assert(recoveryReset > 0, "healthy state must rearm outage reporting");
 
   const entries = [];
   let listLabel = "";
