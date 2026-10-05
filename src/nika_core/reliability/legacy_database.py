@@ -24,6 +24,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.reliability.backup import BackupRecoveryError, SQLiteRecoveryManager
+from nika_core.reliability.recovery_lease import RecoveryFileLease, RecoveryLeaseError
 
 _RECEIPT_TABLE = "legacy_database_adoption_v1"
 _EMPTY_TABLES = {
@@ -78,15 +79,28 @@ def _require_empty_target(db: sqlite3.Connection) -> None:
         raise LegacyDatabaseConflict(_MESSAGE)
 
 
-def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
+def _inspect(
+    path: Path, *, canonical: bool = False, immutable: bool = False
+) -> _State | None:
     if not path.exists():
         return None
     if not path.is_file() or path.is_symlink():
         raise LegacyDatabaseConflict(_MESSAGE)
+    # Use the canonical restore-family guard before opening any WAL/SHM
+    # sidecar. Indirect or non-regular siblings must not redirect a snapshot.
+    SQLiteRecoveryManager._ensure_restore_family_coherent(path)
+    if immutable:
+        # The copy is frozen; active sources must still read their real WAL.
+        if canonical:
+            raise ValueError("canonical database inspection cannot be immutable")
+        SQLiteRecoveryManager._ensure_backup_artifact_coherent(path)
     # rw permits SQLite's own hot-journal recovery on the canonical database;
     # it does not create a missing file. Legacy inspection is strictly read-only.
     mode = "rw" if canonical else "ro"
-    with closing(sqlite3.connect(path.as_uri() + f"?mode={mode}", uri=True, timeout=2)) as db:
+    suffix = "&immutable=1" if immutable else ""
+    with closing(
+        sqlite3.connect(path.as_uri() + f"?mode={mode}{suffix}", uri=True, timeout=2)
+    ) as db:
         db.execute("PRAGMA query_only = ON")
         db.execute("PRAGMA trusted_schema = OFF")
         db.execute("BEGIN")
@@ -163,41 +177,21 @@ def _validate_receipt(receipt: dict[str, str]) -> None:
         raise LegacyDatabaseConflict(_MESSAGE)
 
 
-def _source_unchanged(path: Path, digest: str) -> bool:
-    state = _inspect(path)
+def _source_unchanged(path: Path, digest: str, *, immutable: bool = False) -> bool:
+    state = _inspect(path, immutable=immutable)
     return state is not None and state.digest == digest
 
 
 @contextmanager
 def _startup_lock(target: Path) -> Iterator[None]:
-    target.parent.mkdir(parents=True, exist_ok=True)
+    # Reuse the canonical no-follow, regular-file and inode-identity lease.
+    # A plain is_symlink()/open() pair allows a lock-file substitution.
     lock = target.with_name(f".{target.name}.startup.lock")
-    if lock.is_symlink():
-        raise LegacyDatabaseConflict(_MESSAGE)
-    with lock.open("a+b") as handle:
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise LegacyDatabaseConflict(_MESSAGE) from None
-        try:
+    try:
+        with RecoveryFileLease(lock):
             yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except RecoveryLeaseError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
 
 
 def _publish_pending(path: Path, record: dict[str, object]) -> None:
@@ -218,16 +212,40 @@ def _publish_pending(path: Path, record: dict[str, object]) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _has_sqlite_sidecars(path: Path) -> bool:
+    return any(
+        sidecar.exists() or sidecar.is_symlink()
+        for sidecar in (
+            path.with_name(path.name + "-wal"),
+            path.with_name(path.name + "-shm"),
+        )
+    )
+
+
 def _known_sources(target: Path, candidates: Sequence[Path]) -> list[Path]:
     paths: list[Path] = []
     for candidate in candidates:
         if candidate.is_symlink():
             raise LegacyDatabaseConflict(_MESSAGE)
         path = candidate.resolve()
-        if not path.exists() or path == target or (target.exists() and path.samefile(target)):
+        if not path.exists() or path == target:
             continue
-        if not any(path.samefile(other) for other in paths):
-            paths.append(path)
+        if target.exists() and path.samefile(target):
+            # A canonical database and its hard-link alias share main bytes,
+            # but SQLite's live WAL/SHM belongs to each *path*, not the inode.
+            # Silently skipping the alias could discard committed user work.
+            if _has_sqlite_sidecars(path) or _has_sqlite_sidecars(target):
+                raise LegacyDatabaseConflict(_MESSAGE)
+            continue
+        duplicate = next((other for other in paths if path.samefile(other)), None)
+        if duplicate is not None:
+            # Hard links share SQLite's main file but not the path-named WAL/SHM.
+            if path != duplicate and (
+                _has_sqlite_sidecars(path) or _has_sqlite_sidecars(duplicate)
+            ):
+                raise LegacyDatabaseConflict(_MESSAGE)
+            continue
+        paths.append(path)
     return paths
 
 
@@ -315,8 +333,9 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
         with TemporaryDirectory(prefix="prepare-", dir=backup_root) as folder:
             baseline = backup_root / f"{adoption_id}.original.sqlite3"
             SQLiteRecoveryManager(SQLiteStore(source)).create_backup(baseline, record_audit=False)
-            if not _source_unchanged(baseline, state.digest) or not _source_unchanged(
-                source, state.digest
+            if (
+                not _source_unchanged(baseline, state.digest, immutable=True)
+                or not _source_unchanged(source, state.digest)
             ):
                 raise LegacyDatabaseConflict(_MESSAGE)
             staged = SQLiteStore(Path(folder) / "prepared.sqlite3")
@@ -351,7 +370,7 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
         _publish_pending(pending_path, pending)
     backup = target.parent / "legacy-adoption-backups" / f"{adoption_id}.sqlite3"
     manager.verify_backup(backup)
-    backup_receipt = _inspect(backup).receipt
+    backup_receipt = _inspect(backup, immutable=True).receipt
     if not backup_receipt or any(backup_receipt[key] != pending[key] for key in backup_receipt):
         raise LegacyDatabaseConflict(_MESSAGE)
     if not _source_unchanged(source, state.digest):

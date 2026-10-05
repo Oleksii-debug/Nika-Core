@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import subprocess
@@ -19,6 +20,7 @@ from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
+_VOICE_RUNTIME_EVIDENCE_NAME = "packaged-voice-runtime-proof.json"
 
 
 def project_version(project_root: Path) -> str:
@@ -26,11 +28,11 @@ def project_version(project_root: Path) -> str:
     with pyproject.open("rb") as handle:
         data = tomllib.load(handle)
     try:
-        version = str(data["project"]["version"]).strip()
+        version = data["project"]["version"]
     except (KeyError, TypeError) as exc:
         raise RuntimeError("pyproject.toml is missing [project].version") from exc
-    if not version:
-        raise RuntimeError("pyproject.toml [project].version is empty")
+    if not isinstance(version, str) or not version or version != version.strip():
+        raise RuntimeError("pyproject.toml [project].version must be a nonempty, unpadded string")
     return version
 
 
@@ -45,7 +47,12 @@ def resolve_release_version(project_root: Path, requested: str | None) -> str:
 
 
 def resolve_source_sha(requested: str | None) -> str:
-    candidate = requested or os.environ.get("NIKA_SOURCE_SHA") or os.environ.get("GITHUB_SHA")
+    if requested is not None:
+        candidate = requested
+    elif "NIKA_SOURCE_SHA" in os.environ:
+        candidate = os.environ["NIKA_SOURCE_SHA"]
+    else:
+        candidate = os.environ.get("GITHUB_SHA")
     candidate = (candidate or "").strip().lower()
     if not _FULL_SHA_RE.fullmatch(candidate):
         raise ValueError(
@@ -61,6 +68,194 @@ def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> in
         raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
     return value
 
+
+
+def _unique_proof_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate packaged PF11 proof field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_proof_number(value: str) -> object:
+    raise ValueError(f"non-finite packaged PF11 proof number: {value}")
+
+
+def _unique_voice_proof_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate packaged voice proof field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_voice_number(value: str) -> object:
+    raise ValueError(f"non-finite packaged voice proof number: {value}")
+
+
+def _parse_finite_voice_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("non-finite packaged voice proof floating-point number")
+    return value
+
+
+def _parse_finite_pf11_float(text: str) -> float:
+    value = float(text)
+    if not math.isfinite(value):
+        raise ValueError("non-finite packaged PF11 proof floating-point number")
+    return value
+
+
+def _proof_identity(payload: dict[str, object]) -> str:
+    # JSON preserves bool/int distinctions that Python dict equality does not.
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def prove_packaged_voice_runtime(bundle_dir: Path, *, source_sha: str) -> Path:
+    """Prove that the frozen executable can import every packaged local voice dependency."""
+
+    executable = bundle_dir / "NikaCore.exe"
+    if not executable.is_file():
+        raise RuntimeError(f"packaged voice proof executable is missing: {executable}")
+    if not _FULL_SHA_RE.fullmatch(source_sha):
+        raise ValueError("packaged voice proof requires exact source SHA")
+
+    with tempfile.TemporaryDirectory(prefix="nika-voice-runtime-proof-") as temporary:
+        output = Path(temporary) / "voice-runtime.json"
+        completed = subprocess.run(
+            [
+                str(executable),
+                "--voice-runtime-proof",
+                "--voice-runtime-proof-output",
+                str(output),
+            ],
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(
+                f"packaged voice runtime proof failed: exit {completed.returncode}"
+            )
+        try:
+            # Limit the actual read, rather than trusting a separate path stat.
+            with output.open("rb") as handle:
+                encoded = handle.read(1024 * 1024 + 1)
+            if len(encoded) > 1024 * 1024:
+                raise ValueError("packaged voice runtime proof exceeds 1 MiB")
+            payload = json.loads(
+                encoded.decode("utf-8"),
+                object_pairs_hook=_unique_voice_proof_fields,
+                parse_constant=_reject_nonfinite_voice_number,
+                parse_float=_parse_finite_voice_float,
+            )
+        except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+            raise RuntimeError(
+                "packaged voice runtime proof did not emit valid JSON evidence"
+            ) from exc
+
+    if not isinstance(payload, dict):
+        raise TypeError("packaged voice runtime proof evidence must be a JSON object")
+    required_true = (
+        "numpy_imported",
+        "sherpa_onnx_imported",
+        "sherpa_native_imported",
+        "sounddevice_imported",
+        "sounddevice_data_proven",
+    )
+    if (
+        payload.get("schema") != "nika.packaged-voice-runtime-proof:v1"
+        or any(payload.get(field) is not True for field in required_true)
+        or payload.get("microphone_opened") is not False
+        or payload.get("model_loaded") is not False
+    ):
+        raise RuntimeError("packaged voice runtime proof returned invalid evidence")
+    for forbidden_true in ("human_tested", "nvda_verified", "production_release_ready"):
+        if payload.get(forbidden_true) is not False:
+            raise RuntimeError(f"packaged voice proof may not set {forbidden_true}=true")
+
+    target = bundle_dir / _VOICE_RUNTIME_EVIDENCE_NAME
+    evidence = {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "packaged_executable_proven": True,
+        **{field: True for field in required_true},
+        "microphone_opened": False,
+        "model_loaded": False,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    encoded = json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=bundle_dir,
+            prefix=".voice-proof-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    return target
+
+
+
+def _valid_pf11_text(value: object) -> bool:
+    if type(value) is not str or not value.strip():
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _validate_first_pf11_payload(first: dict[str, object]) -> tuple[int, int]:
+    """Reject an invalid first proof before a second EXE can mutate the proof database."""
+    selection = first.get("selection_before_command")
+    if selection not in ("absent", "restored"):
+        raise RuntimeError("packaged PF11 proof lacks pre-command selection for attempt 1")
+    if selection != "absent":
+        raise RuntimeError("packaged PF11 first run did not start without a selection")
+    project_id = first.get("project_id")
+    if (
+        first.get("route") != "product_project"
+        or type(first.get("spec_version")) is not int
+        or first["spec_version"] != 1
+        or not _valid_pf11_text(project_id)
+        or first.get("command_center_state_proven") is not True
+        or first.get("current_command_proven") is not True
+        or first.get("current_command_focus_proven") is not True
+        or first.get("restart_selection_integrity_proven") is not True
+        or first.get("bounded_projection_proven") is not True
+        or not _valid_pf11_text(first.get("state"))
+        or first.get("bridge_state_project_id") != project_id
+        or type(first.get("bridge_state_spec_version")) is not int
+        or first["bridge_state_spec_version"] != 1
+    ):
+        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
+    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
+    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
+    for forbidden_true in (
+        "human_tested",
+        "nvda_verified",
+        "production_release_ready",
+    ):
+        if first.get(forbidden_true) is not False:
+            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
+    return status_count, decision_count
 
 def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path:
     """Run the packaged executable twice and persist restart-bound PF11 evidence."""
@@ -95,44 +290,43 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
                     f"exit {completed.returncode}"
                 )
             try:
-                payload = json.loads(output.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+                # Bound the actual open/read, not a separate stat susceptible to file replacement.
+                with output.open("rb") as handle:
+                    encoded = handle.read(1024 * 1024 + 1)
+                if len(encoded) > 1024 * 1024:
+                    raise ValueError("packaged PF11 proof is too large")
+                payload = json.loads(
+                    encoded.decode("utf-8"),
+                    object_pairs_hook=_unique_proof_fields,
+                    parse_constant=_reject_nonfinite_proof_number,
+                    parse_float=_parse_finite_pf11_float,
+                )
+            except (OSError, UnicodeError, ValueError, RecursionError) as exc:
                 raise RuntimeError("packaged PF11 proof did not emit valid JSON evidence") from exc
             if not isinstance(payload, dict):
                 raise TypeError("packaged PF11 proof evidence must be a JSON object")
+            if attempt == 1:
+                status_count, decision_count = _validate_first_pf11_payload(payload)
             outputs.append(payload)
 
     first, second = outputs
-    if first != second:
+    # The first run is validated before executing the second process.
+    if second.get("selection_before_command") not in ("absent", "restored"):
+        raise RuntimeError("packaged PF11 proof lacks pre-command selection for attempt 2")
+    if second["selection_before_command"] != "restored":
+        raise RuntimeError("packaged PF11 restart did not restore pre-command selection")
+    first_stable = {key: value for key, value in first.items() if key != "selection_before_command"}
+    second_stable = {
+        key: value for key, value in second.items() if key != "selection_before_command"
+    }
+    if _proof_identity(first_stable) != _proof_identity(second_stable):
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
-    project_id = first.get("project_id")
-    if (
-        first.get("route") != "product_project"
-        or first.get("spec_version") != 1
-        or not isinstance(project_id, str)
-        or not project_id.strip()
-        or first.get("command_center_state_proven") is not True
-        or first.get("bounded_projection_proven") is not True
-        or first.get("bridge_state_project_id") != project_id
-        or first.get("bridge_state_spec_version") != 1
-    ):
-        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
-    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
-    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
-    for forbidden_true in (
-        "human_tested",
-        "nvda_verified",
-        "production_release_ready",
-    ):
-        if first.get(forbidden_true) is not False:
-            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
-
     target = bundle_dir / _PF11_EVIDENCE_NAME
     evidence = {
         "schema_version": 2,
         "source_sha": source_sha,
         "route": first["route"],
-        "product_project_id": project_id,
+        "product_project_id": first["project_id"],
         "product_project_spec_version": first["spec_version"],
         "product_project_state": first.get("state"),
         "product_command_center_proven": True,
@@ -142,14 +336,31 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
         "bridge_state_decision_count": decision_count,
         "packaged_executable_proven": True,
         "restart_replay_proven": True,
+        "first_run_selection_absent": True,
+        "second_run_selection_restored": True,
         "human_tested": False,
         "nvda_verified": False,
         "production_release_ready": False,
     }
-    target.write_text(
-        json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    encoded = json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    temporary_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=bundle_dir,
+            prefix=".pf11-proof-",
+            suffix=".tmp",
+            delete=False,
+        ) as handle:
+            temporary_path = Path(handle.name)
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temporary_path.replace(target)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
     return target
 
 
@@ -165,6 +376,7 @@ def build(
     plan = default_windows_plan(project_root)
     PyInstaller.__main__.run(list(plan.pyinstaller_args()))
 
+    prove_packaged_voice_runtime(plan.bundle_dir, source_sha=exact_source_sha)
     prove_packaged_product_journey(plan.bundle_dir, source_sha=exact_source_sha)
     build_third_party_notices(plan.bundle_dir)
     notice_findings = verify_third_party_notices(plan.bundle_dir)

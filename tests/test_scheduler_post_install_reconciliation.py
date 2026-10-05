@@ -1,0 +1,219 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import Mock
+
+import pytest
+
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
+from nika_core.scheduler import (
+    APSchedulerAdapter,
+    ScheduledJob,
+    ScheduledJobStore,
+    TriggerKind,
+)
+
+
+def _setup(tmp_path: Path) -> tuple[ScheduledJobStore, APSchedulerAdapter, Mock]:
+    store = SQLiteStore(tmp_path / "Ніка scheduler" / "jobs.sqlite3")
+    store.initialize()
+    jobs = ScheduledJobStore(store)
+    resolver = Mock(return_value=Mock())
+    adapter = APSchedulerAdapter(jobs, resolver)
+    adapter.start()
+    return jobs, adapter, resolver
+
+
+def _job(*, generation: str = "old") -> ScheduledJob:
+    return ScheduledJob(
+        job_id="post-install-race",
+        action_id="scheduler.test",
+        trigger_kind=TriggerKind.DATE,
+        trigger={"run_date": "2035-01-02T10:00:00+00:00"},
+        payload={"generation": generation},
+    )
+
+
+def test_replacement_during_install_is_reconciled_without_old_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    old = _job()
+    successor = replace(old, action_id="scheduler.new", payload={"generation": "new"})
+    jobs.upsert(old)
+    original_install = adapter._install
+    installed: list[ScheduledJob] = []
+
+    def install_and_replace(job: ScheduledJob) -> None:
+        original_install(job)
+        installed.append(job)
+        if job == old:
+            jobs.upsert(successor)
+
+    monkeypatch.setattr(adapter, "_install", install_and_replace)
+    try:
+        # Exercise the actual connectivity producer-facing activation method.
+        adapter.activate_persisted(old)
+        assert installed == [old, successor]
+        assert jobs.get(old.job_id) == successor
+        runtime = adapter._scheduler.get_job(old.job_id)
+        assert runtime is not None and runtime.args == (old.job_id, successor)
+        adapter._dispatch(old.job_id, old)
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
+
+
+@pytest.mark.parametrize("change", ["disable", "delete"])
+def test_disabling_or_removing_during_install_clears_old_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    old = _job()
+    jobs.upsert(old)
+    original_install = adapter._install
+
+    def install_then_remove(job: ScheduledJob) -> None:
+        original_install(job)
+        if change == "disable":
+            jobs.upsert(replace(job, enabled=False))
+        else:
+            jobs.delete(job.job_id)
+
+    monkeypatch.setattr(adapter, "_install", install_then_remove)
+    try:
+        assert adapter._sync_runtime_job(old.job_id) is None
+        assert adapter._scheduler.get_job(old.job_id) is None
+        current = jobs.get(old.job_id)
+        if change == "delete":
+            assert current is None
+        else:
+            assert current is not None and not current.enabled
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
+
+
+def test_continuous_replacement_exhausts_bounded_retries_and_fails_closed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    jobs.upsert(_job())
+    original_install = adapter._install
+    installed: list[ScheduledJob] = []
+
+    def replace_every_install(job: ScheduledJob) -> None:
+        original_install(job)
+        installed.append(job)
+        jobs.upsert(replace(job, payload={"generation": str(len(installed))}))
+
+    monkeypatch.setattr(adapter, "_install", replace_every_install)
+    try:
+        assert adapter._sync_runtime_job("post-install-race") is None
+        assert len(installed) == 3
+        assert jobs.get("post-install-race") is not None
+        assert adapter._scheduler.get_job("post-install-race") is None
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
+
+
+def test_unchanged_snapshot_installs_normally(tmp_path: Path) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    job = _job()
+    jobs.upsert(job)
+    try:
+        assert adapter._sync_runtime_job(job.job_id) == job
+        runtime = adapter._scheduler.get_job(job.job_id)
+        assert runtime is not None and runtime.args == (job.job_id, job)
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
+
+
+def test_terminal_task_during_install_suppresses_obsolete_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sqlite = SQLiteStore(tmp_path / "terminal-during-install.sqlite3")
+    sqlite.initialize()
+    queue = TaskQueue(sqlite)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "terminal during scheduler installation"},
+    )
+    queue.transition(task.task_id, TaskState.READY)
+    queue.transition(task.task_id, TaskState.RUNNING)
+    jobs = ScheduledJobStore(sqlite)
+    resolver = Mock(return_value=Mock())
+    adapter = APSchedulerAdapter(jobs, resolver)
+    adapter.start()
+    job = replace(_job(), payload={"task_id": task.task_id})
+    jobs.upsert(job)
+    original_install = adapter._install
+
+    def install_then_cancel(current: ScheduledJob) -> None:
+        original_install(current)
+        queue.transition(task.task_id, TaskState.CANCELLED)
+
+    monkeypatch.setattr(adapter, "_install", install_then_cancel)
+    try:
+        assert adapter._sync_runtime_job(job.job_id) is None
+        assert queue.get(task.task_id).state is TaskState.CANCELLED
+        persisted = jobs.get(job.job_id)
+        assert persisted is not None and not persisted.enabled
+        assert adapter._scheduler.get_job(job.job_id) is None
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
+
+
+def test_obsolete_install_failure_recovers_durable_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    old = _job()
+    successor = replace(old, payload={"generation": "replacement"})
+    jobs.upsert(old)
+    original_install = adapter._install
+    installed: list[ScheduledJob] = []
+
+    def replace_and_fail_once(job: ScheduledJob) -> None:
+        original_install(job)
+        installed.append(job)
+        if job == old:
+            jobs.upsert(successor)
+            raise ValueError("obsolete trigger failed after replacement")
+
+    monkeypatch.setattr(adapter, "_install", replace_and_fail_once)
+    try:
+        assert adapter._sync_runtime_job(old.job_id) == successor
+        assert installed == [old, successor]
+        assert jobs.get(old.job_id) == successor
+        runtime = adapter._scheduler.get_job(old.job_id)
+        assert runtime is not None and runtime.args == (old.job_id, successor)
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
+
+
+def test_current_install_failure_remains_visible_without_successor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    jobs, adapter, resolver = _setup(tmp_path)
+    current = _job()
+    jobs.upsert(current)
+    installer = Mock(side_effect=ValueError("invalid current trigger"))
+    monkeypatch.setattr(adapter, "_install", installer)
+    try:
+        with pytest.raises(ValueError, match="invalid current trigger"):
+            adapter._sync_runtime_job(current.job_id)
+        installer.assert_called_once_with(current)
+        assert jobs.get(current.job_id) == current
+        assert adapter._scheduler.get_job(current.job_id) is None
+        resolver.assert_not_called()
+    finally:
+        adapter.shutdown()
