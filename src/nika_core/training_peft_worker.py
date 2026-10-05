@@ -1556,6 +1556,9 @@ def _train_one_step(
     ):
         _best_effort_unlink_identity(candidate, temporary_identity)
         _fail("candidate_publish_digest_mismatch")
+    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+        _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("checkpoint_payload_changed_after_candidate")
     return resume_state, candidate_sha256
 
 
