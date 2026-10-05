@@ -69,6 +69,23 @@ scorer must provide an explicit stable scorer ID before any benchmark execution.
 result-affecting runner setting requires extending this identity before that setting can be used
 as comparable promotion evidence.
 
+## Run and reproducibility identity
+
+Every benchmark attempt carries an exact `BenchmarkRunEvidence` with two distinct identities:
+
+- `run_id`: a unique safe-ASCII attempt identifier;
+- `configuration_sha256`: a stable fingerprint over candidate evidence, evaluation-set
+  ID/version/content SHA and the exact execution-config SHA.
+
+Two reruns of the same candidate/evaluation/configuration therefore keep the same configuration
+fingerprint while receiving different run IDs and request IDs. Changing the candidate, evaluation
+content/version, timeout, temperature or scorer changes the configuration fingerprint.
+
+The configuration fingerprint deliberately excludes raw prompt/response text and credentials.
+Current Model Lab does not yet have a trusted source/build-revision attestation input, so reports
+state `source_build_revision_not_attested` as an evidence limitation rather than inventing code
+provenance. Configuration reproducibility is not a claim of bit-identical model output.
+
 ## Candidate identity and licensing
 
 `ModelCandidate` keeps inference-engine evidence separate from model evidence:
@@ -95,8 +112,8 @@ silently contaminate another candidate's latency/resource evidence.
 
 Each case:
 1. captures optional CPU/memory and accelerator snapshots;
-2. creates a deterministic benchmark request ID bound to candidate evidence, evaluation-set
-   evidence and case ID, while request metadata binds the exact execution-config digest;
+2. creates a run-specific benchmark request ID bound to the attempt run ID, stable configuration
+   fingerprint and case ID; request metadata carries run/configuration/execution-config evidence;
 3. calls the existing ModelGateway-compatible completion port with an exact provider ID and model;
 4. records typed `ModelGatewayError` failure without persisting exception text;
 5. validates response request/provider/provider-kind/model identity before scoring;
@@ -122,10 +139,12 @@ Per candidate the current foundation records:
 - optional peak accelerator utilization;
 - optional peak accelerator memory usage.
 
-CPU/memory/accelerator measurements are bounded point snapshots around each case. They are useful
-evidence, not a claim of continuous high-frequency profiling. A future physical performance lane
-may adapt an existing maintained telemetry source behind the same narrow ports if continuous GPU
-or contention profiling is required.
+CPU/memory/accelerator measurements are bounded point snapshots around each case. The
+`nika-model-resource-evidence-v1` view distinguishes observed zero from UNKNOWN, labels host
+CPU/RAM separately from optional Nika-process RSS, and never relabels an untyped accelerator as a
+GPU. These measurements are useful evidence, not a claim of continuous high-frequency profiling.
+A future physical performance lane may adapt an existing maintained telemetry source behind the
+same narrow ports if continuous GPU or contention profiling is required.
 
 ## Experiment Engine bridge
 
@@ -163,8 +182,12 @@ not contain:
 - provider exception text;
 - API keys, cookies or credentials.
 
-`render_text_report()` emits a simple linear report suitable for NVDA review. Automated tests may
-validate its structure but never set `HUMAN_TESTED` or `NVDA_VERIFIED`.
+`benchmark_accessible_report_payload()` exposes a stable semantic view with Model, Provider,
+Dataset, Quality, Latency, Resources, Failures, Recommendation and Evidence limitations sections.
+`render_text_report()` renders that same view linearly for screen-reader review, while
+`benchmark_accessible_report_json()` provides the machine-readable companion. Recommendation is
+explicitly `not_evaluated`; this layer never auto-promotes a candidate. Automated tests validate
+structure, determinism and privacy but never set `HUMAN_TESTED` or `NVDA_VERIFIED`.
 
 ## Failure policy
 
@@ -184,7 +207,10 @@ Fail closed on:
 - replay/evaluation-set evidence substitution;
 - same-candidate-ID model evidence substitution;
 - cross-execution-config benchmark evidence substitution;
-- custom scorer execution without a stable scorer identity.
+- custom scorer execution without a stable scorer identity;
+- malformed, unsafe or duplicate benchmark run identity;
+- run/configuration fingerprint substitution;
+- invalid Nika-process RSS used by benchmark resource evidence.
 
 Provider errors remain benchmark evidence as typed failures. Unexpected programming errors are not
 laundered into a normal provider failure.
