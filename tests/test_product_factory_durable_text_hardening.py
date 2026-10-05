@@ -73,6 +73,26 @@ def test_review_evidence_refs_reject_behavioral_carrier_before_truthiness() -> N
     assert coordinator.snapshot() == snapshot
 
 
+@pytest.mark.parametrize(
+    "boundary",
+    ("\\u0085", "\\u2028", "\\u2029", "\\ud800"),
+)
+def test_durable_single_line_text_rejects_unicode_boundaries_and_surrogate(
+    boundary: str,
+) -> None:
+    with pytest.raises(CoordinatorError, match="canonical single-line text"):
+        ReviewDecision(f"qa{boundary}forged", True, "verified", ("ci:1",))
+
+    with pytest.raises(CoordinatorError, match="evidence refs must be canonical text"):
+        ReviewDecision("qa-1", True, "verified", (f"ci{boundary}forged",))
+
+    coordinator = _coordinator()
+    snapshot = coordinator.snapshot()
+    with pytest.raises(CoordinatorError, match="canonical single-line text"):
+        coordinator.block("core", f"blocked{boundary}forged")
+    assert coordinator.snapshot() == snapshot
+
+
 def test_review_durable_text_utf8_boundary_round_trips() -> None:
     coordinator = _coordinator()
     request = coordinator.start("core")
