@@ -673,7 +673,6 @@ def _configured_model_settings(tmp_path, *, model: str = "base-model"):
     return store, settings
 
 
-
 def _downgrade_task_binding_schema_without_artifact_pin(conn) -> None:
     conn.execute(
         "ALTER TABLE v01_task_model_bindings "
@@ -1217,6 +1216,7 @@ def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path
 
     assert settings.snapshot()["model"] == "base-model"
     assert settings.snapshot()["revision"] == 1
+
 
 @pytest.mark.asyncio
 async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) -> None:
