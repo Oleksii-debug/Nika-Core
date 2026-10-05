@@ -382,7 +382,9 @@ class HttpResearchService:
             locator=state.url,
         )
 
-        force_unconditional = False
+        # After extraction failure, only a verified pending blob can avoid a
+        # fresh GET. An orphaned snapshot must not inherit stale validators.
+        force_unconditional = state.last_error_code == "extraction_failed"
         if state.last_error_code == "extraction_failed":
             pending = self._pending_failed_snapshot(source_id)
             if pending is not None:
@@ -390,9 +392,8 @@ class HttpResearchService:
                 try:
                     self._blobs.resolve(artifact)
                 except (BlobStoreError, OSError, RuntimeError, TypeError, ValueError):
-                    # The extraction retry has no usable bytes. A conditional
-                    # 304 must not turn this missing candidate into success.
-                    force_unconditional = True
+                    # A missing or damaged blob requires unconditional recovery.
+                    pass
                 else:
                     return self._extract_artifact(
                         source=source,
