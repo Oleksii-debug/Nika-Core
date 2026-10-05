@@ -877,11 +877,18 @@ class RegistrySubprocessLoadedModelAttestor:
             waiter = asyncio.create_task(process.wait())
             try:
                 async with asyncio.timeout(timeout_seconds):
-                    _, raw_response, returncode = await asyncio.gather(
-                        writer,
-                        reader,
-                        waiter,
+                    await writer
+                    done, _ = await asyncio.wait(
+                        (reader, waiter),
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
+                    if reader in done:
+                        raw_response = reader.result()
+                    returncode = await waiter
+                    if returncode == 0 and os.name == "nt":
+                        job.close()
+                    if reader not in done:
+                        raw_response = await reader
             except TimeoutError as exc:
                 await self._terminate(process, job)
                 raise _error(
@@ -915,8 +922,6 @@ class RegistrySubprocessLoadedModelAttestor:
                     provider_id=provider_id,
                     effect=ModelFailureEffect.UNKNOWN,
                 )
-            if os.name == "nt":
-                job.close()
             return raw_response
         except asyncio.CancelledError:
             await self._terminate(process, job)
