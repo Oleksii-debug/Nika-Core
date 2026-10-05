@@ -16,6 +16,7 @@ from nika_core.training_artifacts import (
     VerifiedCandidateArtifact,
     verify_candidate_artifact,
 )
+from nika_core.training_peft_worker import PeftTrainerError, candidate_adapter_manifest
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingControl,
@@ -26,11 +27,17 @@ from nika_core.training_runtime import (
 )
 from nika_core.training_scale import TrainingScaleAuthorization
 
-_SCHEMA_VERSION = 2
-_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v2\x00"
+_SCHEMA_VERSION = 3
+_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v3\x00"
 _MAX_REPORT_BYTES = 32 * 1024
+_MAX_CANDIDATE_MANIFEST_BYTES = 512 * 1024
 _MAX_TEXT_BYTES = 1024
 _MAX_STEPS = 1_000_000
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 _PLATFORM_PATH_TYPE = type(Path())
 _REQUIRED_REPORT_FIELDS = {
     "base_sha256",
@@ -39,6 +46,13 @@ _REQUIRED_REPORT_FIELDS = {
     "candidate_descriptor_sha256",
     "candidate_registry_key",
     "candidate_sha256",
+    "candidate_manifest_sha256",
+    "consumed_materials_sha256",
+    "model_dir_manifest_sha256",
+    "trainer_artifact_id",
+    "trainer_deployment_sha256",
+    "trainer_implementation_sha256",
+    "training_runtime_manifest_sha256",
     "completed_checkpoint_id",
     "completed_steps",
     "execution_plan_sha256",
@@ -161,6 +175,157 @@ def _verify_candidate_receipt(
     return receipt
 
 
+
+@dataclass(frozen=True, slots=True)
+class _CandidateManifestEvidence:
+    candidate_manifest_sha256: str
+    consumed_materials_sha256: str
+    model_dir_manifest_sha256: str
+    trainer_artifact_id: str
+    trainer_deployment_sha256: str
+    trainer_implementation_sha256: str
+    training_runtime_manifest_sha256: str
+
+
+def _open_windows_candidate_stability_lock(path: Path) -> int | None:
+    """Deny write/delete replacement while canonical byte + manifest checks run."""
+
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "CreateFileW failed")
+        return int(handle)
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        raise PhysicalTrainingPilotError(
+            "candidate artifact could not be locked for stable verification"
+        ) from exc
+
+
+def _close_windows_candidate_stability_lock(handle: int | None) -> None:
+    if handle is None:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(ctypes.c_void_p(handle))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        pass
+
+
+def _candidate_manifest_evidence(
+    *,
+    candidate_path: Path,
+    completed: TrainingRunEvidence,
+) -> _CandidateManifestEvidence:
+    try:
+        manifest = candidate_adapter_manifest(candidate_path)
+    except (PeftTrainerError, OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise PhysicalTrainingPilotError(
+            "canonical PEFT candidate manifest verification failed"
+        ) from exc
+    if type(manifest) is not dict or manifest.get("schema") != "nika-peft-candidate-v1":
+        _fail("canonical PEFT candidate manifest returned invalid evidence")
+
+    if manifest.get("base_artifact_ref") != completed.base_artifact.artifact_ref:
+        _fail("PEFT candidate manifest changed base artifact reference")
+    base_sha256 = _require_sha256(
+        manifest.get("base_artifact_sha256"),
+        name="candidate manifest base_artifact_sha256",
+    )
+    if not hmac.compare_digest(base_sha256, completed.base_artifact.sha256):
+        _fail("PEFT candidate manifest changed base artifact digest")
+    if manifest.get("candidate_artifact_ref") != completed.candidate_artifact_ref:
+        _fail("PEFT candidate manifest changed candidate artifact reference")
+    job_fingerprint = _require_sha256(
+        manifest.get("job_fingerprint"),
+        name="candidate manifest job_fingerprint",
+    )
+    if not hmac.compare_digest(job_fingerprint, completed.job_fingerprint):
+        _fail("PEFT candidate manifest changed job fingerprint")
+    step_number = manifest.get("step_number")
+    if type(step_number) is not int or step_number != completed.next_step:
+        _fail("PEFT candidate manifest does not match completed step boundary")
+
+    consumed_materials_sha256 = _require_sha256(
+        manifest.get("consumed_materials_sha256"),
+        name="candidate manifest consumed_materials_sha256",
+    )
+    model_dir_manifest_sha256 = _require_sha256(
+        manifest.get("model_dir_manifest_sha256"),
+        name="candidate manifest model_dir_manifest_sha256",
+    )
+    trainer_artifact_id = _require_sha256(
+        manifest.get("trainer_artifact_id"),
+        name="candidate manifest trainer_artifact_id",
+    )
+    trainer_deployment_sha256 = _require_sha256(
+        manifest.get("trainer_sha256"),
+        name="candidate manifest trainer_sha256",
+    )
+    trainer_implementation_sha256 = _require_sha256(
+        manifest.get("trainer_implementation_sha256"),
+        name="candidate manifest trainer_implementation_sha256",
+    )
+    training_runtime_manifest_sha256 = _require_sha256(
+        manifest.get("training_runtime_manifest_sha256"),
+        name="candidate manifest training_runtime_manifest_sha256",
+    )
+    try:
+        encoded = json.dumps(
+            manifest,
+            allow_nan=False,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise PhysicalTrainingPilotError(
+            "canonical PEFT candidate manifest could not be snapshotted"
+        ) from exc
+    if not encoded or len(encoded) > _MAX_CANDIDATE_MANIFEST_BYTES:
+        _fail("canonical PEFT candidate manifest exceeds the evidence byte limit")
+
+    return _CandidateManifestEvidence(
+        candidate_manifest_sha256=hashlib.sha256(encoded).hexdigest(),
+        consumed_materials_sha256=consumed_materials_sha256,
+        model_dir_manifest_sha256=model_dir_manifest_sha256,
+        trainer_artifact_id=trainer_artifact_id,
+        trainer_deployment_sha256=trainer_deployment_sha256,
+        trainer_implementation_sha256=trainer_implementation_sha256,
+        training_runtime_manifest_sha256=training_runtime_manifest_sha256,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PhysicalTrainingPilotReport:
     """Minimized, path-free evidence for one checkpoint/restart PEFT pilot."""
@@ -180,6 +345,13 @@ class PhysicalTrainingPilotReport:
     candidate_registry_key: str
     candidate_sha256: str
     candidate_byte_count: int
+    candidate_manifest_sha256: str
+    consumed_materials_sha256: str
+    model_dir_manifest_sha256: str
+    trainer_artifact_id: str
+    trainer_deployment_sha256: str
+    trainer_implementation_sha256: str
+    training_runtime_manifest_sha256: str
     completed_steps: int
     platform: str = "windows"
     schema_version: int = _SCHEMA_VERSION
@@ -207,6 +379,16 @@ class PhysicalTrainingPilotReport:
             (self.candidate_descriptor_sha256, "candidate_descriptor_sha256"),
             (self.candidate_registry_key, "candidate_registry_key"),
             (self.candidate_sha256, "candidate_sha256"),
+            (self.candidate_manifest_sha256, "candidate_manifest_sha256"),
+            (self.consumed_materials_sha256, "consumed_materials_sha256"),
+            (self.model_dir_manifest_sha256, "model_dir_manifest_sha256"),
+            (self.trainer_artifact_id, "trainer_artifact_id"),
+            (self.trainer_deployment_sha256, "trainer_deployment_sha256"),
+            (self.trainer_implementation_sha256, "trainer_implementation_sha256"),
+            (
+                self.training_runtime_manifest_sha256,
+                "training_runtime_manifest_sha256",
+            ),
         ):
             _require_sha256(value, name=name)
         if len(
@@ -238,6 +420,13 @@ class PhysicalTrainingPilotReport:
             "candidate_descriptor_sha256": self.candidate_descriptor_sha256,
             "candidate_registry_key": self.candidate_registry_key,
             "candidate_sha256": self.candidate_sha256,
+            "candidate_manifest_sha256": self.candidate_manifest_sha256,
+            "consumed_materials_sha256": self.consumed_materials_sha256,
+            "model_dir_manifest_sha256": self.model_dir_manifest_sha256,
+            "trainer_artifact_id": self.trainer_artifact_id,
+            "trainer_deployment_sha256": self.trainer_deployment_sha256,
+            "trainer_implementation_sha256": self.trainer_implementation_sha256,
+            "training_runtime_manifest_sha256": self.training_runtime_manifest_sha256,
             "completed_checkpoint_id": self.completed_checkpoint_id,
             "completed_steps": self.completed_steps,
             "execution_plan_sha256": self.execution_plan_sha256,
@@ -297,6 +486,15 @@ class PhysicalTrainingPilotReport:
             candidate_registry_key=value["candidate_registry_key"],
             candidate_sha256=value["candidate_sha256"],
             candidate_byte_count=value["candidate_byte_count"],
+            candidate_manifest_sha256=value["candidate_manifest_sha256"],
+            consumed_materials_sha256=value["consumed_materials_sha256"],
+            model_dir_manifest_sha256=value["model_dir_manifest_sha256"],
+            trainer_artifact_id=value["trainer_artifact_id"],
+            trainer_deployment_sha256=value["trainer_deployment_sha256"],
+            trainer_implementation_sha256=value["trainer_implementation_sha256"],
+            training_runtime_manifest_sha256=value[
+                "training_runtime_manifest_sha256"
+            ],
             completed_steps=value["completed_steps"],
             platform=value["platform"],
             schema_version=value["schema_version"],
@@ -455,13 +653,22 @@ def build_physical_training_pilot_report(
     if completed.candidate_sha256 is None:
         _fail("completed pilot is missing candidate digest evidence")
 
-    receipt = _verify_candidate_receipt(
-        candidate_path=candidate_path,
-        candidate_descriptor=candidate_descriptor,
-        candidate_root=candidate_root,
-    )
-    if receipt.sha256 != completed.candidate_sha256:
-        _fail("physical candidate receipt does not match completed runtime evidence")
+    stable_candidate_path = _require_path(candidate_path, name="candidate_path")
+    stability_lock = _open_windows_candidate_stability_lock(stable_candidate_path)
+    try:
+        receipt = _verify_candidate_receipt(
+            candidate_path=stable_candidate_path,
+            candidate_descriptor=candidate_descriptor,
+            candidate_root=candidate_root,
+        )
+        if receipt.sha256 != completed.candidate_sha256:
+            _fail("physical candidate receipt does not match completed runtime evidence")
+        manifest_evidence = _candidate_manifest_evidence(
+            candidate_path=stable_candidate_path,
+            completed=completed,
+        )
+    finally:
+        _close_windows_candidate_stability_lock(stability_lock)
 
     return PhysicalTrainingPilotReport(
         job_id=completed.job_id,
@@ -479,6 +686,15 @@ def build_physical_training_pilot_report(
         candidate_registry_key=receipt.registry_key,
         candidate_sha256=receipt.sha256,
         candidate_byte_count=receipt.size_bytes,
+        candidate_manifest_sha256=manifest_evidence.candidate_manifest_sha256,
+        consumed_materials_sha256=manifest_evidence.consumed_materials_sha256,
+        model_dir_manifest_sha256=manifest_evidence.model_dir_manifest_sha256,
+        trainer_artifact_id=manifest_evidence.trainer_artifact_id,
+        trainer_deployment_sha256=manifest_evidence.trainer_deployment_sha256,
+        trainer_implementation_sha256=manifest_evidence.trainer_implementation_sha256,
+        training_runtime_manifest_sha256=(
+            manifest_evidence.training_runtime_manifest_sha256
+        ),
         completed_steps=completed.next_step,
     )
 
