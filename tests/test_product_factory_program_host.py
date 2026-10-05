@@ -3278,3 +3278,78 @@ def test_prepare_repair_waits_for_failed_result_reconciliation(tmp_path: Path) -
     assert repaired.work_id != request.work_id
     assert _record(coordinator, request.component_id).state is WorkState.READY
 
+def test_manual_block_rejects_running_work_that_requires_recovery(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host = ProductFactoryProgramHost(
+        store,
+        FakeProgramWorker(),
+        owner_id="program-host:block-running",
+    )
+    request = coordinator.start("component-0")
+    lease = host._acquire(request)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(lease,),
+        )
+    finally:
+        host._release_best_effort(lease)
+
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="requires recovery-aware blocking",
+    ):
+        host.block_and_checkpoint(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            component_id=request.component_id,
+            reason="manual operator block",
+        )
+
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    assert _record(restored, request.component_id).state is WorkState.RUNNING
+
+
+def test_manual_block_cannot_erase_completed_worker_evidence(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    host = ProductFactoryProgramHost(store, worker)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    before = _record(coordinator, "component-0")
+    assert before.result is not None
+
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="cannot be blocked without evidence loss",
+    ):
+        host.block_and_checkpoint(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            component_id="component-0",
+            reason="manual operator block",
+        )
+
+    current = _record(coordinator, "component-0")
+    assert current == before
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    durable = _record(restored, "component-0")
+    assert durable == before
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{before.request.work_id}"
+    ).status is IdempotencyStatus.COMPLETED
+
