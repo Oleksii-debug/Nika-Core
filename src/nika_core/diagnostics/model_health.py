@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -10,6 +11,12 @@ from urllib.parse import urlsplit
 import httpx
 
 from nika_core.diagnostics.health import HealthCheck, HealthStatus
+
+_MAX_HEALTH_TIMEOUT_SECONDS = 30.0
+_MAX_MODEL_ID_CHARS = 512
+_MAX_BASE_URL_CHARS = 2048
+_MAX_MODEL_CATALOG_ENTRIES = 10_000
+_FORBIDDEN_IDENTITY_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
 class ModelHealthFact(StrEnum):
@@ -134,7 +141,7 @@ class OllamaModelHealthProbe:
         client_factory: Callable[..., httpx.Client] = httpx.Client,
     ) -> None:
         self._model_id = model_id
-        self._base_url = base_url.rstrip("/") if type(base_url) is str else base_url
+        self._base_url = base_url
         self._provider_id = provider_id
         self._timeout_seconds = timeout_seconds
         self._evidence_port = evidence_port
@@ -152,6 +159,7 @@ class OllamaModelHealthProbe:
             )
 
         route_identity = self._route_identity()
+        request_base_url = self._request_base_url()
         inference_proven = self._inference_proven(route_identity=route_identity)
         try:
             with self._client_factory(
@@ -159,7 +167,7 @@ class OllamaModelHealthProbe:
                 follow_redirects=False,
                 trust_env=False,
             ) as client:
-                tags_response = client.get(f"{self._base_url}/api/tags")
+                tags_response = client.get(f"{request_base_url}/api/tags")
                 reachable = ModelHealthFact.YES
                 present = self._presence_from_response(tags_response)
                 if present is ModelHealthFact.NO:
@@ -179,7 +187,7 @@ class OllamaModelHealthProbe:
                         inference_proven=inference_proven,
                     )
                 try:
-                    running_response = client.get(f"{self._base_url}/api/ps")
+                    running_response = client.get(f"{request_base_url}/api/ps")
                 except httpx.TransportError:
                     ready = ModelHealthFact.UNKNOWN
                 else:
@@ -203,11 +211,8 @@ class OllamaModelHealthProbe:
 
     def _configured(self) -> ModelHealthFact:
         if (
-            type(self._model_id) is not str
-            or not self._model_id.strip()
-            or self._model_id != self._model_id.strip()
-            or type(self._base_url) is not str
-            or not self._base_url.strip()
+            not self._valid_route_text(self._model_id, max_chars=_MAX_MODEL_ID_CHARS)
+            or not self._valid_route_text(self._base_url, max_chars=_MAX_BASE_URL_CHARS)
             or type(self._provider_id) is not str
             or self._provider_id != "ollama"
             or not self._valid_timeout(self._timeout_seconds)
@@ -232,6 +237,21 @@ class OllamaModelHealthProbe:
         return ModelHealthFact.YES
 
     @staticmethod
+    def _valid_route_text(value: object, *, max_chars: int) -> bool:
+        if type(value) is not str or not value or len(value) > max_chars:
+            return False
+        if value != value.strip():
+            return False
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError:
+            return False
+        return not any(
+            unicodedata.category(char) in _FORBIDDEN_IDENTITY_CATEGORIES
+            for char in value
+        )
+
+    @staticmethod
     def _valid_timeout(value: object) -> bool:
         if type(value) is not int and type(value) is not float:
             return False
@@ -239,7 +259,12 @@ class OllamaModelHealthProbe:
             number = float(value)
         except OverflowError:
             return False
-        return math.isfinite(number) and number > 0
+        return math.isfinite(number) and 0 < number <= _MAX_HEALTH_TIMEOUT_SECONDS
+
+    def _request_base_url(self) -> str:
+        if self._base_url.endswith("/"):
+            return self._base_url[:-1]
+        return self._base_url
 
     def _route_identity(self) -> str:
         parsed = urlsplit(self._base_url)
@@ -322,7 +347,7 @@ class OllamaModelHealthProbe:
         if type(body) is not dict:
             return None
         raw_models = body.get("models")
-        if type(raw_models) is not list:
+        if type(raw_models) is not list or len(raw_models) > _MAX_MODEL_CATALOG_ENTRIES:
             return None
         identities: set[str] = set()
         for item in raw_models:
@@ -333,7 +358,10 @@ class OllamaModelHealthProbe:
                 if key not in item:
                     continue
                 value = item[key]
-                if type(value) is not str or not value:
+                if not OllamaModelHealthProbe._valid_route_text(
+                    value,
+                    max_chars=_MAX_MODEL_ID_CHARS,
+                ):
                     return None
                 item_identities.append(value)
             if not item_identities:
