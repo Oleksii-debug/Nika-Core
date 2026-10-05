@@ -117,6 +117,8 @@ def _validate_payload_resources(payload: object) -> None:
             json_bytes = _checked_json_bytes(json_bytes, _json_string_utf8_size(value))
             continue
         if isinstance(value, dict):
+            if type(value) is not dict:
+                raise ValueError("Checkpoint payload containers must be built-in types")
             if len(value) > _JSON_MAX_NODES - nodes:
                 raise ValueError("Checkpoint payload exceeds the JSON node limit")
             punctuation = 2 + len(value) + max(0, len(value) - 1)
@@ -126,6 +128,8 @@ def _validate_payload_resources(payload: object) -> None:
                 stack.append((item, depth + 1))
             continue
         if isinstance(value, (list, tuple)):
+            if type(value) not in (list, tuple):
+                raise ValueError("Checkpoint payload containers must be built-in types")
             if len(value) > _JSON_MAX_NODES - nodes:
                 raise ValueError("Checkpoint payload exceeds the JSON node limit")
             punctuation = 2 + max(0, len(value) - 1)
