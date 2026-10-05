@@ -38,7 +38,6 @@ _MAX_JSON_DEPTH = 12
 _MAX_JSON_NODES = 4096
 _STREAM_JOIN_TIMEOUT_SECONDS = 1.0
 _READ_CHUNK_BYTES = 64 * 1024
-_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 class TrainingSubprocessError(TrainingWorkerError):
@@ -118,16 +117,6 @@ def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
             raise ValueError(f"duplicate JSON key: {key}")
         result[key] = value
     return result
-
-
-def _validate_sha256(value: object, *, name: str) -> str:
-    if (
-        type(value) is not str
-        or len(value) != 64
-        or any(character not in _HEX_DIGITS for character in value)
-    ):
-        raise ValueError(f"{name} must be a lowercase 64-character SHA-256 digest")
-    return value
 
 
 def _validate_positive_byte_limit(value: object, *, name: str) -> int:
@@ -374,7 +363,6 @@ class SubprocessTrainingWorker:
                 code="base_artifact_identity_mismatch",
             )
 
-        self._verify_trainer_artifact()
         job_fingerprint = _job_fingerprint(spec)
         trainer_state, previous_step_id = self._unwrap_resume_state(
             resume_state=resume_state,
@@ -405,6 +393,9 @@ class SubprocessTrainingWorker:
             label="training subprocess request",
         )
 
+        # Keep the physical registry check as close as practical to process creation.
+        # All remaining work before Popen is constant-time call plumbing.
+        self._verify_trainer_artifact()
         stdout = self._execute(request_bytes + b"\n")
         try:
             response = self._parse_response(stdout, expected_step_id=current_step_id)
