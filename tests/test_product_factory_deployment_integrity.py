@@ -322,3 +322,79 @@ def test_environment_identity_rejects_empty_scope(
             EnvironmentTier.STAGING,
             provider_ref,
         )
+
+class _MutatedDeployResultProvider(FakeProvider):
+    def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
+        result = ProviderDeploymentResult(
+            True,
+            False,
+            (f"deploy:{intent.intent_id}",),
+        )
+        object.__setattr__(result, "applied", 1)
+        return result
+
+
+class _MutatedHealthEvidenceProvider(FakeProvider):
+    def health(self, intent: DeploymentIntent) -> HealthEvidence:
+        evidence = super().health(intent)
+        object.__setattr__(evidence, "healthy", 1)
+        return evidence
+
+
+class _MutatedInspectionProvider(FakeProvider):
+    def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
+        inspection = super().inspect(intent)
+        object.__setattr__(inspection, "healthy", 1)
+        return inspection
+
+
+class _MutatedRollbackEvidenceProvider(FakeProvider):
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        evidence = super().rollback_exact(intent, previous_release)
+        object.__setattr__(evidence, "succeeded", 1)
+        return evidence
+
+
+def test_deploy_result_post_construction_mutation_fails_uncertain() -> None:
+    provider = _MutatedDeployResultProvider()
+    fabric = DeploymentFabric(provider)
+
+    record = fabric.deploy(_intent("project-a", "mutated-deploy", 1))
+
+    assert record.state is DeploymentState.UNCERTAIN
+
+
+def test_health_evidence_post_construction_mutation_fails_uncertain() -> None:
+    provider = _MutatedHealthEvidenceProvider()
+    fabric = DeploymentFabric(provider)
+
+    record = fabric.deploy(_intent("project-a", "mutated-health", 1))
+
+    assert record.state is DeploymentState.UNCERTAIN
+
+
+def test_inspection_post_construction_mutation_cannot_authorize_health() -> None:
+    provider = _MutatedInspectionProvider(uncertain={"mutated-inspection"})
+    fabric = DeploymentFabric(provider)
+    intent = _intent("project-a", "mutated-inspection", 1)
+    first = fabric.deploy(intent)
+
+    assert first.state is DeploymentState.UNCERTAIN
+    with pytest.raises(DeploymentFabricError, match="inspection healthy"):
+        fabric.reconcile(intent.intent_id)
+    assert fabric.snapshot().records[0].state is DeploymentState.UNCERTAIN
+
+
+def test_rollback_post_construction_mutation_cannot_authorize_success() -> None:
+    provider = _MutatedRollbackEvidenceProvider(unhealthy={_sha(2)})
+    fabric = DeploymentFabric(provider)
+    first = fabric.deploy(_intent("project-a", "healthy-first", 1))
+    second = fabric.deploy(_intent("project-a", "mutated-rollback", 2))
+
+    assert first.state is DeploymentState.HEALTHY
+    assert second.state is DeploymentState.UNCERTAIN
+
