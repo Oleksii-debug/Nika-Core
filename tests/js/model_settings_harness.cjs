@@ -126,6 +126,9 @@ function safeModelSnapshot(payload) {
       ? payload.private_data_allowed
       : true,
     credential_configured: payload.credential_ref !== null,
+    artifact: payload.route_kind === "deterministic"
+      ? { status: "not_applicable" }
+      : { status: "unregistered" },
   };
 }
 
@@ -328,6 +331,9 @@ const status = element("model-settings-status");
   });
   assert.equal(document.activeElement, element("command-input"));
   assert.match(status.textContent, /ollama, qwen3:8b/);
+  assert.equal(element("model-artifact-panel").hidden, false);
+  assert.equal(element("model-artifact-summary").hidden, true);
+  assert.match(element("model-artifact-status").textContent, /немає зареєстрованих/);
 
   let releaseStateRead = holdNextStateRead();
   click(reload);
@@ -509,6 +515,11 @@ const status = element("model-settings-status");
   model.focus();
   model.value = "unsaved-model";
   fire(model, "input");
+  assert.equal(
+    element("model-artifact-panel").hidden,
+    true,
+    "Unsaved model identity must hide provenance for the previously saved model",
+  );
   const dirtyFocus = document.activeElement;
   await poll();
   assert.equal(model.value, "unsaved-model");
@@ -532,6 +543,7 @@ const status = element("model-settings-status");
     status: "ready", revision: 9, route_kind: "ollama", provider_id: "ollama",
     provider_kind: "local", model: "safe-model", base_url: "http://localhost:11434",
     timeout_seconds: 60, private_data_allowed: true, credential_configured: false,
+    artifact: { status: "unregistered" },
   };
   failRead = false;
   await poll();
@@ -545,6 +557,69 @@ const status = element("model-settings-status");
 
   failRead = false;
   await poll();
+
+  currentModel = {
+    status: "ready",
+    revision: 10,
+    route_kind: "ollama",
+    provider_id: "ollama",
+    provider_kind: "local",
+    model: "qwen3:8b",
+    base_url: "http://localhost:11434",
+    timeout_seconds: 60,
+    private_data_allowed: true,
+    credential_configured: false,
+    artifact: {
+      status: "registered",
+      kind: "external_local",
+      model_version: "8b-reviewed",
+      source_reference: "https://ollama.com/library/qwen3",
+      license_reference: "https://qwenlm.github.io/license",
+      integrity_basis: "sha256",
+      sha256: "a".repeat(64),
+      size_bytes: "1152921504606846976",
+      descriptor_digest: "b".repeat(64),
+      capabilities: ["text", "text.chat"],
+      resources: {
+        min_system_memory_bytes: "8589934592",
+        min_available_memory_bytes: "2147483648",
+        min_vram_bytes: "4294967296",
+        recommended_memory_bytes: "17179869184",
+        cpu_architectures: ["amd64", "x86_64"],
+      },
+    },
+  };
+  await poll();
+  assert.equal(element("model-artifact-panel").hidden, false);
+  assert.equal(element("model-artifact-summary").hidden, false);
+  assert.match(element("model-artifact-status").textContent, /не є доказом фактичного завантаження/);
+  assert.equal(element("model-artifact-kind").textContent, "зовнішній локальний");
+  assert.equal(element("model-artifact-version").textContent, "8b-reviewed");
+  assert.equal(element("model-artifact-integrity").textContent, "записаний SHA-256");
+  assert.equal(element("model-artifact-sha256").textContent, "a".repeat(64));
+  assert.equal(element("model-artifact-descriptor-digest").textContent, "b".repeat(64));
+  assert.equal(element("model-artifact-source").textContent, "https://ollama.com/library/qwen3");
+  assert.equal(element("model-artifact-license").textContent, "https://qwenlm.github.io/license");
+  assert.equal(element("model-artifact-size").textContent, "1152921504606846976 байт");
+  assert.match(element("model-artifact-capabilities").textContent, /text.chat/);
+  assert.match(element("model-artifact-resources").textContent, /amd64/);
+
+  currentModel = {
+    ...currentModel,
+    revision: 11,
+    artifact: {
+      ...currentModel.artifact,
+      descriptor_digest: "PRIVATE_MODEL_CANARY",
+    },
+  };
+  await poll();
+  assert.equal(save.disabled, true, "Malformed provenance must fail the bounded model snapshot");
+  assert.equal(element("model-artifact-panel").hidden, true);
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_MODEL_CANARY"),
+    false,
+    "Rejected provenance bytes must never be rendered",
+  );
 
   currentRecovery = {
     schema_version: 1,
