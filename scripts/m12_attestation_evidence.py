@@ -8,6 +8,7 @@ from nika_core.packaging.attestation import (
     build_release_attestation_evidence,
     write_release_attestation_evidence,
 )
+from nika_core.packaging.release import require_product_version
 
 
 def _canonical_product_version() -> str:
@@ -18,9 +19,13 @@ def _canonical_product_version() -> str:
         value = payload["project"]["version"]
     except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
         raise RuntimeError("canonical project version is unavailable") from exc
-    if not isinstance(value, str) or not value or value != value.strip():
-        raise RuntimeError("canonical project version is invalid")
-    return value
+    try:
+        return require_product_version(
+            value,
+            authority="canonical project version",
+        )
+    except ValueError as exc:
+        raise RuntimeError("canonical project version is invalid") from exc
 
 
 def parser() -> argparse.ArgumentParser:
