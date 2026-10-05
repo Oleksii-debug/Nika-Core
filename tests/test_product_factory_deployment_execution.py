@@ -667,6 +667,7 @@ def test_restore_rejects_tampered_release_payload_without_mutation() -> None:
         target.restore(DeploymentExecutionSnapshot((corrupted,)))
     assert target.snapshot() == before
 
+
 @pytest.mark.parametrize(
     ("field_name", "invalid_value", "error"),
     [
