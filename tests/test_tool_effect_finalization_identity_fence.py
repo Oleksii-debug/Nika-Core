@@ -13,7 +13,6 @@ from nika_core.tools import (
     ToolCall,
     ToolEffectConflictError,
     ToolEffectGuard,
-    ToolEffectReservation,
     ToolExecutor,
     ToolRisk,
     ToolSpec,
@@ -146,6 +145,7 @@ def test_tool_executor_cannot_finalize_rebound_external_effect(tmp_path) -> None
     assert len(rebound) == 1
     assert rebound[0].created_at == _REBOUND_CREATED_AT
     assert rebound[0].status is IdempotencyStatus.PENDING
+
 
 class _BoolTrap:
     def __init__(self) -> None:
