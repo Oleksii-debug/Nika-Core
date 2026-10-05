@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from nika_core.builder.compiler import AgentCompiler, RiskTier
 from nika_core.builder.spec import AgentDefinition, ToolGrant
@@ -77,3 +78,22 @@ def test_valid_scope_catalog_still_compiles_without_escalation() -> None:
         compiler.compile(
             _definition("web.read", RiskTier.R0_READ_ONLY, scopes=("network.write",))
         )
+
+
+@pytest.mark.parametrize("untrusted_risk", (True, False, 1.0, "1"))
+def test_untrusted_numeric_coercion_cannot_select_agent_tool_risk(untrusted_risk: object) -> None:
+    with pytest.raises(ValidationError):
+        ToolGrant(tool_id="web.read", max_risk=untrusted_risk)  # type: ignore[arg-type]
+    assert ToolGrant(tool_id="web.read", max_risk=RiskTier.R0_READ_ONLY).max_risk == 0
+
+
+def test_compilation_detaches_nested_caller_grants_before_draft_persistence() -> None:
+    source = _definition("web.read", RiskTier.R0_READ_ONLY)
+    compiled = _compiler(ToolSpec("web.read", "Read", ToolRisk.READ_ONLY)).compile(source)
+    object.__setattr__(source.tool_grants[0], "max_risk", RiskTier.R4_HIGH_IMPACT)
+    object.__setattr__(source.tool_grants[0], "tool_id", "release.publish")
+
+    assert compiled.definition.tool_grants[0].tool_id == "web.read"
+    assert compiled.definition.tool_grants[0].max_risk == RiskTier.R0_READ_ONLY
+    assert compiled.required_human_approvals == ()
+    assert compiled.highest_risk is RiskTier.R0_READ_ONLY
