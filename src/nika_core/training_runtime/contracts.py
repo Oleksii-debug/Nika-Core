@@ -88,6 +88,7 @@ class TrainingControl(StrEnum):
 
 class TrainingRunState(StrEnum):
     WAITING = "waiting"
+    DISPATCHING = "dispatching"
     RUNNING = "running"
     PAUSED = "paused"
     COMPLETED = "completed"
