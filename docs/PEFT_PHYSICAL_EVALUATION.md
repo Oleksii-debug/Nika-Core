@@ -152,17 +152,36 @@ It reconstructs the exact training job and lets
 `bind_training_result_for_evaluation` recompute the job fingerprint. No model
 subprocess is started if those authorities disagree.
 
-Immediately before champion inference, before challenger inference, and before the
-durable Experiment Engine comparison, the latest training checkpoint is re-read and
-must still equal the completed physical-pilot report.
+Immediately before the durable evaluation attempt is claimed, before champion
+inference, before challenger inference, and before the durable Experiment Engine
+comparison, the latest training checkpoint is re-read and must still equal the
+completed physical-pilot report.
+
+Before the first model inference effect, the command derives a deterministic physical
+attempt ID from the requested `experiment_id`, physical-pilot evidence, exact
+training/champion bindings, candidate identities, held-out set, benchmark config,
+promotion policy, permission fingerprint, and exact Registry-bound evaluator
+attestor ID/SHA-256. The canonical Experiment Engine persists that exact definition
+and transitions it to `running` before inference starts.
+
+If the same durable attempt already exists on a later invocation, the command fails
+closed instead of silently repeating champion or challenger inference. This applies
+even when the final report is missing because the previous process or Windows host
+stopped after model effects began. Preserve `physical-pilot.sqlite3` and treat the
+attempt as **inconclusive/unknown** until reconciled; do not delete the Experiment
+Engine row or choose a different `experiment_id` merely to bypass the fence. If
+the prior effect state cannot be independently reconciled, keep
+`OLD_VS_NEW_MODEL_EVALUATION_PROVEN=false` and perform a completely fresh physical
+pilot/evaluation run in a new output root rather than replaying the ambiguous
+attempt.
 
 On success the command prints a minimized JSON payload and atomically creates:
 
 `physical-old-new-evaluation-report.json`
 
-inside `physical_pilot_output_root`. That report contains evidence digests,
-Experiment Engine status/selection IDs, benchmark evidence digests, and attestor
-identity. It does not contain model paths, evaluator paths, held-out prompts,
+inside `physical_pilot_output_root`. That report contains the requested experiment label, deterministic physical attempt
+ID, evidence digests, Experiment Engine status/selection IDs, benchmark evidence
+digests, and attestor identity. It does not contain model paths, evaluator paths, held-out prompts,
 expected answers, environment variables, credentials, or model bytes.
 
 If that report already exists, the command refuses to repeat model effects. A
