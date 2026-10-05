@@ -284,17 +284,19 @@ class ToolEffectGuard:
     def _reservation_identity(
         reservation: ToolEffectReservation,
     ) -> tuple[str, str, str, str]:
-        values = (
-            reservation.task_id,
-            reservation.operation_type,
-            reservation.input_fingerprint,
-            reservation.created_at,
-        )
-        if any(type(value) is not str or not value for value in values):
+        task_id = reservation.task_id
+        operation_type = reservation.operation_type
+        input_fingerprint = reservation.input_fingerprint
+        created_at = reservation.created_at
+        if (
+            not task_id
+            or not operation_type
+            or not input_fingerprint
+            or not created_at
+        ):
             raise ToolEffectConflictError(
                 "tool effect finalization lacks reservation authority"
             )
-        task_id, operation_type, input_fingerprint, created_at = values
         return task_id, operation_type, input_fingerprint, created_at
 
     @staticmethod
