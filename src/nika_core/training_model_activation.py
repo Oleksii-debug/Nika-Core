@@ -19,6 +19,13 @@ from nika_core.training_evaluation_attestation import (
 )
 from nika_core.training_evaluation_comparison import AttestedTrainingComparisonResult
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
+from nika_core.training_ollama_manifest import (
+    OllamaManifestAuthority,
+    OllamaManifestAuthorityError,
+    OllamaPreparedModelBinding,
+    OllamaPromotionManifestStore,
+    OllamaPromotionManifestStoreError,
+)
 from nika_core.v01_model_settings import (
     ModelPromotionReceipt,
     ModelSetupError,
@@ -132,18 +139,19 @@ def _activation_attestation_sha256(
             "activation result must be an exact AttestedModelCompletionResult"
         )
     attestation = result.attestation.revalidated()
-    return _canonical_sha256(
-        {
-            "request_id": attestation.request_id,
-            "binding_sha256": attestation.binding_sha256,
-            "provider_id": attestation.provider_id,
-            "model_id": attestation.model_id,
-            "artifact_sha256": attestation.artifact_sha256,
-            "descriptor_digest": attestation.descriptor_digest,
-            "attestor_id": attestation.attestor_id,
-            "attestor_sha256": attestation.attestor_sha256,
-        }
-    )
+    payload: dict[str, object] = {
+        "request_id": attestation.request_id,
+        "binding_sha256": attestation.binding_sha256,
+        "provider_id": attestation.provider_id,
+        "model_id": attestation.model_id,
+        "artifact_sha256": attestation.artifact_sha256,
+        "descriptor_digest": attestation.descriptor_digest,
+        "attestor_id": attestation.attestor_id,
+        "attestor_sha256": attestation.attestor_sha256,
+    }
+    if attestation.provider_manifest_sha256 is not None:
+        payload["provider_manifest_sha256"] = attestation.provider_manifest_sha256
+    return _canonical_sha256(payload)
 
 
 def _apply_promotion(
@@ -177,12 +185,147 @@ def _apply_promotion(
         ) from exc
 
 
+async def _prepare_promotion_manifests(
+    *,
+    canonical: AttestedTrainingComparisonResult,
+    training: TrainingEvaluationBinding,
+    manifest_authority: OllamaManifestAuthority,
+    base_url: object,
+) -> tuple[OllamaPreparedModelBinding, OllamaPreparedModelBinding]:
+    if type(manifest_authority) is not OllamaManifestAuthority:
+        raise TypeError("manifest_authority must be an exact OllamaManifestAuthority")
+    if type(base_url) is not str:
+        raise TrainingModelActivationError(
+            "active Ollama endpoint is unavailable for manifest preparation"
+        )
+    if (
+        canonical.champion_provider_manifest_sha256 is None
+        or canonical.challenger_provider_manifest_sha256 is None
+    ):
+        raise TrainingModelActivationError(
+            "comparison lacks provider manifest evidence required for activation"
+        )
+    try:
+        expected_endpoint = OllamaManifestAuthority(
+            base_url=base_url
+        ).endpoint_sha256
+    except (TypeError, ValueError) as exc:
+        raise TrainingModelActivationError(
+            "active Ollama endpoint is invalid for manifest preparation"
+        ) from exc
+    if manifest_authority.endpoint_sha256 != expected_endpoint:
+        raise TrainingModelActivationError(
+            "Ollama manifest authority belongs to another endpoint"
+        )
+
+    try:
+        base = await manifest_authority.prepare_existing_gguf_blob(
+            model_id=training.base_model_id,
+            artifact_sha256=training.base_sha256,
+            descriptor_digest=training.base_descriptor_digest,
+        )
+        challenger = await manifest_authority.prepare_existing_gguf_blob(
+            model_id=training.challenger_model_id,
+            artifact_sha256=training.challenger_sha256,
+            descriptor_digest=training.descriptor_digest,
+        )
+        # Re-observe both aliases after both /api/create effects so a later create
+        # cannot silently invalidate the first prepared identity.
+        await manifest_authority.assert_available(base)
+        await manifest_authority.assert_available(challenger)
+    except OllamaManifestAuthorityError as exc:
+        raise TrainingModelActivationError(
+            "Ollama physical-artifact to provider-manifest preparation failed"
+        ) from exc
+
+    if (
+        base.route_model_id != training.base_model_id
+        or base.artifact_sha256 != training.base_sha256
+        or base.descriptor_digest != training.base_descriptor_digest
+        or challenger.route_model_id != training.challenger_model_id
+        or challenger.artifact_sha256 != training.challenger_sha256
+        or challenger.descriptor_digest != training.descriptor_digest
+        or base.endpoint_sha256 != expected_endpoint
+        or challenger.endpoint_sha256 != expected_endpoint
+    ):
+        raise TrainingModelActivationError(
+            "prepared Ollama manifest evidence does not match the training binding"
+        )
+    if (
+        base.provider_manifest_sha256
+        != canonical.champion_provider_manifest_sha256
+        or challenger.provider_manifest_sha256
+        != canonical.challenger_provider_manifest_sha256
+    ):
+        raise TrainingModelActivationError(
+            "prepared Ollama manifests do not match evaluated provider manifests"
+        )
+    return base, challenger
+
+
+def _require_persisted_promotion_manifests(
+    *,
+    canonical: AttestedTrainingComparisonResult,
+    training: TrainingEvaluationBinding,
+    settings: V01ModelSettings,
+    manifest_store: OllamaPromotionManifestStore | None,
+) -> None:
+    if manifest_store is None:
+        raise TrainingModelActivationError(
+            "durable Ollama provider manifest authority is required for promotion retry"
+        )
+    if type(manifest_store) is not OllamaPromotionManifestStore:
+        raise TypeError("manifest_store must be an exact OllamaPromotionManifestStore")
+    snapshot = settings.snapshot()
+    base_url = snapshot.get("base_url")
+    if type(base_url) is not str:
+        raise TrainingModelActivationError(
+            "active Ollama endpoint is unavailable for provider manifest recovery"
+        )
+    try:
+        base = manifest_store.resolve(
+            decision_sha256=canonical.evidence_sha256,
+            binding_sha256=training.binding_sha256,
+            role="rollback",
+            artifact_sha256=training.base_sha256,
+            descriptor_digest=training.base_descriptor_digest,
+            route_model_id=training.base_model_id,
+            base_url=base_url,
+        )
+        challenger = manifest_store.resolve(
+            decision_sha256=canonical.evidence_sha256,
+            binding_sha256=training.binding_sha256,
+            role="challenger",
+            artifact_sha256=training.challenger_sha256,
+            descriptor_digest=training.descriptor_digest,
+            route_model_id=training.challenger_model_id,
+            base_url=base_url,
+        )
+    except OllamaPromotionManifestStoreError as exc:
+        raise TrainingModelActivationError(
+            "existing promotion lacks valid durable Ollama provider manifest authority"
+        ) from exc
+    if (
+        canonical.champion_provider_manifest_sha256 is None
+        or canonical.challenger_provider_manifest_sha256 is None
+        or base.provider_manifest_sha256
+        != canonical.champion_provider_manifest_sha256
+        or challenger.provider_manifest_sha256
+        != canonical.challenger_provider_manifest_sha256
+    ):
+        raise TrainingModelActivationError(
+            "durable Ollama manifests do not match evaluated provider manifests"
+        )
+
+
 async def activate_attested_training_promotion(
     *,
     result: AttestedTrainingComparisonResult,
     settings: V01ModelSettings,
     expected_revision: int,
     effect_port: LoadedModelAttestedCompletionPort | None = None,
+    manifest_store: OllamaPromotionManifestStore | None = None,
+    manifest_authority: OllamaManifestAuthority | None = None,
 ) -> ModelPromotionReceipt:
     """Activate a promoted local model only after a fresh loaded-byte attestation.
 
@@ -212,6 +355,12 @@ async def activate_attested_training_promotion(
                 "existing promotion predates fresh loaded-model attestation; "
                 "rollback or reevaluate before activation"
             )
+        _require_persisted_promotion_manifests(
+            canonical=canonical,
+            training=training,
+            settings=settings,
+            manifest_store=manifest_store,
+        )
         return _apply_promotion(
             canonical=canonical,
             settings=settings,
@@ -246,6 +395,18 @@ async def activate_attested_training_promotion(
         raise TrainingModelActivationError(
             "fresh loaded-model attestation is required before activation"
         )
+    if manifest_store is None or manifest_authority is None:
+        raise TrainingModelActivationError(
+            "Ollama provider manifest authority is required before activation"
+        )
+    if type(manifest_store) is not OllamaPromotionManifestStore:
+        raise TypeError("manifest_store must be an exact OllamaPromotionManifestStore")
+    base_prepared, challenger_prepared = await _prepare_promotion_manifests(
+        canonical=canonical,
+        training=training,
+        manifest_authority=manifest_authority,
+        base_url=snapshot.get("base_url"),
+    )
 
     request = _activation_probe(
         canonical=canonical,
@@ -262,6 +423,25 @@ async def activate_attested_training_promotion(
     except ModelGatewayError as exc:
         raise TrainingModelActivationError(
             "fresh loaded-model activation attestation failed"
+        ) from exc
+    if (
+        attested.attestation.revalidated().provider_manifest_sha256
+        != challenger_prepared.provider_manifest_sha256
+    ):
+        raise TrainingModelActivationError(
+            "fresh loaded-model provider manifest does not match prepared authority"
+        )
+
+    try:
+        manifest_store.save_pair(
+            decision_sha256=canonical.evidence_sha256,
+            binding_sha256=training.binding_sha256,
+            base=base_prepared,
+            challenger=challenger_prepared,
+        )
+    except OllamaPromotionManifestStoreError as exc:
+        raise TrainingModelActivationError(
+            "verified Ollama provider manifest mapping could not be persisted"
         ) from exc
 
     return _apply_promotion(

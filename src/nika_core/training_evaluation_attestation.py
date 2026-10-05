@@ -51,6 +51,7 @@ class LoadedModelArtifactAttestation:
     descriptor_digest: str
     attestor_id: str
     attestor_sha256: str
+    provider_manifest_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _canonical_text(self.request_id, name="request_id")
@@ -61,6 +62,11 @@ class LoadedModelArtifactAttestation:
         _sha256(self.artifact_sha256, name="artifact_sha256")
         _sha256(self.descriptor_digest, name="descriptor_digest")
         _sha256(self.attestor_sha256, name="attestor_sha256")
+        if self.provider_manifest_sha256 is not None:
+            _sha256(
+                self.provider_manifest_sha256,
+                name="provider_manifest_sha256",
+            )
 
     def revalidated(self) -> LoadedModelArtifactAttestation:
         if type(self) is not LoadedModelArtifactAttestation:
@@ -77,6 +83,7 @@ class LoadedModelArtifactAttestation:
                 descriptor_digest=self.descriptor_digest,
                 attestor_id=self.attestor_id,
                 attestor_sha256=self.attestor_sha256,
+                provider_manifest_sha256=self.provider_manifest_sha256,
             )
         except AttributeError as exc:
             raise ValueError("loaded-model attestation fields are incomplete") from exc
