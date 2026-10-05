@@ -58,6 +58,7 @@ from nika_core.training_model_activation import (
     rollback_attested_training_promotion,
 )
 from nika_core.training_ollama_manifest import (
+    ManifestPinnedOllamaProvider,
     OllamaManifestAuthority,
     OllamaPreparedModelBinding,
     OllamaPromotionManifestStore,
@@ -1467,6 +1468,16 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     monkeypatch.setattr(settings, "artifact_pin_for_task", unexpected_legacy_read)
     monkeypatch.setattr(TaskQueue, "get", unexpected_legacy_read)
 
+    seen_binding: list[OllamaPreparedModelBinding] = []
+
+    def observing_provider(**kwargs):
+        seen_binding.append(kwargs["binding"])
+        return ManifestPinnedOllamaProvider(**kwargs)
+
+    monkeypatch.setattr(
+        "nika_core.v01_model_settings.ManifestPinnedOllamaProvider",
+        observing_provider,
+    )
     factory = V01BoundModelRuntimeFactory(
         store=store,
         definitions=AgentDefinitionRepository(store),
@@ -1474,3 +1485,45 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     )
 
     assert factory.for_task(task.task_id) is not None
+    assert len(seen_binding) == 1
+    assert (
+        seen_binding[0].artifact_sha256
+        == result.challenger_benchmark.binding.challenger_sha256
+    )
+    assert seen_binding[0].route_model_id == "challenger-model"
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_fails_closed_when_promoted_manifest_mapping_is_missing(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    await _activate_with_manifests(
+        result=result,
+        store=store,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_ChallengerPort("activation-ok"),
+    )
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload(
+            {"command": "must retain provider manifest authority"}
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM training_ollama_promotion_manifests "
+            "WHERE decision_sha256 = ? AND role = 'challenger'",
+            (result.evidence_sha256,),
+        )
+
+    factory = V01BoundModelRuntimeFactory(
+        store=store,
+        definitions=AgentDefinitionRepository(store),
+        settings=settings,
+    )
+    with pytest.raises(ModelSetupError, match="provider manifest"):
+        factory.for_task(task.task_id)
