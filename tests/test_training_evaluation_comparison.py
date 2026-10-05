@@ -209,7 +209,12 @@ class _ChallengerPort:
         )
 
 
-async def _attested_results(tmp_path):
+async def _attested_results(
+    tmp_path,
+    *,
+    champion_text: str = "old-answer",
+    challenger_text: str = "answer",
+):
     evaluation = _evaluation_set()
     training_binding = _training_binding(evaluation)
     base_path = tmp_path / "base-model.bin"
@@ -226,7 +231,7 @@ async def _attested_results(tmp_path):
         champion_binding=champion_binding,
         champion=_champion(),
         evaluation_set=evaluation,
-        effect_port=_ChampionPort("old-answer"),
+        effect_port=_ChampionPort(champion_text),
         expected_attestor_id=_CHAMPION_ATTESTOR_ID,
         expected_attestor_sha256=_CHAMPION_ATTESTOR_SHA256,
         timeout_seconds=5,
@@ -236,7 +241,7 @@ async def _attested_results(tmp_path):
         binding=training_binding,
         challenger=_challenger(),
         evaluation_set=evaluation,
-        effect_port=_ChallengerPort("answer"),
+        effect_port=_ChallengerPort(challenger_text),
         expected_attestor_id=_CHALLENGER_ATTESTOR_ID,
         expected_attestor_sha256=_CHALLENGER_ATTESTOR_SHA256,
         timeout_seconds=5,
@@ -500,3 +505,84 @@ async def test_comparison_resumes_partial_evidence_after_sqlite_restart(tmp_path
     assert len(result.experiment_snapshot.observations) == 4
     recovered = reopened_repository.get(definition.experiment_id)
     assert recovered == result.experiment_snapshot
+
+
+@pytest.mark.asyncio
+async def test_attested_comparison_keeps_champion_when_improvement_threshold_is_not_met(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(
+        tmp_path,
+        champion_text="answer",
+        challenger_text="answer",
+    )
+    repository = InMemoryExperimentRepository()
+
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-no-promotion",
+        repository=repository,
+    )
+
+    assert result.experiment_snapshot.status is ExperimentStatus.COMPLETED
+    assert result.experiment_snapshot.selected_candidate_id == "models/base"
+    assert result.experiment_snapshot.previous_champion_id == "models/base"
+
+
+@pytest.mark.asyncio
+async def test_comparison_rejects_reuse_after_canonical_rollback(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    repository = InMemoryExperimentRepository()
+    kwargs = dict(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-rolled-back",
+        repository=repository,
+    )
+    first = run_attested_old_vs_new_comparison(**kwargs)
+    assert first.experiment_snapshot.status is ExperimentStatus.PROMOTED
+    rolled_back = ExperimentEngine(repository).rollback("training-job-1-rolled-back")
+    assert rolled_back.status is ExperimentStatus.ROLLED_BACK
+
+    with pytest.raises(ValueError, match="rolled-back experiment"):
+        run_attested_old_vs_new_comparison(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_comparison_receipt_rejects_forged_challenger_training_authority(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-forgery-check",
+        repository=InMemoryExperimentRepository(),
+    )
+    forged_binding = replace(
+        result.challenger_result.binding,
+        frozen_package_sha256=_sha(b"forged-package"),
+    )
+    forged_receipts = tuple(
+        replace(receipt, binding_sha256=forged_binding.binding_sha256)
+        for receipt in result.challenger_result.case_receipts
+    )
+    object.__setattr__(result.challenger_result, "binding", forged_binding)
+    object.__setattr__(result.challenger_result, "case_receipts", forged_receipts)
+
+    assert result.challenger_result.revalidated().binding == forged_binding
+    with pytest.raises(ValueError, match="does not share one training authority"):
+        result.revalidated()
