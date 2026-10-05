@@ -649,6 +649,17 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 raise ContainedLocalWorkerError(
                     "terminal no-candidate evidence contradicts the persisted result"
                 )
+            expected_diff_digest = self._terminal_diff_digest(
+                repository_id=evidence.repository_id,
+                base_sha=evidence.base_sha,
+                result_sha=evidence.result_sha,
+                tree_digest=None,
+                changed_files=(),
+            )
+            if evidence.diff_digest.casefold() != expected_diff_digest:
+                raise ContainedLocalWorkerError(
+                    "terminal no-candidate diff evidence is not replay-verifiable"
+                )
             return
         if not result.changed_files:
             raise ContainedLocalWorkerError(
@@ -800,6 +811,18 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 raise ContainedLocalWorkerError(
                     "terminal changed-file evidence does not match current candidate bytes"
                 )
+
+        expected_diff_digest = self._terminal_diff_digest(
+            repository_id=evidence.repository_id,
+            base_sha=evidence.base_sha,
+            result_sha=evidence.result_sha,
+            tree_digest=tree.digest,
+            changed_files=tuple(changed_by_path.values()),
+        )
+        if evidence.diff_digest.casefold() != expected_diff_digest:
+            raise ContainedLocalWorkerError(
+                "terminal candidate diff evidence is not replay-verifiable"
+            )
 
     def candidate_worktree(self, job_id: str) -> pathlib.Path:
         evidence = self.execution_evidence(job_id)
@@ -1031,7 +1054,13 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 repository_id=job.repository.repository_id,
                 base_sha=job.repository.base_sha.casefold(),
                 result_sha=result_sha,
-                diff_digest=delta.digest,
+                diff_digest=self._terminal_diff_digest(
+                    repository_id=job.repository.repository_id,
+                    base_sha=job.repository.base_sha,
+                    result_sha=result_sha,
+                    tree_digest=after.digest,
+                    changed_files=changed,
+                ),
             )
             artifacts = self._candidate_artifacts(result_sha, after.digest)
 
@@ -1381,6 +1410,84 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         return (matches[0], *command.argv[1:])
 
     @staticmethod
+    def _terminal_diff_digest(
+        *,
+        repository_id: str,
+        base_sha: str,
+        result_sha: str,
+        tree_digest: str | None,
+        changed_files: tuple[ChangedFile, ...],
+    ) -> str:
+        """Build replay-verifiable source evidence from terminal authorities."""
+
+        identity = _safe_text(repository_id, "repository_id")
+        normalized_base = base_sha.casefold()
+        normalized_result = result_sha.casefold()
+        for value, label in (
+            (normalized_base, "base_sha"),
+            (normalized_result, "result_sha"),
+        ):
+            if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+                raise ContainedLocalWorkerError(
+                    f"terminal {label} is not a canonical Git commit identity"
+                )
+
+        if normalized_result == normalized_base:
+            if tree_digest is not None or changed_files:
+                raise ContainedLocalWorkerError(
+                    "no-change terminal evidence cannot carry candidate source state"
+                )
+            normalized_tree = "-"
+        else:
+            if (
+                type(tree_digest) is not str
+                or len(tree_digest) != 64
+                or any(
+                    char not in "0123456789abcdef"
+                    for char in tree_digest.casefold()
+                )
+            ):
+                raise ContainedLocalWorkerError(
+                    "terminal candidate tree digest is invalid"
+                )
+            if not changed_files:
+                raise ContainedLocalWorkerError(
+                    "terminal candidate diff evidence requires changed files"
+                )
+            normalized_tree = tree_digest.casefold()
+
+        hasher = hashlib.sha256()
+        hasher.update(b"nika-contained-terminal-diff-v1\0")
+        hasher.update(identity.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(normalized_base.encode("ascii"))
+        hasher.update(b"\0")
+        hasher.update(normalized_result.encode("ascii"))
+        hasher.update(b"\0")
+        hasher.update(normalized_tree.encode("ascii"))
+        hasher.update(b"\n")
+
+        seen: set[str] = set()
+        for item in sorted(changed_files, key=lambda value: value.path.casefold()):
+            if type(item) is not ChangedFile:
+                raise ContainedLocalWorkerError(
+                    "terminal diff evidence contains an invalid changed-file carrier"
+                )
+            folded = item.path.casefold()
+            if folded in seen:
+                raise ContainedLocalWorkerError(
+                    "terminal diff evidence repeats a path identity"
+                )
+            seen.add(folded)
+            hasher.update(item.path.encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(item.sha256.casefold().encode("ascii"))
+            hasher.update(b"\0")
+            hasher.update(str(item.size_bytes).encode("ascii"))
+            hasher.update(b"\n")
+        return hasher.hexdigest()
+
+    @staticmethod
     def _candidate_artifacts(
         result_sha: str,
         tree_digest: str,
@@ -1445,7 +1552,13 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             repository_id=job.repository.repository_id,
             base_sha=job.repository.base_sha.casefold(),
             result_sha=job.repository.base_sha.casefold(),
-            diff_digest=self._no_change_digest(job),
+            diff_digest=self._terminal_diff_digest(
+                repository_id=job.repository.repository_id,
+                base_sha=job.repository.base_sha,
+                result_sha=job.repository.base_sha,
+                tree_digest=None,
+                changed_files=(),
+            ),
         )
         self._save_terminal(job, evidence, result)
 
