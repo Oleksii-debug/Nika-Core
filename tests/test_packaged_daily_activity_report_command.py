@@ -116,6 +116,39 @@ def test_packaged_daily_report_is_read_only_and_bypasses_ordinary_task(
         repository.get(product_project_identity(command))
 
 
+def test_daily_report_preserves_current_product_project_selection(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "selected project report.db")
+    store.initialize()
+    repository = ProductProjectRepository(store)
+    ordinary = _OrdinaryHandler()
+    service = DailyActivityReportService(store)
+    router = PackagedProductCommandRouter(
+        products=ProductProjectCommandService(repository),
+        ordinary_handler=ordinary,
+        activity_report_handler=lambda: _daily_activity_report_result(
+            service,
+            day_provider=lambda: date(2026, 10, 5),
+        ),
+    )
+    product_command = "Створи застосунок для доступного читання звітів"
+    project_id = product_project_identity(product_command)
+    created = router.create({"command": product_command})
+
+    assert created.status == "completed"
+    assert router.active_project_id == project_id
+    before = repository.get(project_id)
+
+    report = router.create({"command": "Покажи щоденний звіт активності"})
+    after = repository.get(project_id)
+
+    assert report.status == "completed"
+    assert report.focus_id == "logs-heading"
+    assert router.active_project_id == project_id
+    assert after == before
+    assert ordinary.calls == []
+    assert _task_count(store) == 0
+
+
 def test_explicit_daily_report_fails_closed_when_composition_does_not_bind_handler(
     tmp_path: Path,
 ) -> None:
