@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -21,6 +22,8 @@ from nika_core.product_project import ProductProjectRepository
 
 _INSTALLER_NAME = "install_nika_core.ps1"
 _UPGRADE_PROBE_NAME = "m12-byte-distinct-upgrade-proof.txt"
+_MAX_RUNTIME_EVIDENCE_JSON_BYTES = 1024 * 1024
+_MAX_RUNTIME_EVIDENCE_JSON_DEPTH = 64
 
 
 def parser() -> argparse.ArgumentParser:
@@ -33,6 +36,69 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--artifact-reference", required=True)
     result.add_argument("--product-version", required=True)
     return result
+
+
+def _unique_runtime_json_object(
+    pairs: list[tuple[str, object]],
+) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _finite_runtime_json_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _reject_runtime_json_constant(_raw: str) -> None:
+    raise ValueError("non-JSON numeric constant")
+
+
+def _require_bounded_runtime_json_depth(content: bytes) -> None:
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in content:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                quoted = False
+        elif byte == 0x22:
+            quoted = True
+        elif byte in (0x5B, 0x7B):
+            depth += 1
+            if depth > _MAX_RUNTIME_EVIDENCE_JSON_DEPTH:
+                raise ValueError("runtime evidence exceeds JSON depth limit")
+        elif byte in (0x5D, 0x7D):
+            depth -= 1
+            if depth < 0:
+                raise ValueError("runtime evidence contains unbalanced JSON")
+
+
+def _read_runtime_evidence_json(path: Path, *, label: str) -> object:
+    try:
+        with path.open("rb") as handle:
+            content = handle.read(_MAX_RUNTIME_EVIDENCE_JSON_BYTES + 1)
+        if len(content) > _MAX_RUNTIME_EVIDENCE_JSON_BYTES:
+            raise ValueError("runtime evidence exceeds the byte limit")
+        _require_bounded_runtime_json_depth(content)
+        return json.loads(
+            content.decode("utf-8-sig"),
+            object_pairs_hook=_unique_runtime_json_object,
+            parse_float=_finite_runtime_json_float,
+            parse_constant=_reject_runtime_json_constant,
+        )
+    except (OSError, UnicodeError, ValueError, RecursionError) as exc:
+        raise RuntimeError(f"{label} is invalid or oversized JSON") from exc
 
 
 def _powershell() -> str:
@@ -204,17 +270,21 @@ def _require_rollback_operation_marker(
     source_digest: str,
     target_digest: str,
 ) -> None:
-    try:
-        payload = json.loads(marker_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("packaged rollback did not preserve a valid operation marker") from exc
+    payload = _read_runtime_evidence_json(
+        marker_path,
+        label="packaged rollback operation marker",
+    )
     expected = {
         "marker_version": 1,
         "operation_id": operation_id,
         "source_digest": source_digest,
         "target_digest": target_digest,
     }
-    if type(payload) is not dict or payload != expected:
+    if (
+        type(payload) is not dict
+        or type(payload.get("marker_version")) is not int
+        or payload != expected
+    ):
         raise RuntimeError("packaged rollback operation marker does not match exact image authority")
 
 
@@ -229,17 +299,21 @@ def _run_installed_pf11(executable: Path, output: Path, *, env: dict[str, str]) 
         env=env,
         label="installed NikaCore.exe PF11 proof",
     )
-    try:
-        payload = json.loads(output.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("installed NikaCore.exe did not emit valid PF11 JSON") from exc
-    if not isinstance(payload, dict):
+    payload = _read_runtime_evidence_json(
+        output,
+        label="installed NikaCore.exe PF11 evidence",
+    )
+    if type(payload) is not dict:
         raise TypeError("installed NikaCore.exe PF11 evidence must be an object")
+    route = payload.get("route")
     project_id = payload.get("project_id")
+    spec_version = payload.get("spec_version")
     if (
-        payload.get("route") != "product_project"
-        or payload.get("spec_version") != 1
-        or not isinstance(project_id, str)
+        type(route) is not str
+        or route != "product_project"
+        or type(spec_version) is not int
+        or spec_version != 1
+        or type(project_id) is not str
         or not project_id.strip()
     ):
         raise RuntimeError("installed NikaCore.exe returned invalid PF11 route evidence")
