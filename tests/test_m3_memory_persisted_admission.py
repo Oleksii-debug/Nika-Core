@@ -433,3 +433,31 @@ def test_noncanonical_persisted_key_is_not_returned(tmp_path: Path) -> None:
             owner_id="owner",
             namespace="scratch",
         )
+
+
+
+def test_corrupt_created_at_blocks_put_before_mutation(tmp_path: Path) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET created_at = ? WHERE memory_key = 'entry'",
+            ("2038-01-01T00:00:00",),
+        )
+
+    with pytest.raises(ValueError, match="stored memory created_at must be timezone-aware"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+            value={"replacement": True},
+        )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT value_json, created_at FROM memory_records "
+            "WHERE memory_key = 'entry'"
+        ).fetchone()
+        assert row["value_json"] == '{"safe":true}'
+        assert row["created_at"] == "2038-01-01T00:00:00"
