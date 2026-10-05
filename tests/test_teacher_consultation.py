@@ -92,6 +92,7 @@ def _spec(
     model: str = "teacher-model",
     policy: TeacherConsultationPolicy | None = None,
     privacy: PrivacyClass = PrivacyClass.PRIVATE,
+    temperature: float | None = None,
 ) -> TeacherConsultationSpec:
     return TeacherConsultationSpec(
         consultation_id="consultation-001",
@@ -103,6 +104,7 @@ def _spec(
             ModelMessage(role="user", content="Explain the evidence."),
         ),
         privacy=privacy,
+        temperature=temperature,
         policy=policy or TeacherConsultationPolicy(),
     )
 
@@ -135,6 +137,68 @@ def test_local_teacher_call_is_explicit_bounded_and_content_free_in_evidence() -
     assert "teacher answer" not in durable
     assert result.evidence.request_fingerprint.startswith("sha256:")
     assert result.evidence.response_sha256 is not None
+
+
+def test_durable_evidence_binds_execution_policy_and_temperature() -> None:
+    provider = _FakeProvider(provider_id="teacher-local", kind=ProviderKind.LOCAL)
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=123,
+        timeout_seconds=12.5,
+        max_observed_total_tokens=10,
+    )
+
+    result = asyncio.run(
+        service.consult(_spec(policy=policy, temperature=0.7))
+    )
+
+    evidence = result.evidence
+    assert evidence.status is TeacherConsultationStatus.SUCCEEDED
+    assert evidence.temperature == 0.7
+    assert evidence.max_request_chars == 100
+    assert evidence.max_response_chars == 123
+    assert evidence.timeout_seconds == 12.5
+    assert evidence.max_observed_total_tokens == 10
+    assert evidence.total_tokens == 7
+    assert evidence.budget_status is TeacherBudgetStatus.WITHIN
+    durable = evidence.as_dict()
+    assert durable["schema"] == "nika.teacher-consultation-evidence:v2"
+    assert durable["temperature"] == 0.7
+    assert durable["max_observed_total_tokens"] == 10
+
+
+def test_failed_evidence_retains_policy_context() -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        text="too long",
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=3,
+        timeout_seconds=9.0,
+        max_observed_total_tokens=5,
+    )
+
+    result = asyncio.run(
+        service.consult(_spec(policy=policy, temperature=0.25))
+    )
+
+    assert result.text is None
+    evidence = result.evidence
+    assert evidence.status is TeacherConsultationStatus.FAILED
+    assert evidence.error_code is ModelErrorCode.RESOURCE_LIMIT
+    assert evidence.temperature == 0.25
+    assert evidence.max_request_chars == 100
+    assert evidence.max_response_chars == 3
+    assert evidence.timeout_seconds == 9.0
+    assert evidence.max_observed_total_tokens == 5
 
 
 def test_cloud_teacher_uses_selected_provider_without_fallback() -> None:
