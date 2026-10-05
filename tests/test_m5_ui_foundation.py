@@ -43,6 +43,31 @@ def test_bridge_rejects_unknown_action_and_unconfigured_registered_action(tmp_pa
     assert unavailable["message"] == "Ця дія недоступна в поточному контексті."
 
 
+def test_bridge_owned_failures_match_ukrainian_shell_language(tmp_path: Path) -> None:
+    bridge = build_bridge(tmp_path)
+
+    invalid = bridge.dispatch({"request_id": "invalid"})
+    assert invalid["status"] == "rejected"
+    assert invalid["message"] == "Некоректна команда інтерфейсу."
+
+    unknown = bridge.dispatch(
+        {"request_id": "unknown", "action_id": "shell.exec", "payload": {}}
+    )
+    assert unknown["status"] == "rejected"
+    assert unknown["message"] == "Невідома дія інтерфейсу."
+
+    unavailable = bridge.dispatch(
+        {"request_id": "unavailable", "action_id": "agent.stop", "payload": {}}
+    )
+    assert unavailable["status"] == "rejected"
+    assert unavailable["message"] == "Ця дія недоступна в поточному контексті."
+
+    assert bridge.get_state() == {
+        "ok": False,
+        "message": "Джерело стану програми недоступне.",
+    }
+
+
 def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> None:
     bridge = build_bridge(tmp_path)
     accepted = bridge.dispatch(
