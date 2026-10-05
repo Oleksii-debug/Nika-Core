@@ -89,6 +89,7 @@ def _report(
         CaseBenchmarkResult(
             candidate_id=candidate.candidate_id,
             case_id=case.case_id,
+            evaluation_weight=float(case.weight),
             score=score,
             passed=score >= case.pass_score,
             completion_succeeded=True,
@@ -129,7 +130,13 @@ def _report(
         execution_config_sha256=config.evidence_sha256,
         evaluation_purpose=evaluation.purpose,
         case_results=results,
-        weighted_quality_score=sum(quality) / len(quality),
+        weighted_quality_score=(
+            sum(
+                result.score * float(result.evaluation_weight)
+                for result in results
+            )
+            / sum(float(result.evaluation_weight) for result in results)
+        ),
         task_pass_rate=sum(item.passed for item in results) / len(results),
         completion_rate=1.0,
         mean_latency_ms=sum(latency) / len(latency),
@@ -419,6 +426,46 @@ def test_observation_bridge_rejects_incoherent_report_aggregates(
     )
 
     with pytest.raises(ValueError, match="aggregate metrics"):
+        benchmark_observations(
+            forged,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
+
+
+def test_observation_bridge_rejects_case_weight_substitution() -> None:
+    candidate = _candidate("candidate", "m")
+    base_evaluation = _evaluation()
+    evaluation = replace(
+        base_evaluation,
+        cases=(
+            replace(base_evaluation.cases[0], weight=1.0),
+            replace(base_evaluation.cases[1], weight=3.0),
+        ),
+    )
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 0.0),
+        latency=(10.0, 20.0),
+    )
+    forged_second = replace(report.case_results[1], evaluation_weight=1.0)
+    forged = replace(
+        report,
+        case_results=(report.case_results[0], forged_second),
+        weighted_quality_score=0.5,
+    )
+    definition = build_experiment_definition(
+        experiment_id="weight-binding",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=_execution_config(),
+        policy=PromotionPolicy(primary_metric=QUALITY_METRIC, minimum_replays=2),
+        permission_fingerprint="permissions-v1",
+    )
+
+    with pytest.raises(ValueError, match="weight evidence"):
         benchmark_observations(
             forged,
             definition=definition,
