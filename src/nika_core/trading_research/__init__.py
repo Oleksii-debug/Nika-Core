@@ -36,6 +36,7 @@ from .dataset import (
     ValidationReport,
     event_sort_key,
 )
+from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
 from .orders import (
     ExecutionPolicy,
     OrderIntent,
@@ -68,6 +69,7 @@ __all__ = [
     "FutureAccessError",
     "InMemoryDataProvider",
     "Instrument",
+    "InstrumentIdentity",
     "MarketEvent",
     "OddsSnapshot",
     "OrderIntent",
@@ -108,5 +110,7 @@ __all__ = [
     "event_sort_key",
     "fee_for",
     "fill_missing",
+    "instrument_identity",
+    "instrument_identity_sha256",
     "trailing_mean",
 ]
