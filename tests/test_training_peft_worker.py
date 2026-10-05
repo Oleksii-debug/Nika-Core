@@ -738,6 +738,7 @@ def test_final_candidate_immediate_post_link_substitution_is_detected(
     assert substituted is True
     assert candidate.read_bytes() == b"substituted"
 
+
 def test_final_candidate_uses_unique_reserved_temporary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -764,6 +765,7 @@ def test_final_candidate_uses_unique_reserved_temporary(
         for path in candidate.parent.iterdir()
         if path.name.endswith(".tmp")
     ) == [legacy_temporary.name]
+
 
 def test_final_candidate_cleanup_failure_rolls_back_published_path(
     tmp_path: Path,
@@ -826,6 +828,7 @@ def test_final_candidate_rejects_extra_hardlink_alias(
 
     assert not candidate.exists()
     assert alias.exists()
+
 
 def test_final_candidate_rejects_checkpoint_change_during_materialization(
     tmp_path: Path,
