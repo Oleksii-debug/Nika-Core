@@ -431,6 +431,43 @@ async def test_comparison_rejects_cross_execution_config_evidence_before_persist
 
 
 @pytest.mark.asyncio
+async def test_comparison_rejects_different_training_authority_before_persistence(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    different_binding = replace(
+        challenger_result.binding,
+        frozen_package_sha256=_sha(b"different-package"),
+    )
+    different_challenger = await run_attested_challenger_benchmark(
+        binding=different_binding,
+        challenger=_challenger(),
+        evaluation_set=evaluation,
+        effect_port=_ChallengerPort("answer"),
+        expected_attestor_id=_CHALLENGER_ATTESTOR_ID,
+        expected_attestor_sha256=_CHALLENGER_ATTESTOR_SHA256,
+        timeout_seconds=5,
+        temperature=0,
+    )
+    repository = InMemoryExperimentRepository()
+
+    with pytest.raises(ValueError, match="share one training authority"):
+        run_attested_old_vs_new_comparison(
+            champion_result=champion_result,
+            challenger_result=different_challenger,
+            evaluation_set=evaluation,
+            execution_config=_config(),
+            policy=_policy(),
+            permission_fingerprint="perm:test",
+            experiment_id="training-job-1-old-vs-new",
+            repository=repository,
+        )
+
+    with pytest.raises(KeyError):
+        repository.get("training-job-1-old-vs-new")
+
+
+@pytest.mark.asyncio
 async def test_comparison_rejects_altered_held_out_set_before_persistence(tmp_path) -> None:
     evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
     repository = InMemoryExperimentRepository()
