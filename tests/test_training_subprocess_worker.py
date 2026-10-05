@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -18,51 +20,60 @@ from nika_core.training_runtime import (
     TrainingWorkerFailureEffect,
 )
 
+_WORKSPACE_ID = "subprocess-training"
+_TRAINING_BODY = b'{"prompt":"train","response":"ok"}\n'
+_VALIDATION_BODY = b'{"prompt":"validate","response":"ok"}\n'
+
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _script(tmp_path: Path, body: str, *, name: str = "trainer.py") -> Path:
-    path = (tmp_path / name).resolve()
+def _script(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "trainer.py"
     path.write_text(body, encoding="utf-8")
     return path
 
 
-def _materials(tmp_path: Path) -> ResolvedTrainingPackage:
-    workspace_id = "workspace-alpha"
-    store = ContentAddressedBlobStore(tmp_path / "training-blobs")
-    training_body = b'{"prompt":"a","response":"b"}\n'
-    validation_body = b'{"prompt":"c","response":"d"}\n'
-    store.put_bytes(workspace_id, training_body)
-    store.put_bytes(workspace_id, validation_body)
-    training = LearningShard(
-        split=LearningDataSplit.TRAINING,
-        artifact_sha256=_sha256(training_body),
-        provenance_sha256=_sha256(b"training-provenance"),
-        license_evidence_sha256=_sha256(b"training-license"),
-        record_count=1,
-        byte_count=len(training_body),
-    )
-    validation = LearningShard(
-        split=LearningDataSplit.VALIDATION,
-        artifact_sha256=_sha256(validation_body),
-        provenance_sha256=_sha256(b"validation-provenance"),
-        license_evidence_sha256=_sha256(b"validation-license"),
-        record_count=1,
-        byte_count=len(validation_body),
-    )
-    package = FrozenLearningPackage.freeze(
-        package_id="pkg-1",
+def _frozen_package() -> FrozenLearningPackage:
+    return FrozenLearningPackage.freeze(
+        package_id="subprocess-package",
         package_version="1",
-        base_artifact_sha256="a" * 64,
+        base_artifact_sha256=_sha256(b"base-model"),
         selection_policy_sha256=_sha256(b"selection-policy"),
         verification_sha256=_sha256(b"verification"),
-        evaluation_set_sha256=_sha256(b"strict-held-out-evaluation"),
-        shards=(training, validation),
+        evaluation_set_sha256=_sha256(b"held-out"),
+        shards=(
+            LearningShard(
+                split=LearningDataSplit.TRAINING,
+                artifact_sha256=_sha256(_TRAINING_BODY),
+                provenance_sha256=_sha256(b"training-provenance"),
+                license_evidence_sha256=_sha256(b"training-license"),
+                record_count=1,
+                byte_count=len(_TRAINING_BODY),
+            ),
+            LearningShard(
+                split=LearningDataSplit.VALIDATION,
+                artifact_sha256=_sha256(_VALIDATION_BODY),
+                provenance_sha256=_sha256(b"validation-provenance"),
+                license_evidence_sha256=_sha256(b"validation-license"),
+                record_count=1,
+                byte_count=len(_VALIDATION_BODY),
+            ),
+        ),
     )
+
+
+def _resolved_materials(
+    tmp_path: Path,
+    *,
+    workspace_id: str = _WORKSPACE_ID,
+) -> ResolvedTrainingPackage:
+    store = ContentAddressedBlobStore(tmp_path / f"materials-{_sha256(workspace_id.encode())}")
+    store.put_bytes(workspace_id, _TRAINING_BODY)
+    store.put_bytes(workspace_id, _VALIDATION_BODY)
     return resolve_training_materials(
-        package,
+        _frozen_package(),
         workspace_id=workspace_id,
         blob_store=store,
     )
@@ -71,12 +82,12 @@ def _materials(tmp_path: Path) -> ResolvedTrainingPackage:
 def _spec(
     materials: ResolvedTrainingPackage,
     *,
-    max_steps: int = 3,
     job_id: str = "job-1",
+    max_steps: int = 3,
 ) -> TrainingJobSpec:
     return TrainingJobSpec(
         job_id=job_id,
-        task_id="task-1",
+        task_id=f"task-{job_id}",
         project_id="project-1",
         owner_id="owner-1",
         base_artifact=ArtifactIdentity(
@@ -90,56 +101,117 @@ def _spec(
     )
 
 
-def _worker(
+def _registry_for_python(
     tmp_path: Path,
-    trainer: Path,
-    *,
-    command: tuple[str, ...] | None = None,
-    environment: dict[str, str] | None = None,
-    timeout_seconds: float = 300.0,
-    max_request_bytes: int = 64 * 1024,
-    max_response_bytes: int = 64 * 1024,
-) -> SubprocessTrainingWorker:
+    script: Path | None = None,
+) -> tuple[ArtifactRegistry, str, Path, str | None]:
+    executable = Path(sys.executable).resolve()
+    roots = [executable.parent]
+    if script is not None and script.parent.resolve() not in roots:
+        roots.append(script.parent.resolve())
     registry = ArtifactRegistry.from_store(
-        SQLiteStore(tmp_path / "artifact-registry.sqlite3"),
-        local_file_roots=(tmp_path,),
+        SQLiteStore(tmp_path / "artifacts.sqlite3"),
+        local_file_roots=tuple(roots),
     )
     record = registry.register_file(
-        workspace_id="workspace-alpha",
-        idempotency_key=f"trainer:{trainer.name}:{_sha256(trainer.read_bytes())}",
-        path=trainer,
-        kind="training_worker",
-        producer_type="test",
+        workspace_id="trainer-tests",
+        idempotency_key="python-executable",
+        path=executable,
+        kind="training_executable",
     )
-    return SubprocessTrainingWorker(
-        command or (sys.executable, str(trainer)),
-        artifact_registry=registry,
-        trainer_artifact_id=record.artifact_id,
-        environment=environment,
-        timeout_seconds=timeout_seconds,
-        max_request_bytes=max_request_bytes,
-        max_response_bytes=max_response_bytes,
-    )
+    script_artifact_id: str | None = None
+    if script is not None:
+        script_record = registry.register_file(
+            workspace_id="trainer-tests",
+            idempotency_key="trainer-script",
+            path=script,
+            kind="training_command_file",
+        )
+        script_artifact_id = script_record.artifact_id
+    return registry, record.artifact_id, executable, script_artifact_id
 
 
-def _invoke(
-    worker: SubprocessTrainingWorker,
+def _worker(
     tmp_path: Path,
-    *,
-    step_index: int,
-    resume_state: dict[str, object],
-    spec: TrainingJobSpec | None = None,
-) -> object:
-    materials = _materials(tmp_path)
-    return worker.step(
-        spec=spec or _spec(materials),
-        step_index=step_index,
-        resume_state=resume_state,
+    script: Path,
+    **kwargs: object,
+) -> tuple[SubprocessTrainingWorker, ArtifactRegistry, str]:
+    registry, artifact_id, executable, script_artifact_id = _registry_for_python(
+        tmp_path,
+        script,
+    )
+    assert script_artifact_id is not None
+    worker = SubprocessTrainingWorker(
+        (str(executable), str(script)),
+        artifact_registry=registry,
+        trainer_artifact_id=artifact_id,
+        command_artifact_ids={1: script_artifact_id},
+        **kwargs,
+    )
+    return worker, registry, artifact_id
+
+
+def test_real_subprocess_receives_exact_registry_and_material_identity(tmp_path: Path) -> None:
+    observed_path = tmp_path / "observed.json"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+Path({str(observed_path)!r}).write_text(
+    json.dumps(request, sort_keys=True),
+    encoding="utf-8",
+)
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{"epoch": 1}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials)
+    worker, registry, artifact_id = _worker(tmp_path, trainer)
+
+    result = worker.step(
+        spec=spec,
+        step_index=0,
+        resume_state={},
         training_materials=materials,
     )
 
+    observed = json.loads(observed_path.read_text(encoding="utf-8"))
+    record = registry.get(artifact_id)
+    assert observed["protocol_version"] == 2
+    assert observed["trainer_artifact_id"] == artifact_id
+    assert observed["trainer_sha256"] == record.sha256
+    assert observed["command_sha256"] == observed["job"]["command_sha256"]
+    assert {item["argument_index"] for item in observed["command_artifacts"]} == {0, 1}
+    assert observed["job"]["frozen_package_sha256"] == spec.frozen_package_sha256
+    assert observed["job"]["training_material_sha256"] == spec.training_material_sha256
+    assert observed["training_materials"]["training_material_sha256"] == (
+        spec.training_material_sha256
+    )
+    assert observed["training_materials"]["package_manifest_sha256"] == (
+        spec.frozen_package_sha256
+    )
+    assert [item["path"] for item in observed["training_materials"]["materials"]] == [
+        os.fspath(item.path) for item in materials.materials
+    ]
+    envelope = result.resume_state["_nika_subprocess"]
+    assert isinstance(envelope, dict)
+    assert envelope["command_sha256"] == observed["command_sha256"]
+    assert envelope["trainer_artifact_id"] == artifact_id
+    assert envelope["trainer_sha256"] == record.sha256
 
-def test_real_subprocess_step_resume_and_completion(tmp_path: Path) -> None:
+
+def test_two_step_resume_and_completion(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
         """
@@ -151,40 +223,36 @@ step_index = request["step_index"]
 response = {
     "candidate_sha256": "b" * 64 if step_index == 1 else None,
     "completed": step_index == 1,
-    "protocol_version": 1,
-    "resume_state": {
-        "next_epoch": step_index + 1,
-        "material_count": len(request["training_materials"]),
-        "material_digest": request["job"]["training_material_sha256"],
-    },
+    "protocol_version": request["protocol_version"],
+    "resume_state": {"next_epoch": step_index + 1},
     "step_id": request["step_id"],
 }
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials)
+    worker, _, _ = _worker(tmp_path, trainer)
 
-    first = _invoke(worker, tmp_path, step_index=0, resume_state={})
-    assert first.completed is False
-    assert first.candidate_sha256 is None
-    first_envelope = first.resume_state["_nika_subprocess"]
-    assert isinstance(first_envelope, dict)
-    state = first_envelope["trainer_state"]
-    assert isinstance(state, dict)
-    assert state["material_count"] == 2
-    assert state["material_digest"] == _materials(tmp_path).training_material_sha256
-
-    second = _invoke(
-        worker,
-        tmp_path,
+    first = worker.step(
+        spec=spec,
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+    second = worker.step(
+        spec=spec,
         step_index=1,
         resume_state=first.resume_state,
+        training_materials=materials,
     )
+
+    assert first.completed is False
     assert second.completed is True
     assert second.candidate_sha256 == "b" * 64
 
 
-def test_step_identity_is_stable_for_replay_and_registry_bound(tmp_path: Path) -> None:
+def test_resume_binds_trainer_artifact_id_even_when_digest_is_same(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
         """
@@ -195,35 +263,62 @@ request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
     "completed": False,
-    "protocol_version": 1,
-    "resume_state": {
-        "observed_step_id": request["step_id"],
-        "trainer_artifact_id": request["trainer_artifact_id"],
-    },
+    "protocol_version": request["protocol_version"],
+    "resume_state": {"step": request["step_index"]},
     "step_id": request["step_id"],
 }
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials)
+    registry, first_id, executable, script_artifact_id = _registry_for_python(
+        tmp_path,
+        trainer,
+    )
+    assert script_artifact_id is not None
+    first_worker = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=first_id,
+        command_artifact_ids={1: script_artifact_id},
+    )
+    first = first_worker.step(
+        spec=spec,
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+    second_record = registry.register_file(
+        workspace_id="trainer-tests",
+        idempotency_key="python-executable-alias",
+        path=executable,
+        kind="training_executable",
+    )
+    replacement = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=second_record.artifact_id,
+        command_artifact_ids={1: script_artifact_id},
+    )
 
-    first = _invoke(worker, tmp_path, step_index=0, resume_state={})
-    replay = _invoke(worker, tmp_path, step_index=0, resume_state={})
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        replacement.step(
+            spec=spec,
+            step_index=1,
+            resume_state=first.resume_state,
+            training_materials=materials,
+        )
 
-    first_envelope = first.resume_state["_nika_subprocess"]
-    replay_envelope = replay.resume_state["_nika_subprocess"]
-    assert isinstance(first_envelope, dict)
-    assert isinstance(replay_envelope, dict)
-    assert first_envelope["last_step_id"] == replay_envelope["last_step_id"]
-    assert first_envelope["trainer_artifact_id"] == replay_envelope["trainer_artifact_id"]
-    assert len(str(first_envelope["trainer_sha256"])) == 64
+    assert exc_info.value.code == "resume_state_command_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
 
 
-def test_resume_rejects_different_registered_trainer_before_process_effect(
-    tmp_path: Path,
-) -> None:
-    marker = tmp_path / "second-step-started"
-    body = f"""
+def test_resume_binds_frozen_and_material_identity(tmp_path: Path) -> None:
+    marker = tmp_path / "second-started"
+    trainer = _script(
+        tmp_path,
+        f"""
 import json
 import sys
 from pathlib import Path
@@ -234,36 +329,37 @@ if request["step_index"] == 1:
 response = {{
     "candidate_sha256": None,
     "completed": False,
-    "protocol_version": 1,
-    "resume_state": {{"next_epoch": request["step_index"] + 1}},
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{"step": request["step_index"]}},
     "step_id": request["step_id"],
 }}
 sys.stdout.write(json.dumps(response))
-""".strip()
-    trainer = _script(tmp_path, body, name="trainer-a.py")
-    original = _worker(tmp_path, trainer)
-    first = _invoke(original, tmp_path, step_index=0, resume_state={})
-
-    replacement_path = _script(
-        tmp_path,
-        body + "\n# distinct registered trainer\n",
-        name="trainer-b.py",
+""".strip(),
     )
-    replacement = _worker(tmp_path, replacement_path)
+    first_materials = _resolved_materials(tmp_path, workspace_id="workspace-a")
+    second_materials = _resolved_materials(tmp_path, workspace_id="workspace-b")
+    worker, _, _ = _worker(tmp_path, trainer)
+    first = worker.step(
+        spec=_spec(first_materials),
+        step_index=0,
+        resume_state={},
+        training_materials=first_materials,
+    )
 
-    with pytest.raises(TrainingSubprocessError, match="trainer registry artifact") as exc_info:
-        _invoke(
-            replacement,
-            tmp_path,
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(second_materials),
             step_index=1,
             resume_state=first.resume_state,
+            training_materials=second_materials,
         )
 
+    assert exc_info.value.code == "resume_state_job_mismatch"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
     assert not marker.exists()
 
 
-def test_registry_tamper_fails_before_process_effect(tmp_path: Path) -> None:
+def test_material_digest_mismatch_fails_before_process_effect(tmp_path: Path) -> None:
     marker = tmp_path / "started"
     trainer = _script(
         tmp_path,
@@ -272,13 +368,131 @@ from pathlib import Path
 Path({str(marker)!r}).write_text("started", encoding="utf-8")
 """.strip(),
     )
-    worker = _worker(tmp_path, trainer)
-    original = trainer.read_bytes()
-    trainer.write_bytes(b"x" * len(original))
+    materials = _resolved_materials(tmp_path)
+    spec = TrainingJobSpec(
+        job_id="job-mismatch",
+        task_id="task-mismatch",
+        project_id="project-1",
+        owner_id="owner-1",
+        base_artifact=ArtifactIdentity(
+            "models/base",
+            materials.evidence.base_artifact_sha256,
+        ),
+        frozen_package_sha256=materials.evidence.package_manifest_sha256,
+        training_material_sha256="f" * 64,
+        candidate_artifact_ref="models/candidate/mismatch",
+        max_steps=1,
+    )
+    worker, _, _ = _worker(tmp_path, trainer)
 
-    with pytest.raises(TrainingSubprocessError, match="physical verification") as exc_info:
-        _invoke(worker, tmp_path, step_index=0, resume_state={})
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=spec,
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
 
+    assert exc_info.value.code == "training_material_identity_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_materials_are_reverified_at_subprocess_effect_boundary(tmp_path: Path) -> None:
+    marker = tmp_path / "started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials, max_steps=1)
+    worker, _, _ = _worker(tmp_path, trainer)
+    material_path = materials.materials[0].path
+    material_path.write_bytes(b"x" * materials.materials[0].evidence.byte_count)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=spec,
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_material_verification_failed"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_registry_artifact_must_match_command_executable(tmp_path: Path) -> None:
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials, max_steps=1)
+    registry, artifact_id, _, _ = _registry_for_python(tmp_path)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        SubprocessTrainingWorker(
+            (str(tmp_path / "different.exe"),),
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+        ).step(
+            spec=spec,
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "command_artifact_argument_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+
+
+def test_absolute_command_file_requires_registry_binding(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
+
+    with pytest.raises(ValueError, match="absolute command file arguments"):
+        SubprocessTrainingWorker(
+            (str(executable), str(trainer)),
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+        )
+
+
+def test_relative_command_file_argument_is_rejected(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
+
+    with pytest.raises(ValueError, match="unbound command arguments"):
+        SubprocessTrainingWorker(
+            (str(executable), trainer.name),
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+        )
+
+
+def test_bound_command_file_tamper_fails_before_process_effect(tmp_path: Path) -> None:
+    marker = tmp_path / "started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    trainer.write_text("raise SystemExit(0)", encoding="utf-8")
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "command_artifact_not_verified"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
     assert not marker.exists()
 
@@ -299,21 +513,270 @@ request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
     "completed": False,
-    "protocol_version": 1,
+    "protocol_version": request["protocol_version"],
     "resume_state": {"secret_seen": os.getenv("NIKA_TRAINING_SECRET") is not None},
     "step_id": request["step_id"],
 }
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
 
-    result = _invoke(worker, tmp_path, step_index=0, resume_state={})
+    result = worker.step(
+        spec=_spec(materials),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
     envelope = result.resume_state["_nika_subprocess"]
     assert isinstance(envelope, dict)
     trainer_state = envelope["trainer_state"]
     assert isinstance(trainer_state, dict)
     assert trainer_state["secret_seen"] is False
+
+
+def test_nonzero_exit_is_unknown_effect_and_stderr_is_minimized(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import sys
+sys.stderr.write("TOP-SECRET-TRAINING-DATA")
+raise SystemExit(9)
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_subprocess_nonzero_exit"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert "TOP-SECRET-TRAINING-DATA" not in str(exc_info.value)
+
+
+def test_timeout_is_unknown_effect(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import time
+time.sleep(10)
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer, timeout_seconds=0.1)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_subprocess_timeout"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+
+
+def test_oversized_response_is_bounded_and_unknown_effect(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import sys
+
+sys.stdin.buffer.read()
+chunk = b"x" * 65536
+while True:
+    sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(
+        tmp_path,
+        trainer,
+        max_response_bytes=1024,
+        timeout_seconds=5,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_subprocess_response_too_large"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+
+
+def test_invalid_response_is_unknown_effect(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import sys
+sys.stdin.buffer.read()
+sys.stdout.write("{not-json")
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_subprocess_invalid_json_response"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+
+
+def test_command_must_not_be_a_shell_string(tmp_path: Path) -> None:
+    registry, artifact_id, _, _ = _registry_for_python(tmp_path)
+    with pytest.raises(TypeError, match="not a shell string"):
+        SubprocessTrainingWorker(
+            "python trainer.py",
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+        )
+
+
+def test_trainer_artifact_id_must_be_exact_sha256(tmp_path: Path) -> None:
+    registry, _, executable, _ = _registry_for_python(tmp_path)
+    with pytest.raises(ValueError, match="trainer_artifact_id"):
+        SubprocessTrainingWorker(
+            (str(executable),),
+            artifact_registry=registry,
+            trainer_artifact_id="not-a-digest",
+        )
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), -1.0, 0.0, True])
+def test_invalid_timeout_is_rejected(tmp_path: Path, timeout: object) -> None:
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        SubprocessTrainingWorker(
+            (str(executable),),
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+            timeout_seconds=timeout,  # type: ignore[arg-type]
+        )
+
+
+def test_huge_integer_timeout_is_rejected_without_overflow(tmp_path: Path) -> None:
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        SubprocessTrainingWorker(
+            (str(executable),),
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+            timeout_seconds=10**10000,  # type: ignore[arg-type]
+        )
+
+
+def test_deeply_nested_response_stays_typed_unknown_effect(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import sys
+
+sys.stdin.buffer.read()
+sys.stdout.write("[" * 5000 + "0" + "]" * 5000)
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert exc_info.value.code in {
+        "training_subprocess_invalid_json_response",
+        "training_subprocess_response_not_object",
+    }
+
+
+def test_step_identity_binds_registry_artifact_id_with_same_trainer_digest(
+    tmp_path: Path,
+) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {"observed_step_id": request["step_id"]},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials)
+    registry, first_id, executable = _registry_for_python(tmp_path)
+    second = registry.register_file(
+        workspace_id="trainer-tests",
+        idempotency_key="python-executable-second-authority",
+        path=executable,
+        kind="training_executable",
+    )
+
+    first_worker = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=first_id,
+    )
+    second_worker = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=second.artifact_id,
+    )
+
+    first = first_worker.step(
+        spec=spec,
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+    second_result = second_worker.step(
+        spec=spec,
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    first_envelope = first.resume_state["_nika_subprocess"]
+    second_envelope = second_result.resume_state["_nika_subprocess"]
+    assert isinstance(first_envelope, dict)
+    assert isinstance(second_envelope, dict)
+    first_state = first_envelope["trainer_state"]
+    second_state = second_envelope["trainer_state"]
+    assert isinstance(first_state, dict)
+    assert isinstance(second_state, dict)
+    assert first_envelope["trainer_sha256"] == second_envelope["trainer_sha256"]
+    assert first_state["observed_step_id"] != second_state["observed_step_id"]
 
 
 def test_explicit_environment_is_the_only_environment_exposed(tmp_path: Path) -> None:
@@ -328,20 +791,27 @@ request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
     "completed": False,
-    "protocol_version": 1,
+    "protocol_version": request["protocol_version"],
     "resume_state": {"allowed": os.getenv("NIKA_ALLOWED")},
     "step_id": request["step_id"],
 }
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(
         tmp_path,
         trainer,
         environment={"NIKA_ALLOWED": "yes"},
     )
 
-    result = _invoke(worker, tmp_path, step_index=0, resume_state={})
+    result = worker.step(
+        spec=_spec(materials),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
     envelope = result.resume_state["_nika_subprocess"]
     assert isinstance(envelope, dict)
     trainer_state = envelope["trainer_state"]
@@ -349,93 +819,7 @@ sys.stdout.write(json.dumps(response))
     assert trainer_state["allowed"] == "yes"
 
 
-def test_nonzero_exit_is_secret_minimized_and_effect_unknown(tmp_path: Path) -> None:
-    trainer = _script(
-        tmp_path,
-        """
-import sys
-sys.stderr.write("TOP-SECRET-TRAINING-DATA")
-raise SystemExit(9)
-""".strip(),
-    )
-    worker = _worker(tmp_path, trainer)
-
-    with pytest.raises(TrainingSubprocessError) as exc_info:
-        _invoke(worker, tmp_path, step_index=0, resume_state={})
-
-    assert "TOP-SECRET-TRAINING-DATA" not in str(exc_info.value)
-    assert "9" in str(exc_info.value)
-    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
-
-
-def test_timeout_is_bounded_minimized_and_effect_unknown(tmp_path: Path) -> None:
-    trainer = _script(
-        tmp_path,
-        """
-import time
-time.sleep(10)
-""".strip(),
-    )
-    worker = _worker(tmp_path, trainer, timeout_seconds=0.1)
-
-    with pytest.raises(TrainingSubprocessError, match="timed out") as exc_info:
-        _invoke(worker, tmp_path, step_index=0, resume_state={})
-
-    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
-
-
-def test_oversized_response_is_rejected_during_execution(tmp_path: Path) -> None:
-    trainer = _script(
-        tmp_path,
-        """
-import sys
-
-sys.stdin.buffer.read()
-chunk = b"x" * 65536
-while True:
-    sys.stdout.buffer.write(chunk)
-    sys.stdout.buffer.flush()
-""".strip(),
-    )
-    worker = _worker(
-        tmp_path,
-        trainer,
-        max_response_bytes=1024,
-        timeout_seconds=5,
-    )
-
-    with pytest.raises(TrainingSubprocessError, match="response exceeds") as exc_info:
-        _invoke(worker, tmp_path, step_index=0, resume_state={})
-
-    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
-
-
-def test_wrong_step_identity_fails_closed_as_unknown_effect(tmp_path: Path) -> None:
-    trainer = _script(
-        tmp_path,
-        """
-import json
-import sys
-
-response = {
-    "candidate_sha256": None,
-    "completed": False,
-    "protocol_version": 1,
-    "resume_state": {},
-    "step_id": "0" * 64,
-}
-sys.stdout.write(json.dumps(response))
-""".strip(),
-    )
-    worker = _worker(tmp_path, trainer)
-
-    with pytest.raises(TrainingSubprocessError, match="wrong step identity") as exc_info:
-        _invoke(worker, tmp_path, step_index=0, resume_state={})
-
-    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
-
-
-def test_unknown_response_field_fails_closed(tmp_path: Path) -> None:
+def test_wrong_step_identity_is_unknown_effect(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
         """
@@ -446,7 +830,40 @@ request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": None,
     "completed": False,
-    "protocol_version": 1,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {},
+    "step_id": "0" * 64,
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_subprocess_wrong_step_identity"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+
+
+def test_unknown_response_field_is_unknown_effect(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
     "resume_state": {},
     "step_id": request["step_id"],
     "unexpected": True,
@@ -454,15 +871,22 @@ response = {
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
 
-    with pytest.raises(TrainingSubprocessError, match="unexpected fields") as exc_info:
-        _invoke(worker, tmp_path, step_index=0, resume_state={})
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
 
+    assert exc_info.value.code == "training_subprocess_response_unexpected_fields"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
 
 
-def test_invalid_candidate_digest_is_minimized(tmp_path: Path) -> None:
+def test_invalid_candidate_digest_is_unknown_effect(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
         """
@@ -473,22 +897,29 @@ request = json.loads(sys.stdin.buffer.read())
 response = {
     "candidate_sha256": "not-a-digest",
     "completed": True,
-    "protocol_version": 1,
+    "protocol_version": request["protocol_version"],
     "resume_state": {},
     "step_id": request["step_id"],
 }
 sys.stdout.write(json.dumps(response))
 """.strip(),
     )
-    worker = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
 
-    with pytest.raises(TrainingSubprocessError, match="invalid result evidence") as exc_info:
-        _invoke(worker, tmp_path, step_index=0, resume_state={})
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
 
+    assert exc_info.value.code == "training_subprocess_invalid_result_evidence"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
 
 
-def test_invalid_resume_state_is_rejected_before_process_effect(tmp_path: Path) -> None:
+def test_invalid_resume_state_fails_before_process_effect(tmp_path: Path) -> None:
     marker = tmp_path / "started"
     trainer = _script(
         tmp_path,
@@ -497,10 +928,10 @@ from pathlib import Path
 Path({str(marker)!r}).write_text("started", encoding="utf-8")
 """.strip(),
     )
-    worker = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
 
-    with pytest.raises(TrainingSubprocessError, match="non-JSON") as exc_info:
-        materials = _materials(tmp_path)
+    with pytest.raises(TrainingSubprocessError) as exc_info:
         worker.step(
             spec=_spec(materials),
             step_index=1,
@@ -508,161 +939,27 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
             training_materials=materials,
         )
 
+    assert exc_info.value.code == "training_resume_state_non_json_value"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
     assert not marker.exists()
-
-
-def test_material_identity_mismatch_is_rejected_before_process_effect(tmp_path: Path) -> None:
-    marker = tmp_path / "started"
-    trainer = _script(
-        tmp_path,
-        f"""
-from pathlib import Path
-Path({str(marker)!r}).write_text("started", encoding="utf-8")
-""".strip(),
-    )
-    worker = _worker(tmp_path, trainer)
-    materials = _materials(tmp_path)
-    spec = TrainingJobSpec(
-        job_id="job-1",
-        task_id="task-1",
-        project_id="project-1",
-        owner_id="owner-1",
-        base_artifact=ArtifactIdentity("models/base", materials.evidence.base_artifact_sha256),
-        frozen_package_sha256=materials.evidence.package_manifest_sha256,
-        training_material_sha256="f" * 64,
-        candidate_artifact_ref="models/candidate/job-1",
-        max_steps=3,
-    )
-
-    with pytest.raises(TrainingSubprocessError, match="material identity") as exc_info:
-        worker.step(
-            spec=spec,
-            step_index=0,
-            resume_state={},
-            training_materials=materials,
-        )
-
-    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
-    assert not marker.exists()
-
-
-def test_resume_state_cannot_cross_jobs(tmp_path: Path) -> None:
-    trainer = _script(
-        tmp_path,
-        """
-import json
-import sys
-
-request = json.loads(sys.stdin.buffer.read())
-response = {
-    "candidate_sha256": None,
-    "completed": False,
-    "protocol_version": 1,
-    "resume_state": {"position": 1},
-    "step_id": request["step_id"],
-}
-sys.stdout.write(json.dumps(response))
-""".strip(),
-    )
-    worker = _worker(tmp_path, trainer)
-    materials = _materials(tmp_path)
-    first = worker.step(
-        spec=_spec(materials),
-        step_index=0,
-        resume_state={},
-        training_materials=materials,
-    )
-    changed = _spec(materials, job_id="job-2")
-
-    with pytest.raises(TrainingSubprocessError, match="current job") as exc_info:
-        worker.step(
-            spec=changed,
-            step_index=1,
-            resume_state=first.resume_state,
-            training_materials=materials,
-        )
-
-    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
-
-
-def test_command_must_not_be_a_shell_string(tmp_path: Path) -> None:
-    trainer = _script(tmp_path, "print('unused')")
-    registry = ArtifactRegistry.from_store(
-        SQLiteStore(tmp_path / "registry.sqlite3"),
-        local_file_roots=(tmp_path,),
-    )
-    record = registry.register_file(
-        workspace_id="workspace-alpha",
-        idempotency_key="trainer",
-        path=trainer,
-        kind="training_worker",
-    )
-    with pytest.raises(TypeError, match="not a shell string"):
-        SubprocessTrainingWorker(
-            "python trainer.py",
-            artifact_registry=registry,
-            trainer_artifact_id=record.artifact_id,
-        )
 
 
 def test_training_executable_must_be_absolute(tmp_path: Path) -> None:
-    trainer = _script(tmp_path, "print('unused')")
-    registry = ArtifactRegistry.from_store(
-        SQLiteStore(tmp_path / "registry.sqlite3"),
-        local_file_roots=(tmp_path,),
-    )
-    record = registry.register_file(
-        workspace_id="workspace-alpha",
-        idempotency_key="trainer",
-        path=trainer,
-        kind="training_worker",
-    )
+    registry, artifact_id, _ = _registry_for_python(tmp_path)
     with pytest.raises(ValueError, match="absolute path"):
         SubprocessTrainingWorker(
-            ("python", str(trainer)),
+            ("python",),
             artifact_registry=registry,
-            trainer_artifact_id=record.artifact_id,
+            trainer_artifact_id=artifact_id,
         )
 
 
-def test_caller_supplied_trainer_digest_is_not_an_adapter_api(tmp_path: Path) -> None:
-    trainer = _script(tmp_path, "print('unused')")
-    registry = ArtifactRegistry.from_store(
-        SQLiteStore(tmp_path / "registry.sqlite3"),
-        local_file_roots=(tmp_path,),
-    )
-    record = registry.register_file(
-        workspace_id="workspace-alpha",
-        idempotency_key="trainer",
-        path=trainer,
-        kind="training_worker",
-    )
+def test_caller_supplied_trainer_digest_is_not_adapter_api(tmp_path: Path) -> None:
+    registry, artifact_id, executable = _registry_for_python(tmp_path)
     with pytest.raises(TypeError):
         SubprocessTrainingWorker(
-            (sys.executable, str(trainer)),
+            (str(executable),),
             artifact_registry=registry,
-            trainer_artifact_id=record.artifact_id,
+            trainer_artifact_id=artifact_id,
             trainer_sha256="c" * 64,  # type: ignore[call-arg]
-        )
-
-
-@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), -1.0, 0.0, True])
-def test_invalid_timeout_is_rejected(tmp_path: Path, timeout: object) -> None:
-    trainer = _script(tmp_path, "print('unused')")
-    with pytest.raises(ValueError, match="timeout_seconds"):
-        _worker(
-            tmp_path,
-            trainer,
-            timeout_seconds=timeout,  # type: ignore[arg-type]
-        )
-
-
-def test_huge_integer_timeout_is_rejected_without_overflow(tmp_path: Path) -> None:
-    trainer = _script(tmp_path, "print('unused')")
-    with pytest.raises(ValueError, match="timeout_seconds"):
-        _worker(
-            tmp_path,
-            trainer,
-            timeout_seconds=10**10000,  # type: ignore[arg-type]
         )
