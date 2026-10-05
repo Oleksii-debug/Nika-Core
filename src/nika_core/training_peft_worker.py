@@ -1794,6 +1794,21 @@ def _train_one_step(
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
     _require_regular_unlinked(adapter_file, code="adapter_candidate_missing")
+    trained_adapter_sha256, _ = _hash_regular_snapshot(
+        adapter_file,
+        code="adapter_candidate_invalid",
+    )
+    previous_adapter_sha256: str | None = None
+    if previous_checkpoint is not None:
+        previous_adapter_file = previous_checkpoint / "adapter" / _CANDIDATE_FILE
+        _require_regular_unlinked(
+            previous_adapter_file,
+            code="previous_adapter_candidate_missing",
+        )
+        previous_adapter_sha256, _ = _hash_regular_snapshot(
+            previous_adapter_file,
+            code="previous_adapter_candidate_invalid",
+        )
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
         checkpoint,
@@ -1830,6 +1845,8 @@ def _train_one_step(
         config=config,
         consumed=consumed,
         adapter_config=adapter_config,
+        previous_adapter_sha256=previous_adapter_sha256,
+        trained_adapter_sha256=trained_adapter_sha256,
     )
     temporary_sha256: str | None = None
     temporary_identity: tuple[int, int] | None = None
@@ -1986,6 +2003,8 @@ def _candidate_manifest_json(
     config: TrainerConfig,
     consumed: ConsumedMaterials,
     adapter_config: dict[str, object],
+    previous_adapter_sha256: str | None,
+    trained_adapter_sha256: str,
 ) -> str:
     payload = {
         "adapter_config": adapter_config,
@@ -1995,6 +2014,8 @@ def _candidate_manifest_json(
         "consumed_materials_sha256": consumed.attestation_sha256,
         "job_fingerprint": request.job_fingerprint,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
+        "previous_adapter_sha256": previous_adapter_sha256,
+        "trained_adapter_sha256": trained_adapter_sha256,
         "trainer_artifact_id": request.trainer_artifact_id,
         "trainer_implementation_sha256": config.trainer_implementation_sha256,
         "trainer_sha256": request.trainer_sha256,
@@ -2002,7 +2023,7 @@ def _candidate_manifest_json(
             dict(config.training_runtime_versions)
         ),
         "training_runtime_versions": dict(config.training_runtime_versions),
-        "schema": "nika-peft-candidate-v1",
+        "schema": "nika-peft-candidate-v2",
         "step_number": request.step_index + 1,
         "trainer_parameters": {
             "learning_rate": config.learning_rate,
@@ -2031,6 +2052,8 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
+        "previous_adapter_sha256",
+        "trained_adapter_sha256",
         "trainer_artifact_id",
         "trainer_implementation_sha256",
         "trainer_sha256",
@@ -2040,7 +2063,7 @@ def _validate_candidate_manifest_payload(
         "step_number",
         "trainer_parameters",
     }
-    if set(value) != expected or value.get("schema") != "nika-peft-candidate-v1":
+    if set(value) != expected or value.get("schema") != "nika-peft-candidate-v2":
         _fail("candidate_manifest_invalid")
 
     base_ref = value["base_artifact_ref"]
@@ -2070,6 +2093,7 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
+        "trained_adapter_sha256",
         "trainer_artifact_id",
         "trainer_implementation_sha256",
         "trainer_sha256",
@@ -2092,6 +2116,17 @@ def _validate_candidate_manifest_payload(
 
     step_number = value["step_number"]
     if type(step_number) is not int or not 1 <= step_number <= 100_000:
+        _fail("candidate_manifest_invalid")
+    previous_adapter_sha256 = value["previous_adapter_sha256"]
+    if previous_adapter_sha256 is not None and (
+        type(previous_adapter_sha256) is not str
+        or _HEX_RE.fullmatch(previous_adapter_sha256) is None
+    ):
+        _fail("candidate_manifest_invalid")
+    if (
+        (step_number == 1 and previous_adapter_sha256 is not None)
+        or (step_number > 1 and previous_adapter_sha256 is None)
+    ):
         _fail("candidate_manifest_invalid")
 
     parameters = value["trainer_parameters"]
@@ -2179,8 +2214,14 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
     try:
         with safe_open(os.fspath(path), framework="pt", device="cpu") as handle:
             metadata = handle.metadata()
-    except (OSError, RuntimeError, ValueError):
+            tensor_keys = tuple(handle.keys())
+    except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_safetensors_invalid")
+    if not tensor_keys or any(
+        type(name) is not str or not name or len(name.encode("utf-8")) > 4096
+        for name in tensor_keys
+    ):
+        _fail("candidate_safetensors_empty")
     if type(metadata) is not dict or set(metadata) != {"nika_adapter_manifest"}:
         _fail("candidate_manifest_missing")
     raw = metadata["nika_adapter_manifest"]
