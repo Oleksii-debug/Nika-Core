@@ -257,7 +257,7 @@ class TrainingScalePlan:
         )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class TrainingScaleProgressionProof:
     plan_sha256: str
     tier_index: int
@@ -274,7 +274,7 @@ class TrainingScaleProgressionProof:
     comparison_evidence_sha256: str
     evaluation_set_sha256: str
 
-    def __post_init__(self) -> None:
+    def _validate(self) -> None:
         for value, name in (
             (self.plan_sha256, "plan_sha256"),
             (self.authorization_sha256, "authorization_sha256"),
@@ -300,7 +300,8 @@ class TrainingScaleProgressionProof:
         if type(self) is not TrainingScaleProgressionProof:
             raise TypeError("proof must be an exact TrainingScaleProgressionProof")
         try:
-            return TrainingScaleProgressionProof(
+            self._validate()
+            return _build_progression_proof(
                 plan_sha256=self.plan_sha256,
                 tier_index=self.tier_index,
                 authorization_sha256=self.authorization_sha256,
@@ -339,6 +340,45 @@ class TrainingScaleProgressionProof:
             "training_material_sha256": proof.training_material_sha256,
         }
         return _sha256_payload(payload, domain=b"nika-training-scale-proof-v1")
+
+
+def _build_progression_proof(
+    *,
+    plan_sha256: str,
+    tier_index: int,
+    authorization_sha256: str,
+    job_id: str,
+    job_fingerprint: str,
+    base_artifact_ref: str,
+    base_sha256: str,
+    candidate_artifact_ref: str,
+    candidate_sha256: str,
+    frozen_package_sha256: str,
+    training_material_sha256: str,
+    execution_plan_sha256: str,
+    comparison_evidence_sha256: str,
+    evaluation_set_sha256: str,
+) -> TrainingScaleProgressionProof:
+    proof = object.__new__(TrainingScaleProgressionProof)
+    for name, value in (
+        ("plan_sha256", plan_sha256),
+        ("tier_index", tier_index),
+        ("authorization_sha256", authorization_sha256),
+        ("job_id", job_id),
+        ("job_fingerprint", job_fingerprint),
+        ("base_artifact_ref", base_artifact_ref),
+        ("base_sha256", base_sha256),
+        ("candidate_artifact_ref", candidate_artifact_ref),
+        ("candidate_sha256", candidate_sha256),
+        ("frozen_package_sha256", frozen_package_sha256),
+        ("training_material_sha256", training_material_sha256),
+        ("execution_plan_sha256", execution_plan_sha256),
+        ("comparison_evidence_sha256", comparison_evidence_sha256),
+        ("evaluation_set_sha256", evaluation_set_sha256),
+    ):
+        object.__setattr__(proof, name, value)
+    proof._validate()
+    return proof
 
 
 @dataclass(frozen=True, slots=True)
@@ -664,7 +704,7 @@ def build_scale_progression_proof(
             "promotion evidence does not match the completed authorized run"
         )
 
-    return TrainingScaleProgressionProof(
+    return _build_progression_proof(
         plan_sha256=canonical_plan.plan_sha256,
         tier_index=canonical_authorization.tier_index,
         authorization_sha256=canonical_authorization.authorization_sha256,
