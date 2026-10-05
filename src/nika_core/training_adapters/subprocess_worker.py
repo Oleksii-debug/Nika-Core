@@ -116,6 +116,133 @@ def _error(code: str, *, effect: TrainingWorkerFailureEffect) -> TrainingSubproc
     return TrainingSubprocessError(code, effect=effect)
 
 
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+
+
+def _windows_open_launch_lock(path: Path, *, directory: bool) -> int:
+    if os.name != "nt":
+        raise OSError("Windows artifact launch locks are unavailable")
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    desired_access = (
+        _WINDOWS_FILE_READ_ATTRIBUTES if directory else _WINDOWS_GENERIC_READ
+    )
+    share_mode = _WINDOWS_FILE_SHARE_READ
+    if directory:
+        share_mode |= _WINDOWS_FILE_SHARE_WRITE
+    flags = _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT
+    if directory:
+        flags |= _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS
+    handle = create_file(
+        os.fspath(path),
+        desired_access,
+        share_mode,
+        None,
+        _WINDOWS_OPEN_EXISTING,
+        flags,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle is None or handle == invalid_handle:
+        error_code = ctypes.get_last_error()
+        raise OSError(error_code, "Windows artifact launch lock could not be acquired")
+    return int(handle)
+
+
+def _windows_close_launch_lock(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    close_handle(handle)
+
+
+class _CommandArtifactLaunchLease:
+    def __init__(self, handles: tuple[int, ...] = ()) -> None:
+        self._handles = handles
+
+    def __enter__(self) -> _CommandArtifactLaunchLease:
+        return self
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc: object,
+        traceback: object,
+    ) -> bool:
+        if os.name == "nt":
+            for handle in reversed(self._handles):
+                _windows_close_launch_lock(handle)
+        self._handles = ()
+        return False
+
+
+def _command_artifact_launch_lease(
+    expected_records: Mapping[int, ArtifactRecord],
+) -> _CommandArtifactLaunchLease:
+    if os.name != "nt":
+        return _CommandArtifactLaunchLease()
+
+    file_paths = tuple(
+        Path(record.locator)
+        for _, record in sorted(expected_records.items())
+    )
+    directory_paths: list[Path] = []
+    seen_directories: set[str] = set()
+    for path in file_paths:
+        anchor = Path(path.anchor)
+        for parent in reversed(path.parents):
+            if parent == anchor:
+                continue
+            identity = os.path.normcase(os.fspath(parent))
+            if identity in seen_directories:
+                continue
+            seen_directories.add(identity)
+            directory_paths.append(parent)
+
+    handles: list[int] = []
+    try:
+        for directory in directory_paths:
+            handles.append(_windows_open_launch_lock(directory, directory=True))
+        seen_files: set[str] = set()
+        for path in file_paths:
+            identity = os.path.normcase(os.fspath(path))
+            if identity in seen_files:
+                continue
+            seen_files.add(identity)
+            handles.append(_windows_open_launch_lock(path, directory=False))
+    except OSError as exc:
+        for handle in reversed(handles):
+            _windows_close_launch_lock(handle)
+        raise _error(
+            "command_artifact_launch_lease_failed",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        ) from exc
+    return _CommandArtifactLaunchLease(tuple(handles))
+
+
 def _canonical_json_bytes(
     value: object,
     *,
@@ -1273,52 +1400,57 @@ class SubprocessTrainingWorker:
     ) -> bytes:
         deadline = time.monotonic() + self._timeout_seconds
         creationflags, start_new_session = process_group_popen_options()
-        try:
-            process = subprocess.Popen(
-                self._command,
-                env=dict(self._environment),
-                shell=False,
-                stdin=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                creationflags=creationflags,
-                start_new_session=start_new_session,
-            )
-        except FileNotFoundError as exc:
-            raise _error(
-                "training_subprocess_executable_not_found",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            ) from exc
-        except PermissionError as exc:
-            raise _error(
-                "training_subprocess_executable_not_executable",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            ) from exc
-        except OSError as exc:
-            raise _error(
-                "training_subprocess_start_failed",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            ) from exc
+        with _command_artifact_launch_lease(expected_command_records):
+            # On Windows the lease prevents write/rename/delete of every Registry-bound
+            # command file and its path chain until the child exits. Registry verification
+            # therefore remains the byte authority while the launch boundary is race-safe.
+            self._verify_command_artifacts(expected_command_records)
+            try:
+                process = subprocess.Popen(
+                    self._command,
+                    env=dict(self._environment),
+                    shell=False,
+                    stdin=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    creationflags=creationflags,
+                    start_new_session=start_new_session,
+                )
+            except FileNotFoundError as exc:
+                raise _error(
+                    "training_subprocess_executable_not_found",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                ) from exc
+            except PermissionError as exc:
+                raise _error(
+                    "training_subprocess_executable_not_executable",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                ) from exc
+            except OSError as exc:
+                raise _error(
+                    "training_subprocess_start_failed",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                ) from exc
 
-        with WindowsJob() as job:
-            if os.name == "nt":
-                try:
-                    job.assign(int(process._handle))  # type: ignore[attr-defined]
-                except ProcessContainmentError as exc:
-                    terminate_process_tree(process, job)
-                    self._reap_process(process)
-                    raise _error(
-                        "training_subprocess_containment_failed",
-                        effect=TrainingWorkerFailureEffect.UNKNOWN,
-                    ) from exc
-            return self._execute_started_process(
-                process,
-                job,
-                request_bytes,
-                deadline=deadline,
-                expected_command_records=expected_command_records,
-                expected_training_materials=expected_training_materials,
-            )
+            with WindowsJob() as job:
+                if os.name == "nt":
+                    try:
+                        job.assign(int(process._handle))  # type: ignore[attr-defined]
+                    except ProcessContainmentError as exc:
+                        terminate_process_tree(process, job)
+                        self._reap_process(process)
+                        raise _error(
+                            "training_subprocess_containment_failed",
+                            effect=TrainingWorkerFailureEffect.UNKNOWN,
+                        ) from exc
+                return self._execute_started_process(
+                    process,
+                    job,
+                    request_bytes,
+                    deadline=deadline,
+                    expected_command_records=expected_command_records,
+                    expected_training_materials=expected_training_materials,
+                )
 
     def _execute_started_process(
         self,
