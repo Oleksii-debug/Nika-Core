@@ -277,3 +277,44 @@ def test_distribution_license_regular_utf8_is_preserved(
     assert notices._license_texts(Distribution()) == (
         ("LICENSE", "SPDX compatible text"),
     )
+
+@pytest.mark.parametrize(
+    "item",
+    (
+        "../private/LICENSE",
+        "/private/LICENSE",
+        "C:/private/LICENSE",
+        "pkg//LICENSE",
+        "pkg/./LICENSE",
+        "pkg/../LICENSE",
+        "pkg/\nLICENSE",
+    ),
+)
+def test_distribution_license_rejects_noncanonical_path_before_locate(item: str) -> None:
+    class Distribution:
+        files = (item,)
+
+        def locate_file(self, _item: str) -> Path:
+            raise AssertionError("noncanonical license path reached filesystem resolution")
+
+    with pytest.raises(RuntimeError, match="license path identity is invalid"):
+        notices._license_texts(Distribution())
+
+
+def test_distribution_license_preserves_valid_nested_relative_path(tmp_path: Path) -> None:
+    nested = tmp_path / "pkg" / "licenses"
+    nested.mkdir(parents=True)
+    license_file = nested / "LICENSE.txt"
+    license_file.write_text("Nested license evidence\n", encoding="utf-8")
+
+    class Distribution:
+        files = ("pkg/licenses/LICENSE.txt",)
+
+        def locate_file(self, item: str) -> Path:
+            assert item == "pkg/licenses/LICENSE.txt"
+            return license_file
+
+    assert notices._license_texts(Distribution()) == (
+        ("pkg/licenses/LICENSE.txt", "Nested license evidence"),
+    )
+

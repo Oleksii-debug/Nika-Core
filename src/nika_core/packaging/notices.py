@@ -60,19 +60,37 @@ def _metadata_license(dist: metadata.Distribution) -> str | None:
     return "; ".join(classifiers) or None
 
 
+def _canonical_distribution_file(item: object) -> str:
+    relative = str(item).replace("\\", "/")
+    if (
+        not relative
+        or relative != relative.strip()
+        or relative.startswith("/")
+        or (len(relative) >= 2 and relative[0].isalpha() and relative[1] == ":")
+        or any(ord(char) < 32 or ord(char) == 127 for char in relative)
+    ):
+        raise RuntimeError("Runtime distribution license path identity is invalid")
+    parts = relative.split("/")
+    if any(part in {"", ".", ".."} for part in parts):
+        raise RuntimeError("Runtime distribution license path identity is invalid")
+    return relative
+
+
 def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
     collected: list[tuple[str, str]] = []
     for item in dist.files or ():
-        leaf = Path(str(item)).name.casefold()
+        relative_path = str(item).replace("\\", "/")
+        leaf = relative_path.rsplit("/", 1)[-1].casefold()
         if not any(marker in leaf for marker in ("license", "licence", "copying", "notice")):
             continue
+        relative_path = _canonical_distribution_file(item)
         try:
             path = Path(dist.locate_file(item))
             text = _read_notices(path)
             if text is None:
                 raise RuntimeError("Runtime distribution license evidence is invalid")
             if text.strip():
-                collected.append((str(item).replace("\\", "/"), text.strip()))
+                collected.append((relative_path, text.strip()))
         except OSError as exc:
             raise RuntimeError("Runtime distribution license evidence is unreadable") from exc
     return tuple(sorted(collected))
