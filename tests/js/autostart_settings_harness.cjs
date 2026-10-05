@@ -60,12 +60,28 @@ global.pywebview = { api: {
   },
   dispatch: async (command) => {
     calls.push(command);
-    if (command.action_id.endsWith("refresh")) return { status: "completed", message: "Перечитано." };
-    if (dispatchMode === "reject") return { status: "failed", message: "Зміну не підтверджено." };
+    if (command.action_id.endsWith("refresh")) {
+      return { request_id: command.request_id, status: "completed", message: "Перечитано." };
+    }
+    if (dispatchMode === "reject") {
+      return {
+        request_id: command.request_id, status: "failed", message: "Зміну не підтверджено.",
+      };
+    }
+    if (dispatchMode === "mismatch") {
+      return {
+        request_id: "stale-request", status: "completed",
+        message: "STALE_AUTOSTART_RESPONSE_MUST_NOT_BE_TRUSTED",
+      };
+    }
     if (dispatchMode === "disconnect") throw new Error("PRIVATE_REGISTRY_CANARY");
     if (dispatchMode === "pending") await new Promise((resolve) => { releaseWrite = resolve; });
     current = command.payload.enabled ? "enabled" : "disabled";
-    return { status: "completed", message: "Налаштування автозапуску збережено." };
+    return {
+      request_id: command.request_id,
+      status: "completed",
+      message: "Налаштування автозапуску збережено.",
+    };
   },
 } };
 eval(fs.readFileSync(process.argv[2], "utf8"));
@@ -108,6 +124,16 @@ const stateText = () => element("autostart-status").textContent;
   click(reload); await tick(); await tick();
   assert.equal(input.checked, true);
   assert.doesNotMatch(stateText(), /ще не збережено/);
+  dispatchMode = "mismatch";
+  choose(false); const beforeMismatch = calls.length;
+  click(save); await tick(); await tick();
+  assert.equal(calls.length, beforeMismatch + 1, "Mismatched ACK must not trigger a blind retry");
+  assert.match(element("app-status").textContent, /Немає підтвердження/);
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent))
+      .includes("STALE_AUTOSTART_RESPONSE_MUST_NOT_BE_TRUSTED"),
+    false,
+  );
   dispatchMode = "disconnect";
   choose(false); const beforeDisconnect = calls.length;
   click(save); await tick(); await tick();
