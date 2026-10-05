@@ -50,6 +50,7 @@ _LOG = logging.getLogger(__name__)
 _CONFIG_SCHEMA_VERSION = 1
 _CONFIG_MAX_BYTES = 64 * 1024
 _FROZEN_PACKAGE_MAX_BYTES = 1024 * 1024
+_TRAINER_MAX_RECORDS = 1_000_000
 _MAX_TEXT_BYTES = 4096
 _MAX_REPORT_BYTES = 64 * 1024
 _TARGET_MODULE_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
@@ -561,6 +562,8 @@ def _material_totals(materials: ResolvedTrainingPackage) -> tuple[int, int, int,
             validation_bytes += item.byte_count
     if training_records < 1 or validation_records < 1 or total_records < 2:
         _fail("physical pilot requires non-empty training and validation material")
+    if total_records > _TRAINER_MAX_RECORDS:
+        _fail("physical pilot material exceeds the canonical PEFT record limit")
     return (
         training_records,
         training_bytes,

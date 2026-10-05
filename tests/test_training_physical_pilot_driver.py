@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -65,6 +66,31 @@ def _write_minimal_pe(path: Path) -> None:
 def _config(tmp_path: Path) -> driver.PhysicalPilotConfig:
     raw = json.dumps(_payload(tmp_path), ensure_ascii=False, sort_keys=True)
     return driver.PhysicalPilotConfig.from_json(raw)
+
+
+def test_material_totals_reject_worker_record_overflow() -> None:
+    materials = SimpleNamespace(
+        evidence=SimpleNamespace(
+            materials=(
+                SimpleNamespace(
+                    split=driver.LearningDataSplit.TRAINING,
+                    record_count=driver._TRAINER_MAX_RECORDS,
+                    byte_count=1,
+                ),
+                SimpleNamespace(
+                    split=driver.LearningDataSplit.VALIDATION,
+                    record_count=1,
+                    byte_count=1,
+                ),
+            )
+        )
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="canonical PEFT record limit",
+    ):
+        driver._material_totals(materials)
 
 
 def test_bounded_reader_rejects_oversized_file(tmp_path: Path) -> None:
