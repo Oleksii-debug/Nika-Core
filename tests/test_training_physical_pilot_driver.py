@@ -158,6 +158,32 @@ def test_invalid_model_directory_fails_before_durable_output(
     assert not config.output_root.exists()
 
 
+@pytest.mark.parametrize("authority", ("model", "blobs"))
+def test_output_root_cannot_mutate_input_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority: str,
+) -> None:
+    payload = _payload(tmp_path)
+    payload["output_root"] = str(tmp_path / authority / "pilot-output")
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+    config.blob_store_root.mkdir()
+    config.frozen_package_path.write_text("{}", encoding="utf-8")
+    config.trainer_executable.write_bytes(b"MZ")
+    config.base_gguf_path.write_bytes(b"GGUF")
+    config.model_dir.mkdir()
+    (config.model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="inside an input authority directory",
+    ):
+        driver.run_physical_pilot_from_config(config)
+
+    assert not config.output_root.exists()
+
+
 def test_duplicate_json_field_is_rejected(tmp_path: Path) -> None:
     payload = json.dumps(_payload(tmp_path))
     duplicate = payload[:-1] + ',"job_id":"other"}'

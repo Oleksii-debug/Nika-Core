@@ -448,7 +448,7 @@ def _require_existing_directory(path: Path, *, name: str) -> Path:
     return resolved
 
 
-def _create_output_root(path: Path) -> Path:
+def _preflight_output_root(path: Path) -> Path:
     try:
         parent = path.parent.resolve(strict=True)
         parent_stat = os.lstat(parent)
@@ -463,6 +463,17 @@ def _create_output_root(path: Path) -> Path:
         _fail("output_root parent must be canonical and non-linked")
     if path.exists():
         _fail("output_root must not already exist")
+    return path
+
+
+def _require_disjoint_output_root(path: Path, *, protected_roots: tuple[Path, ...]) -> None:
+    for root in protected_roots:
+        if path == root or path.is_relative_to(root):
+            _fail("output_root must not be inside an input authority directory")
+
+
+def _create_output_root(path: Path) -> Path:
+    _preflight_output_root(path)
     try:
         path.mkdir()
         value = os.lstat(path)
@@ -675,6 +686,11 @@ def run_physical_pilot_from_config(
         raise PhysicalPilotDriverError(
             "model_dir is not a canonical local model directory"
         ) from exc
+    output_root = _preflight_output_root(config.output_root)
+    _require_disjoint_output_root(
+        output_root,
+        protected_roots=(blob_store_root, model_dir),
+    )
 
     try:
         package_bytes = frozen_package_path.read_bytes()
@@ -699,7 +715,7 @@ def run_physical_pilot_from_config(
     ) = _material_totals(materials)
     runtime_metadata = build_training_runtime_metadata(dict(config.runtime_versions))
 
-    output_root = _create_output_root(config.output_root)
+    output_root = _create_output_root(output_root)
     database_path = output_root / "physical-pilot.sqlite3"
     report_path = output_root / "physical-pilot-report.json"
     store = SQLiteStore(database_path)
