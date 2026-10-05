@@ -1323,9 +1323,18 @@ class V01BoundModelRuntimeFactory:
 
     def for_task(self, task_id: str) -> ModelGatewayAgentRuntime | None:
         selection = self._settings.for_task(task_id)
+        artifact_pin = self._settings.artifact_pin_for_task(task_id)
         if selection.route_kind == "deterministic":
+            if artifact_pin is not None:
+                raise ModelSetupError(
+                    "Детермінований маршрут не може мати артефакт моделі."
+                )
             return None
-        return self._runtime_for_selection(selection, task_id=task_id)
+        return self._runtime_for_selection(
+            selection,
+            task_id=task_id,
+            artifact_pin=artifact_pin,
+        )
 
     def supervisor_for_task(
         self,
@@ -1342,12 +1351,17 @@ class V01BoundModelRuntimeFactory:
         """
 
         selection = self._settings.for_task(task_id)
+        artifact_pin = self._settings.artifact_pin_for_task(task_id)
         if selection.route_kind == "deterministic":
             raise ModelSetupError(
                 "Детермінований режим виконується packaged runtime без ModelGateway."
             )
         return MultiAgentSupervisor(
-            runtime=self._runtime_for_selection(selection, task_id=task_id),
+            runtime=self._runtime_for_selection(
+                selection,
+                task_id=task_id,
+                artifact_pin=artifact_pin,
+            ),
             store=store,
             definitions=self._definitions,
             runtime_timeout_seconds=selection.timeout_seconds,
@@ -1379,6 +1393,7 @@ class V01BoundModelRuntimeFactory:
         selection: ModelSelection,
         *,
         task_id: str,
+        artifact_pin: TaskModelArtifactPin | None,
     ) -> ModelGatewayAgentRuntime:
         if selection.route_kind == "deterministic":
             raise ModelSetupError(
@@ -1389,6 +1404,10 @@ class V01BoundModelRuntimeFactory:
         provider_kind = selection.provider_kind
         if provider_kind is None:
             raise ModelSetupError("Збережений маршрут моделі не має типу постачальника.")
+        if artifact_pin is not None and selection.route_kind != "ollama":
+            raise ModelSetupError(
+                "Прив'язаний артефакт моделі підтримується лише для Ollama."
+            )
 
         cloud_effect_authorizer = (
             self._task_cloud_authorizer(task_id=task_id)
@@ -1438,6 +1457,11 @@ class V01BoundModelRuntimeFactory:
                     default_model=model,
                     base_url=base_url,
                     think=False,
+                    expected_model_digest=(
+                        artifact_pin.artifact_sha256
+                        if artifact_pin is not None
+                        else None
+                    ),
                     client_factory=self._client_factory,
                 ),
                 default=True,
