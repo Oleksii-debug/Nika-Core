@@ -146,3 +146,73 @@ def test_direct_product_helpers_reject_noncanonical_text_before_methods(
     with pytest.raises(PackagedProductJourneyError, match="звичайним текстом"):
         helper(command)  # type: ignore[operator]
 
+
+class _HostileBridgeCommand(str):
+    def __str__(self) -> str:
+        raise AssertionError("bridge must not stringify hostile command input")
+
+    def split(self, *args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        raise AssertionError("bridge must not split hostile command input")
+
+
+def test_real_windows_bridge_composes_ui_payload_and_product_admission(
+    tmp_path: Path,
+) -> None:
+    from nika_core.config import AppConfig
+    from scripts.nika_windows import build_windows_bridge
+
+    bridge, _products = build_windows_bridge(
+        AppConfig(database_path=tmp_path / "combined packaged ingress.db")
+    )
+
+    malformed_payload = bridge.dispatch(
+        {
+            "request_id": "malformed-payload",
+            "action_id": "task.create",
+            "payload": {"command": object()},
+        }
+    )
+    assert malformed_payload["status"] == "rejected"
+    assert malformed_payload["message"].startswith("Invalid UI command:")
+
+    hostile_payload = bridge.dispatch(
+        {
+            "request_id": "hostile-text",
+            "action_id": "task.create",
+            "payload": {"command": _HostileBridgeCommand("Create product application")},
+        }
+    )
+    assert hostile_payload["status"] == "rejected"
+    assert hostile_payload["message"].startswith("Invalid UI command:")
+
+    nontext_command = bridge.dispatch(
+        {
+            "request_id": "nontext-command",
+            "action_id": "task.create",
+            "payload": {"command": 42},
+        }
+    )
+    assert nontext_command["status"] == "rejected"
+    assert nontext_command["message"] == "Команда повинна бути текстом."
+
+    before = bridge.get_state()
+    assert before["ok"] is True
+    assert before["state"]["product_project"] is None
+
+    command = "Create product application for accessible invoice review"
+    project_id = product_project_identity(command)
+    accepted = bridge.dispatch(
+        {
+            "request_id": "valid-product",
+            "action_id": "task.create",
+            "payload": {"command": command},
+        }
+    )
+    assert accepted["status"] == "completed"
+    assert accepted["request_id"] == "valid-product"
+
+    after = bridge.get_state()
+    assert after["ok"] is True
+    assert after["state"]["product_project"]["project_id"] == project_id
+
