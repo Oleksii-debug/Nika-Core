@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import nika_core.app as app
+from nika_core import app
 
 
 def _forbid_startup() -> None:
