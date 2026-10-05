@@ -59,7 +59,7 @@ def test_rejected_admission_cancels_created_task_before_runtime_dispatch(tmp_pat
 
     tasks = queue.list_recent()
     assert len(tasks) == 1
-    assert seen == [seen[0]]
+    assert len(seen) == 1
     assert seen[0].task_id == tasks[0].task_id
     assert seen[0].state is TaskState.CREATED
     assert tasks[0].state is TaskState.CANCELLED
