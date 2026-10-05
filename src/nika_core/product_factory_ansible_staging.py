@@ -94,7 +94,7 @@ class RunnerExecution:
         _validate_runner_status_rc(self.status, self.rc)
         if (
             type(self.evidence_ref) is not str
-            or not self.evidence_ref
+            or not self.evidence_ref.strip()
             or len(self.evidence_ref) > _MAX_RUNNER_EVIDENCE_CHARS
         ):
             raise StagingAdapterError(
@@ -453,7 +453,7 @@ def _validate_runner_status_rc(
 ) -> None:
     if (
         type(status) is not str
-        or not status
+        or not status.strip()
         or len(status) > _MAX_RUNNER_STATUS_CHARS
     ):
         raise StagingAdapterError(
@@ -493,7 +493,7 @@ def _canonical_contract_json(
             sort_keys=True,
             separators=(",", ":"),
         ).encode("utf-8")
-    except (TypeError, ValueError, RecursionError) as exc:
+    except (TypeError, ValueError, UnicodeError, RecursionError) as exc:
         raise StagingAdapterError(
             "nika_pf3 result contract must contain "
             "JSON-compatible finite values"
@@ -544,6 +544,7 @@ def _extract_contract(
             )
         contract = _snapshot_contract(candidate)
     return contract
+
 
 def _require_contract(
     execution: RunnerExecution,
