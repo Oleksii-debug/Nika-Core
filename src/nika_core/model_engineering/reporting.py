@@ -83,6 +83,8 @@ def benchmark_accessible_report_payload(
             "version": report.evaluation_set_version,
             "purpose": report.evaluation_purpose.value,
             "sha256": report.evaluation_set_sha256,
+            "run_id": report.run.run_id,
+            "configuration_sha256": report.run.configuration_sha256,
         },
         "quality": {
             "weighted_quality_score": report.weighted_quality_score,
@@ -127,6 +129,8 @@ def render_text_report(report: CandidateBenchmarkReport) -> str:
         f"Evaluation SHA-256: {view['dataset']['sha256']}",
         f"Candidate evidence SHA-256: {view['model']['candidate_evidence_sha256']}",
         f"Execution config SHA-256: {report.execution_config_sha256}",
+        f"Run ID: {report.run.run_id}",
+        f"Configuration SHA-256: {report.run.configuration_sha256}",
         "Quality",
         f"Weighted quality score: {report.weighted_quality_score:.6f}",
         f"Task pass rate: {report.task_pass_rate:.6f}",
@@ -190,6 +194,7 @@ def _evidence_limitations(
     limitations = [
         "human_nvda_verification_not_attested",
         "resource_sampling_is_point_in_time_not_continuous",
+        "source_build_revision_not_attested",
     ]
     if report.mean_latency_ms is None:
         limitations.append("validated_success_latency_unavailable")
@@ -215,6 +220,10 @@ def benchmark_report_payload(report: CandidateBenchmarkReport) -> dict[str, Any]
             "evidence_sha256": report.candidate.evidence_sha256,
         },
         "execution_config_sha256": report.execution_config_sha256,
+        "run": {
+            "run_id": report.run.run_id,
+            "configuration_sha256": report.run.configuration_sha256,
+        },
         "evaluation_set": {
             "evaluation_set_id": report.evaluation_set_id,
             "version": report.evaluation_set_version,
