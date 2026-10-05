@@ -182,3 +182,23 @@ def test_corrupt_persisted_action_identity_cannot_be_coerced_away(
         keymap.import_json('{"format_version":1,"bindings":{"test.second":"Ctrl+K"}}')
     with keymap._store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM keymap_overrides").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("binding", ["Ctrl+" + "K" * 252, "Ctrl+" + "ї" * 126])
+def test_oversized_direct_binding_is_rejected_without_sqlite_effect(
+    keymap: Keymap, binding: str
+) -> None:
+    with pytest.raises(ValueError, match="shortcut binding exceeds the byte limit"):
+        keymap.set_binding("test.first", binding)
+    assert keymap.resolve("test.first") == "Ctrl+1"
+    with keymap._store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM keymap_overrides").fetchone()[0] == 0
+
+
+def test_oversized_imported_binding_is_rejected_without_sqlite_effect(keymap: Keymap) -> None:
+    payload = json.dumps({"format_version": 1, "bindings": {"test.first": "K" * 257}})
+    with pytest.raises(ValueError, match="shortcut binding exceeds the byte limit"):
+        keymap.import_json(payload)
+    assert keymap.resolve("test.first") == "Ctrl+1"
+    with keymap._store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM keymap_overrides").fetchone()[0] == 0

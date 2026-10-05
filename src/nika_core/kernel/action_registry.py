@@ -22,6 +22,7 @@ _MODIFIER_ORDER = {"ctrl": 0, "alt": 1, "shift": 2, "win": 3}
 _MODIFIER_DISPLAY = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win"}
 
 _MAX_KEYMAP_IMPORT_BYTES = 1_048_576
+_MAX_KEYMAP_BINDING_BYTES = 256
 
 
 def _unique_json_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -287,10 +288,14 @@ def _clean_binding(binding: str | None) -> str | None:
         return None
     if type(binding) is not str:
         raise TypeError("shortcut binding must be text or null")
+    if len(binding) > _MAX_KEYMAP_BINDING_BYTES:
+        raise ValueError("shortcut binding exceeds the byte limit")
     try:
-        binding.encode("utf-8")
+        encoded = binding.encode("utf-8")
     except UnicodeEncodeError:
         raise ValueError("shortcut binding must contain valid UTF-8") from None
+    if len(encoded) > _MAX_KEYMAP_BINDING_BYTES:
+        raise ValueError("shortcut binding exceeds the byte limit")
     if any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in binding):
         raise ValueError("shortcut binding contains unsupported control characters")
     cleaned = "+".join(part.strip() for part in binding.split("+") if part.strip())
