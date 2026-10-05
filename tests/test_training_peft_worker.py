@@ -244,13 +244,18 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
     config = _config(tmp_path, request, base)
     job_root = peft._job_root(config, request)
     checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha = peft._checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha = peft._write_checkpoint_marker(
         checkpoint,
         request=request,
         consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha,
     )
     resume = {
         "checkpoint_marker_sha256": marker_sha,
+        "checkpoint_payload_sha256": payload_sha,
         "checkpoint_step": 1,
         "job_fingerprint": request.job_fingerprint,
         "relative_path": checkpoint.relative_to(job_root).as_posix(),
@@ -270,6 +275,42 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
     tampered = peft._parse_request(raw_request)
     with pytest.raises(peft.PeftTrainerError, match="resume_marker_digest_mismatch"):
         peft._resume_checkpoint(job_root, tampered)
+
+
+def test_resume_rejects_tampered_checkpoint_payload(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    optimizer = checkpoint / "optimizer.pt"
+    optimizer.write_bytes(b"optimizer-state")
+    payload_sha = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    marker_sha = peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha,
+    )
+    resume = {
+        "checkpoint_marker_sha256": marker_sha,
+        "checkpoint_payload_sha256": payload_sha,
+        "checkpoint_step": 1,
+        "job_fingerprint": request.job_fingerprint,
+        "relative_path": checkpoint.relative_to(job_root).as_posix(),
+        "schema_version": 1,
+    }
+    raw_request, _ = _request(tmp_path)
+    raw_request["step_index"] = 1
+    raw_request["previous_step_id"] = request.step_id
+    raw_request["step_id"] = "3" * 64
+    raw_request["resume_state"] = resume
+    second = peft._parse_request(raw_request)
+
+    optimizer.write_bytes(b"forged-optimizer-state")
+
+    with pytest.raises(peft.PeftTrainerError, match="resume_checkpoint_payload_mismatch"):
+        peft._resume_checkpoint(job_root, second)
 
 
 class _FakeTokenizer:
@@ -292,10 +333,23 @@ class _FakeTokenizer:
         return {"attention_mask": [1] * len(ids), "input_ids": ids}
 
 
+def test_response_tokens_must_survive_sequence_budget() -> None:
+    tokenizer = _FakeTokenizer()
+    long_prompt = "p" * 128
+
+    with pytest.raises(peft.PeftTrainerError, match="response_tokens_truncated"):
+        peft._TokenizedDataset(
+            (peft.TrainingExample(long_prompt, "answer"),),
+            tokenizer,
+            32,
+        )
+
+
 class _FakeTokenizerFactory:
     @staticmethod
     def from_pretrained(*args: object, **kwargs: object) -> _FakeTokenizer:
         assert kwargs["local_files_only"] is True
+        assert kwargs["trust_remote_code"] is False
         assert str(kwargs["gguf_file"]).endswith("base.gguf")
         return _FakeTokenizer()
 
@@ -360,6 +414,7 @@ class _FakeModelFactory:
     @staticmethod
     def from_pretrained(*args: object, **kwargs: object) -> _FakeModel:
         assert kwargs["local_files_only"] is True
+        assert kwargs["trust_remote_code"] is False
         assert kwargs["dtype"] == "auto"
         return _FakeModel()
 
@@ -510,6 +565,68 @@ def test_final_candidate_is_never_overwritten(
         peft._train_one_step(request, config, consumed)
 
     assert candidate.read_bytes() == b"existing"
+
+
+def test_concurrent_candidate_publish_never_overwrites_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_link = peft.os.link
+
+    def racing_link(source: object, target: object, *args: object, **kwargs: object) -> None:
+        Path(target).write_bytes(b"concurrent-winner")
+        real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "link", racing_link)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_conflict"):
+        peft._train_one_step(request, config, consumed)
+
+    assert candidate.read_bytes() == b"concurrent-winner"
+
+
+def test_checkpoint_mutation_blocks_final_candidate_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_snapshot = peft._adapter_config_snapshot
+
+    def mutate_after_snapshot(
+        path: Path,
+        parsed: peft.ParsedRequest,
+        trainer_config: peft.TrainerConfig,
+    ) -> dict[str, object]:
+        snapshot = real_snapshot(path, parsed, trainer_config)
+        (path / "adapter_model.safetensors").write_bytes(b"post-marker-tamper")
+        return snapshot
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft, "_adapter_config_snapshot", mutate_after_snapshot)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="checkpoint_payload_changed_before_publish",
+    ):
+        peft._train_one_step(request, config, consumed)
+
+    assert not candidate.exists()
 
 
 def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
