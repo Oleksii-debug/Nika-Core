@@ -593,3 +593,63 @@ def test_notice_builder_enforces_total_budget_before_large_join(
     with pytest.raises(RuntimeError, match="Generated third-party notices exceed"):
         notices.build_third_party_notices(tmp_path)
     assert not (tmp_path / "THIRD_PARTY_NOTICES.txt").exists()
+
+
+def test_notice_verifier_rejects_noncanonical_preamble_prefix(
+    notice_bundle: tuple[Path, Path, bytes],
+) -> None:
+    bundle, target, valid = notice_bundle
+    target.write_bytes(b"untrusted prefix\n" + valid)
+    assert notices.verify_third_party_notices(bundle) == ("notices:structure",)
+
+
+def test_notice_verifier_rejects_extra_preamble_spacing(
+    notice_bundle: tuple[Path, Path, bytes],
+) -> None:
+    bundle, target, _valid = notice_bundle
+    target.write_text(
+        "Nika Core third-party notices\n\n\n"
+        "===== Python runtime =====\nPSF license\n",
+        encoding="utf-8",
+    )
+    assert notices.verify_third_party_notices(bundle) == ("notices:structure",)
+
+
+def test_notice_verifier_rejects_unknown_extra_section(
+    notice_bundle: tuple[Path, Path, bytes],
+) -> None:
+    bundle, target, valid = notice_bundle
+    target.write_bytes(
+        valid
+        + b"\n===== Unexpected package 1.0 =====\n"
+        + b"unbound release evidence\n"
+    )
+    assert notices.verify_third_party_notices(bundle) == (
+        "notices:unexpected-section",
+    )
+
+
+def test_notice_verifier_rejects_decorated_section_marker(
+    notice_bundle: tuple[Path, Path, bytes],
+) -> None:
+    bundle, target, _valid = notice_bundle
+    target.write_text(
+        "Nika Core third-party notices\n\n"
+        " ===== Python runtime ===== \nPSF license\n",
+        encoding="utf-8",
+    )
+    assert notices.verify_third_party_notices(bundle) == ("notices:structure",)
+
+
+def test_notice_parser_bounds_section_count(
+    notice_bundle: tuple[Path, Path, bytes],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, target, valid = notice_bundle
+    monkeypatch.setattr(notices, "_MAX_NOTICE_SECTIONS", 2)
+    target.write_bytes(
+        valid
+        + b"\n===== extra-one =====\none\n"
+        + b"\n===== extra-two =====\ntwo\n"
+    )
+    assert notices.verify_third_party_notices(bundle) == ("notices:structure",)
