@@ -79,6 +79,8 @@ class TrainerConfig:
     base_gguf: Path
     model_dir: Path
     model_dir_manifest_sha256: str
+    trainer_implementation_sha256: str
+    training_runtime_versions: tuple[tuple[str, str], ...]
     output_root: Path
     max_records: int
     max_sequence_length: int
@@ -584,29 +586,22 @@ def _installed_training_runtime_versions() -> dict[str, str]:
     return _normalize_training_runtime_versions(versions)
 
 
-def _verify_training_runtime_versions() -> None:
-    try:
-        expected = _normalize_training_runtime_versions(
-            {
-                distribution: os.environ.get(environment_key)
-                for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS
-            }
-        )
-    except (UnicodeEncodeError, ValueError):
-        _fail("nika_trainer_runtime_manifest_invalid")
-    expected_manifest_sha256 = _require_sha256(
-        os.environ.get("NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"),
-        field="nika_trainer_runtime_manifest_sha256",
-    )
-    if _training_runtime_manifest_sha256(expected) != expected_manifest_sha256:
-        _fail("nika_trainer_runtime_manifest_mismatch")
+def _verify_training_runtime_versions() -> tuple[tuple[str, str], ...]:
     try:
         observed = _installed_training_runtime_versions()
     except (UnicodeEncodeError, ValueError):
         _fail("nika_trainer_runtime_versions_unavailable")
-    if observed != expected:
-        _fail("nika_trainer_runtime_version_mismatch")
-
+    verified: list[tuple[str, str]] = []
+    for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        expected = _require_bounded_text(
+            os.environ.get(environment_key),
+            field=environment_key.lower(),
+            max_bytes=_MAX_RUNTIME_VERSION_BYTES,
+        )
+        if observed[distribution] != expected:
+            _fail("nika_trainer_runtime_version_mismatch")
+        verified.append((distribution, observed[distribution]))
+    return tuple(verified)
 
 def build_trainer_environment(
     *,
@@ -1113,7 +1108,7 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
 
 
 def _read_config() -> TrainerConfig:
-    _verify_training_runtime_versions()
+    training_runtime_versions = _verify_training_runtime_versions()
     expected_implementation_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_IMPLEMENTATION_SHA256"),
         field="nika_trainer_implementation_sha256",
@@ -1167,6 +1162,8 @@ def _read_config() -> TrainerConfig:
         base_gguf=base_gguf,
         model_dir=model_dir,
         model_dir_manifest_sha256=model_dir_manifest_sha256,
+        trainer_implementation_sha256=expected_implementation_sha256,
+        training_runtime_versions=training_runtime_versions,
         output_root=output_root,
         max_records=_env_int(
             "NIKA_TRAINER_MAX_RECORDS",
@@ -1921,6 +1918,8 @@ def _candidate_manifest_json(
         "consumed_materials_sha256": consumed.attestation_sha256,
         "job_fingerprint": request.job_fingerprint,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
+        "trainer_implementation_sha256": config.trainer_implementation_sha256,
+        "training_runtime_versions": dict(config.training_runtime_versions),
         "schema": "nika-peft-candidate-v1",
         "step_number": request.step_index + 1,
         "trainer_parameters": {
@@ -1931,9 +1930,11 @@ def _candidate_manifest_json(
             "lora_target_modules": list(config.lora_target_modules),
             "max_records": config.max_records,
             "max_sequence_length": config.max_sequence_length,
+            "torch_num_threads": config.torch_num_threads,
             "seed": config.seed,
         },
     }
+    _validate_candidate_manifest_payload(payload)
     return _canonical_json_bytes(payload).decode("utf-8")
 
 
@@ -1949,6 +1950,8 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
+        "trainer_implementation_sha256",
+        "training_runtime_versions",
         "schema",
         "step_number",
         "trainer_parameters",
@@ -1983,8 +1986,29 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
+        "trainer_implementation_sha256",
     ):
         if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
+            _fail("candidate_manifest_invalid")
+
+    runtime_versions = value["training_runtime_versions"]
+    runtime_names = tuple(
+        distribution for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
+    )
+    if type(runtime_versions) is not dict or set(runtime_versions) != set(runtime_names):
+        _fail("candidate_manifest_invalid")
+    for distribution in runtime_names:
+        version = runtime_versions[distribution]
+        if type(version) is not str or not version or version != version.strip():
+            _fail("candidate_manifest_invalid")
+        try:
+            encoded_version = version.encode("utf-8", errors="strict")
+        except UnicodeEncodeError:
+            _fail("candidate_manifest_invalid")
+        if (
+            len(encoded_version) > _MAX_RUNTIME_VERSION_BYTES
+            or any(ord(character) < 32 or ord(character) == 127 for character in version)
+        ):
             _fail("candidate_manifest_invalid")
 
     step_number = value["step_number"]
@@ -2000,6 +2024,7 @@ def _validate_candidate_manifest_payload(
         "lora_target_modules",
         "max_records",
         "max_sequence_length",
+        "torch_num_threads",
         "seed",
     }
     if type(parameters) is not dict or set(parameters) != parameter_keys:
@@ -2010,6 +2035,7 @@ def _validate_candidate_manifest_payload(
     lora_r = parameters["lora_r"]
     max_records = parameters["max_records"]
     max_sequence_length = parameters["max_sequence_length"]
+    torch_num_threads = parameters["torch_num_threads"]
     seed = parameters["seed"]
     targets = parameters["lora_target_modules"]
     if (
@@ -2027,6 +2053,8 @@ def _validate_candidate_manifest_payload(
         or not 2 <= max_records <= _MAX_RECORDS_LIMIT
         or type(max_sequence_length) is not int
         or not 32 <= max_sequence_length <= _MAX_SEQUENCE_LENGTH_LIMIT
+        or type(torch_num_threads) is not int
+        or not 1 <= torch_num_threads <= 256
         or type(seed) is not int
         or not 0 <= seed <= (1 << 31) - 1
         or type(targets) is not list
