@@ -42,6 +42,12 @@ class AgentDefinition:
         _text_value(self.goal, "goal", allow_blank=True)
 
 
+def _snapshot_definition(value: object) -> AgentDefinition:
+    if type(value) is not AgentDefinition:
+        raise TypeError("definition must be an exact AgentDefinition")
+    return AgentDefinition(value.agent_id, value.name, value.version, value.goal)
+
+
 class AgentRegistry:
     def __init__(self, store: SQLiteStore | None = None) -> None:
         self._store = store
@@ -56,11 +62,12 @@ class AgentRegistry:
         return int(row["count"])
 
     def register(self, definition: AgentDefinition) -> None:
+        canonical = _snapshot_definition(definition)
         if self._store is None:
-            current = self._latest(definition.agent_id)
-            if current is not None and definition.version <= current.version:
+            current = self._latest(canonical.agent_id)
+            if current is not None and canonical.version <= current.version:
                 raise ValueError("agent version must increase")
-            self._agents[definition.agent_id] = definition
+            self._agents[canonical.agent_id] = canonical
             return
 
         with self._store.connection() as conn:
@@ -71,22 +78,22 @@ class AgentRegistry:
             row = conn.execute(
                 "SELECT agent_id, name, version, goal FROM agents WHERE agent_id = ? "
                 "ORDER BY version DESC LIMIT 1",
-                (definition.agent_id,),
+                (canonical.agent_id,),
             ).fetchone()
             if row is not None:
                 _stored_text(row["agent_id"], "agent_id", allow_blank=False)
                 _stored_text(row["name"], "name", allow_blank=False)
                 current_version = _stored_version(row["version"])
                 _stored_text(row["goal"], "goal", allow_blank=True)
-                if definition.version <= current_version:
+                if canonical.version <= current_version:
                     raise ValueError("agent version must increase")
             conn.execute(
                 "INSERT INTO agents(agent_id, version, name, goal, created_at) VALUES (?, ?, ?, ?, ?)",
                 (
-                    definition.agent_id,
-                    definition.version,
-                    definition.name,
-                    definition.goal,
+                    canonical.agent_id,
+                    canonical.version,
+                    canonical.name,
+                    canonical.goal,
                     datetime.now(UTC).isoformat(),
                 ),
             )
@@ -96,11 +103,13 @@ class AgentRegistry:
         current = self._latest(normalized_id)
         if current is None:
             raise KeyError(f"Unknown agent: {normalized_id}")
-        return current
+        return _snapshot_definition(current)
 
     def list_latest(self) -> tuple[AgentDefinition, ...]:
         if self._store is None:
-            return tuple(self._agents[key] for key in sorted(self._agents))
+            return tuple(
+                _snapshot_definition(self._agents[key]) for key in sorted(self._agents)
+            )
         with self._store.connection() as conn:
             rows = conn.execute(
                 "SELECT a.agent_id, a.name, a.version, a.goal FROM agents AS a "
