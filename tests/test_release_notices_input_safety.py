@@ -454,3 +454,142 @@ def test_distribution_license_rejects_overlong_path_identity_before_locate(
 
     with pytest.raises(RuntimeError, match="path identity is invalid"):
         notices._license_texts(Distribution())
+
+
+def test_distribution_license_resolution_uses_validated_string_identity(
+    tmp_path: Path,
+) -> None:
+    dist_root = tmp_path / "dist"
+    dist_root.mkdir()
+    (dist_root / "LICENSE").write_text("validated path", encoding="utf-8")
+
+    class DeceptiveItem:
+        def __str__(self) -> str:
+            return "LICENSE"
+
+        def __fspath__(self) -> str:
+            return "../../private/LICENSE"
+
+    class Distribution:
+        files = (DeceptiveItem(),)
+
+        def locate_file(self, item: str) -> Path:
+            assert isinstance(item, str)
+            return dist_root / item
+
+    assert notices._license_texts(Distribution()) == (
+        ("LICENSE", "validated path"),
+    )
+
+
+def test_distribution_license_metadata_is_bounded_before_section_assembly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notices, "_MAX_NOTICES_BYTES", 8)
+
+    class Metadata:
+        def get(self, key: str) -> str | None:
+            return "MIT-EXPRESSION" if key == "License-Expression" else None
+
+        def get_all(self, _key: str, _default: object) -> list[str]:
+            return []
+
+    class Distribution:
+        metadata = Metadata()
+
+    with pytest.raises(RuntimeError, match="metadata exceeds the release size limit"):
+        notices._metadata_license(Distribution())
+
+
+def test_distribution_license_metadata_rejects_section_injection() -> None:
+    class Metadata:
+        def get(self, key: str) -> str | None:
+            if key == "License":
+                return "MIT\n===== Python runtime =====\nspoof"
+            return None
+
+        def get_all(self, _key: str, _default: object) -> list[str]:
+            return []
+
+    class Distribution:
+        metadata = Metadata()
+
+    with pytest.raises(RuntimeError, match="license metadata is ambiguous"):
+        notices._metadata_license(Distribution())
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "pkg\nspoof",
+        "pkg\u2028hidden",
+        "pkg\u202edirectional",
+    ),
+)
+def test_distribution_section_identity_rejects_ambiguous_name(name: str) -> None:
+    class Metadata:
+        def get(self, key: str) -> str | None:
+            if key == "Name":
+                return name
+            if key == "License":
+                return "MIT"
+            return None
+
+        def get_all(self, _key: str, _default: object) -> list[str]:
+            return []
+
+    class Distribution:
+        metadata = Metadata()
+        version = "1.0"
+        files: tuple[str, ...] = ()
+
+    with pytest.raises(RuntimeError, match="name identity is invalid"):
+        notices._distribution_section("fallback", Distribution())
+
+
+def test_distribution_section_budget_includes_declared_license_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notices, "_MAX_NOTICES_BYTES", 32)
+
+    class Metadata:
+        def get(self, key: str) -> str | None:
+            if key == "Name":
+                return "pkg"
+            if key == "License-Expression":
+                return "X" * 30
+            return None
+
+        def get_all(self, _key: str, _default: object) -> list[str]:
+            return []
+
+    class Distribution:
+        metadata = Metadata()
+        version = "1.0"
+        files: tuple[str, ...] = ()
+
+    with pytest.raises(RuntimeError, match="evidence exceeds the release size limit"):
+        notices._distribution_section("fallback", Distribution())
+
+
+def test_notice_builder_enforces_total_budget_before_large_join(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(notices, "_MAX_NOTICES_BYTES", 128)
+    monkeypatch.setattr(notices, "RUNTIME_DISTRIBUTIONS", ("one", "two"))
+    monkeypatch.setattr(notices, "_python_license", lambda: "PSF")
+
+    class Distribution:
+        pass
+
+    monkeypatch.setattr(notices.metadata, "distribution", lambda _name: Distribution())
+    monkeypatch.setattr(
+        notices,
+        "_distribution_section",
+        lambda name, _dist: (name, "X" * 40),
+    )
+
+    with pytest.raises(RuntimeError, match="Generated third-party notices exceed"):
+        notices.build_third_party_notices(tmp_path)
+    assert not (tmp_path / "THIRD_PARTY_NOTICES.txt").exists()
