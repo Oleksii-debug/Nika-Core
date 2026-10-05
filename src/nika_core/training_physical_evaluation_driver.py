@@ -65,6 +65,14 @@ _MAX_MESSAGES_PER_CASE = 128
 _MAX_COMMAND_FILES = 16
 _MAX_SWITCHES = 16
 _SWITCH_RE = re.compile(r"^--[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_GENERIC_WRITE = 0x40000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_ALWAYS = 4
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_SHARING_VIOLATION = 32
+_WINDOWS_LOCK_VIOLATION = 33
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -952,6 +960,74 @@ def _write_report(path: Path, payload: dict[str, object]) -> None:
                 pass
 
 
+def _close_windows_execution_lock(handle: int | None) -> None:
+    if handle is None:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(ctypes.c_void_p(handle))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        pass
+
+
+def _open_windows_execution_lock(path: Path) -> int:
+    """Hold one Windows run lease so physical benchmark effects cannot overlap."""
+
+    handle_value: int | None = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ | _WINDOWS_GENERIC_WRITE,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_ALWAYS,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            error_code = ctypes.get_last_error()
+            if error_code in {_WINDOWS_SHARING_VIOLATION, _WINDOWS_LOCK_VIOLATION}:
+                _fail("another physical old-vs-new evaluation is already active")
+            raise OSError(error_code, "CreateFileW failed")
+        handle_value = int(handle)
+        snapshot = os.lstat(path)
+        if (
+            stat.S_ISLNK(snapshot.st_mode)
+            or _is_reparse(snapshot)
+            or not stat.S_ISREG(snapshot.st_mode)
+        ):
+            raise OSError("physical evaluation lock path is not a regular file")
+        return handle_value
+    except PhysicalEvaluationDriverError:
+        _close_windows_execution_lock(handle_value)
+        raise
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        _close_windows_execution_lock(handle_value)
+        raise PhysicalEvaluationDriverError(
+            "physical evaluation exclusive execution lock is unavailable"
+        ) from exc
+
+
 def _is_windows() -> bool:
     return os.name == "nt"
 
@@ -1041,18 +1117,11 @@ async def _run_attested_comparison(
     )
 
 
-def run_physical_evaluation_from_config(
+def _run_locked_physical_evaluation_from_config(
     config: PhysicalEvaluationConfig,
+    *,
+    output_root: Path,
 ) -> dict[str, object]:
-    if type(config) is not PhysicalEvaluationConfig:
-        raise TypeError("config must be exact PhysicalEvaluationConfig")
-    if not _is_windows():
-        _fail("physical old-vs-new evaluation driver must execute on Windows")
-
-    output_root = _canonical_directory(
-        config.physical_pilot_output_root,
-        name="physical_pilot_output_root",
-    )
     report_path = output_root / "physical-old-new-evaluation-report.json"
     if report_path.exists():
         _fail("physical evaluation report already exists; refusing to repeat model effects")
@@ -1201,6 +1270,30 @@ def run_physical_evaluation_from_config(
         payload["experiment_status"],
     )
     return payload
+
+
+def run_physical_evaluation_from_config(
+    config: PhysicalEvaluationConfig,
+) -> dict[str, object]:
+    if type(config) is not PhysicalEvaluationConfig:
+        raise TypeError("config must be exact PhysicalEvaluationConfig")
+    if not _is_windows():
+        _fail("physical old-vs-new evaluation driver must execute on Windows")
+
+    output_root = _canonical_directory(
+        config.physical_pilot_output_root,
+        name="physical_pilot_output_root",
+    )
+    lock_handle = _open_windows_execution_lock(
+        output_root / ".physical-old-new-evaluation.lock"
+    )
+    try:
+        return _run_locked_physical_evaluation_from_config(
+            config,
+            output_root=output_root,
+        )
+    finally:
+        _close_windows_execution_lock(lock_handle)
 
 
 def _read_config(path: Path) -> PhysicalEvaluationConfig:
