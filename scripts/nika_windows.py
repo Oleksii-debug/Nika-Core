@@ -168,7 +168,7 @@ def _confirm_cloud_model_on_windows(request: CloudModelGrantRequest) -> bool:
             f"Хост: {request.network_host}\n"
             f"Приватні дані дозволено: {private_text}\n\n"
             "Дозволити мережеві звернення цього завдання до цієї моделі? "
-            "Дозвіл прив'язаний лише до цього завдання і має обмежений строк дії."
+            "Дозвіл прив'язаний лише до цього завдання і діє до 24 годин."
         )
         flags = 0x00000004 | 0x00000030 | 0x00000100 | 0x00010000
         result = int(
@@ -229,6 +229,7 @@ def build_windows_session(
         runtime=runtime,
         prepare_task_payload=prepare_task_payload,
         admit_created_task=cloud_permissions.admit_created_task,
+        admit_resumed_task=cloud_permissions.admit_resumed_task,
         autostart_service=(
             WindowsAutostartService(Path(sys.executable))
             if sys.platform == "win32" and getattr(sys, "frozen", False)
@@ -273,6 +274,17 @@ def build_windows_session(
             try:
                 return backend.create_task(payload)
             except (ModelSetupError, CloudModelPermissionDenied) as exc:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="rejected",
+                    message=str(exc),
+                    focus_id="model-route-kind",
+                )
+
+        def resume_ordinary_task(payload: Mapping[str, Any]) -> UIResult:
+            try:
+                return backend.resume_task(payload)
+            except CloudModelPermissionDenied as exc:
                 return UIResult(
                     request_id="desktop-handler",
                     status="rejected",
@@ -335,7 +347,7 @@ def build_windows_session(
             handlers={
                 "task.create": product_router.create,
                 "task.pause": backend.pause_task,
-                "task.resume": backend.resume_task,
+                "task.resume": resume_ordinary_task,
                 "agent.stop": backend.stop_agent,
                 "voice.start": voice.start,
                 "voice.cancel": voice.cancel,
