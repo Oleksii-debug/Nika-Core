@@ -118,9 +118,11 @@ def test_model_task_read_is_write_fenced_before_binding(
 
     def read_with_competing_writer(queue: TaskQueue, task_id: str):
         record = original_get(queue, task_id)
-        with sqlite3.connect(store.path, timeout=0) as competing:
-            with pytest.raises(sqlite3.OperationalError, match="locked"):
-                competing.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        with (
+            sqlite3.connect(store.path, timeout=0) as competing,
+            pytest.raises(sqlite3.OperationalError, match="locked"),
+        ):
+            competing.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
         observed.append(task_id)
         return record
 
