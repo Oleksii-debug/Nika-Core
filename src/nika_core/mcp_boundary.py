@@ -28,6 +28,13 @@ _MAX_MCP_INTEGER_BITS = 4096
 _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
+def _encode_utf8_strict(value: str, *, field: str) -> bytes:
+    try:
+        return value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8") from exc
+
+
 def _exact_utf8_text(
     value: object,
     *,
@@ -36,21 +43,20 @@ def _exact_utf8_text(
 ) -> str:
     if type(value) is not str:
         raise TypeError(f"{field} must be an exact string")
-    try:
-        value.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise ValueError(f"{field} must be valid UTF-8") from exc
+    _encode_utf8_strict(value, field=field)
     if non_empty and not value.strip():
         raise ValueError(f"{field} must not be empty")
     return value
 
 
 def _exact_mcp_segment(value: object, *, field: str) -> str:
-    text = _exact_utf8_text(value, field=field, non_empty=True)
-    if len(text) > _MAX_MCP_SEGMENT_CHARS:
+    if type(value) is not str:
+        raise TypeError(f"{field} must be an exact string")
+    if len(value) > _MAX_MCP_SEGMENT_CHARS:
         raise ValueError(
             f"{field} must contain at most {_MAX_MCP_SEGMENT_CHARS} characters"
         )
+    text = _exact_utf8_text(value, field=field, non_empty=True)
     if text != text.strip():
         raise ValueError(f"{field} must not contain edge whitespace")
     if ":" in text:
@@ -68,12 +74,19 @@ def _exact_mcp_tool_name(value: object) -> str:
 
 
 def _exact_mcp_cursor(value: object) -> str:
-    cursor = _exact_utf8_text(value, field="MCP next cursor")
-    if len(cursor.encode("utf-8")) > _MAX_MCP_CURSOR_BYTES:
+    field = "MCP next cursor"
+    if type(value) is not str:
+        raise TypeError(f"{field} must be an exact string")
+    if len(value) > _MAX_MCP_CURSOR_BYTES:
         raise ValueError(
-            f"MCP next cursor must contain at most {_MAX_MCP_CURSOR_BYTES} UTF-8 bytes"
+            f"{field} must contain at most {_MAX_MCP_CURSOR_BYTES} UTF-8 bytes"
         )
-    return cursor
+    encoded = _encode_utf8_strict(value, field=field)
+    if len(encoded) > _MAX_MCP_CURSOR_BYTES:
+        raise ValueError(
+            f"{field} must contain at most {_MAX_MCP_CURSOR_BYTES} UTF-8 bytes"
+        )
+    return value
 
 
 def _exact_tool_risk(value: object) -> ToolRisk:
@@ -130,6 +143,8 @@ def _snapshot_mcp_json(
         _charge_mcp_argument_budget(budget, encoded_bytes=_mcp_scalar_bytes(value))
         return value
     if type(value) is str:
+        if len(value) > budget[1]:
+            raise ValueError("MCP arguments exceed safe UTF-8 byte limit")
         text = _exact_utf8_text(value, field=path)
         _charge_mcp_argument_budget(budget, encoded_bytes=_mcp_scalar_bytes(text))
         return text
@@ -164,7 +179,12 @@ def _snapshot_mcp_json(
 
         snapshot: dict[str, object] = {}
         for index, (raw_key, item) in enumerate(value.items()):
-            key = _exact_utf8_text(raw_key, field=f"{path} key {index}")
+            key_field = f"{path} key {index}"
+            if type(raw_key) is not str:
+                raise TypeError(f"{key_field} must be an exact string")
+            if len(raw_key) > budget[1]:
+                raise ValueError("MCP arguments exceed safe UTF-8 byte limit")
+            key = _exact_utf8_text(raw_key, field=key_field)
             key_bytes = _mcp_scalar_bytes(key) + 1 + (1 if index else 0)
             _charge_mcp_argument_budget(budget, encoded_bytes=key_bytes)
             snapshot[key] = _snapshot_mcp_json(
