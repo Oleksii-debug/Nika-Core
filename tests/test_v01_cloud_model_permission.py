@@ -610,6 +610,76 @@ def test_expired_grant_requires_new_resume_consent_and_new_authority(tmp_path: P
     _authorize(service, record.task_id)
 
 
+def test_revoked_preflight_cannot_hide_new_active_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    first_id = service._bound_permission_id(record.task_id, strict=True)
+    assert first_id is not None
+    service._permissions.revoke(first_id, revoked_at=NOW)
+
+    second_id = service._new_permission_id(record.task_id)
+    service._permissions.grant(
+        permission_id=second_id,
+        scope=StandingPermissionScope(
+            subject_id="nika.packaged.model",
+            context=service._context(record),
+            action_class="model.cloud.complete",
+            targets=(prompts[0].provider_id,),
+            sites=(prompts[0].network_host,),
+            resources=(prompts[0].model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        ),
+    )
+
+    original_bound = service._bound_permission_id
+    injected = [False]
+
+    def raced_bound(
+        task_id: str,
+        *,
+        strict: bool,
+        connection=None,
+    ):
+        if not injected[0] and connection is None:
+            injected[0] = True
+            with store.connection() as conn:
+                conn.execute(
+                    "UPDATE v01_cloud_model_permission_bindings "
+                    "SET permission_id = ?, updated_at = ? WHERE task_id = ?",
+                    (second_id, NOW.isoformat(), record.task_id),
+                )
+            return first_id
+        return original_bound(
+            task_id,
+            strict=strict,
+            connection=connection,
+        )
+
+    monkeypatch.setattr(service, "_bound_permission_id", raced_bound)
+
+    with pytest.raises(CloudModelPermissionDenied, match="змінився під час відкликання"):
+        service.revoke_task(record.task_id)
+
+    second = service._permissions.get(second_id)
+    assert second is not None and second.revoked_at is None
+    assert original_bound(record.task_id, strict=True) == second_id
+
+
 def test_revoke_race_rolls_back_stale_revocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
