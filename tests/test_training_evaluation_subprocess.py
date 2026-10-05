@@ -472,3 +472,73 @@ async def test_explicit_environment_allowlist_exposes_only_admitted_values(
     result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
 
     assert result.response.text == "yes:false"
+
+
+
+def test_attestor_identity_binds_explicit_environment(tmp_path: Path) -> None:
+    script = _success_script(tmp_path)
+    left, _, _, _ = _adapter(
+        tmp_path,
+        script,
+        environment={"NIKA_EVAL_MODE": "left"},
+    )
+    right, _, _, _ = _adapter(
+        tmp_path,
+        script,
+        environment={"NIKA_EVAL_MODE": "right"},
+    )
+
+    assert left.attestor_sha256 != right.attestor_sha256
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "PYTHONPATH",
+        "pythonhome",
+        "LD_PRELOAD",
+        "dyld_insert_libraries",
+        "PATH",
+        "Node_Options",
+        "DOTNET_STARTUP_HOOKS",
+    ],
+)
+def test_environment_rejects_runtime_loader_authority(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    script = _success_script(tmp_path)
+
+    with pytest.raises(ValueError, match="runtime or loader authority"):
+        _adapter(tmp_path, script, environment={key: "untrusted"})
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["NIKA_API_KEY", "ACCESS_TOKEN", "DB_PASSWORD", "SERVICE_CREDENTIAL"],
+)
+def test_environment_rejects_credential_named_fields(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    script = _success_script(tmp_path)
+
+    with pytest.raises(ValueError, match="credential material"):
+        _adapter(tmp_path, script, environment={key: "sensitive"})
+
+
+@pytest.mark.asyncio
+async def test_direct_non_request_carrier_is_typed_no_effect_failure(
+    tmp_path: Path,
+) -> None:
+    script = _success_script(tmp_path)
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(  # type: ignore[arg-type]
+            object(),
+            binding=_binding(descriptor),
+        )
+
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
