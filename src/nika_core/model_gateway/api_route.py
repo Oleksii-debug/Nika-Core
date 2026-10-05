@@ -41,7 +41,7 @@ class EnvironmentCredentialResolver:
             raise ValueError("credential reference prefix must not be empty")
 
     def resolve(self, credential_ref: str) -> str:
-        if not isinstance(credential_ref, str):
+        if type(credential_ref) is not str:
             raise TypeError("credential_ref must be text")
         if not credential_ref.startswith(self.prefix):
             raise CredentialResolutionError("credential reference scheme is unsupported")
@@ -77,7 +77,7 @@ class ApiModelRouteConfig:
             ("default_model", self.default_model),
             ("credential_ref", self.credential_ref),
         ):
-            if not isinstance(value, str):
+            if type(value) is not str:
                 raise TypeError(f"{name} must be text")
             if not value.strip():
                 raise ValueError(f"{name} must not be empty")
@@ -85,9 +85,9 @@ class ApiModelRouteConfig:
                 raise ValueError(f"{name} must not contain surrounding whitespace")
             if any(not char.isprintable() for char in value):
                 raise ValueError(f"{name} must not contain control characters")
-        if not isinstance(self.supports_private_data, bool):
+        if type(self.supports_private_data) is not bool:
             raise TypeError("supports_private_data must be a boolean")
-        if not isinstance(self.supports_hard_cancellation, bool):
+        if type(self.supports_hard_cancellation) is not bool:
             raise TypeError("supports_hard_cancellation must be a boolean")
 
         # urlsplit silently removes CR/LF/TAB and leading C0 controls. Reject
@@ -127,16 +127,26 @@ class CredentialRefOpenAICompatibleProvider:
         credential_resolver: CredentialResolverPort,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
-        self._config = config
+        if type(config) is not ApiModelRouteConfig:
+            raise TypeError("config must be an ApiModelRouteConfig")
+        config_snapshot = ApiModelRouteConfig(
+            provider_id=config.provider_id,
+            base_url=config.base_url,
+            default_model=config.default_model,
+            credential_ref=config.credential_ref,
+            supports_private_data=config.supports_private_data,
+            supports_hard_cancellation=config.supports_hard_cancellation,
+        )
+        self._config = config_snapshot
         self._credential_resolver = credential_resolver
         self._client_factory = client_factory
         self._prototype = OpenAICompatibleProvider(
-            provider_id=config.provider_id,
-            base_url=config.base_url,
+            provider_id=config_snapshot.provider_id,
+            base_url=config_snapshot.base_url,
             kind=ProviderKind.CLOUD,
-            default_model=config.default_model,
-            supports_private_data=config.supports_private_data,
-            supports_hard_cancellation=config.supports_hard_cancellation,
+            default_model=config_snapshot.default_model,
+            supports_private_data=config_snapshot.supports_private_data,
+            supports_hard_cancellation=config_snapshot.supports_hard_cancellation,
             client_factory=client_factory,
         )
 
