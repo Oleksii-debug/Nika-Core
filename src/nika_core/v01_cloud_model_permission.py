@@ -274,10 +274,25 @@ class V01CloudModelPermissionService:
                 "CREATE TABLE IF NOT EXISTS v01_cloud_model_permission_schema ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
             )
+            self._validate_binding_schema(conn, require_bindings=False)
             row = conn.execute(
-                "SELECT MAX(version) AS version FROM v01_cloud_model_permission_schema"
+                "SELECT MAX(version) AS version, "
+                "typeof(MAX(version)) AS version_type "
+                "FROM v01_cloud_model_permission_schema"
             ).fetchone()
-            version = int(row["version"] or 0)
+            raw_version = row["version"]
+            if raw_version is None:
+                if row["version_type"] != "null":
+                    raise RuntimeError(
+                        "cloud model permission schema version has invalid storage type"
+                    )
+                version = 0
+            else:
+                if row["version_type"] != "integer" or type(raw_version) is not int:
+                    raise RuntimeError(
+                        "cloud model permission schema version has invalid storage type"
+                    )
+                version = raw_version
             if version > _BINDING_SCHEMA_VERSION:
                 raise RuntimeError(
                     "cloud model permission binding schema is newer than supported"
@@ -295,6 +310,97 @@ class V01CloudModelPermissionService:
                     "VALUES (?, ?)",
                     (_BINDING_SCHEMA_VERSION, datetime.now(UTC).isoformat()),
                 )
+            self._validate_binding_schema(conn)
+
+    @staticmethod
+    def _validate_binding_schema(
+        conn: sqlite3.Connection,
+        *,
+        require_bindings: bool = True,
+    ) -> None:
+        expected = {
+            "v01_cloud_model_permission_schema": (
+                ("version", "INTEGER", 0, 1),
+                ("applied_at", "TEXT", 1, 0),
+            ),
+        }
+        if require_bindings:
+            expected["v01_cloud_model_permission_bindings"] = (
+                ("task_id", "TEXT", 0, 1),
+                ("permission_id", "TEXT", 1, 0),
+                ("updated_at", "TEXT", 1, 0),
+            )
+        for table_name, expected_columns in expected.items():
+            rows = conn.execute(f"PRAGMA table_info({table_name})").fetchall()
+            actual = tuple(
+                (
+                    row["name"],
+                    str(row["type"]).upper(),
+                    int(row["notnull"]),
+                    int(row["pk"]),
+                )
+                for row in rows
+            )
+            if actual != expected_columns:
+                raise RuntimeError(
+                    f"cloud model permission schema shape is invalid for {table_name}"
+                )
+        if not require_bindings:
+            return
+
+        foreign_keys = conn.execute(
+            "PRAGMA foreign_key_list(v01_cloud_model_permission_bindings)"
+        ).fetchall()
+        actual_foreign_keys = {
+            (
+                row["table"],
+                row["from"],
+                row["to"],
+                row["on_update"],
+                row["on_delete"],
+                row["match"],
+            )
+            for row in foreign_keys
+        }
+        expected_foreign_keys = {
+            (
+                "tasks",
+                "task_id",
+                "task_id",
+                "NO ACTION",
+                "CASCADE",
+                "NONE",
+            ),
+            (
+                "standing_permissions",
+                "permission_id",
+                "permission_id",
+                "NO ACTION",
+                "NO ACTION",
+                "NONE",
+            ),
+        }
+        if actual_foreign_keys != expected_foreign_keys:
+            raise RuntimeError("cloud model permission binding foreign keys are invalid")
+
+        unique_permission = False
+        for index_row in conn.execute(
+            "PRAGMA index_list(v01_cloud_model_permission_bindings)"
+        ).fetchall():
+            if int(index_row["unique"]) != 1:
+                continue
+            index_name = str(index_row["name"]).replace('"', '""')
+            index_columns = conn.execute(
+                f'PRAGMA index_info("{index_name}")'
+            ).fetchall()
+            columns = tuple(row["name"] for row in index_columns)
+            if columns == ("permission_id",):
+                unique_permission = True
+                break
+        if not unique_permission:
+            raise RuntimeError(
+                "cloud model permission binding permission_id must be unique"
+            )
 
     def _bound_permission_id(self, task_id: str, *, strict: bool) -> str | None:
         with self._store.connection() as conn:
