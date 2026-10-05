@@ -651,9 +651,12 @@ class SubprocessTrainingWorker:
     Durable resume state binds the exact command vector, Registry-bound command artifacts,
     explicit sterile environment, trainer digest and frozen/material job identities. Absolute
     command-file arguments must have Artifact Registry authority; relative path arguments are
-    forbidden. Physical training
-    paths remain transient request data only. Immediately before spawn, the canonical Registry
-    verifies every bound command artifact and ResolvedTrainingPackage re-binds all input bytes.
+    forbidden. Physical training paths remain transient request data only. Immediately before
+    spawn, the canonical Registry verifies every bound command artifact and the detached
+    ResolvedTrainingPackage re-binds all input bytes. Protocol v3 additionally requires the exact
+    Registry-bound trainer to attest the digest of the bytes it actually consumed. The process is
+    launched under the shared Toolsmith process-tree containment authority before request bytes
+    are written; Windows kill-on-close cleanup also closes surviving descendants after success.
     """
 
     def __init__(
