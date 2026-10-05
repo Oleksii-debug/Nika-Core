@@ -172,7 +172,7 @@ def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) ->
             job.close()
             return True
         if process.poll() is not None:
-            return True
+            return False
         try:
             process.kill()
         except OSError:
