@@ -872,9 +872,19 @@ class RegistrySubprocessLoadedModelAttestor:
                         raise ValueError("evaluation subprocess response exceeds byte limit")
                 return bytes(captured)
 
+            async def wait_and_contain() -> int:
+                returncode = await process.wait()
+                if os.name == "nt":
+                    job.close()
+                elif not terminate_process_group(process.pid):
+                    raise ProcessContainmentError(
+                        "POSIX evaluation process-group cleanup could not be established"
+                    )
+                return returncode
+
             writer = asyncio.create_task(write_request())
             reader = asyncio.create_task(read_response())
-            waiter = asyncio.create_task(process.wait())
+            waiter = asyncio.create_task(wait_and_contain())
             try:
                 async with asyncio.timeout(timeout_seconds):
                     _, raw_response, returncode = await asyncio.gather(
@@ -893,6 +903,14 @@ class RegistrySubprocessLoadedModelAttestor:
             except asyncio.CancelledError:
                 await self._terminate(process, job)
                 raise
+            except ProcessContainmentError as exc:
+                await self._terminate(process, job)
+                raise _error(
+                    ModelErrorCode.PROVIDER_ERROR,
+                    "evaluation subprocess containment cleanup failed",
+                    provider_id=provider_id,
+                    effect=ModelFailureEffect.UNKNOWN,
+                ) from exc
             except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
                 await self._terminate(process, job)
                 raise _error(
@@ -915,8 +933,6 @@ class RegistrySubprocessLoadedModelAttestor:
                     provider_id=provider_id,
                     effect=ModelFailureEffect.UNKNOWN,
                 )
-            if os.name == "nt":
-                job.close()
             return raw_response
         except asyncio.CancelledError:
             await self._terminate(process, job)
