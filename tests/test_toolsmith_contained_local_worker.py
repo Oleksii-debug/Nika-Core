@@ -400,8 +400,11 @@ def test_terminal_replay_rejects_candidate_worktree_tamper(
         repositories={"repo-1": repository},
         planner=_MustNotPlan(),
     )
+    inspected = _run(reconstructed.inspect(job.job_id))
     replayed = _run(reconstructed.execute(job))
 
+    assert inspected is not None
+    assert inspected.phase == "manual_reconcile_required"
     assert replayed.failure is not None
     assert replayed.failure.kind is WorkerFailureKind.INTERNAL_ERROR
     assert replayed.failure.retryable is False
