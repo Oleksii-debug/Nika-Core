@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from nika_core.intelligence.modes import IntelligenceMode
+from nika_core.intelligence.modes import IntelligenceMode, IntelligenceModePolicy
 from nika_core.intelligence.provenance import (
     IntelligenceProvenance,
     IntelligenceResultStatus,
@@ -88,3 +88,34 @@ def test_wrong_identity_type_is_rejected_before_serialization() -> None:
         _provenance(provider_id=123)
     with pytest.raises(TypeError, match="request_correlation_id"):
         _provenance(request_correlation_id=None)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "name\x7f",
+        "name\x85",
+        "name\u200e",
+        "name\u202e",
+        "name\u2066",
+        "name\u2028",
+        "name\u2029",
+        "\ud800",
+        "а" * 65,
+        "name" * 33,
+    ],
+)
+@pytest.mark.parametrize(
+    "field",
+    ["embedded_provider_id", "external_local_provider_id", "external_provider_id"],
+)
+def test_mode_policy_rejects_invalid_provider_id(field: str, invalid: str) -> None:
+    with pytest.raises(ValueError) as error:
+        IntelligenceModePolicy(**{field: invalid})
+    assert invalid not in str(error.value)
+
+
+@pytest.mark.parametrize("valid", ["а" * 64, "😀" * 32, "x" * 128])
+def test_mode_policy_accepts_exact_utf8_limit(valid: str) -> None:
+    policy = IntelligenceModePolicy(embedded_provider_id=valid)
+    assert policy.embedded_provider_id == valid
