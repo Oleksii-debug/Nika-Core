@@ -256,6 +256,7 @@ def _case_payload(result: CaseBenchmarkResult) -> dict[str, Any]:
         "case_id": result.case_id,
         "score": result.score,
         "evaluation_weight": result.evaluation_weight,
+        "pass_score": result.pass_score,
         "passed": result.passed,
         "completion_succeeded": result.completion_succeeded,
         "latency_ms": result.latency_ms,
