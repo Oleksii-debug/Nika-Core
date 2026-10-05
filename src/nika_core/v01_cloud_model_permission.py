@@ -385,7 +385,7 @@ class V01CloudModelPermissionService:
         for index in conn.execute(
             "PRAGMA index_list(v01_cloud_model_permission_bindings)"
         ).fetchall():
-            if int(index["unique"]) != 1:
+            if int(index["unique"]) != 1 or int(index["partial"]) != 0:
                 continue
             index_name = str(index["name"]).replace("'", "''")
             columns = tuple(
