@@ -879,7 +879,6 @@ def test_layered_percent_encoded_metadata_credentials_are_rejected(
         )
 
 
-
 def test_record_rehydration_rejects_rebound_deterministic_identity(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "state.sqlite3")
     registry = ArtifactRegistry.from_store(store)
