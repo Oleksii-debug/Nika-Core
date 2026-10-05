@@ -38,10 +38,19 @@ class SecretRef:
             raise CredentialBrokerError("secret reference identity fields must not be empty")
         if self.generation < 1:
             raise CredentialBrokerError("secret generation must be positive")
+        if not isinstance(self.scopes, (set, frozenset)) or not isinstance(
+            self.allowed_audiences, (set, frozenset)
+        ):
+            raise CredentialBrokerError("secret scopes and audiences must be sets")
         if not self.scopes or not self.allowed_audiences:
             raise CredentialBrokerError("secret scopes and audiences must not be empty")
-        if any(not value.strip() for value in self.scopes | self.allowed_audiences):
-            raise CredentialBrokerError("secret scopes and audiences must not contain empty values")
+        if any(
+            not isinstance(value, str) or not value.strip()
+            for value in self.scopes | self.allowed_audiences
+        ):
+            raise CredentialBrokerError("secret scopes and audiences must contain text values")
+        object.__setattr__(self, "scopes", frozenset(self.scopes))
+        object.__setattr__(self, "allowed_audiences", frozenset(self.allowed_audiences))
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,10 +67,13 @@ class IdentityRef:
             for value in (self.identity_ref, self.project_id, self.provider, self.subject_ref)
         ):
             raise CredentialBrokerError("identity reference fields must not be empty")
-        if not self.secret_refs or any(not value.strip() for value in self.secret_refs):
+        if not isinstance(self.secret_refs, (list, tuple)) or not self.secret_refs:
             raise CredentialBrokerError("identity must bind at least one secret reference")
+        if any(not isinstance(value, str) or not value.strip() for value in self.secret_refs):
+            raise CredentialBrokerError("identity must bind text secret references")
         if len(self.secret_refs) != len(set(self.secret_refs)):
             raise CredentialBrokerError("identity contains duplicate secret references")
+        object.__setattr__(self, "secret_refs", tuple(self.secret_refs))
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,8 +104,11 @@ class CredentialLease:
             )
         ):
             raise CredentialBrokerError("credential lease identity fields must not be empty")
-        if not self.scopes:
-            raise CredentialBrokerError("credential lease scopes must not be empty")
+        if not isinstance(self.scopes, (set, frozenset)) or not self.scopes:
+            raise CredentialBrokerError("credential lease scopes must be a nonempty set")
+        if any(not isinstance(value, str) or not value.strip() for value in self.scopes):
+            raise CredentialBrokerError("credential lease scopes must contain text values")
+        object.__setattr__(self, "scopes", frozenset(self.scopes))
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +238,11 @@ class CredentialBroker:
             raise CredentialBrokerError("credential lease ttl must be positive")
         if ttl_seconds > _MAX_CREDENTIAL_LEASE_TTL_SECONDS:
             raise CredentialBrokerError("credential lease ttl exceeds maximum")
+        if not isinstance(scopes, (set, frozenset)):
+            raise CredentialBrokerError("credential lease scopes must be a set")
+        if any(not isinstance(value, str) or not value.strip() for value in scopes):
+            raise CredentialBrokerError("credential lease scopes must contain text values")
+        scopes = frozenset(scopes)
         instant = _aware(now or datetime.now(UTC))
         secret = self._authorized_secret(project_id, secret_ref)
         if secret.state is CredentialState.REVOKED:
