@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -233,7 +234,12 @@ class Keymap:
 
     def _effective_bindings(self, conn: sqlite3.Connection) -> dict[str, str | None]:
         rows = conn.execute("SELECT action_id, binding FROM keymap_overrides").fetchall()
-        overrides = {str(row["action_id"]): row["binding"] for row in rows}
+        overrides: dict[str, str | None] = {}
+        for row in rows:
+            action_id = row["action_id"]
+            if type(action_id) is not str:
+                raise TypeError("stored keymap action ID must be text")
+            overrides[action_id] = row["binding"]
         state: dict[str, str | None] = {}
         for action in self._actions.all():
             binding = overrides.get(action.action_id, action.default_binding)
@@ -279,6 +285,14 @@ class Keymap:
 def _clean_binding(binding: str | None) -> str | None:
     if binding is None:
         return None
+    if type(binding) is not str:
+        raise TypeError("shortcut binding must be text or null")
+    try:
+        binding.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("shortcut binding must contain valid UTF-8") from None
+    if any(unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"} for char in binding):
+        raise ValueError("shortcut binding contains unsupported control characters")
     cleaned = "+".join(part.strip() for part in binding.split("+") if part.strip())
     return cleaned or None
 
