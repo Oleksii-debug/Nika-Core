@@ -157,32 +157,44 @@ inference, before challenger inference, and before the durable Experiment Engine
 comparison, the latest training checkpoint is re-read and must still equal the
 completed physical-pilot report.
 
-Before the first model inference effect, the command derives a deterministic physical
-attempt ID from the requested `experiment_id`, physical-pilot evidence, exact
-training/champion bindings, candidate identities, held-out set, benchmark config,
-promotion policy, permission fingerprint, and exact Registry-bound evaluator
-attestor ID/SHA-256. The canonical Experiment Engine persists that exact definition
-and transitions it to `running` before inference starts.
+Before the first model inference effect, the command derives two related durable
+identities. The outer `IdempotencyLedger` operation key is a hash of the physical
+model effects: physical-pilot evidence, exact training/champion bindings, candidate
+identities, held-out set, benchmark config, and the exact Registry-bound evaluator
+attestor ID/SHA-256. The operation key deliberately does **not** depend on the
+requested `experiment_id`, promotion policy, or permission fingerprint. Those
+comparison inputs are instead bound into the ledger input fingerprint. Changing a
+label, policy, or permission value therefore conflicts with the existing effect
+reservation instead of creating a route to repeat the same inference.
 
-If the same durable attempt already exists on a later invocation, the command fails
-closed instead of silently repeating champion or challenger inference. This applies
-even when the final report is missing because the previous process or Windows host
-stopped after model effects began. Preserve `physical-pilot.sqlite3` and treat the
-attempt as **inconclusive/unknown** until reconciled; do not delete the Experiment
-Engine row or choose a different `experiment_id` merely to bypass the fence. If
-the prior effect state cannot be independently reconciled, keep
-`OLD_VS_NEW_MODEL_EVALUATION_PROVEN=false` and perform a completely fresh physical
-pilot/evaluation run in a new output root rather than replaying the ambiguous
-attempt.
+After the outer reservation is won, the canonical Experiment Engine persists an
+exact definition under a deterministic physical attempt ID and transitions it to
+`running` before inference starts. Concurrent callers get one ledger winner; all
+other callers fail closed before model effects.
+
+If an interrupted run leaves the ledger `pending` or `uncertain`, a later
+invocation refuses to repeat champion or challenger inference. Preserve
+`physical-pilot.sqlite3` and treat that attempt as **inconclusive/unknown** until
+the side-effect record is reconciled. Do not delete ledger/Experiment rows or change
+`experiment_id` merely to bypass the fence. If prior effect state cannot be
+independently reconciled, keep `OLD_VS_NEW_MODEL_EVALUATION_PROVEN=false` and
+perform a completely fresh physical pilot/evaluation run in a new output root.
+
+After a terminal comparison, the minimized report payload is first committed as the
+exact COMPLETED idempotency result. Only then is the JSON report published. A crash
+between those two steps is recoverable: the next invocation revalidates the current
+pilot/model/evaluator authority, cross-checks the stored result against the terminal
+Experiment snapshot, and republishes the same payload **without new inference**.
 
 On success the command prints a minimized JSON payload and atomically creates:
 
 `physical-old-new-evaluation-report.json`
 
-inside `physical_pilot_output_root`. That report contains the requested experiment label, deterministic physical attempt
-ID, evidence digests, Experiment Engine status/selection IDs, benchmark evidence
-digests, and attestor identity. It does not contain model paths, evaluator paths, held-out prompts,
-expected answers, environment variables, credentials, or model bytes.
+inside `physical_pilot_output_root`. That report contains the requested experiment
+label, deterministic physical attempt ID, evidence digests, Experiment Engine
+status/selection IDs, benchmark evidence digests, and attestor identity. It does not
+contain model paths, evaluator paths, held-out prompts, expected answers,
+environment variables, credentials, or model bytes.
 
 If that report already exists, the command refuses to repeat model effects. A
 `promoted` Experiment Engine status is selection evidence only; it is not model
