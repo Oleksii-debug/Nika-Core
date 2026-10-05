@@ -17,6 +17,7 @@ from nika_core.model_engineering import (
     ModelBenchmarkIdentityError,
     ModelBenchmarkRunner,
     ModelCandidate,
+    benchmark_accessible_report_json,
     benchmark_report_json,
     benchmark_report_sha256,
     render_text_report,
@@ -230,8 +231,10 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
     assert second.response_sha256 is None
 
     machine = benchmark_report_json(report)
+    accessible_machine = benchmark_accessible_report_json(report)
     accessible = render_text_report(report)
     json.loads(machine)
+    accessible_payload = json.loads(accessible_machine)
     for secret in (
         "secret prompt one",
         "secret prompt two",
@@ -243,6 +246,42 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
         assert secret not in accessible
     assert len(benchmark_report_sha256(report)) == 64
     assert report.execution_config_sha256 in machine
+    assert list(accessible_payload) == [
+        "schema",
+        "model",
+        "provider",
+        "dataset",
+        "quality",
+        "latency",
+        "resources",
+        "failures",
+        "recommendation",
+        "evidence_limitations",
+    ]
+    assert accessible_payload["recommendation"] == {
+        "status": "not_evaluated",
+        "reason": "benchmark_evidence_only",
+    }
+    assert accessible_payload["failures"] == [
+        {"case_id": "provider-failure", "error_code": "unavailable"}
+    ]
+    headings = [
+        "Model",
+        "Provider",
+        "Dataset",
+        "Quality",
+        "Latency",
+        "Resources",
+        "Failures",
+        "Recommendation",
+        "Evidence limitations",
+    ]
+    positions = [accessible.splitlines().index(heading) for heading in headings]
+    assert positions == sorted(positions)
+    assert accessible == render_text_report(report)
+    assert accessible_machine == benchmark_accessible_report_json(report)
+    assert "human_nvda_verification_not_attested" in accessible
+    assert "NVDA_VERIFIED=true" not in accessible
     assert f"Execution config SHA-256: {report.execution_config_sha256}" in accessible
     assert "Cases:" in accessible
     assert "provider-failure: FAIL" in accessible
