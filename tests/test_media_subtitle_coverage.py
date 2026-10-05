@@ -230,4 +230,4 @@ def test_missing_subtitle_file_is_rejected_before_parser(
             version_id="video-1",
             media_duration_seconds=10,
         )
-    assert caught.value.code is MediaErrorCode.INVALID_SUBTITLE
+    assert caught.value.code is MediaErrorCode.SOURCE_NOT_FOUND
