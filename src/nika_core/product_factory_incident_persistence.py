@@ -47,11 +47,13 @@ def load_incident_snapshot(
 ) -> IncidentLifecycleSnapshot:
     """Parse canonical PF8 JSON and revalidate external authority before trust."""
 
-    if not isinstance(payload, str) or not payload.strip():
+    if not isinstance(payload, str):
         raise ProductIncidentError("incident snapshot payload must be non-empty JSON text")
-    # The durable boundary must reject oversized and ill-formed text before decoding.
+    # Apply the cheap size check before stripping or encoding untrusted text.
     if len(payload) > MAX_INCIDENT_SNAPSHOT_BYTES:
         raise ProductIncidentError("incident snapshot payload exceeds byte limit")
+    if not payload.strip():
+        raise ProductIncidentError("incident snapshot payload must be non-empty JSON text")
     try:
         encoded = payload.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -430,9 +432,13 @@ def _datetime(raw: object, label: str) -> datetime:
     text = _text(raw, label)
     try:
         value = datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise ProductIncidentError(f"{label} must be ISO-8601 datetime text") from exc
-    return _aware_json(value)
+        return _aware_json(value)
+    except ProductIncidentError:
+        raise
+    except (ValueError, OverflowError) as exc:
+        raise ProductIncidentError(
+            f"{label} must be ISO-8601 datetime text in the UTC range"
+        ) from exc
 
 
 def _enum(enum_type: type[StrEnum], raw: object, label: str) -> StrEnum:
