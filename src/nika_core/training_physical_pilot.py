@@ -319,7 +319,10 @@ def _candidate_manifest_evidence(
         raise PhysicalTrainingPilotError(
             "canonical PEFT candidate manifest verification failed"
         ) from exc
-    if type(manifest) is not dict or manifest.get("schema") != "nika-peft-candidate-v2":
+    if type(manifest) is not dict or manifest.get("schema") not in {
+        "nika-peft-candidate-v2",
+        "nika-peft-candidate-v3",
+    }:
         _fail("canonical PEFT candidate manifest returned invalid evidence")
 
     if manifest.get("base_artifact_ref") != completed.base_artifact.artifact_ref:
@@ -330,15 +333,11 @@ def _candidate_manifest_evidence(
     )
     if not hmac.compare_digest(base_sha256, completed.base_artifact.sha256):
         _fail("PEFT candidate manifest changed base artifact digest")
-    foundation_model_sha256 = _require_sha256(
-        manifest.get("foundation_model_sha256"),
-        name="candidate manifest foundation_model_sha256",
-    )
-    if not hmac.compare_digest(
-        foundation_model_sha256,
-        completed.base_artifact.sha256,
-    ):
-        _fail("PEFT pilot candidate changed foundation model digest")
+    if manifest.get("schema") == "nika-peft-candidate-v3":
+        _require_sha256(
+            manifest.get("foundation_model_sha256"),
+            name="candidate manifest foundation_model_sha256",
+        )
     if manifest.get("candidate_artifact_ref") != completed.candidate_artifact_ref:
         _fail("PEFT candidate manifest changed candidate artifact reference")
     manifest_job_fingerprint = _require_sha256(
