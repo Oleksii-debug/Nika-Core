@@ -1187,6 +1187,8 @@ def test_recovered_legacy_task_without_frozen_model_selection_never_prompts(
 
     assert prompts == []
     assert service.execution_authority_for_task(record.task_id) is None
+
+
 def test_recovered_running_task_with_corrupt_bound_selection_fails_before_reprompt(
     tmp_path: Path,
 ) -> None:
@@ -1233,6 +1235,7 @@ def test_recovered_running_task_with_corrupt_bound_selection_fails_before_reprom
         assert conn.execute(
             "SELECT COUNT(*) FROM standing_permissions"
         ).fetchone()[0] == 1
+
 
 @pytest.mark.parametrize(
     "mismatch",
