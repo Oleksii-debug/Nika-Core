@@ -114,6 +114,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         base_artifact=ArtifactIdentity("models/base", base_sha256),
         frozen_package_sha256=package.manifest_sha256,
         training_material_sha256=_sha(b"resolved-training-material"),
+        scale_authorization_sha256=_sha(b"scale-authorization"),
         candidate_artifact_ref="models/candidate/job-1",
         max_steps=3,
     )
@@ -125,6 +126,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         base_artifact=spec.base_artifact,
         frozen_package_sha256=spec.frozen_package_sha256,
         training_material_sha256=spec.training_material_sha256,
+        scale_authorization_sha256=spec.scale_authorization_sha256,
         execution_plan_sha256=execution_plan_sha256,
         job_fingerprint=training_job_fingerprint(
             spec,
