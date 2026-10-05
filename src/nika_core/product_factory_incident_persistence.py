@@ -25,6 +25,7 @@ from .product_factory_incidents import IncidentRepairReleaseCoordinator
 
 
 MAX_INCIDENT_SNAPSHOT_BYTES = 2 * 1024 * 1024
+MAX_INCIDENT_JSON_DEPTH = 64
 
 
 def dump_incident_snapshot(snapshot: IncidentLifecycleSnapshot) -> str:
@@ -60,6 +61,7 @@ def load_incident_snapshot(
         raise ProductIncidentError("incident snapshot payload must be valid UTF-8") from exc
     if len(encoded) > MAX_INCIDENT_SNAPSHOT_BYTES:
         raise ProductIncidentError("incident snapshot payload exceeds byte limit")
+    _check_json_depth(payload)
     try:
         raw = json.loads(
             payload,
@@ -463,6 +465,34 @@ def _canonical(payload: object) -> bytes:
     if len(encoded) > MAX_INCIDENT_SNAPSHOT_BYTES:
         raise ProductIncidentError("incident snapshot payload exceeds byte limit")
     return encoded
+
+
+def _check_json_depth(payload: str) -> None:
+    # Count structural brackets only: quoted JSON text can legitimately contain
+    # escaped quotes, backslashes and arbitrary braces.
+    depth = 0
+    quoted = False
+    escaped = False
+    for char in payload:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == "\\\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in "[{":
+            depth += 1
+            if depth > MAX_INCIDENT_JSON_DEPTH:
+                raise ProductIncidentError("incident snapshot exceeds JSON depth limit")
+        elif char in "]}":
+            depth -= 1
+            if depth < 0:
+                raise ProductIncidentError("incident snapshot payload is invalid JSON")
+    if quoted or depth != 0:
+        raise ProductIncidentError("incident snapshot payload is invalid JSON")
 
 
 def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
