@@ -1,0 +1,249 @@
+from __future__ import annotations
+
+import asyncio
+
+from nika_core.config import AppConfig
+from nika_core.data.sqlite import SQLiteStore
+from nika_core.diagnostics import ModelHealthFact, ModelHealthSnapshot
+from nika_core.kernel.audit import AuditLog
+from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_state import TaskState
+from nika_core.runtime.contracts import RuntimeResumeProbeStatus
+from nika_core.runtime.recovery import RecoveryDisposition, RuntimeRecoveryService
+from nika_core.runtime.registry import RuntimeRegistry
+from nika_core.runtime.session_store import RuntimeSessionStore
+from nika_core.v01_model_settings import ModelSelection, V01ModelSettings
+from nika_core.v01_packaged_team_runtime import V01PackagedThreeAgentRuntime
+
+
+class _FixedHealthProbe:
+    def __init__(self, snapshot: ModelHealthSnapshot) -> None:
+        self._snapshot = snapshot
+        self.calls = 0
+
+    def snapshot(self) -> ModelHealthSnapshot:
+        self.calls += 1
+        return self._snapshot
+
+
+class _HealthFactory:
+    def __init__(self, snapshot: ModelHealthSnapshot) -> None:
+        self.probe = _FixedHealthProbe(snapshot)
+        self.selections: list[ModelSelection] = []
+
+    def __call__(self, selection: ModelSelection) -> _FixedHealthProbe:
+        self.selections.append(selection)
+        return self.probe
+
+
+class _UnexpectedHealthFactory:
+    def __call__(self, selection: ModelSelection) -> _FixedHealthProbe:
+        raise AssertionError(
+            f"health probe must not be constructed for route {selection.route_kind}"
+        )
+
+
+class _TrackingRuntime(V01PackagedThreeAgentRuntime):
+    def __init__(self, **kwargs: object) -> None:
+        super().__init__(**kwargs)
+        self.resume_calls = 0
+
+    async def resume(self, request):  # type: ignore[no-untyped-def]
+        self.resume_calls += 1
+        raise AssertionError(f"blocked recovery must not resume {request.task_id}")
+
+
+def _snapshot(*, ready: ModelHealthFact) -> ModelHealthSnapshot:
+    return ModelHealthSnapshot(
+        configured=ModelHealthFact.YES,
+        reachable=ModelHealthFact.YES,
+        model_present=ModelHealthFact.YES,
+        model_ready=ready,
+        inference_proven=ModelHealthFact.UNKNOWN,
+    )
+
+
+def _task_with_selection(
+    store: SQLiteStore,
+    *,
+    payload: dict[str, object],
+) -> tuple[V01ModelSettings, TaskQueue, str]:
+    settings = V01ModelSettings(store)
+    configured = settings.configure({"revision": 0, **payload})
+    assert configured.status == "completed"
+    frozen = settings.prepare_task_payload({"command": "resume health regression"})
+    queue = TaskQueue(store)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=frozen,
+    )
+    return settings, queue, task.task_id
+
+
+def _runtime(
+    store: SQLiteStore,
+    settings: V01ModelSettings,
+    health_factory,
+) -> V01PackagedThreeAgentRuntime:
+    return V01PackagedThreeAgentRuntime(
+        store=store,
+        config=AppConfig(database_path=store.path),
+        model_settings=settings,
+        model_health_probe_factory=health_factory,
+    )
+
+
+def test_deterministic_resume_probe_requires_no_model_health(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "deterministic" / "nika.db")
+    store.initialize()
+    settings, _queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "deterministic",
+            "provider_id": None,
+            "model": None,
+            "base_url": None,
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    runtime = _runtime(store, settings, _UnexpectedHealthFactory())
+    thread_id = f"desktop-{task_id}"
+
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=runtime.initial_resume_token(
+                task_id=task_id,
+                thread_id=thread_id,
+            ),
+        )
+    )
+
+    assert probe.status is RuntimeResumeProbeStatus.READY
+
+
+def test_ollama_resume_probe_requires_exact_route_health_ready(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "ollama-ready" / "nika.db")
+    store.initialize()
+    settings, _queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    health = _HealthFactory(_snapshot(ready=ModelHealthFact.YES))
+    runtime = _runtime(store, settings, health)
+    thread_id = f"desktop-{task_id}"
+
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=runtime.initial_resume_token(
+                task_id=task_id,
+                thread_id=thread_id,
+            ),
+        )
+    )
+
+    assert probe.status is RuntimeResumeProbeStatus.READY
+    assert health.probe.calls == 1
+    assert len(health.selections) == 1
+    assert health.selections[0].provider_id == "ollama"
+    assert health.selections[0].model == "qwen3:8b"
+    assert health.selections[0].base_url == "http://localhost:11434"
+
+
+def test_foundry_resume_remains_unverifiable_without_route_health_authority(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "foundry-blocked" / "nika.db")
+    store.initialize()
+    settings, _queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "foundry_local",
+            "provider_id": "foundry-local",
+            "model": "embedded-test-model",
+            "base_url": None,
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    runtime = _runtime(store, settings, _UnexpectedHealthFactory())
+    thread_id = f"desktop-{task_id}"
+
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=runtime.initial_resume_token(
+                task_id=task_id,
+                thread_id=thread_id,
+            ),
+        )
+    )
+
+    assert probe.status is RuntimeResumeProbeStatus.UNVERIFIABLE
+    assert probe.checkpoint_id is None
+
+
+def test_unready_ollama_route_blocks_recovery_before_runtime_resume(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "ollama-recovery-blocked" / "nika.db")
+    store.initialize()
+    settings, queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    queue.transition(task_id, TaskState.READY)
+    queue.transition(task_id, TaskState.RUNNING)
+    health = _HealthFactory(_snapshot(ready=ModelHealthFact.UNKNOWN))
+    runtime = _TrackingRuntime(
+        store=store,
+        config=AppConfig(database_path=store.path),
+        model_settings=settings,
+        model_health_probe_factory=health,
+    )
+    thread_id = f"desktop-{task_id}"
+    RuntimeSessionStore(store).record_active(
+        task_id=task_id,
+        runtime_id=runtime.runtime_id,
+        thread_id=thread_id,
+        resume_token=runtime.initial_resume_token(
+            task_id=task_id,
+            thread_id=thread_id,
+        ),
+    )
+    registry = RuntimeRegistry()
+    registry.register(runtime)
+    recovery = RuntimeRecoveryService(
+        queue=queue,
+        audit=AuditLog(store),
+        runtimes=registry,
+    )
+
+    executions = asyncio.run(recovery.resume_safe_crash_sessions())
+
+    assert len(executions) == 1
+    assert executions[0].candidate.disposition is RecoveryDisposition.CHECKPOINT_UNAVAILABLE
+    assert executions[0].result is None
+    assert runtime.resume_calls == 0
+    assert health.probe.calls == 1
+    assert queue.get(task_id).state is TaskState.RUNNING
