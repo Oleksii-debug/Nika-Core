@@ -46,6 +46,10 @@ def _bounded_metadata_value(value: object, *, field: str) -> str | None:
     text = value.strip()
     if not text:
         return None
+    if len(text) > _MAX_NOTICES_BYTES:
+        raise RuntimeError(
+            f"Runtime distribution {field} metadata exceeds the release size limit"
+        )
     try:
         encoded = text.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
@@ -60,6 +64,8 @@ def _bounded_metadata_value(value: object, *, field: str) -> str | None:
 def _section_identity(value: object, *, field: str) -> str:
     text = _bounded_metadata_value(value, field=field)
     if text is None:
+        raise RuntimeError(f"Runtime distribution {field} identity is invalid")
+    if len(text) > _MAX_SECTION_IDENTITY_BYTES:
         raise RuntimeError(f"Runtime distribution {field} identity is invalid")
     encoded = text.encode("utf-8")
     if (
@@ -119,6 +125,8 @@ def _metadata_license(dist: metadata.Distribution) -> str | None:
 
 def _canonical_distribution_file(item: object) -> str:
     relative = str(item).replace("\\", "/")
+    if len(relative) > _MAX_DISTRIBUTION_PATH_BYTES:
+        raise RuntimeError("Runtime distribution license path identity is invalid")
     try:
         encoded = relative.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
