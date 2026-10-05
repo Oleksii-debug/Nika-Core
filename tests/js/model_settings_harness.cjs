@@ -73,11 +73,6 @@ const tags = {
   "autostart-enabled": "INPUT",
   "autostart-save": "BUTTON",
   "command-input": "TEXTAREA",
-  "voice-model-source": "INPUT",
-  "voice-model-import": "BUTTON",
-  "speech-text": "TEXTAREA",
-  "speech-start": "BUTTON",
-  "speech-cancel": "BUTTON",
   "source-root": "INPUT",
   "source-a": "INPUT",
   "source-b": "INPUT",
@@ -92,33 +87,7 @@ element("model-save").dataset.actionId = "settings.model.configure";
 element("model-reload").dataset.actionId = "settings.model.refresh";
 element("model-reload").dataset.errorFocusTarget = "model-settings-heading";
 element("autostart-save").dataset.actionId = "settings.autostart.configure";
-element("voice-model-import").dataset.actionId = "voice.model.import";
-element("voice-model-import").dataset.errorFocusTarget = "voice-model-source";
-element("speech-start").dataset.actionId = "speech.start";
-element("speech-cancel").dataset.actionId = "speech.cancel";
 
-let currentVoiceModelSetup = {
-  schema: "nika.packaged-voice-model-setup:v1",
-  status: "missing",
-  generation: 0,
-  active: false,
-  installed: false,
-  can_import: true,
-  restart_required: false,
-  message: "Локальна голосова модель ще не встановлена.",
-};
-let currentSpeech = {
-  schema: "nika.packaged-speech-state:v1",
-  available: true,
-  status: "idle",
-  generation: 0,
-  active: false,
-  message: "Локальне озвучення Windows готове.",
-  accepted_characters: 0,
-  spoken_characters: 0,
-  chunk_count: 0,
-  pending_characters: 0,
-};
 let currentModel = { status: "missing", revision: 0 };
 let currentRecovery = {
   schema_version: 1,
@@ -134,6 +103,11 @@ let dispatchMode = "success";
 let failRead = false;
 let deferredStateRead = null;
 const calls = [];
+const ack = (command, response) => ({
+  request_id: command.request_id,
+  focus_id: null,
+  ...response,
+});
 
 function safeModelSnapshot(payload) {
   const providerKind = payload.route_kind === "deterministic"
@@ -166,26 +140,20 @@ function snapshot() {
       startup_recovery: currentRecovery,
       v01_sources: { status: "missing", revision: 0, root: "", source_a: "", source_b: "" },
       v01_model_settings: currentModel,
-      voice_model_setup: currentVoiceModelSetup,
-      speech: currentSpeech,
       product_project: null,
       v01_team_task: null,
     },
   };
 }
 
-function holdNextStateRead(response = null) {
+function holdNextStateRead() {
   let release;
   deferredStateRead = new Promise((resolve) => {
-    release = () => resolve(response ?? snapshot());
-  });
-  return release;
-}
-
-function holdNextStateReadFailure() {
-  let release;
-  deferredStateRead = new Promise((_resolve, reject) => {
-    release = () => reject(new Error("PRIVATE_STALE_STATE_CANARY"));
+    release = () => {
+      const response = snapshot();
+      deferredStateRead = null;
+      resolve(response);
+    };
   });
   return release;
 }
@@ -201,69 +169,39 @@ global.pywebview = { api: {
   }],
   get_state: async () => {
     if (failRead) throw new Error("PRIVATE_MODEL_CANARY");
-    if (deferredStateRead) {
-      const pending = deferredStateRead;
-      deferredStateRead = null;
-      return pending;
-    }
+    if (deferredStateRead) return deferredStateRead;
     return snapshot();
   },
   dispatch: async (command) => {
     calls.push(command);
     if (dispatchMode === "disconnect") throw new Error("PRIVATE_MODEL_CANARY");
-    if (command.action_id === "voice.model.import") {
-      currentVoiceModelSetup = {
-        schema: "nika.packaged-voice-model-setup:v1",
-        status: "restart_required",
-        generation: currentVoiceModelSetup.generation + 1,
-        active: false,
-        installed: true,
-        can_import: false,
-        restart_required: true,
-        message: "Локальну голосову модель встановлено. Перезапустіть Nika Core.",
-      };
-      return {
-        status: "completed",
-        message: "Локальну голосову модель встановлено. Перезапустіть Nika Core.",
-        focus_id: "voice-heading",
-      };
-    }
-    if (command.action_id === "speech.start") {
-      currentSpeech = {
-        schema: "nika.packaged-speech-state:v1",
-        available: true,
-        status: "completed",
-        generation: currentSpeech.generation + 1,
-        active: false,
-        message: "Озвучення завершено.",
-        accepted_characters: command.payload.text.length,
-        spoken_characters: command.payload.text.length,
-        chunk_count: 1,
-        pending_characters: 0,
-      };
-      return { status: "completed", message: "Озвучення розпочато.", focus_id: "speech-cancel" };
-    }
-    if (command.action_id === "speech.cancel") {
-      currentSpeech = {
-        ...currentSpeech,
-        status: "cancelled",
-        active: false,
-        message: "Озвучення скасовано.",
-        pending_characters: 0,
-      };
-      return { status: "completed", message: "Скасування озвучення запитано.", focus_id: "speech-heading" };
-    }
     if (command.action_id === "settings.model.refresh") {
-      return { status: "completed", message: "Збережені налаштування моделі перечитано.", focus_id: "model-route-kind" };
+      return ack(command, {
+        status: "completed",
+        message: "Збережені налаштування моделі перечитано.",
+        focus_id: "model-route-kind",
+      });
     }
     if (command.action_id === "settings.model.configure" && dispatchMode === "reject-provider") {
-      return { status: "rejected", message: "Перевірте постачальника моделі.", focus_id: "model-provider" };
+      return ack(command, {
+        status: "rejected",
+        message: "Перевірте постачальника моделі.",
+        focus_id: "model-provider",
+      });
     }
     if (command.action_id === "settings.model.configure") {
       currentModel = safeModelSnapshot(command.payload);
-      return { status: "completed", message: "Модель збережено для нових завдань.", focus_id: "command-input" };
+      const response = ack(command, {
+        status: "completed",
+        message: "Модель збережено для нових завдань.",
+        focus_id: "command-input",
+      });
+      if (dispatchMode === "wrong-request-id") {
+        return {...response, request_id: "wrong-model-request"};
+      }
+      return response;
     }
-    return { status: "completed", message: "ok" };
+    return ack(command, { status: "completed", message: "ok" });
   },
   export_keymap: async () => ({ ok: true, data: "{}", message: "ok" }),
   import_keymap: async () => ({ ok: true, message: "ok" }),
@@ -289,11 +227,6 @@ const timeout = element("model-timeout");
 const save = element("model-save");
 const reload = element("model-reload");
 const status = element("model-settings-status");
-const voiceModelSource = element("voice-model-source");
-const voiceModelImport = element("voice-model-import");
-const speechText = element("speech-text");
-const speechStart = element("speech-start");
-const speechCancel = element("speech-cancel");
 
 (async () => {
   await tick(); await tick(); await tick();
@@ -309,135 +242,6 @@ const speechCancel = element("speech-cancel");
   assert.equal(element("recovery-summary").hidden, false);
   assert.equal(element("recovery-auto-count").textContent, "0");
   assert.equal(element("recovery-uncertain-count").textContent, "0");
-
-  assert.equal(voiceModelImport.disabled, false);
-  voiceModelSource.value = "C:\\models\\nika-whisper";
-  const voiceImportCallCount = calls.length;
-  click(voiceModelImport);
-  await tick(); await tick(); await tick();
-  assert.equal(calls.length, voiceImportCallCount + 1);
-  assert.equal(calls.at(-1).action_id, "voice.model.import");
-  assert.deepEqual(calls.at(-1).payload, { source_root: "C:\\models\\nika-whisper" });
-  assert.equal(voiceModelSource.value, "");
-  assert.match(element("voice-model-status").textContent, /Перезапустіть Nika Core/);
-  assert.equal(voiceModelImport.disabled, true);
-  assert.match(element("app-status").textContent, /Перезапустіть Nika Core/);
-
-  assert.equal(speechStart.disabled, false);
-  assert.equal(speechCancel.disabled, true);
-  speechText.value = "Озвучити цей явний тест.";
-  const speechCallCount = calls.length;
-  click(speechStart);
-  await tick(); await tick(); await tick();
-  assert.equal(calls.length, speechCallCount + 1);
-  assert.equal(calls.at(-1).action_id, "speech.start");
-  assert.deepEqual(calls.at(-1).payload, { text: "Озвучити цей явний тест." });
-  assert.equal(element("speech-status").textContent, "Озвучення завершено.");
-  assert.match(element("app-status").textContent, /Озвучення завершено/);
-  assert.equal(speechStart.disabled, false);
-  assert.equal(speechCancel.disabled, true);
-
-  currentSpeech = {
-    ...currentSpeech,
-    status: "running",
-    generation: currentSpeech.generation + 1,
-    active: true,
-    message: "Озвучення виконується.",
-    accepted_characters: 12,
-    spoken_characters: 0,
-    pending_characters: 12,
-  };
-  await poll();
-  assert.equal(speechStart.disabled, true);
-  assert.equal(speechCancel.disabled, false);
-  click(speechCancel);
-  await tick(); await tick(); await tick();
-  assert.equal(calls.at(-1).action_id, "speech.cancel");
-  assert.deepEqual(calls.at(-1).payload, {});
-  assert.equal(element("speech-status").textContent, "Озвучення скасовано.");
-  assert.equal(speechStart.disabled, false);
-  assert.equal(speechCancel.disabled, true);
-
-  const staleResponse = snapshot();
-  staleResponse.state.voice_model_setup = {
-    ...currentVoiceModelSetup,
-    status: "missing",
-    generation: currentVoiceModelSetup.generation,
-    active: false,
-    installed: false,
-    can_import: true,
-    restart_required: false,
-    message: "STALE_VOICE_STATE_MUST_NOT_WIN",
-  };
-  staleResponse.state.speech = {
-    ...currentSpeech,
-    status: "running",
-    generation: currentSpeech.generation + 1,
-    active: true,
-    message: "STALE_SPEECH_STATE_MUST_NOT_WIN",
-    accepted_characters: 17,
-    spoken_characters: 0,
-    pending_characters: 17,
-  };
-  let releaseStaleRead = holdNextStateRead(staleResponse);
-  const staleSuccessPoll = poll();
-  await tick();
-
-  currentVoiceModelSetup = {
-    ...currentVoiceModelSetup,
-    generation: currentVoiceModelSetup.generation + 1,
-    message: "LATEST_VOICE_STATE_MUST_WIN",
-  };
-  currentSpeech = {
-    ...currentSpeech,
-    status: "completed",
-    generation: currentSpeech.generation + 2,
-    active: false,
-    message: "LATEST_SPEECH_STATE_MUST_WIN",
-    pending_characters: 0,
-  };
-  await poll();
-  assert.equal(element("voice-model-status").textContent, "LATEST_VOICE_STATE_MUST_WIN");
-  assert.equal(element("speech-status").textContent, "LATEST_SPEECH_STATE_MUST_WIN");
-  assert.equal(document.documentElement.dataset.nikaReady, "true");
-
-  releaseStaleRead();
-  await staleSuccessPoll;
-  await tick();
-  assert.equal(element("voice-model-status").textContent, "LATEST_VOICE_STATE_MUST_WIN");
-  assert.equal(element("speech-status").textContent, "LATEST_SPEECH_STATE_MUST_WIN");
-  assert.equal(document.documentElement.dataset.nikaReady, "true");
-  assert.equal(
-    JSON.stringify(Object.values(elements).map((e) => e.textContent))
-      .includes("STALE_VOICE_STATE_MUST_NOT_WIN"),
-    false,
-  );
-  assert.equal(
-    JSON.stringify(Object.values(elements).map((e) => e.textContent))
-      .includes("STALE_SPEECH_STATE_MUST_NOT_WIN"),
-    false,
-  );
-
-  const releaseStaleFailure = holdNextStateReadFailure();
-  const staleFailurePoll = poll();
-  await tick();
-  currentSpeech = {
-    ...currentSpeech,
-    generation: currentSpeech.generation + 1,
-    message: "LATEST_AFTER_STALE_FAILURE",
-  };
-  await poll();
-  assert.equal(element("speech-status").textContent, "LATEST_AFTER_STALE_FAILURE");
-  releaseStaleFailure();
-  await staleFailurePoll;
-  await tick();
-  assert.equal(element("speech-status").textContent, "LATEST_AFTER_STALE_FAILURE");
-  assert.equal(document.documentElement.dataset.nikaReady, "true");
-  assert.equal(
-    JSON.stringify(Object.values(elements).map((e) => e.textContent))
-      .includes("PRIVATE_STALE_STATE_CANARY"),
-    false,
-  );
 
   model.focus();
   const recoveryFocus = document.activeElement;
@@ -778,5 +582,16 @@ const speechCancel = element("speech-cancel");
   assert.match(element("app-status").textContent, /Немає підтвердження зміни моделі/);
   assert.equal(JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_MODEL_CANARY"), false);
 
-  console.log("PASS: model settings + startup recovery renderer, Ctrl+Space keymap, draft/race, keyboard focus, safe credential reference, no blind retry");
+  dispatchMode = "wrong-request-id";
+  const beforeWrongRequest = calls.length;
+  click(save);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.length, beforeWrongRequest + 1, "Wrong model ACK identity must not trigger retry");
+  assert.match(element("app-status").textContent, /Немає підтвердження зміни моделі/);
+  assert.equal(
+    JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("wrong-model-request"),
+    false,
+  );
+
+  console.log("PASS: model settings + startup recovery renderer, Ctrl+Space keymap, draft/race, keyboard focus, safe credential reference, no blind retry, exact ACK identity");
 })().catch((error) => { console.error(error); process.exitCode = 1; });

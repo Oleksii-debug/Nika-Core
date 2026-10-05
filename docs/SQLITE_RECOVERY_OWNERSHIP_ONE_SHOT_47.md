@@ -2,21 +2,15 @@
 
 ## Exact lineage
 
-This same-lineage successor converges canonical PR #311 head
-`16e34277a99ade8cf7889139702436fa088b1f63` onto exact live `main`
-`2f7be3389109d7dd6fb3bae40540fe0cf2eba695` on 2026-10-03. The successor keeps
-both parents in Git history instead of recreating the recovery subsystem.
-
-The original batch started from live `main`
+This batch started from live `main`
 `3fbfabfc93d59183f174ff44098db886cff93bd8` and first converged the exact DEV28
 #220 WAL/audit-continuity blobs without importing DEV29 #218 release-layer recovery.
-Current-main compatibility additionally preserves the later public
-`create_backup(..., record_audit=...)` and `restore(..., target_guard=...)` contracts
-used by guarded legacy-database adoption.
 
-Independent indirect-path review is now a production regression family: configured
-backup source/destination symlink or Windows reparse identity is rejected before
-canonical path resolution or redirected publication.
+The branch was then synchronized non-force as `main` advanced. The latest compatibility
+sync parent for this evidence batch is
+`23c7c1ce97b263b4aafa61bdcbace207b4476a3d`. The main movement after
+`af43e41dca1066f95debafef360d61b2bf38b2ec` had no file delta; it only repaired
+accidental main ancestry. No recovery bytes were taken from an unmerged sibling branch.
 
 The canonical recovery authority remains
 `nika_core.reliability.backup.SQLiteRecoveryManager`.

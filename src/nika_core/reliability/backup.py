@@ -108,18 +108,8 @@ class SQLiteRecoveryManager:
         source_connection: sqlite3.Connection | None = None,
     ) -> BackupArtifact:
         self._ensure_no_interrupted_restore()
-        configured_source = self._store.path
-        if self._is_indirect_path(configured_source):
-            raise RestoreSafetyError(
-                "backup source must not be an indirect filesystem path"
-            )
-        source = configured_source.resolve()
-        configured_destination = Path(backup_path)
-        if self._is_indirect_path(configured_destination):
-            raise RestoreSafetyError(
-                "backup destination must not be an indirect filesystem path"
-            )
-        destination = configured_destination.resolve()
+        source = self._store.path.resolve()
+        destination = Path(backup_path).resolve()
         manifest_path = self._manifest_path(destination)
         if not source.is_file():
             raise FileNotFoundError(f"database does not exist: {source}")
@@ -363,10 +353,6 @@ class SQLiteRecoveryManager:
                 )
                 copy_completed = True
             else:
-                if current_exists and target_guard is not None:
-                    raise RestoreSafetyError(
-                        "guarded restore requires a healthy SQLite target"
-                    )
                 if current_exists and not allow_replace_unrecoverable_current:
                     raise RestoreSafetyError(
                         "current database is corrupt or unsupported; destructive replacement "
@@ -383,17 +369,8 @@ class SQLiteRecoveryManager:
                     quarantine, quarantine_manifest = self._replace_unrecoverable(
                         staged, target, plan, backup
                     )
-                elif target_guard is None:
-                    self._publish_database_no_clobber(staged, target)
                 else:
-                    self._copy_database(staged, target, target_guard=target_guard)
-                    if (
-                        self._validate_database(target, require_supported=True)
-                        != SCHEMA_VERSION
-                    ):
-                        raise BackupVerificationError(
-                            "guarded restored database is not on the current schema"
-                        )
+                    self._publish_database_no_clobber(staged, target)
                 copy_completed = True
         except Exception:
             self._audit_if_possible(
@@ -839,12 +816,7 @@ class SQLiteRecoveryManager:
 
     @contextmanager
     def _hold_recovery_lease(self) -> Iterator[None]:
-        configured_target = self._store.path
-        if self._is_indirect_path(configured_target):
-            raise RestoreSafetyError(
-                "recovery target must not be an indirect filesystem path"
-            )
-        target = configured_target.resolve()
+        target = self._store.path.resolve()
         try:
             with RecoveryFileLease(self._recovery_lease_path(target)):
                 yield
@@ -1067,11 +1039,7 @@ class SQLiteRecoveryManager:
 
     @staticmethod
     def _copy_database(
-        source: Path,
-        destination: Path,
-        *,
-        overwrite: bool = False,
-        target_guard: Callable[[sqlite3.Connection], None] | None = None,
+        source: Path, destination: Path, *, overwrite: bool = False
     ) -> None:
         if not source.is_file():
             raise FileNotFoundError(f"SQLite source does not exist: {source}")
@@ -1080,23 +1048,10 @@ class SQLiteRecoveryManager:
         if destination.exists() and not overwrite:
             raise FileExistsError(f"SQLite destination already exists: {destination}")
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if target_guard is not None and not overwrite:
-            try:
-                with destination.open("xb"):
-                    pass
-            except FileExistsError:
-                raise RestorePlanStaleError(
-                    "restore target appeared after preview"
-                ) from None
         source_conn = sqlite3.connect(source, timeout=5.0)
         target_conn = sqlite3.connect(destination, timeout=5.0)
         try:
             source_conn.execute("PRAGMA query_only = ON")
-            if target_guard is not None:
-                target_conn.execute("PRAGMA locking_mode = EXCLUSIVE")
-                target_conn.execute("BEGIN EXCLUSIVE")
-                target_guard(target_conn)
-                target_conn.commit()
             source_conn.backup(target_conn, pages=128, sleep=0.05)
         finally:
             target_conn.close()

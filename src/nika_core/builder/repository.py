@@ -4,7 +4,11 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from nika_core.activation_authority import ActivationAuthorityPort, ActivationSubject
+from nika_core.activation_authority import (
+    ActivationAuthorityPort,
+    ActivationSubject,
+    canonical_approval_refs,
+)
 from nika_core.builder.compiler import CompilationResult
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
@@ -32,7 +36,7 @@ class AgentDefinitionRepository:
         activation_authority: ActivationAuthorityPort | None = None,
     ) -> None:
         self._store = store
-        self._audit_log = audit_log or AuditLog(store)
+        self._audit_log = AuditLog(store) if audit_log is None else audit_log
         self._activation_authority = activation_authority
 
     def next_version(self, agent_id: str) -> int:
@@ -112,6 +116,7 @@ class AgentDefinitionRepository:
         *,
         approval_refs: tuple[str, ...] = (),
     ) -> None:
+        approval_refs = canonical_approval_refs(approval_refs)
         if not definition.enabled:
             raise ValueError("disabled agent definition cannot be activated")
         with self._store.connection() as conn:
@@ -230,24 +235,6 @@ class AgentDefinitionRepository:
                 (agent_id, version),
             ).fetchone()
         return self._decode(row) if row is not None else None
-
-    def list_latest(self, *, limit: int = 50) -> tuple[StoredAgentDefinition, ...]:
-        """Return one integrity-validated latest version per agent for bounded presentation."""
-
-        if type(limit) is not int or not 1 <= limit <= 100:
-            raise ValueError("agent definition list limit must be an exact integer from 1 to 100")
-        with self._store.connection() as conn:
-            rows = conn.execute(
-                "SELECT defs.version, defs.definition_json, defs.status, "
-                "defs.required_approvals_json, defs.highest_risk, defs.created_at, "
-                "defs.activated_at FROM agent_definitions AS defs "
-                "JOIN (SELECT agent_id, MAX(version) AS version FROM agent_definitions "
-                "GROUP BY agent_id) AS latest "
-                "ON latest.agent_id = defs.agent_id AND latest.version = defs.version "
-                "ORDER BY defs.created_at DESC, defs.agent_id LIMIT ?",
-                (limit,),
-            ).fetchall()
-        return tuple(self._decode(row) for row in rows)
 
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:

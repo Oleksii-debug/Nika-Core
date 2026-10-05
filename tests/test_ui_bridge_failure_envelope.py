@@ -76,7 +76,9 @@ def test_bridge_contains_unexpected_state_failure_without_exposing_details(
     assert "OSError" in caplog.text
 
 
-def test_restore_default_expected_conflict_returns_bounded_error(tmp_path: Path, monkeypatch) -> None:
+def test_restore_default_expected_conflict_returns_bounded_error(
+    tmp_path: Path, monkeypatch
+) -> None:
     bridge = _bridge(tmp_path)
 
     def reject_restore(_self: Keymap, _action_id: str) -> None:
@@ -86,7 +88,10 @@ def test_restore_default_expected_conflict_returns_bounded_error(tmp_path: Path,
     response = bridge.restore_default("nav.agents")
 
     assert response["ok"] is False
-    assert response["message"] == "shortcut conflict with nav.tasks"
+    assert response["message"] == (
+        "Не вдалося відновити комбінацію за замовчуванням: "
+        "перевірте конфлікти карти клавіш."
+    )
 
 
 def test_list_actions_contains_unexpected_failure_without_exposing_details(
@@ -149,7 +154,7 @@ def test_dispatch_rejects_non_mapping_payload_without_transport_escape(
 
     assert response["request_id"] == "invalid"
     assert response["status"] == "rejected"
-    assert response["message"].startswith("Invalid UI command:")
+    assert response["message"] == "Некоректна команда інтерфейсу."
 
 
 @pytest.mark.parametrize("request_id", [None, 7, "", "x" * 121])

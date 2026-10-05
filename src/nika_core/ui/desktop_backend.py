@@ -98,6 +98,9 @@ class DesktopBackend:
         audit: AuditLog,
         runtime: AgentRuntimePort | None = None,
         prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        admit_created_task: Callable[[TaskRecord], None] | None = None,
+        admit_resumed_task: Callable[[TaskRecord], None] | None = None,
+        admit_recovered_task: Callable[[TaskRecord], None] | None = None,
         autostart_service: WindowsAutostartService | None = None,
     ) -> None:
         self._queue = queue
@@ -107,13 +110,15 @@ class DesktopBackend:
         self._coordinator = TaskRuntimeCoordinator(queue, audit)
         self._runtime = runtime or ReferenceRuntime()
         self._prepare_task_payload = prepare_task_payload
+        self._admit_created_task = admit_created_task
+        self._admit_resumed_task = admit_resumed_task
+        self._admit_recovered_task = admit_recovered_task
         self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.Lock()
         self._active_threads: dict[str, str] = {}
         self._active_futures: dict[str, Future[Any]] = {}
         self._cancel_futures: dict[str, Future[bool]] = {}
-        self._packaged_futures: set[Future[Any]] = set()
         self._startup_recovery_lock = threading.Lock()
         self._startup_recovery_started = False
         self._startup_recovery_future: Future[Any] | None = None
@@ -143,6 +148,14 @@ class DesktopBackend:
             agent_id=_DEFAULT_AGENT_ID,
             payload=task_payload,
         )
+        try:
+            if self._admit_created_task is not None:
+                self._admit_created_task(record)
+            if self._queue.get(record.task_id).state is not TaskState.CREATED:
+                raise RuntimeError("task admission changed task state before READY")
+        except BaseException:
+            self._cancel_rejected_admission(record.task_id)
+            raise
         self._queue.transition(record.task_id, TaskState.READY)
         self._schedule_start(record.task_id, command)
         return UIResult(
@@ -183,6 +196,11 @@ class DesktopBackend:
         record = self._only_with_state(TaskState.PAUSED, action="продовження")
         if record is None:
             raise ValueError("Немає призупиненого завдання для продовження.")
+
+        if self._admit_resumed_task is not None:
+            self._admit_resumed_task(record)
+        if self._queue.get(record.task_id).state is not TaskState.PAUSED:
+            raise RuntimeError("task resume admission changed task state before submission")
 
         session = self._coordinator.sessions.get(record.task_id)
         if session is not None:
@@ -333,6 +351,18 @@ class DesktopBackend:
         if not auto_resume:
             return self.startup_recovery_snapshot()
 
+        if self._admit_recovered_task is not None:
+            self._admit_startup_recovery(auto_resume)
+            candidates = recovery.inspect()
+            self._set_startup_recovery_state(self._recovery_projection(candidates))
+            auto_resume = tuple(
+                item
+                for item in candidates
+                if item.disposition is RecoveryDisposition.AUTO_RESUME_CRASH
+            )
+            if not auto_resume:
+                return self.startup_recovery_snapshot()
+
         future = self._host().submit(recovery.resume_safe_crash_sessions())
         with self._startup_recovery_lock:
             self._startup_recovery_future = future
@@ -383,25 +413,12 @@ class DesktopBackend:
             ],
         }
 
-    def submit_packaged_coroutine(
-        self,
-        coroutine: Coroutine[Any, Any, Any],
-    ) -> Future[Any]:
-        """Run and track internal packaged async work on the single desktop host."""
-
-        with self._active_lock:
-            future = self._host().submit(coroutine)
-            self._packaged_futures.add(future)
-        future.add_done_callback(self._packaged_done)
-        return future
-
     def close(self) -> None:
         """Stop the private bridge event loop after all submitted runtime work has settled."""
         with self._active_lock:
             futures = [
                 *self._active_futures.values(),
                 *self._cancel_futures.values(),
-                *self._packaged_futures,
             ]
         with self._startup_recovery_lock:
             if (
@@ -425,10 +442,40 @@ class DesktopBackend:
             self._active_threads.clear()
             self._active_futures.clear()
             self._cancel_futures.clear()
-            self._packaged_futures.clear()
         if self._runtime_loop is not None:
             self._runtime_loop.close()
             self._runtime_loop = None
+
+    def _admit_startup_recovery(
+        self,
+        candidates: tuple[RecoveryCandidate, ...],
+    ) -> None:
+        """Apply host-specific authority admission before canonical crash auto-resume."""
+
+        admit = self._admit_recovered_task
+        if admit is None:
+            return
+        for candidate in candidates:
+            try:
+                record = self._queue.get(candidate.task_id)
+                if record.state is not TaskState.RUNNING:
+                    raise RuntimeError("startup recovery task is no longer crash-left RUNNING")
+                admit(record)
+                if self._queue.get(candidate.task_id) != record:
+                    raise RuntimeError("startup recovery admission changed the task record")
+            except Exception as exc:  # noqa: BLE001 - host admission must fail closed per task
+                current = self._queue.get(candidate.task_id)
+                if current.state is TaskState.RUNNING:
+                    self._queue.transition(candidate.task_id, TaskState.PAUSED)
+                self._audit.append(
+                    event_type="desktop.startup_recovery_admission_rejected",
+                    entity_type="task",
+                    entity_id=candidate.task_id,
+                    payload={
+                        "runtime_id": candidate.runtime_id,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
 
     def _set_startup_recovery_state(self, state: Mapping[str, Any]) -> None:
         with self._startup_recovery_lock:
@@ -531,6 +578,24 @@ class DesktopBackend:
             self._runtime_loop = _DesktopRuntimeLoop()
         return self._runtime_loop
 
+    def _cancel_rejected_admission(self, task_id: str) -> None:
+        """Fail closed before runtime dispatch when created-task admission is rejected."""
+
+        try:
+            if self._queue.get(task_id).state is TaskState.CREATED:
+                self._queue.transition(task_id, TaskState.CANCELLED)
+            self._audit.append(
+                event_type="desktop.task_admission_rejected",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"runtime_id": self._runtime.runtime_id},
+            )
+        except BaseException as exc:
+            _LOGGER.error(
+                "Desktop task-admission reconciliation failed; exception_type=%s",
+                type(exc).__name__,
+            )
+
     def _schedule_start(self, task_id: str, command: str) -> None:
         thread_id = f"desktop-{task_id}"
         self._submit_runtime(
@@ -586,10 +651,6 @@ class DesktopBackend:
             future = self._host().submit(coroutine)
             self._active_futures[task_id] = future
         future.add_done_callback(lambda done: self._runtime_done(task_id, done))
-
-    def _packaged_done(self, future: Future[Any]) -> None:
-        with self._active_lock:
-            self._packaged_futures.discard(future)
 
     def _cancel_done(self, task_id: str, future: Future[bool]) -> None:
         with self._active_lock:

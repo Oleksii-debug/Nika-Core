@@ -125,33 +125,17 @@ def test_packaged_missing_model_selection_rejects_task_and_focuses_mode(
     assert selection.credential_ref is None
 
 
-def test_packaged_state_refresh_serializes_overlapping_reads() -> None:
-    app = (ROOT / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
-
-    assert "let stateRefreshGeneration = 0;" in app
-    assert "let lastStateReady = false;" in app
-    assert "const stateReadGeneration = ++stateRefreshGeneration;" in app
-    assert "const isCurrentStateRead = () => stateReadGeneration === stateRefreshGeneration;" in app
-    assert "if (!isCurrentStateRead()) return lastStateReady;" in app
-
-
-def test_team_transition_signature_includes_task_state() -> None:
-    app = (ROOT / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
-    start = app.index("  function teamProjectionSignature(")
-    end = app.index("\n  function renderTeamTask(", start)
-    signature = app[start:end]
-
-    assert "task_state: projection.task.state" in signature
-
-
 def test_model_settings_backend_focus_precedes_potentially_slow_state_refresh() -> None:
     app = (ROOT / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
     start = app.index("  async function dispatchModel(")
     end = app.index("\n  function renderAutostart(", start)
     body = app[start:end]
     focus_attempt = "const focusApplied = focusId ? focusElementById(focusId) : false;"
-    refresh = "await refreshState({ announceTeamTransitions: false })"
+    refresh = "const stateReady = await refreshState({"
     assert focus_attempt in body
+    assert refresh in body
+    assert "requireCurrentGeneration: result === null" in body
+    assert 'dataset.nikaReady = stateReady ? "true" : "false"' in body
     assert body.index(focus_attempt) < body.index(refresh)
     assert "if (!focusApplied)" in body
 

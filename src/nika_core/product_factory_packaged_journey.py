@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -18,7 +19,7 @@ from nika_core.product_project import ProductProjectSpec
 from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
-AgentBuilderCommandHandler = Callable[[Mapping[str, Any]], UIResult]
+ActivityReportHandler = Callable[[], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -36,10 +37,21 @@ _CURRENT_PROJECT_COMMANDS = frozenset(
         "покажи поточний productproject",
     }
 )
+_DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
+    {
+        "daily activity report",
+        "show daily activity report",
+        "nika daily activity report",
+        "щоденний звіт активності",
+        "покажи щоденний звіт активності",
+        "звіт діяльності nika",
+        "покажи звіт діяльності nika",
+    }
+)
 
 
 class PackagedProductJourneyError(ValueError):
-    """Raised when the packaged command cannot safely enter a specialized route."""
+    """Raised when the packaged command cannot safely enter Product Factory routing."""
 
 
 def product_project_identity(normalized_goal: str) -> str:
@@ -63,7 +75,15 @@ def packaged_product_reopen_target(command: str) -> str | None:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split())
     lowered = normalized.casefold()
-    prefix = next((item for item in _REOPEN_PREFIXES if lowered.startswith(item)), None)
+    prefix = next(
+        (
+            item
+            for item in _REOPEN_PREFIXES
+            if lowered.startswith(item)
+            and lowered[len(item) : len(item) + 1] in ("", " ", ":", "#")
+        ),
+        None,
+    )
     if prefix is None:
         return None
     remainder = normalized[len(prefix) :].strip(" :#")
@@ -80,6 +100,27 @@ def packaged_current_product_command(command: str) -> bool:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :")
     return normalized in _CURRENT_PROJECT_COMMANDS
+
+
+def packaged_daily_activity_report_command(command: str) -> bool:
+    """Recognize explicit read-only daily report commands without broad keyword capture."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    return normalized in _DAILY_ACTIVITY_REPORT_COMMANDS
+
+
+def _valid_selection_id(value: object) -> bool:
+    if type(value) is not str or not value or value != value.strip():
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return not any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    )
 
 
 class PackagedProductSelectionStore:
@@ -101,19 +142,24 @@ class PackagedProductSelectionStore:
     def load(self) -> str | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT project_id FROM packaged_product_selection WHERE slot = 1"
+                "SELECT typeof(project_id) AS id_type, "
+                "CAST(project_id AS BLOB) AS raw_id "
+                "FROM packaged_product_selection WHERE slot = 1"
             ).fetchone()
-        if row is None:
+        if row is None or row["id_type"] != "text":
             return None
-        project_id = str(row["project_id"]).strip()
-        return project_id or None
+        try:
+            project_id = row["raw_id"].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
+        return project_id if _valid_selection_id(project_id) else None
 
     def select(self, project_id: str) -> None:
         if type(project_id) is not str:
-            raise PackagedProductJourneyError("ProductProject ID має бути звичайним текстом.")
+            raise PackagedProductJourneyError("selected ProductProject id must be text")
         normalized = project_id.strip()
-        if not normalized:
-            raise PackagedProductJourneyError("selected ProductProject id must not be empty")
+        if not _valid_selection_id(normalized):
+            raise PackagedProductJourneyError("selected ProductProject id contains invalid text")
         with self._store.connection() as conn:
             conn.execute(
                 "INSERT INTO packaged_product_selection(slot, project_id) VALUES (1, ?) "
@@ -127,13 +173,12 @@ class PackagedProductSelectionStore:
 
 
 class PackagedProductCommandRouter:
-    """Route packaged command input without stealing specialized subsystem authority.
+    """Route packaged command input to durable ProductProject, read-only report, or task handling.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
-    Explicit Agent Builder intent is delegated only to an injected Agent Builder handler; if the
-    composition root has not supplied one, the command fails closed instead of becoming an
-    ordinary AgentTask. Toolsmith remains a separate specialized route and also fails closed here.
-    No high-impact external action is launched merely by command classification.
+    Explicit daily-report intent may call one injected read-only canonical report handler.
+    This boundary deliberately does not dispatch workers, deploy providers, Toolsmith, or any
+    high-impact external action. Those remain downstream explicit factory/security boundaries.
     """
 
     def __init__(
@@ -141,12 +186,12 @@ class PackagedProductCommandRouter:
         *,
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
-        agent_builder_handler: AgentBuilderCommandHandler | None = None,
+        activity_report_handler: ActivityReportHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
-        self._agent_builder_handler = agent_builder_handler
+        self._activity_report_handler = activity_report_handler
         self._selection_store = selection_store
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
@@ -215,12 +260,27 @@ class PackagedProductCommandRouter:
     def create(self, payload: Mapping[str, Any]) -> UIResult:
         raw_command = payload.get("command", "")
         if type(raw_command) is not str:
-            raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+            raise PackagedProductJourneyError("Команда повинна бути текстом.")
         command = raw_command.strip()
         if not command:
             raise PackagedProductJourneyError(
                 "Введіть команду перед створенням завдання."
             )
+        if "\x00" in command:
+            raise PackagedProductJourneyError("Команда містить недопустимий NUL-символ.")
+        try:
+            command.encode("utf-8")
+        except UnicodeEncodeError:
+            raise PackagedProductJourneyError(
+                "Команда містить некоректний текст Unicode."
+            ) from None
+
+        if packaged_daily_activity_report_command(command):
+            if self._activity_report_handler is None:
+                raise PackagedProductJourneyError(
+                    "Щоденний звіт активності недоступний у цьому запуску."
+                )
+            return self._activity_report_handler()
 
         if packaged_current_product_command(command):
             return self._describe_current_project()
@@ -234,17 +294,10 @@ class PackagedProductCommandRouter:
             return self._ordinary_handler(payload)
         if decision.route is CommandRouteKind.AMBIGUOUS:
             raise PackagedProductJourneyError(
-                "Команда одночасно відповідає кільком спеціалізованим маршрутам. "
-                "Уточніть, чи потрібно створити ProductProject, агента через Agent Builder, "
-                "чи нову можливість Toolsmith."
+                "Команда одночасно схожа на ProductProject і Toolsmith. "
+                "Уточніть, чи це довготривалий продукт, "
+                "чи створення інструмента."
             )
-        if decision.route is CommandRouteKind.AGENT_BUILDER:
-            if self._agent_builder_handler is None:
-                raise PackagedProductJourneyError(
-                    "Команда визначена як запит Agent Builder. Поточна packaged-композиція "
-                    "ще не підключила Agent Builder handler; звичайне завдання не створено."
-                )
-            return self._agent_builder_handler(payload)
         if decision.route is CommandRouteKind.TOOLSMITH:
             raise PackagedProductJourneyError(
                 "Команда визначена як запит на нову "

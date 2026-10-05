@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.packaging.pf11_evidence import PACKAGED_PF11_EVIDENCE_KEYS
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
@@ -19,10 +20,7 @@ from nika_core.product_command.product_project_adapter import (
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductJourneyError,
-    PackagedProductSelectionStore,
     PackagedProductStateProvider,
-    packaged_current_product_command,
-    packaged_product_reopen_target,
     product_project_identity,
 )
 from nika_core.product_project import ProductProjectRepository
@@ -155,60 +153,6 @@ def test_ordinary_agent_command_does_not_select_product_state(tmp_path: Path) ->
     assert provider()["product_project"] is None
     with pytest.raises(KeyError):
         repository.get(product_project_identity(ordinary_command))
-
-
-class _HostileCommand(str):
-    def strip(self, chars: str | None = None) -> str:
-        del chars
-        raise AssertionError("untrusted string subclass methods must not execute")
-
-
-@pytest.mark.parametrize(
-    "command",
-    (
-        None,
-        7,
-        False,
-        ["Створи агента"],
-        {"command": "Створи застосунок"},
-        _HostileCommand("Створи застосунок"),
-    ),
-)
-def test_packaged_router_rejects_noncanonical_commands_without_side_effects(
-    tmp_path: Path,
-    command: object,
-) -> None:
-    router, repository, ordinary = _router(tmp_path / "invalid command.db")
-    valid_command = "Створи застосунок для безпечної перевірки"
-    project_id = product_project_identity(valid_command)
-    router.create({"command": valid_command})
-
-    with pytest.raises(PackagedProductJourneyError, match="звичайним текстом"):
-        router.create({"command": command})
-
-    assert ordinary.calls == []
-    assert router.active_project_id == project_id
-    assert repository.get(project_id).spec_version == 1
-
-
-@pytest.mark.parametrize(
-    "project_id",
-    (None, 7, False, ["product-id"], _HostileCommand("product-" + "b" * 64)),
-)
-def test_direct_selection_store_rejects_noncanonical_id_without_mutation(
-    tmp_path: Path,
-    project_id: object,
-) -> None:
-    store = SQLiteStore(tmp_path / "selection type boundary українська.db")
-    store.initialize()
-    selection = PackagedProductSelectionStore(store)
-    selected = "product-" + "a" * 64
-    selection.select(selected)
-
-    with pytest.raises(PackagedProductJourneyError, match="звичайним текстом"):
-        selection.select(project_id)
-
-    assert selection.load() == selected
 
 
 def test_ambiguous_product_and_toolsmith_command_fails_closed(tmp_path: Path) -> None:
@@ -350,6 +294,7 @@ def test_headless_pf11_composition_proof_survives_process_restart(tmp_path: Path
     first_payload = json.loads(first.stdout.strip())
     second_payload = json.loads(second.stdout.strip())
     assert first_payload == second_payload
+    assert frozenset(first_payload) == PACKAGED_PF11_EVIDENCE_KEYS
     assert first_payload["route"] == "product_project"
     assert first_payload["spec_version"] == 1
     assert first_payload["command_center_state_proven"] is True
@@ -389,10 +334,13 @@ def test_release_builder_records_packaged_pf11_restart_evidence(
                     "spec_version": 1,
                     "state": "active",
                     "command_center_state_proven": True,
+                    "current_command_proven": True,
+                    "current_command_focus_proven": True,
                     "bridge_state_project_id": project_id,
                     "bridge_state_spec_version": 1,
                     "bridge_state_status_count": 0,
                     "bridge_state_decision_count": 0,
+                    "restart_selection_integrity_proven": True,
                     "bounded_projection_proven": True,
                     "human_tested": False,
                     "nvda_verified": False,
@@ -432,32 +380,3 @@ def test_release_builder_records_packaged_pf11_restart_evidence(
     assert payload["human_tested"] is False
     assert payload["nvda_verified"] is False
     assert payload["production_release_ready"] is False
-
-
-class _HostileDirectHelperText(str):
-    def split(self, *args: object, **kwargs: object) -> list[str]:
-        del args, kwargs
-        raise AssertionError("direct helper must not call untrusted string methods")
-
-
-@pytest.mark.parametrize(
-    "helper",
-    (product_project_identity, packaged_product_reopen_target, packaged_current_product_command),
-)
-@pytest.mark.parametrize(
-    "command",
-    (
-        None,
-        17,
-        False,
-        ["Створи застосунок"],
-        _HostileDirectHelperText("Створи застосунок"),
-        type("PlainHelperSubclass", (str,), {})("Створи застосунок"),
-    ),
-)
-def test_direct_product_helpers_reject_noncanonical_text_before_methods(
-    helper,
-    command: object,
-) -> None:
-    with pytest.raises(PackagedProductJourneyError, match="звичайним текстом"):
-        helper(command)

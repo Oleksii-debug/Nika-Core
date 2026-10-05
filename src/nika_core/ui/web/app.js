@@ -6,52 +6,6 @@
   const keymapBody = document.getElementById("keymap-body");
   const keymapJson = document.getElementById("keymap-json");
   const commandInput = document.getElementById("command-input");
-  const voiceStatus = document.getElementById("voice-status");
-  const voiceTranscript = document.getElementById("voice-transcript");
-  const voiceStart = document.getElementById("voice-start");
-  const voiceCancel = document.getElementById("voice-cancel");
-  const voiceUseCommand = document.getElementById("voice-use-command");
-  const voiceModelSource = document.getElementById("voice-model-source");
-  const voiceModelStatus = document.getElementById("voice-model-status");
-  const voiceModelImport = document.getElementById("voice-model-import");
-  const voiceModelCancel = document.getElementById("voice-model-cancel");
-  const allowedVoiceModelSetupStatuses = new Set([
-    "missing",
-    "installed",
-    "partial",
-    "importing",
-    "cancelling",
-    "restart_required",
-    "failed",
-    "cancelled",
-  ]);
-  let voiceModelTerminalSignature = null;
-  const speechText = document.getElementById("speech-text");
-  const speechStatus = document.getElementById("speech-status");
-  const speechStart = document.getElementById("speech-start");
-  const speechCancel = document.getElementById("speech-cancel");
-  const allowedSpeechStatuses = new Set([
-    "unavailable",
-    "idle",
-    "running",
-    "draining",
-    "cancelling",
-    "completed",
-    "cancelled",
-    "failed",
-  ]);
-  let speechTerminalSignature = null;
-  const allowedVoiceStatuses = new Set([
-    "idle",
-    "running",
-    "cancelling",
-    "completed",
-    "failed",
-    "cancelled",
-  ]);
-  let voiceTranscriptValue = "";
-  let voiceTerminalSignature = null;
-
   const sourceInputs = Object.freeze({
     root: document.getElementById("source-root"),
     source_a: document.getElementById("source-a"),
@@ -223,8 +177,41 @@
   });
   let actions = [];
   let actionsReady = false;
+  // One outstanding durable task command per UI session: a second click must not mint a new request ID.
+  const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
+  const inFlightActions = new Set();
+  let keymapMutationPending = false;
+  let stateUnavailableReported = false;
+  const maxActivityItems = 200;
+  // Foreground reconciliation has priority over background state polling.
+  let foregroundStateRefreshPending = 0;
+
+  function validDispatchResponse(response, expectedRequestId) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && response.request_id === expectedRequestId
+      && ["accepted", "completed", "failed", "rejected"].includes(response.status)
+      && typeof response.message === "string"
+      && (response.focus_id == null || typeof response.focus_id === "string"),
+    );
+  }
+
+  function validKeymapResponse(response, requireData = false) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && typeof response.ok === "boolean"
+      && typeof response.message === "string"
+      && (!requireData || !response.ok || typeof response.data === "string"),
+    );
+  }
+
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
+  let statePollPending = false;
   let stateRefreshGeneration = 0;
   let lastStateReady = false;
   let teamStateSignature = null;
@@ -236,10 +223,14 @@
   }
 
   function appendLog(message) {
-    if (!message) return;
+    if (!message || activityLog.lastElementChild?.textContent === message) return;
     const item = document.createElement("li");
     item.textContent = message;
     activityLog.appendChild(item);
+    if (activityLog.childElementCount > maxActivityItems) {
+      activityLog.firstElementChild.remove();
+      activityLog.setAttribute("aria-label", "Журнал активності: останні 200 повідомлень");
+    }
   }
 
   function requestId() {
@@ -366,6 +357,8 @@
     renderModelSettings(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
+    if (stateUnavailableReported) return;
+    stateUnavailableReported = true;
     announce(productProjectUnavailableMessage, true);
     appendLog(productProjectUnavailableMessage);
   }
@@ -1136,12 +1129,13 @@
     setModelControlsDisabled(true);
     let result = null;
     try {
+      const dispatchRequestId = requestId();
       result = await globalThis.pywebview.api.dispatch({
-        request_id: requestId(),
+        request_id: dispatchRequestId,
         action_id: actionId,
         payload,
       });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) {
+      if (!validDispatchResponse(result, dispatchRequestId) || result.status === "accepted") {
         throw new Error("Invalid model settings acknowledgement");
       }
       const failed = result.status !== "completed";
@@ -1150,6 +1144,7 @@
       appendLog(result.message);
     } catch {
       result = null;
+      document.documentElement.dataset.nikaReady = "false";
       announce("Немає підтвердження зміни моделі. Перечитайте збережені налаштування перед повтором.", true);
       appendLog("Немає підтвердження зміни моделі; автоматичний повтор не виконується.");
     } finally {
@@ -1168,7 +1163,20 @@
         focusTarget.disabled = false;
       }
       const focusApplied = focusId ? focusElementById(focusId) : false;
-      if (!await refreshState({ announceTeamTransitions: false })) renderModelSettings(null);
+      let stateReady = false;
+      foregroundStateRefreshPending += 1;
+      try {
+        stateReady = await refreshState({
+          announceTeamTransitions: false,
+          requireCurrentGeneration: result === null,
+        });
+      } finally {
+        foregroundStateRefreshPending -= 1;
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
+        renderModelSettings(null);
+      }
       if (!focusApplied) {
         const refreshedFocusApplied = focusId ? focusElementById(focusId) : false;
         if (!refreshedFocusApplied) {
@@ -1215,255 +1223,45 @@
     autostartGeneration += 1;
     autostartInput.disabled = true;
     autostartSave.disabled = true;
+    let uncertain = false;
     try {
-      const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) throw new Error("Invalid acknowledgement");
+      const dispatchRequestId = requestId();
+      const result = await globalThis.pywebview.api.dispatch({
+        request_id: dispatchRequestId, action_id: actionId, payload,
+      });
+      if (!validDispatchResponse(result, dispatchRequestId) || result.status === "accepted") {
+        throw new Error("Invalid acknowledgement");
+      }
       const failed = result.status !== "completed";
       if (!failed || !save) autostartDirty = false;
       announce(result.message, failed);
       appendLog(result.message);
     } catch {
       // The OS write may have completed before the bridge disconnected. No blind retry.
+      uncertain = true;
+      document.documentElement.dataset.nikaReady = "false";
       announce("Немає підтвердження зміни автозапуску. Перечитайте стан перед повтором.", true);
     } finally {
       autostartPending = false;
       autostartGeneration += 1;
-      if (!await refreshState({ announceTeamTransitions: false })) renderAutostart(null);
+      let stateReady = false;
+      foregroundStateRefreshPending += 1;
+      try {
+        stateReady = await refreshState({
+          announceTeamTransitions: false,
+          requireCurrentGeneration: uncertain,
+        });
+      } finally {
+        foregroundStateRefreshPending -= 1;
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
+        renderAutostart(null);
+      }
       if (!autostartInput.disabled) autostartInput.focus();
       else if (trigger && !trigger.disabled) trigger.focus();
       else focusElementById("autostart-heading");
     }
-  }
-
-  function renderVoiceModelSetup(snapshot) {
-    const failClosed = (message = "Стан локальної голосової моделі недоступний або несумісний.") => {
-      voiceModelTerminalSignature = null;
-      if (voiceModelStatus) voiceModelStatus.textContent = message;
-      if (voiceModelSource) voiceModelSource.disabled = true;
-      if (voiceModelImport) voiceModelImport.disabled = true;
-      if (voiceModelCancel) voiceModelCancel.disabled = true;
-      return false;
-    };
-    if (
-      !snapshot
-      || snapshot.schema !== "nika.packaged-voice-model-setup:v1"
-      || !allowedVoiceModelSetupStatuses.has(snapshot.status)
-      || !Number.isSafeInteger(snapshot.generation)
-      || snapshot.generation < 0
-      || typeof snapshot.active !== "boolean"
-      || typeof snapshot.installed !== "boolean"
-      || typeof snapshot.can_import !== "boolean"
-      || typeof snapshot.restart_required !== "boolean"
-      || typeof snapshot.message !== "string"
-      || snapshot.message.length === 0
-    ) {
-      return failClosed();
-    }
-
-    const activeStatus = snapshot.status === "importing" || snapshot.status === "cancelling";
-    if (snapshot.active !== activeStatus) return failClosed();
-    const retryableTerminal = snapshot.status === "failed" || snapshot.status === "cancelled";
-    const validState = (
-      (snapshot.status === "missing"
-        && !snapshot.active
-        && !snapshot.installed
-        && !snapshot.restart_required)
-      || (snapshot.status === "installed"
-        && !snapshot.active
-        && snapshot.installed
-        && !snapshot.can_import
-        && !snapshot.restart_required)
-      || (snapshot.status === "partial"
-        && !snapshot.active
-        && !snapshot.installed
-        && !snapshot.can_import
-        && !snapshot.restart_required)
-      || (snapshot.status === "importing"
-        && snapshot.active
-        && !snapshot.installed
-        && !snapshot.can_import
-        && !snapshot.restart_required)
-      || (snapshot.status === "cancelling"
-        && snapshot.active
-        && !snapshot.installed
-        && !snapshot.can_import
-        && !snapshot.restart_required)
-      || (snapshot.status === "restart_required"
-        && !snapshot.active
-        && snapshot.installed
-        && !snapshot.can_import
-        && snapshot.restart_required)
-      || (retryableTerminal
-        && !snapshot.active
-        && !snapshot.installed
-        && !snapshot.restart_required)
-    );
-    if (!validState) return failClosed();
-
-    if (voiceModelStatus) voiceModelStatus.textContent = snapshot.message;
-    if (voiceModelSource) voiceModelSource.disabled = !snapshot.can_import;
-    if (voiceModelImport) voiceModelImport.disabled = !snapshot.can_import;
-    if (voiceModelCancel) {
-      voiceModelCancel.disabled = !snapshot.active || snapshot.status === "cancelling";
-    }
-    if (snapshot.status === "restart_required" && voiceModelSource) {
-      voiceModelSource.value = "";
-    }
-
-    const terminal = ["restart_required", "failed", "cancelled"].includes(snapshot.status);
-    const signature = terminal && snapshot.generation > 0
-      ? JSON.stringify([snapshot.generation, snapshot.status, snapshot.message])
-      : null;
-    if (signature !== null && signature !== voiceModelTerminalSignature) {
-      voiceModelTerminalSignature = signature;
-      announce(snapshot.message, snapshot.status === "failed");
-    } else if (!terminal) {
-      voiceModelTerminalSignature = null;
-    }
-    return true;
-  }
-
-  function renderVoice(snapshot) {
-    const failClosed = (message = "Стан голосового вводу недоступний або несумісний.") => {
-      voiceTranscriptValue = "";
-      voiceTerminalSignature = null;
-      if (voiceStatus) voiceStatus.textContent = message;
-      if (voiceTranscript) voiceTranscript.textContent = "Недоступно.";
-      if (voiceStart) voiceStart.disabled = true;
-      if (voiceCancel) voiceCancel.disabled = true;
-      if (voiceUseCommand) voiceUseCommand.disabled = true;
-      return false;
-    };
-    if (
-      !snapshot
-      || snapshot.schema !== "nika.packaged-voice-state:v1"
-      || typeof snapshot.available !== "boolean"
-      || typeof snapshot.message !== "string"
-      || snapshot.message.length === 0
-    ) {
-      return failClosed();
-    }
-    if (!snapshot.available) {
-      if (snapshot.turn !== null) return failClosed();
-      voiceTranscriptValue = "";
-      voiceTerminalSignature = null;
-      if (voiceStatus) voiceStatus.textContent = snapshot.message;
-      if (voiceTranscript) voiceTranscript.textContent = "Голосовий ввід недоступний.";
-      if (voiceStart) voiceStart.disabled = true;
-      if (voiceCancel) voiceCancel.disabled = true;
-      if (voiceUseCommand) voiceUseCommand.disabled = true;
-      return true;
-    }
-
-    const turn = snapshot.turn;
-    if (
-      !turn
-      || turn.schema !== "nika.desktop-voice-state:v1"
-      || !allowedVoiceStatuses.has(turn.status)
-      || typeof turn.message !== "string"
-      || turn.message.length === 0
-      || typeof turn.active !== "boolean"
-      || ![null, true, false].includes(turn.activated)
-      || !(turn.transcript === null || typeof turn.transcript === "string")
-    ) {
-      return failClosed();
-    }
-    const activeStatus = turn.status === "running" || turn.status === "cancelling";
-    if (turn.active !== activeStatus) return failClosed();
-
-    if (voiceStatus) voiceStatus.textContent = turn.message;
-    if (voiceStart) voiceStart.disabled = turn.active;
-    if (voiceCancel) voiceCancel.disabled = !turn.active;
-
-    const canUseTranscript = turn.status === "completed"
-      && turn.activated === true
-      && typeof turn.transcript === "string"
-      && turn.transcript.length > 0;
-    voiceTranscriptValue = canUseTranscript ? turn.transcript : "";
-    if (voiceTranscript) {
-      voiceTranscript.textContent = typeof turn.transcript === "string" && turn.transcript.length > 0
-        ? turn.transcript
-        : "Ще немає.";
-    }
-    if (voiceUseCommand) voiceUseCommand.disabled = !canUseTranscript;
-
-    const terminalVoiceState = ["completed", "failed", "cancelled"].includes(turn.status);
-    const terminalSignature = terminalVoiceState
-      ? JSON.stringify([turn.request_id, turn.status, turn.activated, turn.message])
-      : null;
-    if (terminalSignature !== null && terminalSignature !== voiceTerminalSignature) {
-      voiceTerminalSignature = terminalSignature;
-      announce(turn.message, turn.status === "failed");
-    } else if (!terminalVoiceState) {
-      voiceTerminalSignature = null;
-    }
-    return true;
-  }
-
-  function renderSpeech(snapshot) {
-    const failClosed = (message = "Стан озвучення недоступний або несумісний.") => {
-      speechTerminalSignature = null;
-      if (speechStatus) speechStatus.textContent = message;
-      if (speechStart) speechStart.disabled = true;
-      if (speechCancel) speechCancel.disabled = true;
-      return false;
-    };
-    if (
-      !snapshot
-      || snapshot.schema !== "nika.packaged-speech-state:v1"
-      || typeof snapshot.available !== "boolean"
-      || !allowedSpeechStatuses.has(snapshot.status)
-      || !Number.isSafeInteger(snapshot.generation)
-      || snapshot.generation < 0
-      || typeof snapshot.active !== "boolean"
-      || typeof snapshot.message !== "string"
-      || snapshot.message.length === 0
-    ) {
-      return failClosed();
-    }
-    const counters = [
-      snapshot.accepted_characters,
-      snapshot.spoken_characters,
-      snapshot.chunk_count,
-      snapshot.pending_characters,
-    ];
-    if (counters.some((value) => !Number.isSafeInteger(value) || value < 0)) {
-      return failClosed();
-    }
-    if (!snapshot.available) {
-      if (snapshot.status !== "unavailable" || snapshot.active) return failClosed();
-      if (speechStatus) speechStatus.textContent = snapshot.message;
-      if (speechStart) speechStart.disabled = true;
-      if (speechCancel) speechCancel.disabled = true;
-      speechTerminalSignature = null;
-      return true;
-    }
-
-    const activeStatus = ["running", "draining", "cancelling"].includes(snapshot.status);
-    if (snapshot.status === "unavailable" || snapshot.active !== activeStatus) {
-      return failClosed();
-    }
-    if (snapshot.spoken_characters > snapshot.accepted_characters
-        || snapshot.pending_characters > snapshot.accepted_characters) {
-      return failClosed();
-    }
-    if (speechStatus) speechStatus.textContent = snapshot.message;
-    if (speechStart) speechStart.disabled = snapshot.active;
-    if (speechCancel) {
-      speechCancel.disabled = !snapshot.active || snapshot.status === "cancelling";
-    }
-
-    const terminal = ["completed", "cancelled", "failed"].includes(snapshot.status);
-    const signature = terminal
-      ? JSON.stringify([snapshot.generation, snapshot.status, snapshot.message])
-      : null;
-    if (signature !== null && signature !== speechTerminalSignature) {
-      speechTerminalSignature = signature;
-      announce(snapshot.message, snapshot.status === "failed");
-    } else if (!terminal) {
-      speechTerminalSignature = null;
-    }
-    return true;
   }
 
   function renderSourceSetup(selection) {
@@ -1496,16 +1294,7 @@
     if (await refreshState()) announce("Збережені налаштування перечитано.");
   });
 
-  voiceUseCommand?.addEventListener("click", () => {
-    if (!voiceTranscriptValue) return;
-    commandInput.value = voiceTranscriptValue;
-    commandInput.focus();
-    announce(
-      "Розпізнаний текст перенесено в поле команди. Перевірте його перед створенням завдання.",
-    );
-  });
-
-  async function refreshState({ announceTeamTransitions = true } = {}) {
+  async function refreshState({ announceTeamTransitions = true, requireCurrentGeneration = false } = {}) {
     const stateReadGeneration = ++stateRefreshGeneration;
     const isCurrentStateRead = () => stateReadGeneration === stateRefreshGeneration;
     const autostartReadGeneration = autostartGeneration;
@@ -1521,14 +1310,14 @@
     try {
       response = await globalThis.pywebview.api.get_state();
     } catch {
-      if (!isCurrentStateRead()) return lastStateReady;
+      if (!isCurrentStateRead()) return requireCurrentGeneration ? false : lastStateReady;
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
       lastStateReady = false;
       reportStateUnavailable();
       return false;
     }
-    if (!isCurrentStateRead()) return lastStateReady;
+    if (!isCurrentStateRead()) return requireCurrentGeneration ? false : lastStateReady;
     if (!response?.ok) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
@@ -1541,9 +1330,6 @@
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
-    renderVoiceModelSetup(state.voice_model_setup ?? null);
-    renderVoice(state.voice ?? null);
-    renderSpeech(state.speech ?? null);
     renderItems(
       tasksList,
       tasksEmpty,
@@ -1568,13 +1354,11 @@
       lastStateReady = false;
       return false;
     }
+    stateUnavailableReported = false;
     if (announceTeamTransitions && recoveryRender.changed) {
       announce(
         teamRender.modelResultBecameAvailable
-          ? [
-            recoveryRender.message,
-            "Перевірена відповідь моделі доступна в підсумку командного завдання.",
-          ].join(" ")
+          ? `${recoveryRender.message} Перевірена відповідь моделі доступна в підсумку командного завдання.`
           : recoveryRender.message,
         recoveryRender.assertive,
       );
@@ -1602,24 +1386,182 @@
       await dispatchModel(actionId, trigger);
       return;
     }
-    const payload = {};
-    if (actionId === "task.create") payload.command = commandInput.value.trim();
-    if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
-    if (actionId === "speech.start") payload.text = speechText?.value ?? "";
-    if (actionId === "team.sources.configure") {
-      payload.revision = sourceRevision;
-      for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+    // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
+    const durableMutation = taskMutationActions.has(actionId) || actionId === "team.sources.configure";
+    const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
+    if (inFlightActions.has(lockKey)) {
+      announce("Попередню команду ще обробляють. Дочекайтеся підтвердження.", false);
+      return;
     }
-    const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-    const failed = result.status === "failed" || result.status === "rejected";
-    if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
-    announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
-    appendLog(result.message);
-    const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
-    if (focusId) focusElementById(focusId);
-    else trigger?.focus?.();
-    const stateReady = await refreshState();
-    document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+    inFlightActions.add(lockKey);
+    let keepLocked = false;
+    const reconcileUncertain = async (message) => {
+      document.documentElement.dataset.nikaReady = "false";
+      announce(message, true);
+      appendLog(message);
+      let stateReady = false;
+      try {
+        stateReady = await refreshState({ requireCurrentGeneration: true });
+      } catch {
+        reportStateUnavailable();
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (durableMutation) keepLocked = true;
+      if (stateReady) {
+        const reconciled = durableMutation
+          ? "Стан перечитано після непідтвердженої дії. Повтор заблоковано до перезапуску вікна; перевірте результат."
+          : "Стан перечитано після непідтвердженої дії. Перевірте результат перед повтором.";
+        announce(reconciled, true);
+        appendLog(reconciled);
+      } else {
+        keepLocked = true;
+        announce(
+          "Немає безпечного підтвердження поточного стану. Повтор цієї дії заблоковано до перезапуску вікна.",
+          true,
+        );
+      }
+      trigger?.focus?.();
+    };
+    foregroundStateRefreshPending += 1;
+    try {
+      const payload = {};
+      if (actionId === "task.create") payload.command = commandInput.value.trim();
+      if (actionId === "team.sources.configure") {
+        payload.revision = sourceRevision;
+        for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+      }
+      const dispatchRequestId = requestId();
+      let result;
+      try {
+        result = await globalThis.pywebview.api.dispatch({
+          request_id: dispatchRequestId, action_id: actionId, payload,
+        });
+      } catch {
+        // The durable effect may have committed before the bridge disconnected. Never retry blindly.
+        await reconcileUncertain(
+          "Немає підтвердження виконання дії. Стан буде перечитано перед можливим повтором.",
+        );
+        return;
+      }
+      if (!validDispatchResponse(result, dispatchRequestId)) {
+        await reconcileUncertain(
+          "Міст повернув непідтверджений результат. Стан буде перечитано перед можливим повтором.",
+        );
+        return;
+      }
+      const failed = ["failed", "rejected"].includes(result.status);
+      const message = typeof result.message === "string" && result.message
+        ? result.message
+        : (failed
+          ? "Дію відхилено."
+          : (result.status === "accepted" ? "Дію прийнято до виконання." : "Виконано."));
+      if (actionId === "team.sources.configure" && result.status === "completed") {
+        sourceDirty = false;
+      }
+      announce(message, failed);
+      appendLog(message);
+      let stateReady = false;
+      try {
+        stateReady = await refreshState();
+      } catch {
+        reportStateUnavailable();
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
+        if (!failed && durableMutation) keepLocked = true;
+        announce(
+          failed
+            ? "Не вдалося оновити стан після відхиленої дії. Причина є в журналі."
+            : (result.status === "accepted"
+              ? (durableMutation
+                ? "Дію прийнято, але оновлений стан недоступний. Повтор заблоковано до перезапуску вікна."
+                : "Дію прийнято, але оновлений стан недоступний. Не повторюйте її без перевірки.")
+              : (durableMutation
+                ? "Дію підтверджено, але оновлений стан недоступний. Повтор заблоковано до перезапуску вікна."
+                : "Дію підтверджено, але оновлений стан недоступний. Перечитайте стан.")),
+          true,
+        );
+      }
+      const focusId = result.focus_id
+        || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
+      if (focusId) focusElementById(focusId);
+      else trigger?.focus?.();
+    } finally {
+      foregroundStateRefreshPending -= 1;
+      if (!keepLocked) inFlightActions.delete(lockKey);
+    }
+  }
+
+  async function mutateKeymap(operation, focusId = null, failureTarget = null) {
+    if (keymapMutationPending) {
+      announce("Зміна карти клавіш ще виконується. Дочекайтеся підтвердження.", false);
+      return;
+    }
+    keymapMutationPending = true;
+    let keepPending = false;
+    const reconcileUncertainKeymap = async (message) => {
+      announce(message, true);
+      appendLog(message);
+      let keymapReady = false;
+      try {
+        keymapReady = await refreshKeymap();
+      } catch {
+        keymapReady = false;
+      }
+      if (keymapReady) {
+        const reconciled = "Карту клавіш перечитано після непідтвердженої зміни. Перевірте її перед повтором.";
+        announce(reconciled, true);
+        appendLog(reconciled);
+      } else {
+        actionsReady = false;
+        keepPending = true;
+        announce(
+          "Немає безпечного підтвердження карти клавіш. Повтор змін заблоковано до перезапуску вікна.",
+          true,
+        );
+      }
+      failureTarget?.focus?.();
+    };
+    try {
+      let response;
+      try {
+        response = await operation();
+      } catch {
+        await reconcileUncertainKeymap(
+          "Немає підтвердження зміни клавіш. Карта буде перечитана перед можливим повтором.",
+        );
+        return;
+      }
+      if (!validKeymapResponse(response)) {
+        await reconcileUncertainKeymap(
+          "Міст повернув непідтверджену зміну клавіш. Карта буде перечитана перед можливим повтором.",
+        );
+        return;
+      }
+      const message = typeof response.message === "string" && response.message
+        ? response.message : (response.ok ? "Зміни збережено." : "Зміну відхилено.");
+      announce(message, !response.ok);
+      appendLog(message);
+      if (!response.ok) {
+        failureTarget?.focus?.();
+        return;
+      }
+      try {
+        if (!await refreshKeymap()) throw new Error("keymap unavailable");
+      } catch {
+        actionsReady = false;
+        keepPending = true;
+        announce(
+          "Зміну підтверджено, але карту клавіш не вдалося перечитати. Повтор змін заблоковано до перезапуску вікна.",
+          true,
+        );
+        failureTarget?.focus?.();
+        return;
+      }
+      if (focusId) focusElementById(focusId);
+    } finally {
+      if (!keepPending) keymapMutationPending = false;
+    }
   }
 
   async function refreshKeymap() {
@@ -1656,12 +1598,11 @@
           : `Зберегти комбінацію для ${accessibleActionLabel}`,
       );
       save.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(saveFocusId);
-        } else input.focus();
+        await mutateKeymap(
+          () => globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null),
+          saveFocusId,
+          input,
+        );
       });
       const restore = document.createElement("button");
       const restoreFocusId = keymapControlId(action.action_id, "restore");
@@ -1673,12 +1614,11 @@
         `Відновити комбінацію за замовчуванням для ${accessibleActionLabel}`,
       );
       restore.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.restore_default(action.action_id);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(restoreFocusId);
-        }
+        await mutateKeymap(
+          () => globalThis.pywebview.api.restore_default(action.action_id),
+          restoreFocusId,
+          restore,
+        );
       });
       controlCell.append(save, document.createTextNode(" "), restore);
       row.append(labelCell, bindingCell, controlCell);
@@ -1691,9 +1631,14 @@
   function startStatePolling() {
     if (statePollHandle !== null || typeof window.setInterval !== "function") return;
     statePollHandle = window.setInterval(async () => {
-      if (document.hidden) return;
-      const ready = await refreshState();
-      document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+      if (document.hidden || statePollPending || foregroundStateRefreshPending > 0) return;
+      statePollPending = true;
+      try {
+        const ready = await refreshState();
+        document.documentElement.dataset.nikaReady = ready ? "true" : "false";
+      } finally {
+        statePollPending = false;
+      }
     }, 1500);
   }
 
@@ -1730,19 +1675,33 @@
   }
 
   document.getElementById("keymap-export").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.export_keymap();
-    announce(response.message, !response.ok);
-    if (response.ok) {
-      keymapJson.value = response.data;
-      keymapJson.focus();
+    if (keymapMutationPending) {
+      announce("Дочекайтеся збереження карти клавіш перед експортом.");
+      return;
+    }
+    try {
+      const response = await globalThis.pywebview.api.export_keymap();
+      if (!validKeymapResponse(response, true)) {
+        throw new Error("invalid keymap export acknowledgement");
+      }
+      const message = typeof response.message === "string" && response.message
+        ? response.message : (response.ok ? "Карту експортовано." : "Не вдалося експортувати карту.");
+      announce(message, !response.ok);
+      if (response.ok) {
+        keymapJson.value = response.data;
+        keymapJson.focus();
+      }
+    } catch {
+      announce("Не вдалося підтвердити експорт карти клавіш. Повторіть після перевірки мосту.", true);
     }
   });
 
   document.getElementById("keymap-import").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.import_keymap(keymapJson.value);
-    announce(response.message, !response.ok);
-    if (response.ok) await refreshKeymap();
-    else keymapJson.focus();
+    await mutateKeymap(
+      () => globalThis.pywebview.api.import_keymap(keymapJson.value),
+      null,
+      keymapJson,
+    );
   });
 
   document.addEventListener("click", (event) => {

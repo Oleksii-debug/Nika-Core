@@ -22,8 +22,6 @@
     <a href="#recovery-heading">Відновлення</a>
     <a href="#model-settings-heading">Модель</a>
     <a href="#source-setup-heading">Джерела команди</a>
-    <a href="#voice-heading">Голосовий ввід</a>
-    <a href="#speech-heading">Голос Nika</a>
     <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
     <a href="#autostart-heading">Автозапуск Windows</a>
@@ -115,69 +113,6 @@
         <button type="button" id="source-reload">Перечитати збережені</button>
       </div>
     </section>
-    <section aria-labelledby="voice-heading">
-      <h2 id="voice-heading" tabindex="-1">Голосовий ввід</h2>
-      <p id="voice-help">
-        Один запуск записує лише один короткий фрагмент з мікрофона та розпізнає його локально.
-        Nika не слухає у фоні й не запускає розпізнаний текст як завдання автоматично.
-      </p>
-      <div aria-labelledby="voice-model-heading">
-        <h3 id="voice-model-heading">Локальна модель розпізнавання</h3>
-        <p id="voice-model-help">
-          Якщо модель ще не встановлена, вкажіть повний шлях до локальної папки з
-          encoder.onnx, decoder.onnx і tokens.txt. Nika копіює лише ці три файли
-          у власну папку; мережа та автоматичне завантаження не використовуються.
-        </p>
-        <label for="voice-model-source">Папка локальної голосової моделі — повний шлях</label>
-        <input id="voice-model-source" type="text" spellcheck="false" autocomplete="off"
-               aria-describedby="voice-model-help voice-model-status">
-        <p id="voice-model-status">Перевірка встановлення локальної голосової моделі.</p>
-        <button type="button" id="voice-model-import" data-action-id="voice.model.import"
-                aria-describedby="voice-model-help voice-model-status"
-                data-error-focus-target="voice-model-source">Імпортувати голосову модель</button>
-        <button type="button" id="voice-model-cancel" data-action-id="voice.model.cancel"
-                aria-describedby="voice-model-status"
-                data-error-focus-target="voice-model-heading" disabled>
-          Скасувати імпорт голосової моделі
-        </button>
-      </div>
-      <p id="voice-status">
-        Перевірка локального голосового вводу.
-      </p>
-      <p id="voice-transcript-label">Розпізнаний текст:</p>
-      <output id="voice-transcript" aria-labelledby="voice-transcript-label">Ще немає.</output>
-      <div class="actions">
-        <button type="button" id="voice-start" data-action-id="voice.start"
-                aria-describedby="voice-help voice-status"
-                data-error-focus-target="voice-heading">Почати один голосовий ввід</button>
-        <button type="button" id="voice-cancel" data-action-id="voice.cancel"
-                data-error-focus-target="voice-heading" disabled>Скасувати голосовий ввід</button>
-        <button type="button" id="voice-use-command" disabled>
-          Перенести розпізнаний текст у поле команди
-        </button>
-      </div>
-    </section>
-
-    <section aria-labelledby="speech-heading">
-      <h2 id="speech-heading" tabindex="-1">Голос Nika</h2>
-      <p id="speech-help">
-        Явно озвучує введений нижче текст локальним системним голосом Windows.
-        Nika не читає результати, пам’ять або приватний вміст автоматично.
-        Це системний голос Windows, а не фінальний власний голос Nika.
-      </p>
-      <label for="speech-text">Текст для озвучення</label>
-      <textarea id="speech-text" rows="4" maxlength="20000"
-                aria-describedby="speech-help speech-status"></textarea>
-      <p id="speech-status">Перевірка локального озвучення.</p>
-      <div class="actions">
-        <button type="button" id="speech-start" data-action-id="speech.start"
-                aria-describedby="speech-help speech-status"
-                data-error-focus-target="speech-heading">Озвучити текст</button>
-        <button type="button" id="speech-cancel" data-action-id="speech.cancel"
-                data-error-focus-target="speech-heading" disabled>Скасувати озвучення</button>
-      </div>
-    </section>
-
     <section aria-labelledby="command-heading">
       <h2 id="command-heading" tabindex="-1">Команда</h2>
       <label for="command-input">Що має зробити Nika?</label>

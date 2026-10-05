@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from threading import Lock
 from typing import Annotated, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -50,6 +51,13 @@ class PluginManifest(BaseModel):
         Annotated[str, Field(min_length=3, pattern=_IDENTIFIER_PATTERN)], ...
     ] = ()
     action_ids: tuple[Annotated[str, Field(min_length=3, pattern=_IDENTIFIER_PATTERN)], ...] = ()
+
+    @field_validator("format_version", "plugin_api_min", "plugin_api_max", mode="before")
+    @classmethod
+    def require_exact_api_integers(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("plugin API version fields must be exact integers")
+        return value
 
     @field_validator("permission_ids", "action_ids")
     @classmethod
@@ -124,6 +132,79 @@ class PluginRegistration:
     factory: PluginFactory
 
 
+def _snapshot_capability(value: object) -> CapabilityDeclaration:
+    if type(value) is not CapabilityDeclaration:
+        raise PluginCompatibilityError("plugin capability must use the canonical contract")
+    if (
+        type(value.capability_id) is not str
+        or type(value.risk) is not ToolRisk
+        or type(value.description) is not str
+    ):
+        raise PluginCompatibilityError("plugin capability contains non-canonical fields")
+    try:
+        return CapabilityDeclaration(
+            capability_id=value.capability_id,
+            risk=value.risk,
+            description=value.description,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PluginCompatibilityError("plugin capability is not canonical") from exc
+
+
+def _snapshot_manifest(manifest: PluginManifest) -> PluginManifest:
+    if type(manifest) is not PluginManifest:
+        raise PluginCompatibilityError("plugin manifest must use the canonical contract")
+    scalar_text = (
+        manifest.plugin_id,
+        manifest.name,
+        manifest.version,
+        manifest.entrypoint_name,
+    )
+    scalar_int = (
+        manifest.format_version,
+        manifest.plugin_api_min,
+        manifest.plugin_api_max,
+    )
+    if any(type(value) is not str for value in scalar_text):
+        raise PluginCompatibilityError("plugin manifest contains non-canonical text")
+    if any(type(value) is not int for value in scalar_int):
+        raise PluginCompatibilityError("plugin manifest contains non-canonical API versions")
+    if type(manifest.capabilities) is not tuple:
+        raise PluginCompatibilityError("plugin capabilities must be an exact tuple")
+    permission_ids = _exact_text_tuple(
+        manifest.permission_ids,
+        label="manifest permission_ids",
+    )
+    action_ids = _exact_text_tuple(
+        manifest.action_ids,
+        label="manifest action_ids",
+    )
+    capabilities = tuple(
+        _snapshot_capability(capability) for capability in manifest.capabilities
+    )
+    try:
+        return PluginManifest(
+            format_version=manifest.format_version,
+            plugin_id=manifest.plugin_id,
+            name=manifest.name,
+            version=manifest.version,
+            plugin_api_min=manifest.plugin_api_min,
+            plugin_api_max=manifest.plugin_api_max,
+            entrypoint_name=manifest.entrypoint_name,
+            capabilities=capabilities,
+            permission_ids=permission_ids,
+            action_ids=action_ids,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PluginCompatibilityError("plugin manifest is not canonical") from exc
+
+
+def _exact_text_tuple(value: object, *, label: str) -> tuple[str, ...]:
+    if type(value) is not tuple or any(type(item) is not str for item in value):
+        raise ValueError(f"{label} must be an exact tuple of strings")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class PluginLoadFailure:
     descriptor: EntrypointDescriptor
@@ -153,11 +234,14 @@ def inspect_plugin_entrypoints(
             loaded = load_entrypoint(descriptor)
             if not isinstance(loaded, PluginRegistration):
                 raise TypeError("plugin entry point must expose PluginRegistration")
-            if loaded.manifest.entrypoint_name != descriptor.name:
+            manifest = _snapshot_manifest(loaded.manifest)
+            if manifest.entrypoint_name != descriptor.name:
                 raise PluginCompatibilityError(
                     "manifest entrypoint_name does not match package entry point"
                 )
-            registrations.append((descriptor, loaded))
+            registrations.append(
+                (descriptor, PluginRegistration(manifest=manifest, factory=loaded.factory))
+            )
         except Exception as exc:  # noqa: BLE001 - isolate arbitrary third-party import failures.
             failures.append(
                 PluginLoadFailure(descriptor=descriptor, error_type=type(exc).__name__)
@@ -200,19 +284,27 @@ class PluginRuntime:
         policy_catalog: PluginPolicyCatalog | None = None,
         activation_authority: ActivationAuthorityPort | None = None,
     ) -> None:
+        if type(core_api) is not int or core_api <= 0:
+            raise ValueError("core_api must be an exact positive integer")
         self._core_api = core_api
-        self._policy_catalog = policy_catalog or PluginPolicyCatalog()
+        self._policy_catalog = (
+            PluginPolicyCatalog() if policy_catalog is None else policy_catalog
+        )
         self._activation_authority = activation_authority
+        self._registry_lock = Lock()
+        self._deactivating: set[str] = set()
         self._factories: dict[str, tuple[PluginManifest, PluginFactory]] = {}
         self._active: dict[str, PluginAdapter] = {}
         self._effective_permissions: dict[str, tuple[str, ...]] = {}
 
     def register(self, manifest: PluginManifest, factory: PluginFactory) -> None:
-        manifest.assert_compatible(self._core_api)
-        self._policy_catalog.validate(manifest)
-        if manifest.plugin_id in self._factories:
-            raise ValueError(f"plugin already registered: {manifest.plugin_id}")
-        self._factories[manifest.plugin_id] = (manifest, factory)
+        snapshot = _snapshot_manifest(manifest)
+        snapshot.assert_compatible(self._core_api)
+        self._policy_catalog.validate(snapshot)
+        with self._registry_lock:
+            if snapshot.plugin_id in self._factories:
+                raise ValueError(f"plugin already registered: {snapshot.plugin_id}")
+            self._factories[snapshot.plugin_id] = (snapshot, factory)
 
     def upgrade(
         self,
@@ -221,18 +313,26 @@ class PluginRuntime:
         *,
         expected_version: str,
     ) -> None:
-        current = self._factories.get(manifest.plugin_id)
-        if current is None:
-            raise KeyError(f"unknown plugin: {manifest.plugin_id}")
-        if manifest.plugin_id in self._active:
-            raise RuntimeError("active plugin must be deactivated before upgrade")
-        if current[0].version != expected_version:
-            raise ValueError("plugin upgrade expected_version does not match current registration")
-        if manifest.version == expected_version:
-            raise ValueError("plugin upgrade must change the manifest version")
-        manifest.assert_compatible(self._core_api)
-        self._policy_catalog.validate(manifest)
-        self._factories[manifest.plugin_id] = (manifest, factory)
+        if type(expected_version) is not str or not expected_version:
+            raise ValueError("expected_version must be exact non-empty text")
+        snapshot = _snapshot_manifest(manifest)
+        snapshot.assert_compatible(self._core_api)
+        self._policy_catalog.validate(snapshot)
+        with self._registry_lock:
+            current = self._factories.get(snapshot.plugin_id)
+            if current is None:
+                raise KeyError(f"unknown plugin: {snapshot.plugin_id}")
+            if snapshot.plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
+            if snapshot.plugin_id in self._active:
+                raise RuntimeError("active plugin must be deactivated before upgrade")
+            if current[0].version != expected_version:
+                raise ValueError(
+                    "plugin upgrade expected_version does not match current registration"
+                )
+            if snapshot.version == expected_version:
+                raise ValueError("plugin upgrade must change the manifest version")
+            self._factories[snapshot.plugin_id] = (snapshot, factory)
 
     def register_entrypoint(self, entrypoint: EntrypointLoaderPort) -> PluginManifest:
         """Compatibility port for an explicitly selected lazy registration loader."""
@@ -242,7 +342,7 @@ class PluginRuntime:
                 "plugin entry point must expose PluginRegistration so registration cannot execute "
                 "adapter construction"
             )
-        manifest = loaded.manifest
+        manifest = _snapshot_manifest(loaded.manifest)
         if manifest.entrypoint_name != entrypoint.name:
             raise PluginCompatibilityError(
                 "manifest entrypoint_name does not match package entry point"
@@ -256,15 +356,20 @@ class PluginRuntime:
         loaded = load_entrypoint(descriptor)
         if not isinstance(loaded, PluginRegistration):
             raise TypeError("plugin entry point must expose PluginRegistration")
-        if loaded.manifest.entrypoint_name != descriptor.name:
+        manifest = _snapshot_manifest(loaded.manifest)
+        if manifest.entrypoint_name != descriptor.name:
             raise PluginCompatibilityError(
                 "manifest entrypoint_name does not match package entry point"
             )
-        self.register(loaded.manifest, loaded.factory)
-        return loaded.manifest
+        self.register(manifest, loaded.factory)
+        return manifest
 
     def manifests(self) -> Mapping[str, PluginManifest]:
-        return {plugin_id: pair[0] for plugin_id, pair in self._factories.items()}
+        with self._registry_lock:
+            return {
+                plugin_id: _snapshot_manifest(pair[0])
+                for plugin_id, pair in self._factories.items()
+            }
 
     def activate(
         self,
@@ -273,10 +378,21 @@ class PluginRuntime:
         permission_ids: tuple[str, ...] | None = None,
         approval_refs: tuple[str, ...] = (),
     ) -> PluginAdapter:
-        try:
-            manifest, factory = self._factories[plugin_id]
-        except KeyError as exc:
-            raise KeyError(f"unknown plugin: {plugin_id}") from exc
+        if type(plugin_id) is not str or not plugin_id:
+            raise ValueError("plugin_id must be exact non-empty text")
+        if permission_ids is not None:
+            permission_ids = _exact_text_tuple(
+                permission_ids,
+                label="permission_ids",
+            )
+        approval_refs = _exact_text_tuple(approval_refs, label="approval_refs")
+        with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
+            try:
+                manifest, factory = self._factories[plugin_id]
+            except KeyError as exc:
+                raise KeyError(f"unknown plugin: {plugin_id}") from exc
         manifest.assert_compatible(self._core_api)
         self._policy_catalog.validate(manifest)
 
@@ -294,12 +410,16 @@ class PluginRuntime:
                     "plugin activation requests undeclared permissions: " + ", ".join(undeclared)
                 )
 
-        if plugin_id in self._active:
-            if self._effective_permissions[plugin_id] != selected_permissions:
-                raise PermissionError(
-                    "active plugin permission set differs from requested activation"
-                )
-            return self._active[plugin_id]
+        with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is still in progress")
+            active = self._active.get(plugin_id)
+            if active is not None:
+                if self._effective_permissions[plugin_id] != selected_permissions:
+                    raise PermissionError(
+                        "active plugin permission set differs from requested activation"
+                    )
+                return active
 
         high_impact_ids = tuple(
             sorted(
@@ -332,17 +452,58 @@ class PluginRuntime:
             raise PluginCompatibilityError(
                 "runtime plugin manifest differs from registered manifest"
             )
-        self._active[plugin_id] = adapter
-        self._effective_permissions[plugin_id] = selected_permissions
-        return adapter
+
+        publication_error: Exception | None = None
+        existing_active: PluginAdapter | None = None
+        with self._registry_lock:
+            if plugin_id in self._deactivating:
+                publication_error = RuntimeError("plugin deactivation is still in progress")
+            else:
+                current = self._factories.get(plugin_id)
+                if current != (manifest, factory):
+                    publication_error = PluginCompatibilityError(
+                        "plugin registration changed during activation; retry activation"
+                    )
+                else:
+                    active = self._active.get(plugin_id)
+                    if active is not None:
+                        if self._effective_permissions[plugin_id] != selected_permissions:
+                            publication_error = PermissionError(
+                                "active plugin permission set differs from requested activation"
+                            )
+                        else:
+                            existing_active = active
+                    else:
+                        self._active[plugin_id] = adapter
+                        self._effective_permissions[plugin_id] = selected_permissions
+                        return adapter
+
+        # Adapter code is third-party execution and must never run under the registry lock.
+        adapter.close()
+        if publication_error is not None:
+            raise publication_error
+        if existing_active is None:
+            raise RuntimeError("plugin activation publication ended without a result")
+        return existing_active
 
     def effective_permissions(self, plugin_id: str) -> tuple[str, ...]:
-        if plugin_id not in self._active:
-            raise KeyError(f"plugin is not active: {plugin_id}")
-        return self._effective_permissions[plugin_id]
+        with self._registry_lock:
+            if plugin_id not in self._active:
+                raise KeyError(f"plugin is not active: {plugin_id}")
+            return self._effective_permissions[plugin_id]
 
     def deactivate(self, plugin_id: str) -> None:
-        adapter = self._active.pop(plugin_id, None)
-        self._effective_permissions.pop(plugin_id, None)
-        if adapter is not None:
-            adapter.close()
+        with self._registry_lock:
+            if plugin_id in self._deactivating:
+                raise RuntimeError("plugin deactivation is already in progress")
+            adapter = self._active.pop(plugin_id, None)
+            self._effective_permissions.pop(plugin_id, None)
+            if adapter is None:
+                return
+            self._deactivating.add(plugin_id)
+
+        # Clear the fail-stop marker only after teardown is proven complete.
+        # If close() raises, this runtime keeps the plugin generation blocked.
+        adapter.close()
+        with self._registry_lock:
+            self._deactivating.remove(plugin_id)
