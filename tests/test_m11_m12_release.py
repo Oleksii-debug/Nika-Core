@@ -227,6 +227,22 @@ def test_windows_plan_accepts_unicode_single_component_bundle_name(tmp_path: Pat
     assert args[args.index("--name") + 1] == "Ніка Core"
 
 
+def test_windows_plan_rejects_behavioral_string_bundle_name(tmp_path: Path) -> None:
+    class BehavioralName(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("behavioral string must not execute")
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    plan = replace(default_windows_plan(tmp_path), name=BehavioralName("NikaCore"))
+
+    with pytest.raises(TypeError, match="exact text"):
+        _ = plan.bundle_dir
+
+
 def test_windows_plan_accepts_maximum_component_length(tmp_path: Path) -> None:
     (tmp_path / "scripts").mkdir()
     (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
