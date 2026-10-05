@@ -728,6 +728,37 @@ def test_adverse_slippage_never_crosses_limit_price(
     assert update.fill.price == Decimal(100)
 
 
+def test_v3_schema_with_global_fill_primary_key_fails_closed(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE trading_research_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "INSERT INTO trading_research_schema_migrations(version) VALUES (3)"
+        )
+        conn.execute(
+            "CREATE TABLE trading_research_run_fills ("
+            "workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, "
+            "fill_id TEXT NOT NULL PRIMARY KEY, approval_id TEXT NOT NULL, "
+            "intent_id TEXT NOT NULL, order_id TEXT NOT NULL, venue_id TEXT NOT NULL, "
+            "venue_timezone TEXT NOT NULL, instrument_id TEXT NOT NULL, "
+            "currency TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, "
+            "price TEXT NOT NULL, fee TEXT NOT NULL, filled_at TEXT NOT NULL, "
+            "filled_slice INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE trading_research_run_account_state ("
+            "workspace_id TEXT NOT NULL, run_id TEXT NOT NULL, payload TEXT NOT NULL, "
+            "last_fill_id TEXT NOT NULL, PRIMARY KEY(workspace_id, run_id))"
+        )
+
+    with pytest.raises(RuntimeError, match="run fill primary key"):
+        TradingStateRepository(store).initialize()
+
+
 def test_nonempty_v2_state_fails_closed_without_run_scope(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
