@@ -583,6 +583,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         compiler = AgentCompiler(
             tools=(ToolSpec("file.read", "Read declared source", ToolRisk.READ_ONLY),),
             model_profiles={_MODEL_PROFILE},
+            permission_catalog={"file.read": {"workspace"}},
         )
         for agent_id in (_CHECKER_ID, _WORKER_A_ID, _WORKER_B_ID):
             definition = AgentDefinition(
