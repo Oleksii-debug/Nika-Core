@@ -778,3 +778,139 @@ def test_huge_integer_timeout_is_rejected_without_overflow() -> None:
             trainer_artifact_id="a" * 64,
             timeout_seconds=10**10000,  # type: ignore[arg-type]
         )
+
+def test_transient_material_path_cannot_enter_resume_state(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": 2,
+    "resume_state": {
+        "physical_path": request["training_materials"]["materials"][0]["path"],
+    },
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    worker = _worker(tmp_path, (sys.executable, str(trainer)))
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        _step(worker, tmp_path, spec=_spec(), step_index=0, resume_state={})
+
+    assert exc_info.value.code == "transient_material_path_in_resume"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert str(tmp_path) not in str(exc_info.value)
+
+
+def test_tampered_resume_material_path_is_rejected_before_second_spawn(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "second-step-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+if request["step_index"] == 1:
+    Path({str(marker)!r}).write_text("started", encoding="utf-8")
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": 2,
+    "resume_state": {{"epoch": request["step_index"] + 1}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    worker = _worker(tmp_path, (sys.executable, str(trainer)))
+    first = _step(worker, tmp_path, spec=_spec(), step_index=0, resume_state={})
+    envelope = first.resume_state["_nika_subprocess"]
+    assert isinstance(envelope, dict)
+    trainer_state = envelope["trainer_state"]
+    assert isinstance(trainer_state, dict)
+    trainer_state["physical_path"] = str(_resolved_materials(tmp_path).materials[0].path)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        _step(
+            worker,
+            tmp_path,
+            spec=_spec(),
+            step_index=1,
+            resume_state=first.resume_state,
+        )
+
+    assert exc_info.value.code == "transient_material_path_in_resume"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_post_spawn_trainer_reverification_failure_is_unknown_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": 2,
+    "resume_state": {},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    worker = _worker(tmp_path, (sys.executable, str(trainer)))
+    registry = worker._artifact_registry
+    original_verify = registry.verify
+    calls = 0
+
+    def verify_once_then_fail(artifact_id: str):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise KeyError("simulated post-spawn identity loss")
+        return original_verify(artifact_id)
+
+    monkeypatch.setattr(registry, "verify", verify_once_then_fail)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        _step(worker, tmp_path, spec=_spec(), step_index=0, resume_state={})
+
+    assert calls == 2
+    assert exc_info.value.code == "trainer_artifact_verification_failed"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+
+
+def test_deep_response_parse_failure_remains_typed_unknown_effect(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import sys
+sys.stdin.buffer.read()
+sys.stdout.write("[" * 5000 + "0" + "]" * 5000)
+""".strip(),
+    )
+    worker = _worker(tmp_path, (sys.executable, str(trainer)))
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        _step(worker, tmp_path, spec=_spec(), step_index=0, resume_state={})
+
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+
