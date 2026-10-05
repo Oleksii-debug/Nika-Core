@@ -6,6 +6,8 @@ from pathlib import Path
 import httpx
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -110,7 +112,7 @@ def _environment(tmp_path: Path):
         rationale="The option is supported by sealed research evidence.",
         decided_by_ref="user://owner",
     )
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     decisions.record(
         "p1",
         decision,
