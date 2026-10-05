@@ -57,10 +57,10 @@ def _sha(value: bytes) -> str:
 _BASE_BYTES = b"base"
 _BASE_SHA256 = _sha(_BASE_BYTES)
 _CHALLENGER_SHA256 = _sha(b"challenger")
-_CHAMPION_ATTESTOR_ID = "test-champion-attestor"
-_CHAMPION_ATTESTOR_SHA256 = _sha(b"champion-attestor")
-_CHALLENGER_ATTESTOR_ID = "test-challenger-attestor"
-_CHALLENGER_ATTESTOR_SHA256 = _sha(b"challenger-attestor")
+_CHAMPION_ATTESTOR_ID = "test-shared-attestor"
+_CHAMPION_ATTESTOR_SHA256 = _sha(b"shared-attestor")
+_CHALLENGER_ATTESTOR_ID = _CHAMPION_ATTESTOR_ID
+_CHALLENGER_ATTESTOR_SHA256 = _CHAMPION_ATTESTOR_SHA256
 
 
 def _evaluation_set() -> EvaluationSet:
@@ -290,7 +290,10 @@ async def test_attested_old_vs_new_comparison_promotes_only_from_both_attested_r
     assert result.experiment_snapshot.selected_candidate_id == "models/challenger"
     assert result.experiment_snapshot.previous_champion_id == "models/base"
     assert len(result.experiment_snapshot.observations) == 4
-    assert result.evidence_payload()["observation_count"] == 4
+    payload = result.evidence_payload()
+    assert payload["observation_count"] == 4
+    assert payload["attestor_id"] == _CHAMPION_ATTESTOR_ID
+    assert payload["attestor_sha256"] == _CHAMPION_ATTESTOR_SHA256
     assert len(result.evidence_sha256) == 64
 
 
@@ -402,6 +405,84 @@ async def test_comparison_rejects_conflicting_persisted_observation(tmp_path) ->
             experiment_id=definition.experiment_id,
             repository=repository,
         )
+
+
+@pytest.mark.asyncio
+async def test_comparison_rejects_different_attestor_before_persistence(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    other_id = "different-attestor"
+    other_sha256 = _sha(b"different-attestor")
+    object.__setattr__(challenger_result, "attestor_id", other_id)
+    object.__setattr__(challenger_result, "attestor_sha256", other_sha256)
+    object.__setattr__(
+        challenger_result,
+        "case_receipts",
+        tuple(
+            replace(
+                receipt,
+                attestor_id=other_id,
+                attestor_sha256=other_sha256,
+            )
+            for receipt in challenger_result.case_receipts
+        ),
+    )
+    challenger_result.revalidated()
+    repository = InMemoryExperimentRepository()
+
+    with pytest.raises(ValueError, match="one attestor authority"):
+        run_attested_old_vs_new_comparison(
+            champion_result=champion_result,
+            challenger_result=challenger_result,
+            evaluation_set=evaluation,
+            execution_config=_config(),
+            policy=_policy(),
+            permission_fingerprint="perm:test",
+            experiment_id="training-job-1-old-vs-new",
+            repository=repository,
+        )
+
+    with pytest.raises(KeyError):
+        repository.get("training-job-1-old-vs-new")
+
+
+@pytest.mark.asyncio
+async def test_comparison_result_rejects_attestor_authority_substitution(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new",
+        repository=InMemoryExperimentRepository(),
+    )
+    other_id = "different-attestor"
+    other_sha256 = _sha(b"different-attestor")
+    nested = result.challenger_benchmark
+    object.__setattr__(nested, "attestor_id", other_id)
+    object.__setattr__(nested, "attestor_sha256", other_sha256)
+    object.__setattr__(
+        nested,
+        "case_receipts",
+        tuple(
+            replace(
+                receipt,
+                attestor_id=other_id,
+                attestor_sha256=other_sha256,
+            )
+            for receipt in nested.case_receipts
+        ),
+    )
+    nested.revalidated()
+
+    with pytest.raises(ValueError, match="one attestor authority"):
+        result.evidence_payload()
 
 
 @pytest.mark.asyncio

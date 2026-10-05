@@ -27,6 +27,17 @@ from nika_core.training_evaluation_champion_execution import (
 from nika_core.training_evaluation_execution import AttestedChallengerBenchmarkResult
 
 
+def _validate_shared_attestor(
+    champion: AttestedChampionBenchmarkResult,
+    challenger: AttestedChallengerBenchmarkResult,
+) -> None:
+    if (
+        champion.attestor_id != challenger.attestor_id
+        or champion.attestor_sha256 != challenger.attestor_sha256
+    ):
+        raise ValueError("old/new benchmarks do not share one attestor authority")
+
+
 def _observation_key(item: MetricObservation) -> tuple[str, str, str]:
     return item.candidate_id, item.replay_id, item.metric
 
@@ -312,6 +323,7 @@ class AttestedTrainingComparisonResult:
             != challenger.report.execution_config_sha256
         ):
             raise ValueError("old/new benchmark authority changed")
+        _validate_shared_attestor(champion, challenger)
         return champion, challenger, training
 
     def _validate(self) -> None:
@@ -378,6 +390,16 @@ class AttestedTrainingComparisonResult:
         _, challenger, _ = self._canonical_authorities()
         return challenger.evidence_sha256
 
+    @property
+    def attestor_id(self) -> str:
+        champion, _, _ = self._canonical_authorities()
+        return champion.attestor_id
+
+    @property
+    def attestor_sha256(self) -> str:
+        champion, _, _ = self._canonical_authorities()
+        return champion.attestor_sha256
+
     def evidence_payload(self) -> dict[str, object]:
         result = self.revalidated()
         snapshot = result.experiment_snapshot
@@ -391,6 +413,8 @@ class AttestedTrainingComparisonResult:
             "champion_binding_sha256": result.champion_binding_sha256,
             "champion_benchmark_sha256": result.champion_benchmark_sha256,
             "challenger_benchmark_sha256": result.challenger_benchmark_sha256,
+            "attestor_id": result.attestor_id,
+            "attestor_sha256": result.attestor_sha256,
             "definition_sha256": result.definition_sha256,
             "observations_sha256": result.observations_sha256,
             "observation_count": len(snapshot.observations),
@@ -453,6 +477,7 @@ def run_attested_old_vs_new_comparison(
         challenger = challenger_result.revalidated()
     except (AttributeError, TypeError, ValueError) as exc:
         raise ValueError("attested benchmark evidence must be canonical") from exc
+    _validate_shared_attestor(champion, challenger)
     try:
         validate_evaluation_set(evaluation_set)
     except (AttributeError, TypeError, ValueError) as exc:

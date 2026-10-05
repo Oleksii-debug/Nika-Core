@@ -194,55 +194,61 @@ class ProductOperationsCoordinator:
 
     def revoke_credential(self, credential_ref: str) -> tuple[str, ...]:
         canonical_text(credential_ref, "credential_ref")
-        self._revoked.add(credential_ref)
-        affected: list[str] = []
-        for service_id, record in tuple(self._services.items()):
-            if credential_ref not in record.service.credential_refs:
-                continue
-            blocked = tuple(sorted(set(record.blocked_credentials) | {credential_ref}))
-            self._services[service_id] = ServiceRecord(
-                record.service,
-                ServiceHealth.BLOCKED,
-                record.maintenance,
-                record.observation,
-                record.rollback,
-                blocked,
-                record.node_loss,
-            )
-            affected.append(service_id)
-        return tuple(sorted(affected))
+        with self._maintenance_lock:
+            self._revoked.add(credential_ref)
+            affected: list[str] = []
+            for service_id, record in tuple(self._services.items()):
+                if credential_ref not in record.service.credential_refs:
+                    continue
+                blocked = tuple(
+                    sorted(set(record.blocked_credentials) | {credential_ref})
+                )
+                self._services[service_id] = ServiceRecord(
+                    record.service,
+                    ServiceHealth.BLOCKED,
+                    record.maintenance,
+                    record.observation,
+                    record.rollback,
+                    blocked,
+                    record.node_loss,
+                )
+                affected.append(service_id)
+            return tuple(sorted(affected))
 
     def restore_credential(self, credential_ref: str) -> tuple[str, ...]:
         canonical_text(credential_ref, "credential_ref")
-        self._revoked.discard(credential_ref)
-        affected: list[str] = []
-        for service_id, record in tuple(self._services.items()):
-            if credential_ref not in record.blocked_credentials:
-                continue
-            blocked = tuple(
-                value for value in record.blocked_credentials if value != credential_ref
-            )
-            probe = ServiceRecord(
-                record.service,
-                observation=record.observation,
-                rollback=record.rollback,
-                blocked_credentials=blocked,
-                node_loss=record.node_loss,
-            )
-            health = ServiceHealth.BLOCKED if blocked else ServiceHealth.PENDING
-            if not blocked and record.observation is not None:
-                health = self._health(probe, record.observation)
-            self._services[service_id] = ServiceRecord(
-                record.service,
-                health,
-                record.maintenance,
-                record.observation,
-                record.rollback,
-                blocked,
-                record.node_loss,
-            )
-            affected.append(service_id)
-        return tuple(sorted(affected))
+        with self._maintenance_lock:
+            self._revoked.discard(credential_ref)
+            affected: list[str] = []
+            for service_id, record in tuple(self._services.items()):
+                if credential_ref not in record.blocked_credentials:
+                    continue
+                blocked = tuple(
+                    value
+                    for value in record.blocked_credentials
+                    if value != credential_ref
+                )
+                probe = ServiceRecord(
+                    record.service,
+                    observation=record.observation,
+                    rollback=record.rollback,
+                    blocked_credentials=blocked,
+                    node_loss=record.node_loss,
+                )
+                health = ServiceHealth.BLOCKED if blocked else ServiceHealth.PENDING
+                if not blocked and record.observation is not None:
+                    health = self._health(probe, record.observation)
+                self._services[service_id] = ServiceRecord(
+                    record.service,
+                    health,
+                    record.maintenance,
+                    record.observation,
+                    record.rollback,
+                    blocked,
+                    record.node_loss,
+                )
+                affected.append(service_id)
+            return tuple(sorted(affected))
 
     def record_rollback(self, observation: RollbackObservation) -> ServiceRecord:
         observation = _private_rollback(observation)
@@ -560,21 +566,14 @@ class ProductOperationsCoordinator:
             raise ProductOperationsError(
                 "maintenance effect state is not eligible for provider inspection"
             )
-        try:
-            result_raw = self.port.inspect(_private_request(request))
-        except BaseException:
-            self.effect_journal.mark_uncertain(reservation.operation_key)
-            raise
+        result_raw = self.port.inspect(_private_request(request))
         try:
             result = _private_result(result_raw)
         except ProductOperationsError as exc:
-            self.effect_journal.mark_uncertain(reservation.operation_key)
             raise ProductOperationsError(
                 "maintenance port returned invalid inspection evidence"
             ) from exc
-        if result.uncertain:
-            self.effect_journal.mark_uncertain(reservation.operation_key)
-        else:
+        if not result.uncertain:
             self.effect_journal.reconcile(
                 reservation.operation_key,
                 _private_result(result),
@@ -653,6 +652,10 @@ class ProductOperationsCoordinator:
         record: ServiceRecord,
         request: MaintenanceRequest,
     ) -> None:
+        if record.blocked_credentials:
+            raise ProductOperationsError(
+                "maintenance is blocked by revoked service credentials"
+            )
         known = self._known_maintenance_evidence(record)
         if not known:
             raise ProductOperationsError(
