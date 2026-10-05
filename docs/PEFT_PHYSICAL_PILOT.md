@@ -90,8 +90,8 @@ in the destination directory, holds the Windows parent directory against rename/
 publication is in flight, atomically links the temporary file into place without replacing an
 existing report, verifies that the linked destination retains the exact staged file identity,
 holds that destination against Windows write/delete replacement during byte and parse-back
-verification, re-verifies the canonical bytes, and removes a failed destination only when it still has the
-writer-owned file identity. A concurrent replacement is never deleted as rollback. A report can
+verification, re-verifies the canonical bytes, and removes a failed destination only when it
+still has the writer-owned file identity. A concurrent replacement is never deleted as rollback. A report can
 be shared as evidence after reviewing it for the intended run.
 
 ## Repository-native Windows driver
