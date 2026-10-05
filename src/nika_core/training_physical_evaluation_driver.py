@@ -1259,7 +1259,16 @@ def _mark_evaluation_uncertain(
             task_id=record.task_id,
             operation_type=record.operation_type,
             input_fingerprint=record.input_fingerprint,
-            created_at=record.cdef _canonical_report_output_path(path: Path) -> tuple[Path, os.stat_result]:
+            created_at=record.created_at,
+        )
+    except (IdempotencyConflictError, KeyError, RuntimeError, TypeError, ValueError):
+        _LOG.exception(
+            "failed to mark interrupted physical evaluation as uncertain; "
+            "its existing ledger reservation still blocks automatic replay"
+        )
+
+
+def _canonical_report_output_path(path: Path) -> tuple[Path, os.stat_result]:
     if type(path) is not type(Path()) or not path.is_absolute():
         _fail("physical evaluation report path must be an absolute canonical platform Path")
     parent = path.parent
@@ -1576,16 +1585,6 @@ def _write_report(path: Path, payload: dict[str, object]) -> None:
             except OSError:
                 pass
         _close_windows_stability_lock(parent_lock)
-xc:
-        raise PhysicalEvaluationDriverError(
-            "physical evaluation report could not be persisted"
-        ) from exc
-    finally:
-        if temporary is not None:
-            try:
-                temporary.unlink(missing_ok=True)
-            except OSError:
-                pass
 
 
 def _is_windows() -> bool:
