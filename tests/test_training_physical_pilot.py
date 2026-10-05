@@ -49,7 +49,11 @@ def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _candidate_manifest() -> dict[str, object]:
+def _candidate_manifest(
+    *,
+    previous_adapter_tensors_sha256: str = "7" * 64,
+    trained_adapter_tensors_sha256: str = "8" * 64,
+) -> dict[str, object]:
     return {
         "adapter_config": {
             "base_model_name_or_path": "models/base",
@@ -66,6 +70,8 @@ def _candidate_manifest() -> dict[str, object]:
         "consumed_materials_sha256": "1" * 64,
         "job_fingerprint": _TRAINER_JOB_FINGERPRINT,
         "model_dir_manifest_sha256": "2" * 64,
+        "previous_adapter_tensors_sha256": previous_adapter_tensors_sha256,
+        "trained_adapter_tensors_sha256": trained_adapter_tensors_sha256,
         "trainer_artifact_id": "3" * 64,
         "trainer_implementation_sha256": "4" * 64,
         "trainer_sha256": "5" * 64,
@@ -78,7 +84,7 @@ def _candidate_manifest() -> dict[str, object]:
             "torch": "1.0",
             "transformers": "1.0",
         },
-        "schema": "nika-peft-candidate-v1",
+        "schema": "nika-peft-candidate-v2",
         "step_number": 2,
         "trainer_parameters": {
             "learning_rate": 0.0002,
@@ -581,6 +587,41 @@ def test_build_report_rejects_candidate_manifest_consumed_material_drift(
     monkeypatch.setattr(pilot, "candidate_adapter_manifest", lambda _: manifest)
 
     with pytest.raises(PhysicalTrainingPilotError, match="consumed-material attestation"):
+        build_physical_training_pilot_report(
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
+            trainer_consumed_materials_sha256="1" * 64,
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+
+def test_build_report_rejects_candidate_manifest_without_tensor_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    monkeypatch.setattr(
+        pilot,
+        "candidate_adapter_manifest",
+        lambda _: _candidate_manifest(
+            previous_adapter_tensors_sha256="7" * 64,
+            trained_adapter_tensors_sha256="7" * 64,
+        ),
+    )
+
+    with pytest.raises(PhysicalTrainingPilotError, match="adapter tensor mutation"):
         build_physical_training_pilot_report(
             trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             trainer_deployment_identity=_TRAINER_DEPLOYMENT_IDENTITY,
