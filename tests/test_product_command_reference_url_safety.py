@@ -112,3 +112,31 @@ def test_public_evidence_hashes_all_common_credential_query_keys(key: str) -> No
 
     assert protected.startswith("evidence-sha256:")
     assert "raw-credential" not in protected
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "evidence://project-1/build\nforged-line",
+        "evidence://project-1/build\u0085forged-line",
+        "evidence://project-1/build\u200bhidden",
+        "evidence://project-1/build\u202eforged-direction",
+        "evidence://project-1/build\u2028forged-line",
+        "evidence://project-1/build\u2029forged-line",
+        "evidence://project-1/build%0Aforged-line",
+        "evidence://project-1/build%E2%80%8Bhidden",
+    ),
+)
+def test_public_evidence_hashes_unsafe_unicode_presentation_controls(
+    reference: str,
+) -> None:
+    protected = safe_evidence_reference(reference)
+
+    assert protected.startswith("evidence-sha256:")
+    assert reference not in protected
+
+
+def test_public_evidence_preserves_printable_ukrainian_unicode() -> None:
+    reference = "evidence://проєкт-1/збірка/готово"
+
+    assert safe_evidence_reference(reference) == reference
