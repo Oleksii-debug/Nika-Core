@@ -263,6 +263,7 @@ def test_waiting_resource_request_can_be_cancelled(tmp_path: Path) -> None:
     assert manager.cancel_waiting(scope="workspace", owner_id="w", request_id="waiting")
     assert manager.queued(scope="workspace", owner_id="w") == ()
 
+
 def test_resource_manager_revalidates_live_cpu_and_memory_without_queue_mutation(
     tmp_path: Path,
 ) -> None:
