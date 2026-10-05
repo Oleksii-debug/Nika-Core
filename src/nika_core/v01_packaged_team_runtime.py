@@ -16,6 +16,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import (
     ModelHealthFact,
     ModelHealthProbePort,
+    ModelHealthSnapshot,
     OllamaModelHealthProbe,
 )
 from nika_core.intelligence.provenance import (
@@ -101,7 +102,9 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             settings=self._model_settings,
         )
         self._model_health_probe_factory = (
-            model_health_probe_factory or self._default_model_health_probe
+            self._default_model_health_probe
+            if model_health_probe_factory is None
+            else model_health_probe_factory
         )
         self._model_runtimes: dict[str, ModelGatewayAgentRuntime] = {}
         self._coordinator = MultiAgentSupervisor(
@@ -182,13 +185,28 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
         try:
             health_probe = self._model_health_probe_factory(selection)
-            snapshot = await asyncio.to_thread(health_probe.snapshot)
+            observed = await asyncio.to_thread(health_probe.snapshot)
+            if type(observed) is not ModelHealthSnapshot:
+                raise TypeError("model health probe returned a noncanonical snapshot")
+            snapshot = ModelHealthSnapshot(
+                configured=observed.configured,
+                reachable=observed.reachable,
+                model_present=observed.model_present,
+                model_ready=observed.model_ready,
+                inference_proven=observed.inference_proven,
+            )
         except Exception:  # noqa: BLE001 - provider/health failures are fail-closed
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNVERIFIABLE,
                 reason="Selected Ollama model health could not be verified.",
             )
-        if snapshot.model_ready is not ModelHealthFact.YES:
+        required = (
+            snapshot.configured,
+            snapshot.reachable,
+            snapshot.model_present,
+            snapshot.model_ready,
+        )
+        if not all(value is ModelHealthFact.YES for value in required):
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNVERIFIABLE,
                 reason="Selected Ollama model is not ready for automatic resume.",
