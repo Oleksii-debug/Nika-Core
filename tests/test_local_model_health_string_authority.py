@@ -188,6 +188,7 @@ def test_oversized_catalog_fails_closed_without_runtime_inventory_probe() -> Non
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
     assert calls == ["http://localhost:11434/api/tags"]
 
+
 class _RecursiveResponse(_Response):
     def __init__(self) -> None:
         super().__init__({})
