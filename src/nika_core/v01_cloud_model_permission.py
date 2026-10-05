@@ -159,7 +159,12 @@ class V01CloudModelPermissionService:
             self._permissions.revoke(permission_id, revoked_at=self._utc_now())
 
     def _cloud_selection(self, task_id: str) -> ModelSelection | None:
-        selection = self._settings.for_task(task_id)
+        try:
+            selection = self._settings.for_task(task_id)
+        except Exception:  # noqa: BLE001 - durable model binding fails closed
+            raise CloudModelPermissionDenied(
+                "Не вдалося безпечно перевірити збережений маршрут моделі для завдання."
+            ) from None
         if selection.route_kind != "openai_compatible":
             return None
         if not selection.private_data_allowed:
