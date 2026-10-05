@@ -112,8 +112,9 @@ def _catalog_factory(
     return create
 
 
-def test_route_text_rejects_noncanonical_path_and_invisible_model_identities() -> None:
+def test_route_text_rejects_noncanonical_endpoint_and_invisible_model_identities() -> None:
     _assert_rejected(base_url="http://localhost:11434//")
+    _assert_rejected(base_url="http://localhost:0")
     for model_id in (
         "local-model:\u200b1",
         "local-model:\u20281",
