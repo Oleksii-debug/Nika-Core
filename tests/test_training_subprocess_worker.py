@@ -159,6 +159,7 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
 
     assert not marker.exists()
 
+
 def test_parent_environment_is_not_inherited_by_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
