@@ -52,7 +52,7 @@ def test_nonfinite_numbers_fail_before_snapshot_admission(number: str) -> None:
 def test_invalid_json_and_deeply_nested_input_fail_with_domain_error() -> None:
     with pytest.raises(ProductIncidentError, match="invalid JSON"):
         load_incident_snapshot('{"schema":')
-    with pytest.raises(ProductIncidentError, match="invalid JSON"):
+    with pytest.raises(ProductIncidentError, match="JSON depth"):
         load_incident_snapshot("[" * 1500 + "0" + "]" * 1500)
 
 
@@ -133,3 +133,15 @@ def test_unrepresentable_utc_incident_time_fails_with_domain_error(
     ]
     with pytest.raises(ProductIncidentError, match="ISO-8601 datetime text"):
         load_incident_snapshot(json.dumps(payload))
+
+
+def test_quoted_brackets_and_escaped_quotes_do_not_count_as_json_depth() -> None:
+    project_id = 'проєкт [ { } ] з "лапками" та \\\\'
+    snapshot = _empty_snapshot(project_id)
+    assert load_incident_snapshot(dump_incident_snapshot(snapshot)) == snapshot
+
+
+@pytest.mark.parametrize("payload", ('{"a":]', ']["a"', '{"a":"unclosed}'))
+def test_invalid_structure_is_rejected_before_record_hydration(payload: str) -> None:
+    with pytest.raises(ProductIncidentError, match="invalid JSON"):
+        load_incident_snapshot(payload)
