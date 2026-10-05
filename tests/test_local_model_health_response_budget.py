@@ -326,3 +326,27 @@ def test_duplicate_running_identity_cannot_prove_readiness() -> None:
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
     assert calls == ["/api/tags", "/api/ps"]
 
+class _UnreadResponseClient:
+    def __enter__(self) -> "_UnreadResponseClient":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def get(self, _url: str) -> httpx.Response:
+        return httpx.Response(
+            200,
+            stream=httpx.ByteStream(b'{"models":[{"model":"selected:1"}]}'),
+        )
+
+
+def test_unread_exact_response_is_unknown_not_exception() -> None:
+    snapshot = OllamaModelHealthProbe(
+        model_id="selected:1",
+        client_factory=lambda **_kwargs: _UnreadResponseClient(),
+    ).snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+
