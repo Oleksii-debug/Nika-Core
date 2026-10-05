@@ -92,11 +92,20 @@ def trusted_business_authorization(
     _text(evidence_ref, "business authorization evidence_ref")
     if authority is None:
         return False
+    expected_fingerprint = intent.fingerprint
+    detached_intent = BusinessAuthorizationIntent(
+        objective_id=intent.objective_id,
+        purpose=intent.purpose,
+        subject_id=intent.subject_id,
+        bindings=tuple((key, value) for key, value in intent.bindings),
+        use=intent.use,
+    )
     try:
-        result = authority.authorize(intent=intent, evidence_ref=evidence_ref)
-    except (LookupError, PermissionError, RuntimeError, TypeError, ValueError):
+        result = authority.authorize(intent=detached_intent, evidence_ref=evidence_ref)
+        returned_fingerprint = detached_intent.fingerprint
+    except (AttributeError, LookupError, PermissionError, RuntimeError, TypeError, ValueError):
         return False
-    return result is True
+    return result is True and returned_fingerprint == expected_fingerprint
 
 
 def _text(value: object, label: str) -> None:
