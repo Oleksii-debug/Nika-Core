@@ -71,7 +71,7 @@ class SimulationExecutionEngine:
             raise TradingResearchError("remaining_quantity must be positive")
         if order.intent.expires_at is not None and time_slice.at >= order.intent.expires_at:
             return OrderUpdate(order.approval_id, OrderState.EXPIRED, quantity, reason="order expired")
-        if time_slice.index <= order.intent.submitted_slice:
+        if time_slice.index <= order.authority.submitted_slice:
             return OrderUpdate(
                 order.approval_id,
                 OrderState.PENDING,
@@ -121,6 +121,7 @@ class SimulationExecutionEngine:
             ),
             approval_id=order.approval_id,
             intent_id=order.intent.intent_id,
+            authority=order.authority,
             instrument=order.intent.instrument,
             side=order.intent.side,
             quantity=fill_quantity,
@@ -191,16 +192,25 @@ def _legal_fill_price(order: RiskApprovedOrder, market_price: Decimal) -> Decima
     return max(slipped, limit)
 
 
-def _replay_order_key(order: RiskApprovedOrder) -> tuple[str, InstrumentIdentity]:
-    return order.approval_id, instrument_identity(order.intent.instrument)
+type ReplayOrderKey = tuple[str, str, str, str, InstrumentIdentity]
+
+
+def _replay_order_key(order: RiskApprovedOrder) -> ReplayOrderKey:
+    return (
+        order.authority.workspace_id,
+        order.authority.run_id,
+        order.authority.order_id,
+        order.approval_id,
+        instrument_identity(order.intent.instrument),
+    )
 
 
 @dataclass(slots=True)
 class ReplayBook:
     ledger: PortfolioLedger
     execution: SimulationExecutionEngine
-    _remaining: dict[tuple[str, InstrumentIdentity], Decimal]
-    _terminal: dict[tuple[str, InstrumentIdentity], OrderUpdate]
+    _remaining: dict[ReplayOrderKey, Decimal]
+    _terminal: dict[ReplayOrderKey, OrderUpdate]
 
     def __init__(self, ledger: PortfolioLedger) -> None:
         self.ledger = ledger
