@@ -490,3 +490,42 @@ def test_mutated_training_binding_cannot_retarget_champion(tmp_path: Path) -> No
             champion_path=path,
             allowed_root=tmp_path,
         )
+
+def test_champion_route_must_match_v2_training_base_authority(tmp_path: Path) -> None:
+    path, descriptor, champion, training = _champion_fixture(tmp_path)
+    changed_training = replace(training, base_provider_id="other-local-provider")
+
+    with pytest.raises(
+        ChampionEvaluationBindingError,
+        match="training-bound base authority",
+    ):
+        bind_champion_for_attested_evaluation(
+            training_binding=changed_training,
+            champion=champion,
+            descriptor=descriptor,
+            champion_path=path,
+            allowed_root=tmp_path,
+        )
+
+
+def test_champion_descriptor_must_match_v2_training_base_authority(
+    tmp_path: Path,
+) -> None:
+    path, descriptor, champion, training = _champion_fixture(tmp_path)
+    changed_training = replace(
+        training,
+        base_descriptor_digest=_sha(b"substituted-base-descriptor"),
+    )
+
+    with pytest.raises(
+        ChampionEvaluationBindingError,
+        match="training-bound base descriptor",
+    ):
+        bind_champion_for_attested_evaluation(
+            training_binding=changed_training,
+            champion=champion,
+            descriptor=descriptor,
+            champion_path=path,
+            allowed_root=tmp_path,
+        )
+
