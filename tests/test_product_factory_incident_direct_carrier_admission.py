@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 
 import pytest
+import test_product_factory_incidents as baseline
 
 from nika_core.product_factory_incident_contracts import (
     INCIDENT_LIFECYCLE_SCHEMA,
@@ -19,6 +20,7 @@ from nika_core.product_factory_incident_persistence import (
     dump_incident_snapshot,
     load_incident_snapshot,
 )
+from nika_core.product_factory_incidents import IncidentRepairReleaseCoordinator
 
 
 SHA = "1" * 40
@@ -158,3 +160,73 @@ def test_valid_snapshot_remains_dump_load_stable() -> None:
 
     assert load_incident_snapshot(payload) == snapshot
     assert dump_incident_snapshot(load_incident_snapshot(payload)) == payload
+
+def test_coordinator_revalidates_trigger_after_post_construction_mutation() -> None:
+    coordinator = IncidentRepairReleaseCoordinator("project-a")
+    trigger = baseline.trigger()
+    object.__setattr__(trigger, "evidence_refs", ())
+
+    with pytest.raises(ProductIncidentError, match="incident evidence must not be empty"):
+        coordinator.open_incident(
+            "incident-tampered",
+            trigger,
+            baseline.operations().snapshot(),
+        )
+
+    assert coordinator.list_incidents() == ()
+
+
+def test_returned_incident_record_does_not_alias_coordinator_state() -> None:
+    coordinator = IncidentRepairReleaseCoordinator("project-a")
+    saved = coordinator.open_incident(
+        "incident-1",
+        baseline.trigger(),
+        baseline.operations().snapshot(),
+    )
+    original_refs = saved.trigger.evidence_refs
+
+    object.__setattr__(saved.trigger, "evidence_refs", ())
+
+    stored = coordinator.get("incident-1")
+    assert stored.trigger.evidence_refs == original_refs
+    assert coordinator.snapshot().incidents[0].trigger.evidence_refs == original_refs
+
+
+def test_coordinator_revalidates_work_order_after_post_construction_mutation() -> None:
+    coordinator = IncidentRepairReleaseCoordinator("project-a")
+    coordinator.open_incident(
+        "incident-1",
+        baseline.trigger(),
+        baseline.operations().snapshot(),
+    )
+    work = baseline.order()
+    object.__setattr__(work, "allowed_paths", ())
+
+    with pytest.raises(ProductIncidentError, match="allowed paths must not be empty"):
+        coordinator.create_repair_work_order(work)
+
+    assert coordinator.get("incident-1").work_order is None
+
+
+def test_coordinator_revalidates_candidate_after_post_construction_mutation() -> None:
+    coordinator, work = baseline.planned()
+    item = baseline.candidate()
+    proof = baseline.authority(work, item)
+    object.__setattr__(item, "review_accepted", 1)
+
+    with pytest.raises(ProductIncidentError, match="review_accepted must be boolean"):
+        coordinator.record_candidate(item, proof)
+
+    assert coordinator.get("incident-1").candidates == ()
+
+
+def test_coordinator_revalidates_release_after_post_construction_mutation() -> None:
+    coordinator, _, item, _ = baseline.reviewed()
+    evidence = baseline.release(item=item)
+    object.__setattr__(evidence, "deployment_evidence_refs", ())
+
+    with pytest.raises(ProductIncidentError, match="deployment evidence must not be empty"):
+        coordinator.record_release(evidence, baseline.deployments())
+
+    assert coordinator.get("incident-1").release_events == ()
+
