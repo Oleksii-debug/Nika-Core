@@ -474,7 +474,14 @@ class HttpResearchService:
                 result.body,
                 max_bytes=self._policy.max_response_bytes,
             )
-        except (BlobStoreError, OSError):
+            title = _source_title(result.final_url)
+            self._repository.record_artifact(
+                source,
+                artifact,
+                media_type=result.media_type,
+                original_name=title,
+            )
+        except (BlobStoreError, OSError, RuntimeError):
             # Never mark the old digest CURRENT if its on-disk blob is corrupt
             # or the replacement could not be durably stored.
             failed = replace(
@@ -505,13 +512,6 @@ class HttpResearchService:
                 error_code=failed.error_code,
                 message=failed.message,
             )
-        title = _source_title(result.final_url)
-        self._repository.record_artifact(
-            source,
-            artifact,
-            media_type=result.media_type,
-            original_name=title,
-        )
         if artifact.raw_sha256 == state.current_raw_sha256:
             self._record_fetch_attempt(
                 source_id=source_id,
