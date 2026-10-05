@@ -555,8 +555,6 @@ def test_build_report_holds_candidate_stable_during_manifest_read(
     assert candidate.read_bytes() == b"replacement"
 
 
-
-
 def test_report_publication_round_trips_exact_canonical_bytes(tmp_path: Path) -> None:
     report = _build_report(tmp_path)
     output = (tmp_path / "evidence.json").resolve()
