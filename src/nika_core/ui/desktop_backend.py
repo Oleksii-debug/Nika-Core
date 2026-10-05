@@ -686,6 +686,8 @@ class DesktopBackend:
 
     def _runtime_done(self, task_id: str, future: Future[Any]) -> None:
         with self._active_lock:
+            if self._active_futures.get(task_id) is not future:
+                return
             self._active_threads.pop(task_id, None)
             self._active_futures.pop(task_id, None)
         if future.cancelled() or future.exception() is None:
