@@ -10,6 +10,7 @@ from nika_core.batch_cursor import (
     _json_copy,
     AttemptState,
     BatchCursor,
+    BatchCursorState,
     BatchCursorStateError,
     BatchTargetSpec,
     TargetCursor,
@@ -266,6 +267,23 @@ def test_non_object_carriers_fail_before_effect_completion_or_uncertainty(
 
     assert ledger.require(grant.operation_key).status is IdempotencyStatus.PENDING
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+
+def test_persisted_input_count_does_not_drive_range_allocation() -> None:
+    with pytest.raises(ValueError, match="input positions do not match input_count"):
+        BatchCursorState.model_validate(
+            {
+                "version": 1,
+                "task_id": "task",
+                "cursor_id": "cursor",
+                "batch_size": 1,
+                "input_count": 1 << 62,
+                "ready_batch_index": 0,
+                "plan_fingerprint": "f" * 64,
+                "targets": [],
+                "next_scheduled_intent": None,
+            }
+        )
 
 
 def _persisted_target_payload(
