@@ -236,7 +236,7 @@ class MemoryService:
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
         key = _required("key", key)
-        current = _as_utc(now) if now else datetime.now(UTC)
+        current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
             row = conn.execute(
                 "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
@@ -386,7 +386,7 @@ class MemoryService:
         return True
 
     def purge_expired(self, *, now: datetime | None = None) -> int:
-        current = _as_utc(now) if now else datetime.now(UTC)
+        current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
             # An explicit global purge must obey the same offset-aware expiry
             # semantics as get() and scoped reads; invalid dates roll back.
@@ -441,6 +441,8 @@ def _required(name: str, value: str) -> str:
 
 
 def _as_utc(value: datetime) -> datetime:
+    if type(value) is not datetime:
+        raise ValueError("datetime must be an exact datetime")
     if value.tzinfo is None:
         raise ValueError("datetime must be timezone-aware")
     return value.astimezone(UTC)
