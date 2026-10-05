@@ -103,7 +103,11 @@ class LoadedModelAttestedCompletionPort(Protocol):
 
 def _snapshot_request(request: ModelRequest) -> ModelRequest:
     if type(request) is not ModelRequest:
-        raise TypeError("request must be an exact ModelRequest")
+        raise ModelGatewayError(
+            ModelErrorCode.INVALID_REQUEST,
+            "attested training-candidate request is invalid",
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
     try:
         return ModelRequest(
             request_id=request.request_id,
@@ -279,6 +283,33 @@ def _attestation_matches_effect(
         )
 
 
+def _verify_effect_inputs_unchanged(
+    *,
+    effect_request: ModelRequest,
+    effect_binding: TrainingEvaluationBinding,
+    authority_request: ModelRequest,
+    authority_binding: TrainingEvaluationBinding,
+) -> None:
+    try:
+        observed_request = _snapshot_request(effect_request)
+        observed_binding = effect_binding.revalidated()
+    except (AttributeError, ModelGatewayError, TypeError, ValueError):
+        raise ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "attested provider mutated inference authority",
+            provider_id=authority_binding.challenger_provider_id,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        ) from None
+
+    if observed_request != authority_request or observed_binding != authority_binding:
+        raise ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "attested provider mutated inference authority",
+            provider_id=authority_binding.challenger_provider_id,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+
+
 class AttestedTrainingCandidateGateway:
     """Model-Lab completion adapter requiring same-effect loaded-artifact proof.
 
@@ -312,30 +343,54 @@ class AttestedTrainingCandidateGateway:
         )
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
-        canonical_request = _snapshot_request(request)
-        _request_matches_binding(canonical_request, self._binding)
+        authority_request = _snapshot_request(request)
+        authority_binding = self._binding.revalidated()
+        _request_matches_binding(authority_request, authority_binding)
 
-        result = await self._effect_port.complete_attested(
-            canonical_request,
-            binding=self._binding,
+        # Never hand the post-effect verifier's authority objects to the provider.
+        # Frozen dataclasses can still be changed with object.__setattr__, so use
+        # detached effect copies and prove they remained unchanged before accepting
+        # any response/attestation pair.
+        effect_request = _snapshot_request(authority_request)
+        effect_binding = authority_binding.revalidated()
+        try:
+            result = await self._effect_port.complete_attested(
+                effect_request,
+                binding=effect_binding,
+            )
+        except ModelGatewayError:
+            raise
+        except Exception:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "attested provider effect failed",
+                provider_id=authority_binding.challenger_provider_id,
+                failure_effect=ModelFailureEffect.UNKNOWN,
+            ) from None
+
+        _verify_effect_inputs_unchanged(
+            effect_request=effect_request,
+            effect_binding=effect_binding,
+            authority_request=authority_request,
+            authority_binding=authority_binding,
         )
         if type(result) is not AttestedModelCompletionResult:
             raise ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "attested provider returned an invalid effect result",
-                provider_id=self._binding.challenger_provider_id,
+                provider_id=authority_binding.challenger_provider_id,
                 failure_effect=ModelFailureEffect.UNKNOWN,
             )
         _attestation_matches_effect(
             result.attestation,
-            request=canonical_request,
-            binding=self._binding,
+            request=authority_request,
+            binding=authority_binding,
             expected_attestor_id=self._expected_attestor_id,
             expected_attestor_sha256=self._expected_attestor_sha256,
         )
         _response_matches_request(
             result.response,
-            request=canonical_request,
-            binding=self._binding,
+            request=authority_request,
+            binding=authority_binding,
         )
         return result.response

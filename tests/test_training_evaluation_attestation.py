@@ -83,6 +83,11 @@ class _EffectPort:
         binding: TrainingEvaluationBinding,
     ) -> AttestedModelCompletionResult:
         self.calls += 1
+        if self.mode == "mutate-effect-binding":
+            object.__setattr__(binding, "challenger_sha256", _sha(b"substituted-artifact"))
+        elif self.mode == "mutate-effect-request":
+            object.__setattr__(request, "request_id", "substituted-request")
+
         attestation = LoadedModelArtifactAttestation(
             request_id=request.request_id,
             binding_sha256=binding.binding_sha256,
@@ -426,3 +431,53 @@ async def test_mutated_unbounded_attestation_identity_is_unknown() -> None:
 
     assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
     assert port.calls == 1
+
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["mutate-effect-binding", "mutate-effect-request"])
+async def test_effect_port_cannot_mutate_verification_authority(mode: str) -> None:
+    port = _EffectPort(mode=mode)
+    gateway = _gateway(port)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await gateway.complete(_request())
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert port.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_untyped_effect_port_failure_is_unknown_and_secret_free() -> None:
+    class ExplodingPort:
+        async def complete_attested(self, request, *, binding):
+            raise RuntimeError("raw provider detail must not escape")
+
+    gateway = AttestedTrainingCandidateGateway(
+        ExplodingPort(),
+        binding=_binding(),
+        expected_attestor_id=_ATTESTOR_ID,
+        expected_attestor_sha256=_ATTESTOR_SHA256,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await gateway.complete(_request())
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert "raw provider detail" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+async def test_non_request_carrier_is_typed_no_effect_failure() -> None:
+    port = _EffectPort()
+    gateway = _gateway(port)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await gateway.complete(object())  # type: ignore[arg-type]
+
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert port.calls == 0
