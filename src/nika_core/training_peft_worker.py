@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 _PROTOCOL_VERSION = 3
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MAX_REQUEST_BYTES = 1024 * 1024
 _MAX_JSON_DEPTH = 16
 _MAX_JSON_NODES = 100_000
@@ -28,6 +28,9 @@ _HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
 _MATERIAL_DOMAIN = b"nika-training-consumed-materials-v1\x00"
 _CHECKPOINT_MARKER = "nika_checkpoint.json"
+_CHECKPOINT_PAYLOAD_DOMAIN = b"nika-peft-checkpoint-payload-v1\x00"
+_MAX_CHECKPOINT_FILES = 100_000
+_MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
 _CANDIDATE_FILE = "adapter_model.safetensors"
 
 
@@ -823,13 +826,86 @@ def _checkpoint_dir(job_root: Path, step_number: int) -> Path:
     return job_root / "trainer" / f"checkpoint-{step_number}"
 
 
+def _checkpoint_payload_sha256(checkpoint: Path) -> str:
+    """Bind the complete regular-file payload of one durable trainer checkpoint."""
+    try:
+        root_stat = os.lstat(checkpoint)
+    except OSError:
+        _fail("checkpoint_payload_invalid")
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or _is_reparse(root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        _fail("checkpoint_payload_invalid")
+
+    try:
+        paths = sorted(
+            checkpoint.rglob("*"),
+            key=lambda item: item.relative_to(checkpoint).as_posix(),
+        )
+    except OSError:
+        _fail("checkpoint_payload_invalid")
+
+    entries: list[dict[str, object]] = []
+    total_bytes = 0
+    for path in paths:
+        relative = path.relative_to(checkpoint).as_posix()
+        if relative in {_CHECKPOINT_MARKER, f".{_CHECKPOINT_MARKER}.tmp"}:
+            continue
+        try:
+            before = os.lstat(path)
+        except OSError:
+            _fail("checkpoint_payload_invalid")
+        if stat.S_ISLNK(before.st_mode) or _is_reparse(before):
+            _fail("checkpoint_payload_invalid")
+        if stat.S_ISDIR(before.st_mode):
+            continue
+        if not stat.S_ISREG(before.st_mode):
+            _fail("checkpoint_payload_invalid")
+
+        if len(entries) >= _MAX_CHECKPOINT_FILES:
+            _fail("checkpoint_payload_bounds_exceeded")
+        total_bytes += before.st_size
+        if total_bytes > _MAX_CHECKPOINT_BYTES:
+            _fail("checkpoint_payload_bounds_exceeded")
+
+        digest = _sha256_file(path)
+        try:
+            after = os.lstat(path)
+        except OSError:
+            _fail("checkpoint_payload_changed")
+        if (
+            stat.S_ISLNK(after.st_mode)
+            or _is_reparse(after)
+            or not stat.S_ISREG(after.st_mode)
+            or (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+            != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        ):
+            _fail("checkpoint_payload_changed")
+        entries.append(
+            {
+                "path": relative,
+                "sha256": digest,
+                "size_bytes": before.st_size,
+            }
+        )
+
+    if not entries:
+        _fail("checkpoint_payload_empty")
+    encoded = _canonical_json_bytes(entries)
+    return hashlib.sha256(_CHECKPOINT_PAYLOAD_DOMAIN + encoded).hexdigest()
+
+
 def _write_checkpoint_marker(
     checkpoint: Path,
     *,
     request: ParsedRequest,
     consumed_sha256: str,
-) -> str:
+) -> tuple[str, str]:
+    checkpoint_payload_sha256 = _checkpoint_payload_sha256(checkpoint)
     marker = {
+        "checkpoint_payload_sha256": checkpoint_payload_sha256,
         "consumed_materials_sha256": consumed_sha256,
         "job_fingerprint": request.job_fingerprint,
         "schema_version": _SCHEMA_VERSION,
@@ -855,7 +931,7 @@ def _write_checkpoint_marker(
                 temporary.unlink()
         except OSError:
             pass
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(encoded).hexdigest(), checkpoint_payload_sha256
 
 
 def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
@@ -866,6 +942,7 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         return None
     expected = {
         "checkpoint_marker_sha256",
+        "checkpoint_payload_sha256",
         "checkpoint_step",
         "job_fingerprint",
         "relative_path",
@@ -875,6 +952,12 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         _fail("resume_state_invalid")
     if state.get("job_fingerprint") != request.job_fingerprint:
         _fail("resume_job_mismatch")
+    checkpoint_payload_sha256 = state.get("checkpoint_payload_sha256")
+    if (
+        type(checkpoint_payload_sha256) is not str
+        or _HEX_RE.fullmatch(checkpoint_payload_sha256) is None
+    ):
+        _fail("resume_state_invalid")
     checkpoint_step = state.get("checkpoint_step")
     if type(checkpoint_step) is not int or checkpoint_step != request.step_index:
         _fail("resume_step_mismatch")
@@ -907,10 +990,13 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         or marker.get("schema_version") != _SCHEMA_VERSION
         or marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index
+        or marker.get("checkpoint_payload_sha256") != checkpoint_payload_sha256
         or marker.get("consumed_materials_sha256")
         != request.required_consumed_materials_sha256
     ):
         _fail("resume_marker_identity_mismatch")
+    if _checkpoint_payload_sha256(candidate) != checkpoint_payload_sha256:
+        _fail("resume_checkpoint_payload_mismatch")
     return candidate
 
 
@@ -1104,13 +1190,14 @@ def _train_one_step(
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
     _require_regular_unlinked(adapter_file, code="adapter_candidate_missing")
-    marker_sha256 = _write_checkpoint_marker(
+    marker_sha256, checkpoint_payload_sha256 = _write_checkpoint_marker(
         checkpoint,
         request=request,
         consumed_sha256=consumed.attestation_sha256,
     )
     resume_state: dict[str, object] = {
         "checkpoint_marker_sha256": marker_sha256,
+        "checkpoint_payload_sha256": checkpoint_payload_sha256,
         "checkpoint_step": request.step_index + 1,
         "job_fingerprint": request.job_fingerprint,
         "relative_path": checkpoint.relative_to(job_root).as_posix(),
