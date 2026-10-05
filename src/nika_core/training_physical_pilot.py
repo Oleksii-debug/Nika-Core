@@ -250,6 +250,7 @@ def _candidate_manifest_evidence(
     candidate_path: Path,
     completed: TrainingRunEvidence,
     trainer_job_fingerprint: str,
+    trainer_deployment_identity: ArtifactIdentity,
 ) -> _CandidateManifestEvidence:
     try:
         manifest = candidate_adapter_manifest(candidate_path)
@@ -295,6 +296,16 @@ def _candidate_manifest_evidence(
         manifest.get("model_dir_manifest_sha256"),
         name="candidate manifest model_dir_manifest_sha256",
     )
+    if type(trainer_deployment_identity) is not ArtifactIdentity:
+        raise TypeError("trainer_deployment_identity must be exact ArtifactIdentity")
+    expected_trainer_artifact_id = _require_sha256(
+        trainer_deployment_identity.artifact_ref,
+        name="verified trainer artifact_id",
+    )
+    expected_trainer_deployment_sha256 = _require_sha256(
+        trainer_deployment_identity.sha256,
+        name="verified trainer sha256",
+    )
     trainer_artifact_id = _require_sha256(
         manifest.get("trainer_artifact_id"),
         name="candidate manifest trainer_artifact_id",
@@ -303,6 +314,13 @@ def _candidate_manifest_evidence(
         manifest.get("trainer_sha256"),
         name="candidate manifest trainer_sha256",
     )
+    if not hmac.compare_digest(trainer_artifact_id, expected_trainer_artifact_id):
+        _fail("PEFT candidate manifest changed trainer artifact identity")
+    if not hmac.compare_digest(
+        trainer_deployment_sha256,
+        expected_trainer_deployment_sha256,
+    ):
+        _fail("PEFT candidate manifest changed trainer deployment digest")
     trainer_implementation_sha256 = _require_sha256(
         manifest.get("trainer_implementation_sha256"),
         name="candidate manifest trainer_implementation_sha256",
@@ -743,6 +761,7 @@ def build_physical_training_pilot_report(
     restart_probe: TrainingRunEvidence,
     completed: TrainingRunEvidence,
     trainer_job_fingerprint: str,
+    trainer_deployment_identity: ArtifactIdentity,
     candidate_path: Path,
     candidate_descriptor: ModelArtifactDescriptor,
     candidate_root: Path | None = None,
@@ -821,6 +840,7 @@ def build_physical_training_pilot_report(
             candidate_path=stable_candidate_path,
             completed=completed,
             trainer_job_fingerprint=trainer_job_fingerprint,
+            trainer_deployment_identity=trainer_deployment_identity,
         )
     finally:
         _close_windows_candidate_stability_lock(stability_lock)
@@ -943,6 +963,11 @@ def run_physical_training_pilot(
         worker.protocol_job_fingerprint(canonical_spec),
         name="initial worker trainer_job_fingerprint",
     )
+    initial_trainer_deployment_identity = (
+        worker.verified_trainer_deployment_identity()
+    )
+    if type(initial_trainer_deployment_identity) is not ArtifactIdentity:
+        raise TypeError("worker trainer deployment identity must be exact ArtifactIdentity")
 
     control_reads = 0
 
@@ -995,6 +1020,13 @@ def run_physical_training_pilot(
         initial_trainer_job_fingerprint,
     ):
         _fail("trainer protocol job identity changed across restart")
+    resumed_trainer_deployment_identity = (
+        resumed_worker.verified_trainer_deployment_identity()
+    )
+    if type(resumed_trainer_deployment_identity) is not ArtifactIdentity:
+        raise TypeError("worker trainer deployment identity must be exact ArtifactIdentity")
+    if resumed_trainer_deployment_identity != initial_trainer_deployment_identity:
+        _fail("verified trainer deployment identity changed across restart")
 
     restart_probe = resumed_runtime.run(
         canonical_spec,
@@ -1031,6 +1063,7 @@ def run_physical_training_pilot(
         restart_probe=restart_probe,
         completed=completed,
         trainer_job_fingerprint=resumed_trainer_job_fingerprint,
+        trainer_deployment_identity=resumed_trainer_deployment_identity,
         candidate_path=candidate_path,
         candidate_descriptor=candidate_descriptor,
         candidate_root=candidate_root,
