@@ -89,6 +89,7 @@ def _champion_fixture(
         challenger_sha256=_sha(b"trained-candidate"),
         candidate_artifact_ref="models/candidate/job-1",
         frozen_package_sha256=_sha(b"frozen-package"),
+        scale_authorization_sha256=_sha(b"scale-authorization"),
         execution_plan_sha256=_sha(b"training-execution-plan"),
         evaluation_set_sha256=_HELD_OUT_SHA256,
         base_descriptor_digest=descriptor.descriptor_digest,

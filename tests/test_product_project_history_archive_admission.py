@@ -162,3 +162,37 @@ def test_build_rejects_nonfinite_unknown_audit_payload(tmp_path) -> None:
 
     with pytest.raises(ProductProjectError, match="durable JSON column: payload_json"):
         service.build("project-1")
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        b"not-json",
+        ("tuple",),
+        {"set"},
+    ),
+)
+def test_build_shape_rejects_values_strict_verifier_cannot_admit(value) -> None:
+    with pytest.raises(
+        ProductProjectError,
+        match="(?:non-finite JSON number|unsupported JSON value)",
+    ):
+        archive_module._validate_json_shape(
+            {"value": value},
+            label="ProductProject history archive payload",
+        )
+
+
+class _BehavioralString(str):
+    pass
+
+
+def test_build_shape_rejects_behavioral_json_object_keys() -> None:
+    with pytest.raises(ProductProjectError, match="non-text JSON object key"):
+        archive_module._validate_json_shape(
+            {_BehavioralString("key"): "value"},
+            label="ProductProject history archive payload",
+        )

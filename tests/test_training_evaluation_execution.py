@@ -42,6 +42,7 @@ _CHALLENGER_SHA256 = _sha(b"trained-challenger")
 _ATTESTOR_SHA256 = _sha(b"attestor-code")
 _ATTESTOR_ID = "test-loaded-model-attestor"
 _DESCRIPTOR_SHA256 = _sha(b"descriptor")
+_PROVIDER_MANIFEST_SHA256 = _sha(b"provider-manifest")
 _REGISTRY_KEY = _sha(b"registry")
 
 
@@ -84,6 +85,7 @@ def _binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBinding:
         challenger_sha256=_CHALLENGER_SHA256,
         candidate_artifact_ref="models/challenger",
         frozen_package_sha256=_sha(b"package"),
+        scale_authorization_sha256=_sha(b"scale-authorization"),
         execution_plan_sha256=_sha(b"training-execution-plan"),
         evaluation_set_sha256=evaluation_set.content_sha256,
         base_descriptor_digest=_sha(b"base-descriptor"),
@@ -111,8 +113,14 @@ def _challenger() -> ModelCandidate:
 
 
 class _AttestedEffectPort:
-    def __init__(self, *, mode: str = "valid") -> None:
+    def __init__(
+        self,
+        *,
+        mode: str = "valid",
+        provider_manifest_sha256: str | None = None,
+    ) -> None:
         self.mode = mode
+        self.provider_manifest_sha256 = provider_manifest_sha256
         self.calls = 0
 
     async def complete_attested(
@@ -133,6 +141,11 @@ class _AttestedEffectPort:
             raise RuntimeError("raw provider secret must not escape")
         if self.mode == "mutate-effect-request":
             object.__setattr__(request, "request_id", "substituted-request")
+        provider_manifest_sha256 = self.provider_manifest_sha256
+        if self.mode == "changing-manifest":
+            provider_manifest_sha256 = _sha(
+                f"provider-manifest-{self.calls}".encode("utf-8")
+            )
         attestation = LoadedModelArtifactAttestation(
             request_id=request.request_id,
             binding_sha256=binding.binding_sha256,
@@ -142,6 +155,7 @@ class _AttestedEffectPort:
             descriptor_digest=binding.descriptor_digest,
             attestor_id=_ATTESTOR_ID,
             attestor_sha256=_ATTESTOR_SHA256,
+            provider_manifest_sha256=provider_manifest_sha256,
         )
         if self.mode == "wrong-artifact":
             attestation = replace(
@@ -208,6 +222,41 @@ async def test_complete_attested_challenger_benchmark_emits_bound_evidence() -> 
     assert len(receipts[0]["receipt_sha256"]) == 64
     assert len(result.evidence_sha256) == 64
     assert result.revalidated().evidence_sha256 == result.evidence_sha256
+    assert result.provider_manifest_sha256 is None
+    assert "provider_manifest_sha256" not in result.evidence_payload()
+
+
+@pytest.mark.asyncio
+async def test_benchmark_preserves_stable_provider_manifest_in_receipts() -> None:
+    result = await _run(
+        _AttestedEffectPort(
+            provider_manifest_sha256=_PROVIDER_MANIFEST_SHA256,
+        )
+    )
+
+    assert result.provider_manifest_sha256 == _PROVIDER_MANIFEST_SHA256
+    assert all(
+        receipt.provider_manifest_sha256 == _PROVIDER_MANIFEST_SHA256
+        for receipt in result.case_receipts
+    )
+    payload = result.evidence_payload()
+    assert payload["provider_manifest_sha256"] == _PROVIDER_MANIFEST_SHA256
+    receipts = payload["case_receipts"]
+    assert all(
+        receipt["provider_manifest_sha256"] == _PROVIDER_MANIFEST_SHA256
+        for receipt in receipts
+    )
+
+
+@pytest.mark.asyncio
+async def test_benchmark_rejects_provider_manifest_change_between_cases() -> None:
+    port = _AttestedEffectPort(mode="changing-manifest")
+
+    with pytest.raises(TrainingEvaluationExecutionError) as exc_info:
+        await _run(port)
+
+    assert port.calls == 2
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 @pytest.mark.asyncio

@@ -19,7 +19,19 @@ from nika_core.artifacts import (
     ArtifactRegistryError,
     ArtifactVerificationState,
 )
-from nika_core.training_materials import ResolvedTrainingPackage, TrainingMaterialResolutionError
+from nika_core.process_containment import (
+    ProcessContainmentError,
+    WindowsJob,
+    process_group_popen_options,
+    terminate_process_tree,
+)
+from nika_core.training_materials import (
+    ResolvedTrainingMaterial,
+    ResolvedTrainingPackage,
+    TrainingMaterialEvidence,
+    TrainingMaterialResolutionError,
+    TrainingMaterialSetEvidence,
+)
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
@@ -28,7 +40,8 @@ from nika_core.training_runtime import (
     TrainingWorkerFailureEffect,
 )
 
-_PROTOCOL_VERSION = 2
+_PROTOCOL_VERSION = 3
+_MATERIAL_ATTESTATION_DOMAIN = b"nika-training-consumed-materials-v1\x00"
 _RESUME_ENVELOPE_KEY = "_nika_subprocess"
 _DEFAULT_TIMEOUT_SECONDS = 300.0
 _DEFAULT_MAX_REQUEST_BYTES = 64 * 1024
@@ -374,6 +387,7 @@ def _job_identity(
         "owner_id": spec.owner_id,
         "project_id": spec.project_id,
         "resource_scope": spec.resource_scope,
+        "scale_authorization_sha256": spec.scale_authorization_sha256,
         "task_id": spec.task_id,
         "training_material_sha256": spec.training_material_sha256,
     }
@@ -426,7 +440,7 @@ def _job_fingerprint(
         label="training_job_identity",
         effect=TrainingWorkerFailureEffect.NO_EFFECT,
     )
-    return hashlib.sha256(b"nika-training-job-v3\x00" + identity).hexdigest()
+    return hashlib.sha256(b"nika-training-job-v4\x00" + identity).hexdigest()
 
 
 def _step_id(job_fingerprint: str, trainer_sha256: str, step_index: int) -> str:
@@ -461,6 +475,7 @@ def _snapshot_spec(spec: TrainingJobSpec) -> TrainingJobSpec:
             ),
             frozen_package_sha256=spec.frozen_package_sha256,
             training_material_sha256=spec.training_material_sha256,
+            scale_authorization_sha256=spec.scale_authorization_sha256,
             candidate_artifact_ref=spec.candidate_artifact_ref,
             max_steps=spec.max_steps,
             resource_scope=spec.resource_scope,
@@ -468,6 +483,100 @@ def _snapshot_spec(spec: TrainingJobSpec) -> TrainingJobSpec:
     except (AttributeError, TypeError, ValueError) as exc:
         raise _error(
             "training_spec_invalid",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        ) from exc
+
+
+def _snapshot_training_materials(
+    training_materials: ResolvedTrainingPackage,
+) -> ResolvedTrainingPackage:
+    if type(training_materials) is not ResolvedTrainingPackage:
+        raise _error(
+            "training_materials_invalid_type",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        )
+    try:
+        evidence = training_materials.evidence
+        if type(evidence) is not TrainingMaterialSetEvidence:
+            raise TypeError("evidence must be an exact TrainingMaterialSetEvidence")
+        materials = training_materials.materials
+        if type(materials) is not tuple or not materials:
+            raise TypeError("materials must be a non-empty immutable tuple")
+        if type(evidence.materials) is not tuple or not evidence.materials:
+            raise TypeError("evidence materials must be a non-empty immutable tuple")
+        if not all(
+            type(item) is TrainingMaterialEvidence for item in evidence.materials
+        ):
+            raise TypeError("evidence materials must be exact TrainingMaterialEvidence values")
+
+        detached_evidence_items = tuple(
+            TrainingMaterialEvidence(
+                split=item.split,
+                artifact_sha256=item.artifact_sha256,
+                provenance_sha256=item.provenance_sha256,
+                license_evidence_sha256=item.license_evidence_sha256,
+                record_count=item.record_count,
+                byte_count=item.byte_count,
+            )
+            for item in evidence.materials
+        )
+        detached_evidence = TrainingMaterialSetEvidence(
+            workspace_sha256=evidence.workspace_sha256,
+            package_id=evidence.package_id,
+            package_version=evidence.package_version,
+            package_schema_version=evidence.package_schema_version,
+            base_artifact_sha256=evidence.base_artifact_sha256,
+            selection_policy_sha256=evidence.selection_policy_sha256,
+            verification_sha256=evidence.verification_sha256,
+            evaluation_set_sha256=evidence.evaluation_set_sha256,
+            candidate_dataset_sha256=evidence.candidate_dataset_sha256,
+            package_manifest_sha256=evidence.package_manifest_sha256,
+            materials=detached_evidence_items,
+            schema_version=evidence.schema_version,
+        )
+        if len(materials) != len(detached_evidence_items):
+            raise ValueError("resolved material count does not match package evidence")
+
+        detached_materials: list[ResolvedTrainingMaterial] = []
+        for material, authoritative_evidence in zip(
+            materials,
+            detached_evidence_items,
+            strict=True,
+        ):
+            if type(material) is not ResolvedTrainingMaterial:
+                raise TypeError("materials must contain exact ResolvedTrainingMaterial values")
+            live_evidence = material.evidence
+            if type(live_evidence) is not TrainingMaterialEvidence:
+                raise TypeError("material evidence must be exact TrainingMaterialEvidence")
+            detached_live_evidence = TrainingMaterialEvidence(
+                split=live_evidence.split,
+                artifact_sha256=live_evidence.artifact_sha256,
+                provenance_sha256=live_evidence.provenance_sha256,
+                license_evidence_sha256=live_evidence.license_evidence_sha256,
+                record_count=live_evidence.record_count,
+                byte_count=live_evidence.byte_count,
+            )
+            if detached_live_evidence != authoritative_evidence:
+                raise ValueError("resolved material evidence diverges from package evidence")
+            detached_materials.append(
+                ResolvedTrainingMaterial(
+                    evidence=authoritative_evidence,
+                    path=material.path,
+                )
+            )
+
+        return ResolvedTrainingPackage(
+            evidence=detached_evidence,
+            materials=tuple(detached_materials),
+        )
+    except TrainingMaterialResolutionError as exc:
+        raise _error(
+            "training_material_verification_failed",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        ) from exc
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise _error(
+            "training_materials_invalid",
             effect=TrainingWorkerFailureEffect.NO_EFFECT,
         ) from exc
 
@@ -495,12 +604,36 @@ def _materials_match_spec(
         return False
 
 
+def _consumed_materials_sha256(
+    training_materials: ResolvedTrainingPackage,
+) -> str:
+    observations = [
+        {
+            "artifact_sha256": material.evidence.artifact_sha256,
+            "byte_count": material.evidence.byte_count,
+            "split": material.evidence.split.value,
+        }
+        for material in training_materials.materials
+    ]
+    encoded = json.dumps(
+        observations,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(_MATERIAL_ATTESTATION_DOMAIN + encoded).hexdigest()
+
+
 def _training_material_request(
     training_materials: ResolvedTrainingPackage,
+    *,
+    required_consumed_materials_sha256: str,
 ) -> dict[str, object]:
     return {
         "base_artifact_sha256": training_materials.evidence.base_artifact_sha256,
         "package_manifest_sha256": training_materials.evidence.package_manifest_sha256,
+        "required_consumed_materials_sha256": required_consumed_materials_sha256,
         "training_material_sha256": training_materials.training_material_sha256,
         "materials": [
             {
@@ -520,9 +653,14 @@ class SubprocessTrainingWorker:
     Durable resume state binds the exact command vector, Registry-bound command artifacts,
     explicit sterile environment, trainer digest and frozen/material job identities. Absolute
     command-file arguments must have Artifact Registry authority; relative path arguments are
-    forbidden. Physical training
-    paths remain transient request data only. Immediately before spawn, the canonical Registry
-    verifies every bound command artifact and ResolvedTrainingPackage re-binds all input bytes.
+    forbidden. Physical training paths remain transient request data only. Immediately before
+    spawn, the canonical Registry verifies every bound command artifact and
+    ResolvedTrainingPackage re-binds all input bytes. Protocol v3 additionally requires the
+    exact Registry-bound trainer to attest the digest of the bytes it actually consumed. The
+    trainer must only return that attestation after binding its own consumed byte streams to
+    the requested material paths; echoing the requested digest without consumption verification
+    violates the trainer protocol. A mismatched or missing attestation is an UNKNOWN effect and
+    no step result or candidate evidence is accepted.
     """
 
     def __init__(
@@ -589,12 +727,8 @@ class SubprocessTrainingWorker:
             raise _error("step_index_out_of_bounds", effect=TrainingWorkerFailureEffect.NO_EFFECT)
         if type(resume_state) is not dict:
             raise _error("resume_state_invalid_type", effect=TrainingWorkerFailureEffect.NO_EFFECT)
-        if type(training_materials) is not ResolvedTrainingPackage:
-            raise _error(
-                "training_materials_invalid_type",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            )
-        if not _materials_match_spec(canonical_spec, training_materials):
+        canonical_materials = _snapshot_training_materials(training_materials)
+        if not _materials_match_spec(canonical_spec, canonical_materials):
             raise _error(
                 "training_material_identity_mismatch",
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
@@ -623,11 +757,15 @@ class SubprocessTrainingWorker:
             command_sha256=self._command_sha256,
             execution_plan_sha256=self._execution_plan_sha256,
         )
+        required_consumed_materials_sha256 = _consumed_materials_sha256(
+            canonical_materials
+        )
         trainer_state, previous_step_id = self._unwrap_resume_state(
             resume_state=resume_state,
             job_fingerprint=job_fingerprint,
             command_sha256=self._command_sha256,
             trainer_sha256=trainer_sha256,
+            consumed_materials_sha256=required_consumed_materials_sha256,
             step_index=step_index,
         )
         current_step_id = _step_id(job_fingerprint, trainer_sha256, step_index)
@@ -650,7 +788,10 @@ class SubprocessTrainingWorker:
             "step_index": step_index,
             "trainer_artifact_id": trainer_record.artifact_id,
             "trainer_sha256": trainer_sha256,
-            "training_materials": _training_material_request(training_materials),
+            "training_materials": _training_material_request(
+                canonical_materials,
+                required_consumed_materials_sha256=required_consumed_materials_sha256,
+            ),
         }
         request_bytes = _canonical_json_bytes(
             request,
@@ -661,7 +802,7 @@ class SubprocessTrainingWorker:
 
         self._verify_command_artifacts(command_records)
         try:
-            training_materials.reverify()
+            canonical_materials.reverify()
         except TrainingMaterialResolutionError as exc:
             raise _error(
                 "training_material_verification_failed",
@@ -671,19 +812,26 @@ class SubprocessTrainingWorker:
         stdout = self._execute(
             request_bytes + b"\n",
             expected_command_records=command_records,
-            expected_training_materials=training_materials,
+            expected_training_materials=canonical_materials,
         )
-        response = self._parse_response(stdout, expected_step_id=current_step_id)
+        response = self._parse_response(
+            stdout,
+            expected_step_id=current_step_id,
+            expected_consumed_materials_sha256=required_consumed_materials_sha256,
+        )
         completed = response["completed"]
         candidate_sha256 = response["candidate_sha256"]
+        consumed_materials_sha256 = response["consumed_materials_sha256"]
         trainer_resume_state = response["resume_state"]
         assert type(completed) is bool
         assert candidate_sha256 is None or type(candidate_sha256) is str
+        assert type(consumed_materials_sha256) is str
         assert type(trainer_resume_state) is dict
 
         wrapped_resume_state = {
             _RESUME_ENVELOPE_KEY: {
                 "command_sha256": self._command_sha256,
+                "consumed_materials_sha256": consumed_materials_sha256,
                 "job_fingerprint": job_fingerprint,
                 "last_step_id": current_step_id,
                 "protocol_version": _PROTOCOL_VERSION,
@@ -787,6 +935,7 @@ class SubprocessTrainingWorker:
         job_fingerprint: str,
         command_sha256: str,
         trainer_sha256: str,
+        consumed_materials_sha256: str,
         step_index: int,
     ) -> tuple[dict[str, object], str | None]:
         _canonical_json_bytes(
@@ -816,6 +965,7 @@ class SubprocessTrainingWorker:
             )
         expected_keys = {
             "command_sha256",
+            "consumed_materials_sha256",
             "job_fingerprint",
             "last_step_id",
             "protocol_version",
@@ -839,6 +989,11 @@ class SubprocessTrainingWorker:
         if envelope["command_sha256"] != command_sha256:
             raise _error(
                 "resume_state_command_mismatch",
+                effect=TrainingWorkerFailureEffect.NO_EFFECT,
+            )
+        if envelope["consumed_materials_sha256"] != consumed_materials_sha256:
+            raise _error(
+                "resume_state_material_attestation_mismatch",
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             )
         if envelope["job_fingerprint"] != job_fingerprint:
@@ -872,15 +1027,6 @@ class SubprocessTrainingWorker:
         return trainer_state, expected_previous_step_id
 
     @staticmethod
-    def _kill_process(process: subprocess.Popen[bytes]) -> None:
-        if process.poll() is not None:
-            return
-        try:
-            process.kill()
-        except OSError:
-            return
-
-    @staticmethod
     def _close_pipe(pipe: object) -> None:
         try:
             pipe.close()  # type: ignore[attr-defined]
@@ -902,6 +1048,7 @@ class SubprocessTrainingWorker:
         expected_training_materials: ResolvedTrainingPackage,
     ) -> bytes:
         deadline = time.monotonic() + self._timeout_seconds
+        creationflags, start_new_session = process_group_popen_options()
         try:
             process = subprocess.Popen(
                 self._command,
@@ -910,6 +1057,8 @@ class SubprocessTrainingWorker:
                 stdin=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
+                creationflags=creationflags,
+                start_new_session=start_new_session,
             )
         except FileNotFoundError as exc:
             raise _error(
@@ -927,8 +1076,38 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             ) from exc
 
+        with WindowsJob() as job:
+            if os.name == "nt":
+                try:
+                    job.assign(int(process._handle))  # type: ignore[attr-defined]
+                except ProcessContainmentError as exc:
+                    terminate_process_tree(process, job)
+                    self._reap_process(process)
+                    raise _error(
+                        "training_subprocess_containment_failed",
+                        effect=TrainingWorkerFailureEffect.UNKNOWN,
+                    ) from exc
+            return self._execute_started_process(
+                process,
+                job,
+                request_bytes,
+                deadline=deadline,
+                expected_command_records=expected_command_records,
+                expected_training_materials=expected_training_materials,
+            )
+
+    def _execute_started_process(
+        self,
+        process: subprocess.Popen[bytes],
+        job: WindowsJob,
+        request_bytes: bytes,
+        *,
+        deadline: float,
+        expected_command_records: Mapping[int, ArtifactRecord],
+        expected_training_materials: ResolvedTrainingPackage,
+    ) -> bytes:
         if process.stdin is None or process.stdout is None:
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             self._reap_process(process)
             raise _error(
                 "training_subprocess_streams_unavailable",
@@ -940,7 +1119,7 @@ class SubprocessTrainingWorker:
         except TrainingSubprocessError as exc:
             self._close_pipe(process.stdin)
             self._close_pipe(process.stdout)
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             self._reap_process(process)
             raise _error(
                 "command_artifact_changed_after_process_start",
@@ -952,7 +1131,7 @@ class SubprocessTrainingWorker:
         except TrainingMaterialResolutionError as exc:
             self._close_pipe(process.stdin)
             self._close_pipe(process.stdout)
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             self._reap_process(process)
             raise _error(
                 "training_material_changed_after_process_start",
@@ -963,7 +1142,7 @@ class SubprocessTrainingWorker:
         if remaining_timeout <= 0:
             self._close_pipe(process.stdin)
             self._close_pipe(process.stdout)
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             self._reap_process(process)
             raise _error(
                 "training_subprocess_timeout",
@@ -983,7 +1162,7 @@ class SubprocessTrainingWorker:
                     remaining = self._max_response_bytes + 1 - len(captured)
                     if remaining <= 0:
                         overflow.set()
-                        self._kill_process(process)
+                        terminate_process_tree(process, job)
                         return
                     chunk = stdout.read(min(_READ_CHUNK_BYTES, remaining))
                     if not chunk:
@@ -991,11 +1170,11 @@ class SubprocessTrainingWorker:
                     captured.extend(chunk)
                     if len(captured) > self._max_response_bytes:
                         overflow.set()
-                        self._kill_process(process)
+                        terminate_process_tree(process, job)
                         return
             except (OSError, ValueError):
                 read_failed.set()
-                self._kill_process(process)
+                terminate_process_tree(process, job)
 
         def write_stdin() -> None:
             try:
@@ -1012,15 +1191,18 @@ class SubprocessTrainingWorker:
         writer.start()
 
         timed_out: subprocess.TimeoutExpired | None = None
+        containment_established = True
         try:
             returncode = process.wait(timeout=remaining_timeout)
         except subprocess.TimeoutExpired as exc:
             timed_out = exc
-            self._kill_process(process)
+            terminate_process_tree(process, job)
             try:
                 returncode = process.wait(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
             except subprocess.TimeoutExpired:
                 returncode = process.returncode
+        else:
+            containment_established = terminate_process_tree(process, job)
 
         reader.join(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
         writer.join(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
@@ -1035,40 +1217,56 @@ class SubprocessTrainingWorker:
         self._close_pipe(stdout)
 
         if timed_out is not None:
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_timeout",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             ) from timed_out
         if reader.is_alive() or writer.is_alive():
-            self._kill_process(process)
+            terminate_process_tree(process, job)
+            self._reap_process(process)
             raise _error(
                 "training_subprocess_streams_stuck",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if overflow.is_set():
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_response_too_large",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if read_failed.is_set():
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_response_read_failed",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if returncode != 0:
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_nonzero_exit",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if write_failed.is_set():
+            terminate_process_tree(process, job)
             raise _error(
                 "training_subprocess_request_write_failed",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
+        if not containment_established:
+            raise _error(
+                "training_subprocess_containment_cleanup_failed",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
+
         return bytes(captured)
 
     def _parse_response(
-        self, raw_response: bytes, *, expected_step_id: str
+        self,
+        raw_response: bytes,
+        *,
+        expected_step_id: str,
+        expected_consumed_materials_sha256: str,
     ) -> dict[str, object]:
         try:
             text = raw_response.decode("utf-8", errors="strict")
@@ -1091,6 +1289,7 @@ class SubprocessTrainingWorker:
         expected_keys = {
             "candidate_sha256",
             "completed",
+            "consumed_materials_sha256",
             "protocol_version",
             "resume_state",
             "step_id",
@@ -1111,6 +1310,24 @@ class SubprocessTrainingWorker:
         if type(response["step_id"]) is not str or response["step_id"] != expected_step_id:
             raise _error(
                 "training_subprocess_wrong_step_identity",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
+        try:
+            consumed_materials_sha256 = _validate_sha256(
+                response["consumed_materials_sha256"],
+                name="consumed_materials_sha256",
+            )
+        except ValueError as exc:
+            raise _error(
+                "training_subprocess_invalid_material_attestation",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            ) from exc
+        if not hmac.compare_digest(
+            consumed_materials_sha256,
+            expected_consumed_materials_sha256,
+        ):
+            raise _error(
+                "training_subprocess_material_attestation_mismatch",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if type(response["completed"]) is not bool:

@@ -5,6 +5,7 @@ import hmac
 import json
 import re
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from nika_core.kernel.checkpoint import Checkpoint, CheckpointService
 from nika_core.resources.manager import ResourceManager
@@ -20,8 +21,12 @@ from nika_core.training_runtime.contracts import (
     TrainingWorkerPort,
 )
 
-_CHECKPOINT_PREFIX = "training_runtime/v3/"
-_CHECKPOINT_SCHEMA_VERSION = 3
+if TYPE_CHECKING:
+    from nika_core.training_scale import TrainingScaleAuthorization
+
+_CHECKPOINT_PREFIX = "training_runtime/v4/"
+_LEGACY_CHECKPOINT_PREFIXES = ("training_runtime/v3/",)
+_CHECKPOINT_SCHEMA_VERSION = 4
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TERMINAL_STATES = {
     TrainingRunState.COMPLETED,
@@ -62,13 +67,14 @@ def training_job_fingerprint(
         "base_sha256": spec.base_artifact.sha256,
         "frozen_package_sha256": spec.frozen_package_sha256,
         "training_material_sha256": spec.training_material_sha256,
+        "scale_authorization_sha256": spec.scale_authorization_sha256,
         "execution_plan_sha256": plan_sha256,
         "candidate_artifact_ref": spec.candidate_artifact_ref,
         "max_steps": spec.max_steps,
         "resource_scope": spec.resource_scope,
     }
     body = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(b"nika-training-runtime-job-v4\x00" + body.encode()).hexdigest()
+    return hashlib.sha256(b"nika-training-runtime-job-v5\x00" + body.encode()).hexdigest()
 
 
 def _worker_execution_plan_sha256(worker: TrainingWorkerPort) -> str:
@@ -140,10 +146,22 @@ class TrainingRuntime:
         spec: TrainingJobSpec,
         worker: TrainingWorkerPort,
         *,
+        scale_authorization: TrainingScaleAuthorization,
         control: Callable[[], TrainingControl] | None = None,
     ) -> TrainingRunEvidence:
         control = control or (lambda: TrainingControl.CONTINUE)
         execution_plan_sha256 = _worker_execution_plan_sha256(worker)
+        from nika_core.training_scale import TrainingScaleAuthorization
+
+        if type(scale_authorization) is not TrainingScaleAuthorization:
+            raise TypeError(
+                "scale_authorization must be an exact TrainingScaleAuthorization"
+            )
+        scale_authorization.verify_for_runtime(
+            spec=spec,
+            material_evidence=self._training_materials.evidence,
+            execution_plan_sha256=execution_plan_sha256,
+        )
         fingerprint = training_job_fingerprint(
             spec,
             execution_plan_sha256=execution_plan_sha256,
@@ -243,6 +261,7 @@ class TrainingRuntime:
                 base_artifact=spec.base_artifact,
                 frozen_package_sha256=spec.frozen_package_sha256,
                 training_material_sha256=spec.training_material_sha256,
+                scale_authorization_sha256=spec.scale_authorization_sha256,
                 execution_plan_sha256=execution_plan_sha256,
                 job_fingerprint=fingerprint,
                 candidate_artifact_ref=spec.candidate_artifact_ref,
@@ -293,6 +312,33 @@ class TrainingRuntime:
                         candidate_sha256=candidate_sha256,
                         checkpoint=saved,
                         reason="cancelled",
+                    )
+
+                resource_decision = self._resources.revalidate(
+                    scope=spec.resource_scope,
+                    owner_id=spec.owner_id,
+                    request_id=spec.job_id,
+                )
+                if not resource_decision.granted:
+                    resource_reason = f"resource_revalidation:{resource_decision.reason}"
+                    saved = self._save(
+                        spec,
+                        fingerprint=fingerprint,
+                        state=TrainingRunState.PAUSED,
+                        next_step=step_index,
+                        resume_state=resume_state,
+                        candidate_sha256=candidate_sha256,
+                        reason=resource_reason,
+                    )
+                    return self._evidence(
+                        spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
+                        state=TrainingRunState.PAUSED,
+                        next_step=step_index,
+                        candidate_sha256=candidate_sha256,
+                        checkpoint=saved,
+                        reason=resource_reason,
                     )
 
                 self._save(
@@ -512,6 +558,7 @@ class TrainingRuntime:
             base_artifact=spec.base_artifact,
             frozen_package_sha256=spec.frozen_package_sha256,
             training_material_sha256=spec.training_material_sha256,
+            scale_authorization_sha256=spec.scale_authorization_sha256,
             execution_plan_sha256=execution_plan_sha256,
             job_fingerprint=job_fingerprint,
             candidate_artifact_ref=spec.candidate_artifact_ref,
@@ -537,6 +584,7 @@ class TrainingRuntime:
             "job_fingerprint": fingerprint,
             "frozen_package_sha256": spec.frozen_package_sha256,
             "training_material_sha256": spec.training_material_sha256,
+            "scale_authorization_sha256": spec.scale_authorization_sha256,
             "next_step": next_step,
             "resume_state": resume_state,
             "candidate_artifact_ref": spec.candidate_artifact_ref,
@@ -555,6 +603,13 @@ class TrainingRuntime:
         if checkpoint is None:
             return TrainingRunState.RUNNING, 0, {}, None, None
         if not checkpoint.stage.startswith(_CHECKPOINT_PREFIX):
+            if any(
+                checkpoint.stage.startswith(prefix)
+                for prefix in _LEGACY_CHECKPOINT_PREFIXES
+            ):
+                raise TrainingCheckpointError(
+                    "legacy training checkpoint predates scale authorization"
+                )
             raise TrainingCheckpointError(
                 "latest task checkpoint is not training-runtime state; "
                 "use a dedicated training task"
@@ -579,6 +634,11 @@ class TrainingRuntime:
             raise TrainingCheckpointError("training frozen-package identity mismatch")
         if payload.get("training_material_sha256") != spec.training_material_sha256:
             raise TrainingCheckpointError("training material identity mismatch")
+        if (
+            payload.get("scale_authorization_sha256")
+            != spec.scale_authorization_sha256
+        ):
+            raise TrainingCheckpointError("training scale authorization mismatch")
         if payload.get("candidate_artifact_ref") != spec.candidate_artifact_ref:
             raise TrainingCheckpointError("training candidate artifact identity mismatch")
 

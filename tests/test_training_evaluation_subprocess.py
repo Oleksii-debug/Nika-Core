@@ -34,6 +34,7 @@ def _sha(payload: bytes) -> str:
 
 
 _HELD_OUT_SHA256 = _sha(b"held-out")
+_PROVIDER_MANIFEST_SHA256 = _sha(b"ollama-provider-manifest")
 
 
 def _script(tmp_path: Path, body: str, *, name: str = "evaluator.py") -> Path:
@@ -75,6 +76,7 @@ def _binding(descriptor: ModelArtifactDescriptor) -> TrainingEvaluationBinding:
         challenger_sha256=descriptor.sha256,
         candidate_artifact_ref="models/candidate/job-1",
         frozen_package_sha256=_sha(b"package"),
+        scale_authorization_sha256=_sha(b"scale-authorization"),
         execution_plan_sha256=_sha(b"training-execution-plan"),
         evaluation_set_sha256=_HELD_OUT_SHA256,
         base_descriptor_digest=_sha(b"base-descriptor"),
@@ -112,9 +114,15 @@ def _success_script(
     size_expression: str = "len(candidate)",
     descriptor_expression: str = 'request["binding"]["descriptor_digest"]',
     total_tokens_expression: str = "5",
+    provider_manifest_expression: str | None = None,
     extra_prefix: str = "",
     name: str = "evaluator.py",
 ) -> Path:
+    provider_manifest_line = (
+        f'    "provider_manifest_sha256": {provider_manifest_expression},\n'
+        if provider_manifest_expression is not None
+        else ""
+    )
     return _script(
         tmp_path,
         f"""
@@ -136,7 +144,7 @@ response = {{
     "loaded_artifact_sha256": {digest_expression},
     "loaded_artifact_size_bytes": {size_expression},
     "descriptor_digest": {descriptor_expression},
-    "usage": {{
+{provider_manifest_line}    "usage": {{
         "input_tokens": 2,
         "output_tokens": 3,
         "total_tokens": {total_tokens_expression},
@@ -232,6 +240,61 @@ async def test_real_subprocess_hashes_candidate_in_same_effect_and_gateway_accep
     assert response.usage.input_tokens == 2
     assert response.usage.output_tokens == 3
     assert response.usage.total_tokens == 5
+
+
+@pytest.mark.asyncio
+async def test_same_effect_provider_manifest_is_carried_separately(
+    tmp_path: Path,
+) -> None:
+    script = _success_script(
+        tmp_path,
+        provider_manifest_expression=repr(_PROVIDER_MANIFEST_SHA256),
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert result.attestation.artifact_sha256 == descriptor.sha256
+    assert result.attestation.provider_manifest_sha256 == _PROVIDER_MANIFEST_SHA256
+    assert result.attestation.provider_manifest_sha256 != descriptor.sha256
+
+
+@pytest.mark.asyncio
+async def test_legacy_evaluator_response_keeps_provider_manifest_absent(
+    tmp_path: Path,
+) -> None:
+    script = _success_script(tmp_path)
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert result.attestation.provider_manifest_sha256 is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "manifest_expression",
+    (
+        repr("not-a-sha256"),
+        repr("A" * 64),
+        "None",
+    ),
+)
+async def test_invalid_provider_manifest_is_unknown_after_evaluator_effect(
+    tmp_path: Path,
+    manifest_expression: str,
+) -> None:
+    script = _success_script(
+        tmp_path,
+        provider_manifest_expression=manifest_expression,
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 @pytest.mark.asyncio
@@ -346,6 +409,42 @@ async def test_post_effect_identity_forgery_is_unknown(
 
 
 @pytest.mark.asyncio
+async def test_nonzero_evaluator_kills_descendant_before_inherited_stdout_eof(
+    tmp_path: Path,
+) -> None:
+    spawned = tmp_path / "nonzero-evaluator-descendant-spawned.txt"
+    survived = tmp_path / "nonzero-evaluator-descendant-survived.txt"
+    child_code = (
+        "import pathlib,sys,time; "
+        "time.sleep(1.5); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    script = _script(
+        tmp_path,
+        f"""
+import pathlib
+import subprocess
+import sys
+
+sys.stdin.buffer.read()
+subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(survived)!r}])
+pathlib.Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
+raise SystemExit(7)
+""".strip(),
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert spawned.exists(), "test did not prove that an evaluator descendant was started"
+    await asyncio.sleep(1.0)
+    assert not survived.exists(), "evaluator descendant escaped nonzero containment"
+
+
+@pytest.mark.asyncio
 async def test_malformed_json_is_unknown_after_process_start(tmp_path: Path) -> None:
     script = _script(
         tmp_path,
@@ -414,6 +513,102 @@ Path({str(marker)!r}).write_text("late-effect", encoding="utf-8")
     assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
     await asyncio.sleep(0.15)
     assert not marker.exists()
+
+
+@pytest.mark.asyncio
+async def test_timeout_kills_evaluator_descendant_process_tree(tmp_path: Path) -> None:
+    spawned = tmp_path / "evaluator-descendant-spawned.txt"
+    survived = tmp_path / "evaluator-descendant-survived.txt"
+    child_code = (
+        "import pathlib,sys,time; "
+        "time.sleep(1.5); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    script = _script(
+        tmp_path,
+        f"""
+import pathlib
+import subprocess
+import sys
+import time
+
+sys.stdin.buffer.read()
+time.sleep(0.2)
+subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(survived)!r}])
+pathlib.Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
+time.sleep(30)
+""".strip(),
+    )
+    adapter, _, _, descriptor = _adapter(
+        tmp_path,
+        script,
+        timeout_seconds=1.0,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert exc_info.value.code is ModelErrorCode.TIMEOUT
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert spawned.exists(), "test did not prove that an evaluator descendant was started"
+    await asyncio.sleep(1.0)
+    assert not survived.exists(), "evaluator descendant escaped timeout containment"
+
+
+@pytest.mark.asyncio
+async def test_success_does_not_leave_evaluator_descendant_running(tmp_path: Path) -> None:
+    spawned = tmp_path / "success-evaluator-descendant-spawned.txt"
+    survived = tmp_path / "success-evaluator-descendant-survived.txt"
+    child_code = (
+        "import pathlib,sys,time; "
+        "time.sleep(1.0); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    script = _success_script(
+        tmp_path,
+        extra_prefix=f"""
+import subprocess
+import time
+
+time.sleep(0.2)
+subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(survived)!r}])
+Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
+""".strip(),
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    result = await adapter.complete_attested(
+        _request(),
+        binding=_binding(descriptor),
+    )
+
+    assert result.response.text == "answer"
+    assert spawned.exists(), "test did not prove that an evaluator descendant was started"
+    await asyncio.sleep(1.2)
+    assert not survived.exists(), "evaluator descendant escaped successful containment"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cleanup-failure injection")
+async def test_success_fails_closed_when_evaluator_group_cleanup_is_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _success_script(tmp_path)
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+    monkeypatch.setattr(
+        "nika_core.training_evaluation_subprocess.terminate_process_group",
+        lambda pid: False,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(
+            _request(),
+            binding=_binding(descriptor),
+        )
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 @pytest.mark.asyncio
