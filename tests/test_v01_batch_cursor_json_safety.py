@@ -267,6 +267,7 @@ def test_non_object_carriers_fail_before_effect_completion_or_uncertainty(
     assert ledger.require(grant.operation_key).status is IdempotencyStatus.PENDING
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
 
+
 def _persisted_target_payload(
     *,
     payload: dict[str, object] | None = None,
