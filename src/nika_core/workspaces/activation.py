@@ -6,7 +6,11 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from nika_core.activation_authority import ActivationAuthorityPort, ActivationSubject
+from nika_core.activation_authority import (
+    ActivationAuthorityPort,
+    ActivationSubject,
+    canonical_approval_refs,
+)
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.plugins.sdk import PluginManifest
 from nika_core.workspaces.catalog import WorkspaceCatalog, WorkspaceManifest
@@ -162,6 +166,7 @@ class WorkspaceActivationRepository:
         *,
         approval_refs: tuple[str, ...] = (),
     ) -> StoredWorkspaceActivation:
+        approval_refs = canonical_approval_refs(approval_refs)
         generation = _exact_positive_int(
             generation,
             field="workspace activation generation",
