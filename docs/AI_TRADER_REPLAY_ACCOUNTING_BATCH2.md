@@ -64,11 +64,20 @@ Risk-generated approval IDs, ReplayBook internal order state and deterministic f
 bind that same full identity (fill IDs use its SHA-256 digest), so equal native IDs on
 different venues cannot alias approval, pending/terminal replay state or a simulated fill.
 
-Durable Trader schema v2 stores the venue ID/timezone and currency beside the native
-instrument ID and repeats the same fields in account-position evidence. An empty
-development v1 database can upgrade additively under one `BEGIN IMMEDIATE` writer
-transaction. A non-empty v1 database fails closed because its historical rows never
-recorded venue identity and Nika must not invent that missing authority.
+`OrderIntent` remains strategy proposal metadata. Executable submission identity is
+host-stamped in immutable `OrderAuthority(workspace_id, run_id, order_id, submitted_at,
+submitted_slice)`; risk approval, same-slice execution guards, replay order state and
+simulated fills use that authority instead of strategy-provided intent ID/time/slice.
+Pending risk from another workspace/run fails closed.
+
+Durable Trader schema v3 writes fills to `trading_research_run_fills` under composite
+`(workspace_id, run_id, fill_id)` authority and stores account snapshots independently
+per workspace/run. Venue/timezone/currency and host order ID remain explicit durable
+evidence. Empty development v1/v2 state can advance under one `BEGIN IMMEDIATE` writer
+transaction while the legacy tables remain inert. Non-empty v1/v2 fails closed because
+missing venue/run authority cannot be reconstructed honestly. Exact fill retries are
+idempotent only when every persisted identity/economic field matches; conflicting reuse
+of the same scoped fill ID fails closed.
 
 Limit-order simulation applies deterministic adverse slippage but caps the final
 paper fill at the legal limit: BUY fills never exceed the limit and SELL fills never
@@ -96,7 +105,7 @@ Focused reservation regressions additionally cover deterministic fee-induced lev
 
 - REUSE canonical `SQLiteStore`, `ExecutionPolicy`, `fee_for`, `apply_slippage`, `RiskApprovedOrder`, `AccountSnapshot` and Python `Decimal`/datetime primitives.
 - ADAPT the integrated Batch 1 market/causality contracts and the existing canonical RiskEngine so deterministic accepted-pending and candidate economics are projected before approval.
-- CUSTOM thin: `PendingRiskOrder` and small deterministic reservation helpers. No second risk/accounting engine and no new dependency.
+- CUSTOM thin: `OrderAuthority`, `PendingRiskOrder` and small deterministic identity/reservation helpers. No second runtime, risk/accounting engine, persistence store or new dependency.
 
 No pandas, NumPy, scikit-learn, Gymnasium, pyarrow, LEAN, Nautilus, Zipline, vectorbt, backtesting.py, QuantStats or broker SDK is added by this batch.
 
