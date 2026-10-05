@@ -102,7 +102,7 @@ class ResourceManager:
         budget = self.get_budget(scope=scope, owner_id=owner_id)
         try:
             snapshot = self._observer.snapshot()
-        except Exception:
+        except Exception:  # noqa: BLE001 - host observer is an untrusted boundary
             raise ResourceTelemetryError("resource telemetry unavailable") from None
         if not _valid_snapshot(snapshot):
             raise ResourceTelemetryError("resource telemetry invalid")
@@ -236,7 +236,7 @@ class ResourceManager:
 
             try:
                 snapshot = self._observer.snapshot()
-            except Exception:
+            except Exception:  # noqa: BLE001 - host observer is an untrusted boundary
                 return ResourceDecision(False, "invalid_observation", position)
             reason = _resource_pressure_reason(budget, snapshot)
             if reason is not None:
