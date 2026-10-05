@@ -216,7 +216,6 @@ def _verify_v3_schema(conn: sqlite3.Connection) -> None:
     fill_rows = conn.execute(
         "PRAGMA table_info(trading_research_run_fills)"
     ).fetchall()
-    fill_columns = {str(row["name"]) for row in fill_rows}
     required_fill = {
         "workspace_id",
         "run_id",
@@ -235,14 +234,41 @@ def _verify_v3_schema(conn: sqlite3.Connection) -> None:
         "filled_at",
         "filled_slice",
     }
-    if fill_columns != required_fill:
+    if _column_names(fill_rows) != required_fill:
         raise RuntimeError("invalid trading research run fill schema")
+    if _primary_key_columns(fill_rows) != ("workspace_id", "run_id", "fill_id"):
+        raise RuntimeError("invalid trading research run fill primary key")
+    if _not_null_columns(fill_rows) != required_fill:
+        raise RuntimeError("invalid nullable trading research run fill column")
+
     account_rows = conn.execute(
         "PRAGMA table_info(trading_research_run_account_state)"
     ).fetchall()
-    account_columns = {str(row["name"]) for row in account_rows}
-    if account_columns != {"workspace_id", "run_id", "payload", "last_fill_id"}:
+    required_account = {"workspace_id", "run_id", "payload", "last_fill_id"}
+    if _column_names(account_rows) != required_account:
         raise RuntimeError("invalid trading research run account schema")
+    if _primary_key_columns(account_rows) != ("workspace_id", "run_id"):
+        raise RuntimeError("invalid trading research run account primary key")
+    if _not_null_columns(account_rows) != required_account:
+        raise RuntimeError("invalid nullable trading research run account column")
+
+
+
+
+def _column_names(rows: list[sqlite3.Row]) -> set[str]:
+    return {str(row["name"]) for row in rows}
+
+
+def _primary_key_columns(rows: list[sqlite3.Row]) -> tuple[str, ...]:
+    keyed = sorted(
+        ((int(row["pk"]), str(row["name"])) for row in rows if int(row["pk"]) > 0),
+        key=lambda item: item[0],
+    )
+    return tuple(name for _, name in keyed)
+
+
+def _not_null_columns(rows: list[sqlite3.Row]) -> set[str]:
+    return {str(row["name"]) for row in rows if int(row["notnull"]) == 1}
 
 
 def _validate_scope(workspace_id: str, run_id: str) -> None:
