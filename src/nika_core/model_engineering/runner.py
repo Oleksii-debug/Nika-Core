@@ -339,6 +339,12 @@ class ModelBenchmarkRunner:
             raise ModelBenchmarkError("response provider_kind must be canonical")
         if type(response.usage) is not ModelUsage:
             raise ModelBenchmarkError("response usage must be an exact ModelUsage")
+        try:
+            response.text.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ModelBenchmarkError(
+                "successful benchmark response text must be valid UTF-8"
+            ) from exc
         if response.request_id != request.request_id:
             raise ModelBenchmarkIdentityError("response request identity mismatch")
         if response.provider_id != candidate.provider_id:
