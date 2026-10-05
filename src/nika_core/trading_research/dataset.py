@@ -107,9 +107,12 @@ class Dataset:
         events: Sequence[MarketEvent],
         provenance: Provenance,
     ) -> None:
-        ordered = tuple(sorted(events, key=event_sort_key))
+        # Capture the provider's sequence once: validation, hashes and replay must
+        # describe the same event snapshot even if its original container changes.
+        captured = tuple(events)
+        ordered = tuple(sorted(captured, key=event_sort_key))
         report = validate_events(ordered)
-        raw_hash = _digest(canonical_event_bytes(event) for event in events)
+        raw_hash = _digest(canonical_event_bytes(event) for event in captured)
         semantic_hash = _digest(semantic_event_bytes(event) for event in ordered)
         self._events = ordered
         self.validation = report
