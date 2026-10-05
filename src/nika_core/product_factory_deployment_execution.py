@@ -112,6 +112,9 @@ class DeploymentExecutionCoordinator:
     _credential_leases: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     def submit(self, spec: DeploymentExecutionSpec, *, now: datetime | None = None) -> DeploymentExecutionRecord:
+        if type(spec) is not DeploymentExecutionSpec:
+            raise DeploymentExecutionError("invalid deployment execution spec")
+        spec.__post_init__()
         existing = self._records.get(spec.operation_id)
         if existing is not None:
             if existing.spec != spec:
