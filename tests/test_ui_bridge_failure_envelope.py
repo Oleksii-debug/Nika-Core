@@ -152,7 +152,7 @@ def test_dispatch_rejects_non_mapping_payload_without_transport_escape(
 
     assert response["request_id"] == "invalid"
     assert response["status"] == "rejected"
-    assert response["message"].startswith("Invalid UI command:")
+    assert response["message"] == "Некоректна команда інтерфейсу."
 
 
 @pytest.mark.parametrize("request_id", [None, 7, "", "x" * 121])
