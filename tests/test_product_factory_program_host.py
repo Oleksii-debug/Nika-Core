@@ -2007,6 +2007,40 @@ def _seed_durable_result_pending_for_reconcile(store, binding, task_id, coordina
     return host, operation_key
 
 
+def test_restore_rejects_durable_result_without_idempotency_operation(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host, operation_key = _seed_durable_result_pending_for_reconcile(
+        store,
+        binding,
+        task_id,
+        coordinator,
+    )
+    with store.connection() as connection:
+        connection.execute(
+            "DELETE FROM idempotency_records WHERE operation_key = ?",
+            (operation_key,),
+        )
+
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="durable worker result is missing its idempotency operation",
+    ):
+        host.restore_latest(host_task_id=task_id, binding=binding)
+
+    checkpoint = ProductFactoryCheckpointHost(store).latest(
+        host_task_id=task_id,
+        project_id="project-1",
+    )
+    assert checkpoint is not None
+    durable = next(
+        record
+        for record in checkpoint.checkpoint.coordinator.records
+        if record.request.component_id == "component-0"
+    )
+    assert durable.state is WorkState.REVIEW_REQUIRED
+    assert IdempotencyLedger(store).get(operation_key) is None
+
+
 def test_reconcile_durable_results_preserves_concurrent_terminal_completion(tmp_path) -> None:
     store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
     host, operation_key = _seed_durable_result_pending_for_reconcile(
