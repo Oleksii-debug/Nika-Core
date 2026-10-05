@@ -355,7 +355,7 @@ def _canonical(payload: object) -> bytes:
 
 
 def _aware(value: datetime) -> datetime:
-    if not isinstance(value, datetime):
+    if type(value) is not datetime:
         raise ProductIncidentError("datetime must be a timezone-aware datetime")
     try:
         if value.tzinfo is None or value.utcoffset() is None:
