@@ -2221,9 +2221,9 @@ def _response(
 
 def main() -> int:
     try:
-        config = _read_config()
         request = _parse_request(_read_request())
         _verify_trainer_deployment_identity(request)
+        config = _read_config()
         consumed = _consume_materials(request, max_records=config.max_records)
         resume_state, candidate_sha256 = _train_one_step(request, config, consumed)
         result = _response(request, consumed, resume_state, candidate_sha256)
