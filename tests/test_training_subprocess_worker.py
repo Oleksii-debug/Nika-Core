@@ -526,7 +526,13 @@ sys.stdout.write(json.dumps(response))
 
     def mutating_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
         trainer.write_text(
-            f"""\nimport time\nfrom pathlib import Path\ntime.sleep(2)\nPath({str(marker)!r}).write_text(\"effect\", encoding=\"utf-8\")\n""".strip(),
+            f"""
+import time
+from pathlib import Path
+
+time.sleep(2)
+Path({str(marker)!r}).write_text("effect", encoding="utf-8")
+""".strip(),
             encoding="utf-8",
         )
         return real_popen(*args, **kwargs)  # type: ignore[arg-type]
