@@ -10,6 +10,7 @@ from threading import Barrier, Event
 
 import pytest
 
+import nika_core.memory.service as memory_service_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.memory import MemoryConflictError, MemoryScope, MemoryService
 
@@ -255,3 +256,187 @@ def test_stale_expiry_cleanup_cannot_delete_concurrent_renewal(tmp_path: Path) -
     durable = MemoryService(store).get(**_identity())
     assert durable == renewed
     assert durable is not None and durable.value == {"generation": "renewed"}
+
+
+class _PauseAfterCommitSQLiteStore(SQLiteStore):
+    def __init__(self, path: Path, *, committed: Event, release: Event) -> None:
+        super().__init__(path)
+        self._committed = committed
+        self._release = release
+        self._pause_next = True
+
+    @contextmanager
+    def connection(self) -> Iterator[sqlite3.Connection]:
+        with super().connection() as conn:
+            yield conn
+        if self._pause_next:
+            self._pause_next = False
+            self._committed.set()
+            if not self._release.wait(timeout=5):
+                raise AssertionError("writer A was not released after commit")
+
+
+def test_compare_and_put_returns_exact_committed_revision_after_later_overwrite(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    baseline_service = MemoryService(store)
+    baseline = baseline_service.compare_and_put(
+        **_identity(),
+        value={"writer": "baseline"},
+        expected_updated_at=None,
+    )
+
+    a_committed = Event()
+    release_a = Event()
+    writer_a = MemoryService(
+        _PauseAfterCommitSQLiteStore(
+            store.path,
+            committed=a_committed,
+            release=release_a,
+        )
+    )
+    writer_b = MemoryService(store)
+
+    def commit_a():
+        return writer_a.compare_and_put(
+            **_identity(),
+            value={"writer": "A"},
+            expected_updated_at=baseline.updated_at,
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future_a = pool.submit(commit_a)
+        assert a_committed.wait(timeout=5), "writer A did not commit"
+
+        observed_a = writer_b.get(**_identity())
+        assert observed_a is not None
+        assert observed_a.value == {"writer": "A"}
+        durable_b = writer_b.compare_and_put(
+            **_identity(),
+            value={"writer": "B"},
+            expected_updated_at=observed_a.updated_at,
+        )
+        release_a.set()
+        returned_a = future_a.result(timeout=5)
+
+    assert returned_a.value == {"writer": "A"}
+    assert returned_a.updated_at == observed_a.updated_at
+    assert durable_b.value == {"writer": "B"}
+    assert durable_b.updated_at > returned_a.updated_at
+    assert MemoryService(store).get(**_identity()) == durable_b
+
+
+class _GateBeforeImmediateConnection:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        reached: Event,
+        release: Event,
+    ) -> None:
+        self._conn = conn
+        self._reached = reached
+        self._release = release
+
+    def execute(
+        self,
+        sql: str,
+        parameters: tuple[object, ...] = (),
+    ) -> sqlite3.Cursor:
+        if sql.strip().upper() == "BEGIN IMMEDIATE":
+            self._reached.set()
+            if not self._release.wait(timeout=5):
+                raise AssertionError("unconditional writer was not released")
+        return self._conn.execute(sql, parameters)
+
+
+class _GateBeforeImmediateStore(SQLiteStore):
+    def __init__(
+        self,
+        path: Path,
+        *,
+        reached: Event,
+        release: Event,
+    ) -> None:
+        super().__init__(path)
+        self._reached = reached
+        self._release = release
+
+    @contextmanager
+    def connection(self) -> Iterator[_GateBeforeImmediateConnection]:
+        with super().connection() as conn:
+            yield _GateBeforeImmediateConnection(
+                conn,
+                self._reached,
+                self._release,
+            )
+
+
+class _FrozenDateTime(datetime):
+    fixed = datetime(2026, 10, 5, 7, 0, 0, tzinfo=UTC)
+
+    @classmethod
+    def now(cls, tz=None):  # type: ignore[no-untyped-def]
+        if tz is None:
+            return cls.fixed.replace(tzinfo=None)
+        return cls.fixed.astimezone(tz)
+
+
+def test_unconditional_put_serializes_revision_after_cas_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(memory_service_module, "datetime", _FrozenDateTime)
+
+    store = _store(tmp_path)
+    service = MemoryService(store)
+    baseline = service.compare_and_put(
+        **_identity(),
+        value={"writer": "baseline"},
+        expected_updated_at=None,
+    )
+
+    begin_reached = Event()
+    release_unconditional = Event()
+    unconditional = MemoryService(
+        _GateBeforeImmediateStore(
+            store.path,
+            reached=begin_reached,
+            release=release_unconditional,
+        )
+    )
+
+    def legacy_put():
+        return unconditional.put(
+            **_identity(),
+            value={"writer": "unconditional"},
+        )
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future_unconditional = pool.submit(legacy_put)
+        assert begin_reached.wait(timeout=5), (
+            "unconditional writer did not enter the shared write boundary"
+        )
+
+        winner = service.compare_and_put(
+            **_identity(),
+            value={"writer": "cas"},
+            expected_updated_at=baseline.updated_at,
+        )
+        assert winner.value == {"writer": "cas"}
+
+        release_unconditional.set()
+        legacy_result = future_unconditional.result(timeout=5)
+
+    final = MemoryService(store).get(**_identity())
+    assert final is not None
+    assert final.value == {"writer": "unconditional"}
+    assert legacy_result == final
+    assert final.updated_at > winner.updated_at
+
+    with pytest.raises(MemoryConflictError, match="revision changed"):
+        MemoryService(store).compare_and_put(
+            **_identity(),
+            value={"writer": "stale-caller"},
+            expected_updated_at=winner.updated_at,
+        )
