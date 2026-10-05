@@ -199,6 +199,10 @@ class MaintenanceEffectReservation:
             raise ProductOperationsError("maintenance effect reservation identity is invalid")
         if type(self.state) is not MaintenanceEffectState:
             raise ProductOperationsError("maintenance effect reservation state is invalid")
+        if self.created and self.state is not MaintenanceEffectState.PENDING:
+            raise ProductOperationsError(
+                "created maintenance effect reservation must be pending"
+            )
         if self.result is not None and type(self.result) is not MaintenanceResult:
             raise ProductOperationsError("maintenance effect reservation result is invalid")
         if self.state is MaintenanceEffectState.COMPLETED:
