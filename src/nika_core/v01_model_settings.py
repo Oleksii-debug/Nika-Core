@@ -52,7 +52,7 @@ from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
 _MAX_STORED_SELECTION_BYTES = 64 * 1024
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
 _ENV_CREDENTIAL_REF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")
@@ -83,14 +83,16 @@ _MIGRATIONS = {
             "base_descriptor_digest TEXT NOT NULL, "
             "challenger_artifact_sha256 TEXT NOT NULL, "
             "challenger_descriptor_digest TEXT NOT NULL, "
-            "activation_request_sha256 TEXT NOT NULL, "
-            "activation_attestation_sha256 TEXT NOT NULL, "
             "previous_selection_id TEXT NOT NULL, "
             "activated_selection_id TEXT NOT NULL, "
             "activated_revision INTEGER NOT NULL CHECK(activated_revision > 0), "
             "rollback_revision INTEGER, "
             "CHECK(rollback_revision IS NULL OR rollback_revision > activated_revision))"
         ),
+    ),
+    3: (
+        "ALTER TABLE v01_model_promotions ADD COLUMN activation_request_sha256 TEXT",
+        "ALTER TABLE v01_model_promotions ADD COLUMN activation_attestation_sha256 TEXT",
     ),
 }
 
@@ -109,8 +111,8 @@ class ModelPromotionReceipt:
     base_descriptor_digest: str
     challenger_artifact_sha256: str
     challenger_descriptor_digest: str
-    activation_request_sha256: str
-    activation_attestation_sha256: str
+    activation_request_sha256: str | None
+    activation_attestation_sha256: str | None
     previous_selection_id: str
     activated_selection_id: str
     activated_revision: int
@@ -124,12 +126,24 @@ class ModelPromotionReceipt:
             (self.base_descriptor_digest, "base_descriptor_digest"),
             (self.challenger_artifact_sha256, "challenger_artifact_sha256"),
             (self.challenger_descriptor_digest, "challenger_descriptor_digest"),
-            (self.activation_request_sha256, "activation_request_sha256"),
-            (self.activation_attestation_sha256, "activation_attestation_sha256"),
             (self.previous_selection_id, "previous_selection_id"),
             (self.activated_selection_id, "activated_selection_id"),
         ):
             if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        activation_proof = (
+            self.activation_request_sha256,
+            self.activation_attestation_sha256,
+        )
+        if (activation_proof[0] is None) != (activation_proof[1] is None):
+            raise ValueError("activation attestation evidence must be complete")
+        for value, name in (
+            (self.activation_request_sha256, "activation_request_sha256"),
+            (self.activation_attestation_sha256, "activation_attestation_sha256"),
+        ):
+            if value is not None and (
+                type(value) is not str or _SELECTION_ID.fullmatch(value) is None
+            ):
                 raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
         if (
             type(self.activated_revision) is not int
