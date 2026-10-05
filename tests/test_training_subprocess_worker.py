@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -551,6 +552,58 @@ Path({str(marker)!r}).write_text("effect", encoding="utf-8")
         )
 
     assert exc_info.value.code == "command_artifact_changed_after_process_start"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert not marker.exists()
+
+
+def test_post_spawn_verification_consumes_process_timeout_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "deadline-effect"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+Path({str(marker)!r}).write_text("effect", encoding="utf-8")
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer, timeout_seconds=0.05)
+    original_verify = worker._verify_command_artifacts
+    calls = 0
+
+    def delayed_verify(expected_records: object) -> None:
+        nonlocal calls
+        calls += 1
+        original_verify(expected_records)  # type: ignore[arg-type]
+        if calls == 2:
+            time.sleep(0.08)
+
+    monkeypatch.setattr(worker, "_verify_command_artifacts", delayed_verify)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert calls == 2
+    assert exc_info.value.code == "training_subprocess_timeout"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
     assert not marker.exists()
 
