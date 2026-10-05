@@ -90,6 +90,7 @@ def _report(
             candidate_id=candidate.candidate_id,
             case_id=case.case_id,
             evaluation_weight=float(case.weight),
+            pass_score=float(case.pass_score),
             score=score,
             passed=score >= case.pass_score,
             completion_succeeded=True,
