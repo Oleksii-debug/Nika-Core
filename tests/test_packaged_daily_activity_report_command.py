@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Mapping
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -187,6 +188,37 @@ def test_generic_report_command_remains_an_ordinary_agent_task(tmp_path: Path) -
     assert result.message == "ordinary-task"
     assert ordinary.calls == [payload]
     assert router.active_project_id is None
+
+
+def test_packaged_report_bounds_corrupt_durable_label_failure(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "corrupt report.db")
+    store.initialize()
+    inside = "2026-10-05T10:00:00+00:00"
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            (sqlite3.Binary(b"private-corrupt-label"), "test", "entity-1", "{}", inside),
+        )
+    ordinary = _OrdinaryHandler()
+    router = PackagedProductCommandRouter(
+        products=ProductProjectCommandService(ProductProjectRepository(store)),
+        ordinary_handler=ordinary,
+        activity_report_handler=lambda: _daily_activity_report_result(
+            DailyActivityReportService(store),
+            day_provider=lambda: date(2026, 10, 5),
+        ),
+    )
+
+    result = router.create({"command": "Покажи щоденний звіт активності"})
+
+    assert result.status == "failed"
+    assert result.focus_id == "logs-heading"
+    assert result.message == "Не вдалося сформувати щоденний звіт активності."
+    assert "private" not in result.message.casefold()
+    assert "corrupt" not in result.message.casefold()
+    assert ordinary.calls == []
+    assert _task_count(store) == 0
 
 
 def test_packaged_report_failure_is_bounded_and_does_not_expose_exception_detail() -> None:
