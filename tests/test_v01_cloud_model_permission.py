@@ -152,6 +152,41 @@ def test_cloud_task_without_private_data_permission_fails_before_prompt(
         assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 0
 
 
+def test_binding_failure_revokes_newly_minted_permission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+
+    def reject_binding(**_kwargs: object) -> None:
+        raise RuntimeError("simulated durable binding failure")
+
+    monkeypatch.setattr(service, "_bind_permission", reject_binding)
+
+    with pytest.raises(CloudModelPermissionDenied, match="зберегти дозвіл"):
+        service.admit_created_task(record)
+
+    with store.connection() as conn:
+        permissions = conn.execute(
+            "SELECT permission_id, revoked_at FROM standing_permissions"
+        ).fetchall()
+        binding_count = conn.execute(
+            "SELECT COUNT(*) FROM v01_cloud_model_permission_bindings"
+        ).fetchone()[0]
+
+    assert len(permissions) == 1
+    assert permissions[0]["revoked_at"] is not None
+    assert binding_count == 0
+
+
 def test_cloud_denial_creates_no_spendable_authority(tmp_path: Path) -> None:
     store = _store(tmp_path)
     settings = _settings(store)
