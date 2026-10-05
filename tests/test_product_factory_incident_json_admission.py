@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import UTC, datetime
 
 import pytest
 
@@ -18,6 +18,48 @@ from nika_core.product_factory_incident_persistence import (
     dump_incident_snapshot,
     load_incident_snapshot,
 )
+
+
+class _BehavioralSnapshotText(str):
+    def __new__(cls, value: str, events: list[str]) -> "_BehavioralSnapshotText":
+        instance = super().__new__(cls, value)
+        instance.events = events
+        return instance
+
+    def __len__(self) -> int:
+        self.events.append("len")
+        return super().__len__()
+
+    def strip(self, *args: object, **kwargs: object) -> str:
+        self.events.append("strip")
+        return super().strip(*args, **kwargs)
+
+    def encode(self, *args: object, **kwargs: object) -> bytes:
+        self.events.append("encode")
+        return super().encode(*args, **kwargs)
+
+
+class _BehavioralDateTime(datetime):
+    def __new__(cls, events: list[str]) -> "_BehavioralDateTime":
+        instance = super().__new__(
+            cls,
+            2026,
+            10,
+            5,
+            12,
+            0,
+            tzinfo=UTC,
+        )
+        instance.events = events
+        return instance
+
+    def utcoffset(self) -> object:
+        self.events.append("utcoffset")
+        return super().utcoffset()
+
+    def astimezone(self, *args: object, **kwargs: object) -> datetime:
+        self.events.append("astimezone")
+        return super().astimezone(*args, **kwargs)
 
 
 def _empty_snapshot(project_id: str = "проєкт-Ніка") -> IncidentLifecycleSnapshot:
@@ -188,3 +230,35 @@ def test_direct_incident_trigger_rejects_nondatetime_without_attribute_error() -
             "approval://incident",
             "2026-10-05T12:00:00+00:00",  # type: ignore[arg-type]
         )
+
+
+def test_snapshot_loader_rejects_behavioral_text_before_string_operations() -> None:
+    events: list[str] = []
+    payload = _BehavioralSnapshotText(
+        dump_incident_snapshot(_empty_snapshot("project-a")),
+        events,
+    )
+
+    with pytest.raises(ProductIncidentError, match="non-empty JSON text"):
+        load_incident_snapshot(payload)
+
+    assert events == []
+
+
+def test_direct_trigger_rejects_behavioral_datetime_before_timezone_hooks() -> None:
+    events: list[str] = []
+
+    with pytest.raises(ProductIncidentError, match="timezone-aware datetime"):
+        IncidentTrigger(
+            "project-a",
+            "api",
+            "prod-eu",
+            "1" * 40,
+            IncidentKind.HEALTH,
+            IncidentSeverity.HIGH,
+            ("health://degraded",),
+            "approval://incident",
+            _BehavioralDateTime(events),
+        )
+
+    assert events == []
