@@ -651,6 +651,10 @@ class V01ModelSettings:
         *,
         decision_sha256: str,
         binding_sha256: str,
+        base_artifact_sha256: str,
+        base_descriptor_digest: str,
+        challenger_artifact_sha256: str,
+        challenger_descriptor_digest: str,
         expected_revision: int,
     ) -> ModelPromotionReceipt:
         """Restore the exact pre-promotion route if the promotion still owns it."""
@@ -662,6 +666,22 @@ class V01ModelSettings:
         binding_digest = self._require_promotion_digest(
             binding_sha256,
             field="SHA-256 зв'язування",
+        )
+        base_artifact_digest = self._require_promotion_digest(
+            base_artifact_sha256,
+            field="SHA-256 базового артефакту",
+        )
+        base_descriptor = self._require_promotion_digest(
+            base_descriptor_digest,
+            field="SHA-256 базового дескриптора",
+        )
+        challenger_artifact_digest = self._require_promotion_digest(
+            challenger_artifact_sha256,
+            field="SHA-256 артефакту-кандидата",
+        )
+        challenger_descriptor = self._require_promotion_digest(
+            challenger_descriptor_digest,
+            field="SHA-256 дескриптора-кандидата",
         )
         if (
             type(expected_revision) is not int
@@ -678,7 +698,15 @@ class V01ModelSettings:
                 if row is None:
                     raise ModelSetupError("Запис просування моделі не знайдено.")
                 receipt = self._promotion_receipt(row)
-                if receipt.binding_sha256 != binding_digest:
+                if (
+                    receipt.binding_sha256 != binding_digest
+                    or receipt.base_artifact_sha256 != base_artifact_digest
+                    or receipt.base_descriptor_digest != base_descriptor
+                    or receipt.challenger_artifact_sha256
+                    != challenger_artifact_digest
+                    or receipt.challenger_descriptor_digest
+                    != challenger_descriptor
+                ):
                     raise ModelSetupError(
                         "Запис відкату належить іншому навчальному доказу."
                     )
