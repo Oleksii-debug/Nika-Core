@@ -122,6 +122,10 @@ def test_installer_contract_reuses_manifest_and_never_elevates() -> None:
         "        }\n"
         "        if ($item.Length -ne [int64]$size)"
     ) in payload
+    copy_call = "Copy-NikaBundleToStage -BundleRoot $bundleRoot -StagePath $stagePath"
+    staged_digest = "$stagedManifestDigest = Get-NikaReleaseManifestDigest -BundleRoot $stagePath"
+    identity_rejection = 'throw "Release bundle changed during staging."'
+    assert payload.index(copy_call) < payload.index(staged_digest) < payload.index(identity_rejection)
 
 
 @pytest.mark.parametrize("mode", ["Install", "Update"])
@@ -180,6 +184,50 @@ def test_tampered_update_fails_before_installed_tree_mutates(tmp_path: Path) -> 
     assert rejected.returncode != 0
     assert (destination / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
     assert not (destination.parent / f".{destination.name}.rollback").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+def test_source_bundle_substitution_after_initial_verify_fails_before_install(
+    tmp_path: Path,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    original = _bundle(tmp_path / "original", "v1")
+    replacement = _bundle(tmp_path / "replacement", "v2")
+    race_original = Path(str(original) + ".race-original")
+    race_replacement = Path(str(original) + ".race-replacement")
+    shutil.move(str(replacement), race_replacement)
+    destination = tmp_path / "install" / "Nika Core"
+
+    payload = SCRIPT.read_text(encoding="utf-8")
+    needle = "    Copy-NikaBundleToStage -BundleRoot $bundleRoot -StagePath $stagePath\n"
+    assert payload.count(needle) == 1
+    injected = (
+        "    $raceOriginalBundle = $bundleRoot + '.race-original'\n"
+        "    $raceReplacementBundle = $bundleRoot + '.race-replacement'\n"
+        "    [System.IO.Directory]::Move($bundleRoot, $raceOriginalBundle)\n"
+        "    [System.IO.Directory]::Move($raceReplacementBundle, $bundleRoot)\n"
+        + needle
+    )
+    instrumented = tmp_path / "install_nika_core_bundle_substitution.ps1"
+    instrumented.write_text(payload.replace(needle, injected, 1), encoding="utf-8")
+
+    rejected = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=original,
+    )
+
+    assert rejected.returncode != 0, rejected.stdout
+    assert "Release bundle changed during staging." in rejected.stderr
+    assert not destination.exists()
+    assert (original / "NikaCore.exe").read_text(encoding="utf-8") == "v2"
+    assert (race_original / "NikaCore.exe").read_text(encoding="utf-8") == "v1"
+    rollback = destination.parent / f".{destination.name}.rollback"
+    assert not rollback.exists()
 
 
 @pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")

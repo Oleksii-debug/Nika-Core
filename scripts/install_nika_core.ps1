@@ -1546,6 +1546,10 @@ else {
 Assert-NikaDataMutationSeparation -DataRoot $dataRoot -MutationPaths @($destinationPath, $rollbackPath, $stagePath)
 try {
     Copy-NikaBundleToStage -BundleRoot $bundleRoot -StagePath $stagePath
+    $stagedManifestDigest = Get-NikaReleaseManifestDigest -BundleRoot $stagePath
+    if ($stagedManifestDigest -cne $bundleManifestDigest) {
+        throw "Release bundle changed during staging."
+    }
 
     Assert-NikaNoReparsePathChain -Path $stagePath
     Assert-NikaNoReparsePathChain -Path $destinationPath
