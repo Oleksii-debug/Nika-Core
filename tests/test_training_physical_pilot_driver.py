@@ -196,6 +196,18 @@ def test_config_v2_requires_exact_scale_plan_fields(tmp_path: Path) -> None:
         driver.PhysicalPilotConfig.from_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize("schema_version", (True, 1.0, "1"))
+def test_config_rejects_non_integer_schema_version(
+    tmp_path: Path,
+    schema_version: object,
+) -> None:
+    payload = _payload(tmp_path)
+    payload["schema_version"] = schema_version
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="unsupported"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
 def test_config_v2_requires_scale_plan(tmp_path: Path) -> None:
     payload = _payload_v2(tmp_path)
     del payload["scale_plan"]

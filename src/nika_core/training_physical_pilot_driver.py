@@ -469,6 +469,8 @@ class PhysicalPilotConfig:
         if type(value) is not dict:
             _fail("physical pilot config fields are invalid")
         schema_version = value.get("schema_version")
+        if type(schema_version) is not int:
+            _fail("unsupported physical pilot config schema")
         if schema_version == _LEGACY_CONFIG_SCHEMA_VERSION:
             expected_keys = _TOP_LEVEL_KEYS_V1
             scale_plan = None
