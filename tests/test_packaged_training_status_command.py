@@ -150,7 +150,7 @@ def test_packaged_training_status_is_read_only_and_bypasses_ordinary_task(
     assert result.focus_id == "logs-heading"
     assert "Стан навчання Nika." in result.message
     assert f"Завдання: {task_id}" in result.message
-    assert "Стан: paused" in result.message
+    assert "Стан: призупинено (paused)" in result.message
     assert "resource_revalidation:memory_limit" in result.message
     assert "Обмеження доказовості:" in result.message
     assert "candidate-1" not in result.message
