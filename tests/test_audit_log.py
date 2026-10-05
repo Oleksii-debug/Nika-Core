@@ -530,6 +530,10 @@ def test_inspect_rejects_query_subclass(tmp_path):
         {"value": _AuditTextSubclass("text")},
         {"key": "\ud800"},
         {"\ud800": "value"},
+        {"api\u200b_key": "secret"},
+        {"field\u2028name": "value"},
+        {"field\u202ename": "value"},
+        {"field\x00name": "value"},
         {"integer": 1 << 4096},
     ],
 )

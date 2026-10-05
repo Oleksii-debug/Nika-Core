@@ -414,7 +414,7 @@ def _snapshot_json_value(
         for index, (raw_key, item) in enumerate(value.items()):
             if type(raw_key) is not str:
                 raise TypeError("audit payload JSON object keys must be exact text")
-            key = _snapshot_payload_text(
+            key = _snapshot_payload_key(
                 raw_key,
                 field=f"{path} key {index}",
                 budget=budget,
@@ -440,6 +440,19 @@ def _snapshot_payload_text(value: str, *, field: str, budget: list[int]) -> str:
         raise ValueError("audit payload exceeds safe UTF-8 byte limit")
     budget[1] -= len(encoded)
     return value
+
+
+def _snapshot_payload_key(value: str, *, field: str, budget: list[int]) -> str:
+    key = _snapshot_payload_text(value, field=field, budget=budget)
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in key
+    ):
+        raise ValueError(
+            "audit payload keys must not contain control, format, or "
+            "line-separator characters"
+        )
+    return key
 
 
 def _canonical_payload_json(payload: dict[str, object]) -> str:

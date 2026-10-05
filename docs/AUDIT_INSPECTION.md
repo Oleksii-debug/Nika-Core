@@ -85,8 +85,9 @@ silently skipping, coercing or partially presenting corrupted evidence.
 
 Audit event identities and inspection filters are exact, non-empty, edge-trimmed UTF-8 text with no
 Unicode control/format (`Cc`/`Cf`) or line/paragraph-separator (`Zl`/`Zp`) characters and at most
-4096 UTF-8 bytes. Payloads are exact JSON-native objects:
-string keys plus dict/list/string/integer/finite-float/bool/null values only. Before persistence and
+4096 UTF-8 bytes. Payloads are exact JSON-native objects with UTF-8 string keys that reject
+Unicode control/format and line/paragraph-separator characters; values remain ordinary
+JSON-native dict/list/string/integer/finite-float/bool/null carriers. Before persistence and
 again after durable decode, each payload is bounded to 1 MiB encoded JSON, 10,000 value nodes,
 32 levels of nesting and 4096-bit integers. Recursive containers, behavioral subclasses, invalid
 UTF-8, non-TEXT persisted carriers and oversized/deep evidence fail closed before SQLite effects or
