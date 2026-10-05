@@ -383,6 +383,10 @@ def test_secret_like_metadata_and_locators_are_rejected() -> None:
         "https://example.test/object?api%5Fkey=canary",
         "https://example.test/object?client_secret=canary",
         "https://example.test/object?x-api-key=canary",
+        "https://example.test/callback#access_token=canary",
+        "blob:refresh_token=canary",
+        "https://example.test/private_key=canary",
+        "https://example.test/object/secret_key=canary",
     ),
 )
 def test_common_credential_locators_are_rejected(reference: str) -> None:
@@ -399,7 +403,18 @@ def test_common_credential_locators_are_rejected(reference: str) -> None:
         ArtifactRecord(**record, locator=reference)
 
 
-@pytest.mark.parametrize("key", ("client_secret", "x-api-key", "api-token"))
+@pytest.mark.parametrize(
+    "key",
+    (
+        "access-token",
+        "client_secret",
+        "private-key",
+        "refresh_token",
+        "secret-key",
+        "x-api-key",
+        "api-token",
+    ),
+)
 def test_common_credential_metadata_keys_are_rejected(key: str) -> None:
     with pytest.raises(ValidationError, match="secret material"):
         ArtifactRecord(

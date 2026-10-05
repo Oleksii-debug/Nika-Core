@@ -27,6 +27,7 @@ class ArtifactVerificationState(StrEnum):
 _MAX_ARTIFACT_METADATA_ITEMS = 256
 
 _FORBIDDEN_SECRET_KEYS = {
+    "access_token",
     "api_key",
     "apikey",
     "api_token",
@@ -34,14 +35,18 @@ _FORBIDDEN_SECRET_KEYS = {
     "client_secret",
     "cookie",
     "password",
+    "private_key",
+    "refresh_token",
     "secret",
+    "secret_key",
     "token",
     "x_api_key",
 }
 _CREDENTIAL_ASSIGNMENT = re.compile(
-    r"(?:^|[?&;,\s])"
-    r"(?:api[_-]?key|api[_-]?token|authorization|client[_-]?secret|cookie|"
-    r"password|secret|token|x[_-]?api[_-]?key)\s*[:=]",
+    r"(?:^|[/?#&;,:\s])"
+    r"(?:access[_-]?token|api[_-]?key|api[_-]?token|authorization|"
+    r"client[_-]?secret|cookie|password|private[_-]?key|refresh[_-]?token|"
+    r"secret(?:[_-]?key)?|token|x[_-]?api[_-]?key)\s*[:=]",
     re.IGNORECASE,
 )
 
