@@ -94,29 +94,14 @@ def resolve_source_sha(requested: str | None) -> str:
                 )
         return explicit
 
-    candidates: list[tuple[str, str]] = []
     if configured is not None:
-        candidates.append(
-            (
-                "NIKA_SOURCE_SHA",
-                _normalize_source_sha(configured, authority="NIKA_SOURCE_SHA"),
-            )
-        )
+        return _normalize_source_sha(configured, authority="NIKA_SOURCE_SHA")
     if github_sha is not None:
-        candidates.append(
-            ("GITHUB_SHA", _normalize_source_sha(github_sha, authority="GITHUB_SHA"))
-        )
-    if not candidates:
-        raise ValueError(
-            "exact 40-character source SHA is required via --source-sha, "
-            "NIKA_SOURCE_SHA or GITHUB_SHA"
-        )
-    if len({value for _, value in candidates}) != 1:
-        raise ValueError(
-            "conflicting exact source SHA environment authorities: "
-            + ", ".join(authority for authority, _ in candidates)
-        )
-    return candidates[0][1]
+        return _normalize_source_sha(github_sha, authority="GITHUB_SHA")
+    raise ValueError(
+        "exact 40-character source SHA is required via --source-sha, "
+        "NIKA_SOURCE_SHA or GITHUB_SHA"
+    )
 
 
 def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> int:
