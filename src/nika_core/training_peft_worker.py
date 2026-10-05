@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -32,6 +33,16 @@ _CHECKPOINT_MARKER = "nika_checkpoint.json"
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
+_MAX_RUNTIME_VERSION_BYTES = 256
+_RUNTIME_MANIFEST_DOMAIN = b"nika-peft-runtime-manifest-v1\x00"
+_TRAINING_RUNTIME_DISTRIBUTIONS = (
+    ("torch", "NIKA_TRAINER_TORCH_VERSION"),
+    ("transformers", "NIKA_TRAINER_TRANSFORMERS_VERSION"),
+    ("peft", "NIKA_TRAINER_PEFT_VERSION"),
+    ("accelerate", "NIKA_TRAINER_ACCELERATE_VERSION"),
+    ("gguf", "NIKA_TRAINER_GGUF_VERSION"),
+    ("safetensors", "NIKA_TRAINER_SAFETENSORS_VERSION"),
+)
 _MAX_MODEL_DIR_FILES = 10_000
 _MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
 _MODEL_SNAPSHOT_DIR = "model-snapshot"
@@ -76,6 +87,7 @@ class TrainerConfig:
     lora_alpha: int
     lora_dropout: float
     lora_target_modules: tuple[str, ...]
+    torch_num_threads: int
     seed: int
 
 
@@ -277,6 +289,10 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
         job["candidate_artifact_ref"],
         field="candidate_artifact_ref",
     )
+    if _looks_like_private_local_path(base_artifact_ref) or _looks_like_private_local_path(
+        candidate_ref
+    ):
+        _fail("artifact_ref_private_path")
     max_steps = job["max_steps"]
     if type(max_steps) is not int or not 1 <= max_steps <= 100_000:
         _fail("max_steps_invalid")
@@ -513,7 +529,6 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
             or _stable_stat_identity(value) != identity
         ):
             raise ValueError("model_dir changed during manifest")
-
     encoded = json.dumps(
         entries,
         allow_nan=False,
@@ -522,6 +537,75 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(b"nika-peft-model-dir-v1\x00" + encoded).hexdigest()
+
+
+def _normalize_training_runtime_versions(value: object) -> dict[str, str]:
+    expected_keys = {distribution for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS}
+    if type(value) is not dict or set(value) != expected_keys:
+        raise ValueError("training runtime manifest has invalid distribution keys")
+    versions: dict[str, str] = {}
+    for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        observed = value[distribution]
+        if (
+            type(observed) is not str
+            or not observed
+            or observed != observed.strip()
+            or len(observed.encode("utf-8", errors="strict")) > _MAX_RUNTIME_VERSION_BYTES
+            or any(ord(character) < 32 or ord(character) == 127 for character in observed)
+        ):
+            raise ValueError(
+                f"training runtime manifest has invalid version: {distribution}"
+            )
+        versions[distribution] = observed
+    return versions
+
+
+def _training_runtime_manifest_sha256(versions: dict[str, str]) -> str:
+    canonical = _normalize_training_runtime_versions(versions)
+    encoded = json.dumps(
+        canonical,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(_RUNTIME_MANIFEST_DOMAIN + encoded).hexdigest()
+
+
+def _installed_training_runtime_versions() -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        try:
+            versions[distribution] = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise ValueError(
+                f"training dependency is unavailable: {distribution}"
+            ) from exc
+    return _normalize_training_runtime_versions(versions)
+
+
+def _verify_training_runtime_versions() -> None:
+    try:
+        expected = _normalize_training_runtime_versions(
+            {
+                distribution: os.environ.get(environment_key)
+                for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS
+            }
+        )
+    except (UnicodeEncodeError, ValueError):
+        _fail("nika_trainer_runtime_manifest_invalid")
+    expected_manifest_sha256 = _require_sha256(
+        os.environ.get("NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"),
+        field="nika_trainer_runtime_manifest_sha256",
+    )
+    if _training_runtime_manifest_sha256(expected) != expected_manifest_sha256:
+        _fail("nika_trainer_runtime_manifest_mismatch")
+    try:
+        observed = _installed_training_runtime_versions()
+    except (UnicodeEncodeError, ValueError):
+        _fail("nika_trainer_runtime_versions_unavailable")
+    if observed != expected:
+        _fail("nika_trainer_runtime_version_mismatch")
 
 
 def build_trainer_environment(
@@ -536,9 +620,17 @@ def build_trainer_environment(
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
     lora_target_modules: tuple[str, ...] = ("q_proj", "v_proj"),
+    runtime_versions: dict[str, str],
+    torch_num_threads: int = 1,
     seed: int = 1729,
 ) -> dict[str, str]:
-    """Build the sterile, execution-plan-bound environment for SubprocessTrainingWorker."""
+    """Build a sterile execution environment from deployment-authoritative runtime metadata.
+
+    The caller must supply the exact runtime-version manifest for the Registry-authorized
+    trainer deployment. This function intentionally never inspects the parent interpreter's
+    installed distributions; the child trainer self-verifies the supplied manifest before any
+    training backend import/effect.
+    """
     base = Path(base_gguf)
     model = Path(model_dir)
     output = Path(output_root)
@@ -568,6 +660,8 @@ def build_trainer_environment(
         raise ValueError("lora_r is outside the supported bound")
     if type(lora_alpha) is not int or not 1 <= lora_alpha <= 65536:
         raise ValueError("lora_alpha is outside the supported bound")
+    if type(torch_num_threads) is not int or not 1 <= torch_num_threads <= 256:
+        raise ValueError("torch_num_threads is outside the supported bound")
     if type(seed) is not int or not 0 <= seed <= (1 << 31) - 1:
         raise ValueError("seed is outside the supported bound")
     if (
@@ -581,6 +675,10 @@ def build_trainer_environment(
         )
     ):
         raise ValueError("lora_target_modules is invalid")
+    try:
+        deployment_runtime_versions = _normalize_training_runtime_versions(runtime_versions)
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise ValueError("training runtime manifest is invalid") from exc
     output.mkdir(parents=True, exist_ok=True)
     try:
         output_stat = os.lstat(output)
@@ -592,7 +690,7 @@ def build_trainer_environment(
         or not stat.S_ISDIR(output_stat.st_mode)
     ):
         raise ValueError("output_root must be a non-linked directory")
-    return {
+    environment = {
         "NIKA_TRAINER_BASE_GGUF": os.fspath(base),
         "NIKA_TRAINER_IMPLEMENTATION_SHA256": trainer_implementation_sha256(),
         "NIKA_TRAINER_LEARNING_RATE": format(learning_rate, ".17g"),
@@ -605,8 +703,15 @@ def build_trainer_environment(
         "NIKA_TRAINER_MODEL_DIR": os.fspath(model),
         "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256": model_manifest,
         "NIKA_TRAINER_OUTPUT_ROOT": os.fspath(output),
+        "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256": _training_runtime_manifest_sha256(
+            deployment_runtime_versions
+        ),
         "NIKA_TRAINER_SEED": str(seed),
+        "NIKA_TRAINER_TORCH_NUM_THREADS": str(torch_num_threads),
     }
+    for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        environment[environment_key] = deployment_runtime_versions[distribution]
+    return environment
 
 
 def _require_regular_unlinked(path: Path, *, code: str) -> os.stat_result:
@@ -1008,6 +1113,7 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
 
 
 def _read_config() -> TrainerConfig:
+    _verify_training_runtime_versions()
     expected_implementation_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_IMPLEMENTATION_SHA256"),
         field="nika_trainer_implementation_sha256",
@@ -1079,6 +1185,12 @@ def _read_config() -> TrainerConfig:
         lora_alpha=_env_int("NIKA_TRAINER_LORA_ALPHA", 16, 1, 65536),
         lora_dropout=_env_float("NIKA_TRAINER_LORA_DROPOUT", 0.05, 0.0, 1.0),
         lora_target_modules=target_modules,
+        torch_num_threads=_env_int(
+            "NIKA_TRAINER_TORCH_NUM_THREADS",
+            1,
+            1,
+            256,
+        ),
         seed=_env_int("NIKA_TRAINER_SEED", 1729, 0, (1 << 31) - 1),
     )
 
@@ -1482,6 +1594,11 @@ def _train_one_step(
         set_seed,
     ) = _import_training_stack()
 
+    try:
+        torch.set_num_threads(config.torch_num_threads)
+        torch.use_deterministic_algorithms(True)
+    except (RuntimeError, TypeError, ValueError):
+        _fail("training_determinism_unavailable")
     set_seed(config.seed)
     job_root = _ensure_job_root(config, request)
     staged_base = _copy_verified_base(config, request, job_root)
@@ -1566,6 +1683,11 @@ def _train_one_step(
             report_to=[],
             seed=config.seed,
             data_seed=config.seed,
+            use_cpu=True,
+            full_determinism=True,
+            dataloader_num_workers=0,
+            dataloader_pin_memory=False,
+            optim="adamw_torch",
             remove_unused_columns=False,
         )
         trainer = Trainer(
@@ -1809,10 +1931,137 @@ def _candidate_manifest_json(
             "lora_target_modules": list(config.lora_target_modules),
             "max_records": config.max_records,
             "max_sequence_length": config.max_sequence_length,
+            "torch_num_threads": config.torch_num_threads,
             "seed": config.seed,
         },
     }
     return _canonical_json_bytes(payload).decode("utf-8")
+
+
+
+def _validate_candidate_manifest_payload(
+    value: dict[str, object],
+) -> dict[str, object]:
+    expected = {
+        "adapter_config",
+        "base_artifact_ref",
+        "base_artifact_sha256",
+        "candidate_artifact_ref",
+        "consumed_materials_sha256",
+        "job_fingerprint",
+        "model_dir_manifest_sha256",
+        "schema",
+        "step_number",
+        "trainer_parameters",
+    }
+    if set(value) != expected or value.get("schema") != "nika-peft-candidate-v1":
+        _fail("candidate_manifest_invalid")
+
+    base_ref = value["base_artifact_ref"]
+    candidate_ref = value["candidate_artifact_ref"]
+    if type(base_ref) is not str or type(candidate_ref) is not str:
+        _fail("candidate_manifest_invalid")
+    try:
+        base_ref_bytes = base_ref.encode("utf-8", errors="strict")
+        candidate_ref_bytes = candidate_ref.encode("utf-8", errors="strict")
+    except UnicodeEncodeError:
+        _fail("candidate_manifest_invalid")
+    if (
+        not base_ref
+        or not candidate_ref
+        or base_ref != base_ref.strip()
+        or candidate_ref != candidate_ref.strip()
+        or len(base_ref_bytes) > 4096
+        or len(candidate_ref_bytes) > 4096
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in base_ref)
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in candidate_ref)
+        or _looks_like_private_local_path(base_ref)
+        or _looks_like_private_local_path(candidate_ref)
+    ):
+        _fail("candidate_manifest_invalid")
+    for field in (
+        "base_artifact_sha256",
+        "consumed_materials_sha256",
+        "job_fingerprint",
+        "model_dir_manifest_sha256",
+    ):
+        if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
+            _fail("candidate_manifest_invalid")
+
+    step_number = value["step_number"]
+    if type(step_number) is not int or not 1 <= step_number <= 100_000:
+        _fail("candidate_manifest_invalid")
+
+    parameters = value["trainer_parameters"]
+    parameter_keys = {
+        "learning_rate",
+        "lora_alpha",
+        "lora_dropout",
+        "lora_r",
+        "lora_target_modules",
+        "max_records",
+        "max_sequence_length",
+        "torch_num_threads",
+        "seed",
+    }
+    if type(parameters) is not dict or set(parameters) != parameter_keys:
+        _fail("candidate_manifest_invalid")
+    learning_rate = parameters["learning_rate"]
+    lora_dropout = parameters["lora_dropout"]
+    lora_alpha = parameters["lora_alpha"]
+    lora_r = parameters["lora_r"]
+    max_records = parameters["max_records"]
+    max_sequence_length = parameters["max_sequence_length"]
+    torch_num_threads = parameters["torch_num_threads"]
+    seed = parameters["seed"]
+    targets = parameters["lora_target_modules"]
+    if (
+        type(learning_rate) is not float
+        or not math.isfinite(learning_rate)
+        or not 1e-8 <= learning_rate <= 1.0
+        or type(lora_dropout) is not float
+        or not math.isfinite(lora_dropout)
+        or not 0.0 <= lora_dropout <= 1.0
+        or type(lora_alpha) is not int
+        or not 1 <= lora_alpha <= 65_536
+        or type(lora_r) is not int
+        or not 1 <= lora_r <= 1024
+        or type(max_records) is not int
+        or not 2 <= max_records <= _MAX_RECORDS_LIMIT
+        or type(max_sequence_length) is not int
+        or not 32 <= max_sequence_length <= _MAX_SEQUENCE_LENGTH_LIMIT
+        or type(torch_num_threads) is not int
+        or not 1 <= torch_num_threads <= 256
+        or type(seed) is not int
+        or not 0 <= seed <= (1 << 31) - 1
+        or type(targets) is not list
+        or not targets
+        or len(targets) > 64
+        or any(type(item) is not str or _TOKEN_RE.fullmatch(item) is None for item in targets)
+        or len(set(targets)) != len(targets)
+    ):
+        _fail("candidate_manifest_invalid")
+
+    adapter = value["adapter_config"]
+    if type(adapter) is not dict:
+        _fail("candidate_manifest_invalid")
+    adapter_targets = adapter.get("target_modules")
+    if (
+        adapter.get("base_model_name_or_path") != base_ref
+        or "revision" in adapter
+        or adapter.get("r") != lora_r
+        or adapter.get("lora_alpha") != lora_alpha
+        or adapter.get("lora_dropout") != lora_dropout
+        or adapter.get("bias") != "none"
+        or adapter.get("task_type") != "CAUSAL_LM"
+        or type(adapter_targets) is not list
+        or any(type(item) is not str for item in adapter_targets)
+        or len(set(adapter_targets)) != len(adapter_targets)
+        or set(adapter_targets) != set(targets)
+    ):
+        _fail("candidate_manifest_invalid")
+    _reject_private_adapter_config_paths(adapter)
+    return dict(value)
 
 
 def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
@@ -1844,11 +2093,11 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
         _bounded_json_tree(value)
     except (json.JSONDecodeError, RecursionError, ValueError):
         _fail("candidate_manifest_invalid")
-    if type(value) is not dict or value.get("schema") != "nika-peft-candidate-v1":
+    if type(value) is not dict:
         _fail("candidate_manifest_invalid")
     if _canonical_json_bytes(value).decode("utf-8") != raw:
         _fail("candidate_manifest_not_canonical")
-    return dict(value)
+    return _validate_candidate_manifest_payload(value)
 
 
 def _response(
