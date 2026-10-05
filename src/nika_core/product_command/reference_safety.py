@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from urllib.parse import unquote, unquote_plus, urlsplit
 
 _MAX_EVIDENCE_REFERENCE_BYTES = 512
+_UNSAFE_TEXT_CATEGORIES = frozenset({"Cc", "Cf", "Zl", "Zp"})
 _SENSITIVE_REFERENCE_MARKERS = (
     "credential://",
     "credential-use:",
@@ -46,6 +48,10 @@ def _strict_utf8(reference: str) -> bytes:
         raise ValueError("evidence reference must be valid UTF-8 text") from exc
 
 
+def _contains_unsafe_text(reference: str) -> bool:
+    return any(unicodedata.category(char) in _UNSAFE_TEXT_CATEGORIES for char in reference)
+
+
 def _contains_sensitive_marker(reference: str) -> bool:
     return any(marker in reference for marker in _SENSITIVE_REFERENCE_MARKERS)
 
@@ -53,11 +59,11 @@ def _contains_sensitive_marker(reference: str) -> bool:
 def _is_sensitive(reference: str) -> bool:
     normalized = reference.strip().casefold()
     for _ in range(_MAX_EVIDENCE_REFERENCE_BYTES):
-        if _contains_sensitive_marker(normalized):
+        if _contains_unsafe_text(normalized) or _contains_sensitive_marker(normalized):
             return True
 
         form_decoded = unquote_plus(normalized).casefold()
-        if _contains_sensitive_marker(form_decoded):
+        if _contains_unsafe_text(form_decoded) or _contains_sensitive_marker(form_decoded):
             return True
 
         if "://" in normalized:
@@ -78,12 +84,12 @@ def _is_sensitive(reference: str) -> bool:
 
 
 def safe_evidence_reference(reference: str) -> str:
-    """Return a bounded user-facing evidence reference without credential material.
+    """Return a bounded user-facing evidence reference without unsafe material.
 
     Product Factory evidence is intentionally opaque and may include credential-use
     audit identities or provider-owned references. PF5 preserves ordinary valid
-    Unicode references verbatim, but one-way hashes anything that is sensitive by
-    shape or exceeds the public evidence byte budget.
+    Unicode references verbatim, but one-way hashes anything sensitive, unsafe for
+    single-line presentation, or beyond the public evidence byte budget.
     """
 
     encoded = _strict_utf8(reference)
