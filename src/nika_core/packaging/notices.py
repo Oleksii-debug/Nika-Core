@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import re
 import stat
@@ -36,6 +37,8 @@ _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
 _MAX_NOTICES_BYTES = 16 * 1024 * 1024
 _MAX_DISTRIBUTION_PATH_BYTES = 4096
 _MAX_SECTION_IDENTITY_BYTES = 4096
+_MAX_NOTICE_SECTIONS = 256
+_NOTICE_PREAMBLE = "Nika Core third-party notices"
 
 
 def _bounded_metadata_value(value: object, *, field: str) -> str | None:
@@ -291,31 +294,52 @@ def build_third_party_notices(bundle_dir: Path) -> Path:
 
 
 def _sections(text: str) -> tuple[dict[str, str], tuple[str, ...]]:
+    """Parse the canonical notices grammar without splitlines() amplification."""
+    source = io.StringIO(text)
+    if source.readline().rstrip("\r\n") != _NOTICE_PREAMBLE:
+        raise ValueError("invalid third-party notices preamble")
+    if source.readline().rstrip("\r\n") != "":
+        raise ValueError("invalid third-party notices preamble separator")
+
     parsed: dict[str, str] = {}
     duplicates: list[str] = []
     title: str | None = None
-    body: list[str] = []
+    body = io.StringIO()
+    section_count = 0
 
     def commit() -> None:
         nonlocal body
         if title is None:
             return
+        value = body.getvalue().strip()
         if title in parsed:
             duplicates.append(title)
         else:
-            parsed[title] = "\n".join(body).strip()
-        body = []
+            parsed[title] = value
+        body = io.StringIO()
 
-    for line in text.splitlines():
-        match = _SECTION_RE.fullmatch(line.strip())
+    for raw_line in source:
+        line = raw_line.rstrip("\r\n")
+        match = _SECTION_RE.fullmatch(line)
         if match:
             commit()
+            section_count += 1
+            if section_count > _MAX_NOTICE_SECTIONS:
+                raise ValueError("too many third-party notice sections")
             title = match.group("title").strip()
-            body = []
+            if not title:
+                raise ValueError("empty third-party notice section")
             continue
-        if title is not None:
-            body.append(line)
+        if title is None:
+            if line:
+                raise ValueError("content before first third-party notice section")
+            continue
+        if body.tell():
+            body.write("\n")
+        body.write(line)
     commit()
+    if section_count == 0:
+        raise ValueError("third-party notices contain no sections")
     return parsed, tuple(duplicates)
 
 
@@ -451,8 +475,13 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     text = _read_notices(target)
     if text is None:
         return ("notices:unreadable",)
-    sections, duplicates = _sections(text)
+    try:
+        sections, duplicates = _sections(text)
+    except ValueError:
+        return ("notices:structure",)
+
     findings: list[str] = []
+    expected_titles = {"Python runtime"}
     if "Python runtime" in duplicates:
         findings.extend(("notices:pythonruntime", "notices:pythonruntime:duplicate"))
     python_body = sections.get("Python runtime")
@@ -469,6 +498,7 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
         try:
             dist = metadata.distribution(distribution_name)
             title, expected_body = _distribution_section(distribution_name, dist)
+            expected_titles.add(title)
         except (metadata.PackageNotFoundError, RuntimeError):
             findings.extend((base_finding, f"{base_finding}:metadata"))
             continue
@@ -477,4 +507,7 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
             continue
         if sections.get(title) != expected_body:
             findings.append(base_finding)
+
+    if set(sections).difference(expected_titles):
+        findings.append("notices:unexpected-section")
     return tuple(dict.fromkeys(findings))
