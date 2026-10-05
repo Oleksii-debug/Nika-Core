@@ -5,6 +5,7 @@ import re
 import stat
 import sys
 import tempfile
+import unicodedata
 from importlib import metadata
 from pathlib import Path
 
@@ -67,9 +68,18 @@ def _canonical_distribution_file(item: object) -> str:
         or relative != relative.strip()
         or relative.startswith("/")
         or (len(relative) >= 2 and relative[0].isalpha() and relative[1] == ":")
-        or any(ord(char) < 32 or ord(char) == 127 for char in relative)
+        or any(
+            unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+            for char in relative
+        )
     ):
         raise RuntimeError("Runtime distribution license path identity is invalid")
+    try:
+        relative.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(
+            "Runtime distribution license path identity is invalid"
+        ) from exc
     parts = relative.split("/")
     if any(part in {"", ".", ".."} for part in parts):
         raise RuntimeError("Runtime distribution license path identity is invalid")
