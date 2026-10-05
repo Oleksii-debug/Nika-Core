@@ -24,7 +24,11 @@ from nika_core.trading_research.orders import (
     SimulatedFill,
 )
 from nika_core.trading_research.persistence import TradingStateRepository
-from nika_core.trading_research.replay import SimulationExecutionEngine, TimeSlice
+from nika_core.trading_research.replay import (
+    ReplayBook,
+    SimulationExecutionEngine,
+    TimeSlice,
+)
 from nika_core.trading_research.risk import RiskEngine, RiskLimits, RiskState
 
 _NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
@@ -201,6 +205,75 @@ def test_risk_position_limit_does_not_merge_equal_ids_from_other_venue() -> None
     )
 
     assert approved.intent.instrument == _INSTRUMENT_B
+
+
+
+def test_risk_generated_approval_id_binds_full_instrument_identity() -> None:
+    snapshot = AccountSnapshot(
+        cash=Decimal(1000),
+        fees=Decimal(0),
+        realized_pnl=Decimal(0),
+        unrealized_pnl=Decimal(0),
+        equity=Decimal(1000),
+        gross_exposure=Decimal(0),
+        net_exposure=Decimal(0),
+        positions=(),
+    )
+    limits = RiskLimits(
+        max_abs_position=Decimal(10),
+        max_gross_exposure=Decimal(1000),
+        max_net_exposure=Decimal(1000),
+        max_session_loss=Decimal(1000),
+        max_drawdown=Decimal(1000),
+        max_leverage=Decimal(10),
+    )
+    engine = RiskEngine(limits)
+
+    def approve(instrument: Instrument) -> RiskApprovedOrder:
+        return engine.approve(
+            OrderIntent(
+                "same-intent",
+                instrument,
+                Side.BUY,
+                OrderType.MARKET,
+                Decimal(1),
+                _NOW,
+                0,
+            ),
+            snapshot=snapshot,
+            mark_price=Decimal(100),
+            pending_signed_quantity=Decimal(0),
+            approved_at=_NOW,
+            approved_slice=0,
+            policy=ExecutionPolicy("approval-identity"),
+            risk_state=RiskState(Decimal(1000), Decimal(1000)),
+        )
+
+    assert approve(_INSTRUMENT_A).approval_id != approve(_INSTRUMENT_B).approval_id
+
+
+def test_replay_book_state_does_not_alias_shared_approval_id_across_venues() -> None:
+    book = ReplayBook(PortfolioLedger(Decimal(1000)))
+    first = book.process_existing_order(
+        _approved(_INSTRUMENT_A),
+        TimeSlice(1, _NOW, (_quote(_INSTRUMENT_A),)),
+    )
+    second = book.process_existing_order(
+        _approved(_INSTRUMENT_B),
+        TimeSlice(1, _NOW, (_quote(_INSTRUMENT_B),)),
+    )
+
+    assert first.fill is not None
+    assert second.fill is not None
+    assert first.fill.instrument == _INSTRUMENT_A
+    assert second.fill.instrument == _INSTRUMENT_B
+    assert first.fill.fill_id != second.fill.fill_id
+    assert len(book.ledger.snapshot(
+        {
+            instrument_identity(_INSTRUMENT_A): Decimal(100),
+            instrument_identity(_INSTRUMENT_B): Decimal(100),
+        }
+    ).positions) == 2
 
 
 def test_persistence_records_complete_instrument_identity(tmp_path) -> None:
