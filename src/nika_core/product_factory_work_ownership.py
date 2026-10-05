@@ -12,10 +12,6 @@ class WorkOwnershipError(ValueError):
     """Raised when Product Factory work ownership authority is violated."""
 
 
-class WorkOwnershipConflictError(WorkOwnershipError):
-    """Raised when valid unexpired work ownership belongs to an active generation."""
-
-
 @dataclass(frozen=True, slots=True)
 class WorkOwnershipLease:
     project_id: str
@@ -105,12 +101,10 @@ class ProductFactoryWorkOwnership:
                     if instant < current_issued:
                         raise WorkOwnershipError("work ownership clock precedes lease issuance")
                     if current_owner == owner_id:
-                        raise WorkOwnershipConflictError(
+                        raise WorkOwnershipError(
                             "work is already owned by this owner; renew the existing lease"
                         )
-                    raise WorkOwnershipConflictError(
-                        "work is already owned by another active owner"
-                    )
+                    raise WorkOwnershipError("work is already owned by another active owner")
                 fence = current_fence + 1
                 connection.execute(
                     "UPDATE product_factory_work_ownership SET owner_id = ?, fence = ?, "
