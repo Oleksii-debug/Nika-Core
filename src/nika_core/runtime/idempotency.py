@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -23,6 +24,7 @@ class IdempotencyRecord:
     task_id: str
     operation_type: str
     input_fingerprint: str
+    reservation_generation: str
     status: IdempotencyStatus
     result: Mapping[str, Any] | None
     created_at: str
@@ -110,18 +112,20 @@ class IdempotencyLedger:
             return record, False
 
         now = datetime.now(UTC).isoformat()
+        reservation_generation = secrets.token_hex(16)
         conn.execute(
             """
             INSERT INTO idempotency_records(
                 operation_key, task_id, operation_type, input_fingerprint,
-                status, result_json, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, NULL, ?, ?)
+                reservation_generation, status, result_json, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
             """,
             (
                 operation_key,
                 task_id,
                 operation_type,
                 input_fingerprint,
+                reservation_generation,
                 IdempotencyStatus.PENDING.value,
                 now,
                 now,
@@ -196,6 +200,7 @@ class IdempotencyLedger:
         task_id: str,
         operation_type: str,
         input_fingerprint: str,
+        reservation_generation: str,
         created_at: str,
         result: Mapping[str, Any] | None = None,
     ) -> IdempotencyRecord:
@@ -208,6 +213,7 @@ class IdempotencyLedger:
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
+                reservation_generation=reservation_generation,
                 created_at=created_at,
             )
             return self._set_status_with_connection(
@@ -224,6 +230,7 @@ class IdempotencyLedger:
         task_id: str,
         operation_type: str,
         input_fingerprint: str,
+        reservation_generation: str,
         created_at: str,
     ) -> IdempotencyRecord:
         """Mark uncertainty only for the exact still-pending reservation."""
@@ -235,6 +242,7 @@ class IdempotencyLedger:
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
+                reservation_generation=reservation_generation,
                 created_at=created_at,
             )
             return self._set_status_with_connection(
@@ -251,6 +259,7 @@ class IdempotencyLedger:
         task_id: str,
         operation_type: str,
         input_fingerprint: str,
+        reservation_generation: str,
         created_at: str,
     ) -> None:
         """Delete only the exact still-pending reservation owned by the caller."""
@@ -262,6 +271,7 @@ class IdempotencyLedger:
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
+                reservation_generation=reservation_generation,
                 created_at=created_at,
             )
             self.release_pending_with_connection(conn, operation_key)
@@ -356,6 +366,7 @@ class IdempotencyLedger:
         task_id: str,
         operation_type: str,
         input_fingerprint: str,
+        reservation_generation: str,
         created_at: str,
     ) -> IdempotencyRecord:
         current = cls._require_with_connection(conn, operation_key)
@@ -363,6 +374,7 @@ class IdempotencyLedger:
             current.task_id != task_id
             or current.operation_type != operation_type
             or current.input_fingerprint != input_fingerprint
+            or current.reservation_generation != reservation_generation
             or current.created_at != created_at
         ):
             raise IdempotencyConflictError(
@@ -442,11 +454,19 @@ class IdempotencyLedger:
 
     @staticmethod
     def _from_row(row) -> IdempotencyRecord:
+        reservation_generation = row["reservation_generation"]
+        if (
+            type(reservation_generation) is not str
+            or len(reservation_generation) != 32
+            or any(character not in "0123456789abcdef" for character in reservation_generation)
+        ):
+            raise RuntimeError("invalid idempotency reservation generation")
         return IdempotencyRecord(
             operation_key=row["operation_key"],
             task_id=row["task_id"],
             operation_type=row["operation_type"],
             input_fingerprint=row["input_fingerprint"],
+            reservation_generation=reservation_generation,
             status=IdempotencyStatus(row["status"]),
             result=json.loads(row["result_json"]) if row["result_json"] else None,
             created_at=row["created_at"],
