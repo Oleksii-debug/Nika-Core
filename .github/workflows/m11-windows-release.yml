@@ -10,6 +10,7 @@ on:
       - "src/nika_core/diagnostics/**"
       - "src/nika_core/v01_packaged_team_runtime.py"
       - "src/nika_core/v01_model_settings.py"
+      - "src/nika_core/v01_cloud_model_permission.py"
       - "src/nika_core/security/model_cloud_authority.py"
       - "src/nika_core/security/standing_permission.py"
       - "scripts/nika_windows.py"
@@ -30,6 +31,9 @@ on:
       - "tests/test_v01_model_settings_ui.py"
       - "tests/test_v01_packaged_model_recovery_health.py"
       - "tests/test_v01_packaged_cloud_authority_composition.py"
+      - "tests/test_v01_cloud_model_permission.py"
+      - "tests/test_v01_desktop_task_admission.py"
+      - "tests/test_windows_cloud_model_permission.py"
       - "tests/test_local_model_health.py"
       - "tests/js/model_settings_harness.cjs"
       - "tests/test_pf11_proof_precommand.py"
@@ -50,6 +54,7 @@ on:
       - "src/nika_core/diagnostics/**"
       - "src/nika_core/v01_packaged_team_runtime.py"
       - "src/nika_core/v01_model_settings.py"
+      - "src/nika_core/v01_cloud_model_permission.py"
       - "src/nika_core/security/model_cloud_authority.py"
       - "src/nika_core/security/standing_permission.py"
       - "scripts/nika_windows.py"
@@ -70,6 +75,9 @@ on:
       - "tests/test_v01_model_settings_ui.py"
       - "tests/test_v01_packaged_model_recovery_health.py"
       - "tests/test_v01_packaged_cloud_authority_composition.py"
+      - "tests/test_v01_cloud_model_permission.py"
+      - "tests/test_v01_desktop_task_admission.py"
+      - "tests/test_windows_cloud_model_permission.py"
       - "tests/test_local_model_health.py"
       - "tests/js/model_settings_harness.cjs"
       - "tests/test_pf11_proof_precommand.py"
@@ -130,6 +138,9 @@ jobs:
           tests/test_v01_model_settings_ui.py
           tests/test_v01_packaged_model_recovery_health.py
           tests/test_v01_packaged_cloud_authority_composition.py
+          tests/test_v01_cloud_model_permission.py
+          tests/test_v01_desktop_task_admission.py
+          tests/test_windows_cloud_model_permission.py
           tests/test_local_model_health.py
           tests/test_pf11_proof_precommand.py
           tests/test_windows_packaging_input_safety.py
