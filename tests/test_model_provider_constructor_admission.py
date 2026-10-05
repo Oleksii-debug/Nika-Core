@@ -149,6 +149,37 @@ def test_ollama_provider_rejects_nontext_carriers_with_type_error(
         OllamaProvider(**kwargs)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "http://localhost:65536",
+        "http://localhost:abc",
+        "http://localhost:0",
+        "http://localhost:",
+        "http://localhost?",
+        "http://localhost#",
+        "http://localhost\\@evil.invalid",
+        "http://localhost%2E",
+    ),
+)
+def test_ollama_provider_rejects_malformed_loopback_authority(base_url: str) -> None:
+    with pytest.raises(ValueError):
+        OllamaProvider(default_model="qwen3:8b", base_url=base_url)
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    (
+        "http://localhost:11434",
+        "http://127.0.0.1:11434",
+        "http://[::1]:11434",
+        "https://localhost",
+    ),
+)
+def test_ollama_provider_accepts_explicit_loopback_authority(base_url: str) -> None:
+    OllamaProvider(default_model="qwen3:8b", base_url=base_url)
+
+
 def test_exact_supported_constructor_values_remain_accepted() -> None:
     DeterministicMockProvider(provider_id="deterministic", prefix="")
     OpenAICompatibleProvider(
