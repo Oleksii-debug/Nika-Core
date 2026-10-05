@@ -45,6 +45,21 @@ _OIDC_ID_TOKEN_CREDENTIAL = re.compile(
     r"((?:id[-_]?token)\s*[:=]\s*)"
     r"([^\s,;&#]+)"
 )
+_PROVIDER_SECRET_FIELDS = frozenset(
+    {
+        "xamzcredential",
+        "xamzsecuritytoken",
+        "xamzserversideencryptioncustomerkey",
+        "xamzserversideencryptioncustomerkeymd5",
+        "xamzsignature",
+        "xgoogcredential",
+        "xgoogencryptionkey",
+        "xgoogencryptionkeysha256",
+        "xgoogsignature",
+        "xmsencryptionkey",
+        "xmsencryptionkeysha256",
+    }
+)
 _KEY_COLLISION_ERROR = "memory persistence key collision after minimization"
 
 
@@ -90,10 +105,13 @@ def _redact_secrets(value: Any) -> Any:
             # while redacting scalar leaves under the canonical secret context.
             structured_item = isinstance(item, (Mapping, list, tuple))
             if isinstance(key, str) and safe_key == key:
-                if structured_item and _uses_canonical_secret_field_semantics(key):
+                secret_field = _uses_canonical_secret_field_semantics(key)
+                if structured_item and secret_field:
                     result[safe_key] = _redact_secret_structure(item)
                 elif structured_item:
                     result[safe_key] = _redact_secrets(item)
+                elif secret_field:
+                    result[safe_key] = "[REDACTED]"
                 else:
                     redacted_item = redact_mapping({key: item})[key]
                     result[safe_key] = _redact_secrets(redacted_item)
@@ -108,6 +126,9 @@ def _redact_secrets(value: Any) -> Any:
 
 
 def _uses_canonical_secret_field_semantics(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "", key.casefold())
+    if normalized in _PROVIDER_SECRET_FIELDS:
+        return True
     probe = object()
     return redact_mapping({key: probe})[key] is not probe
 
