@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -500,6 +501,16 @@ def _require_regular_unlinked(path: Path, *, code: str) -> os.stat_result:
     return value
 
 
+def _require_directory_unlinked(path: Path, *, code: str) -> os.stat_result:
+    try:
+        value = os.lstat(path)
+    except OSError:
+        _fail(code)
+    if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISDIR(value.st_mode):
+        _fail(code)
+    return value
+
+
 def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     before = _require_regular_unlinked(path, code=code)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -820,16 +831,77 @@ def candidate_artifact_path(output_root: Path, candidate_artifact_ref: str) -> P
     return root / _candidate_key(ref) / "candidate" / _CANDIDATE_FILE
 
 
+def _reserve_candidate_temporary(candidate: Path) -> Path:
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{_CANDIDATE_FILE}.",
+            suffix=".tmp",
+            dir=candidate.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+    except OSError:
+        _fail("candidate_publish_failed")
+    _require_regular_unlinked(temporary, code="candidate_publish_failed")
+    return temporary
+
+
+def _best_effort_unlink_identity(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        value = os.lstat(path)
+    except OSError:
+        return
+    if (
+        stat.S_ISREG(value.st_mode)
+        and not stat.S_ISLNK(value.st_mode)
+        and not _is_reparse(value)
+        and (value.st_dev, value.st_ino) == identity
+    ):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def _job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     return config.output_root / _candidate_key(request.candidate_artifact_ref)
+
+
+def _ensure_child_directory(parent: Path, name: str, *, code: str) -> Path:
+    parent_before = _require_directory_unlinked(parent, code=code)
+    child = parent / name
+    try:
+        child.mkdir(parents=False, exist_ok=True)
+    except OSError:
+        _fail(code)
+    _require_directory_unlinked(child, code=code)
+    parent_after = _require_directory_unlinked(parent, code=code)
+    if (parent_before.st_dev, parent_before.st_ino) != (
+        parent_after.st_dev,
+        parent_after.st_ino,
+    ):
+        _fail(code)
+    return child
+
+
+def _ensure_job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
+    return _ensure_child_directory(
+        config.output_root,
+        _candidate_key(request.candidate_artifact_ref),
+        code="job_output_root_failed",
+    )
 
 
 def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root: Path) -> Path:
     source = config.base_gguf
     if _sha256_file(source) != request.base_artifact_sha256:
         _fail("base_gguf_digest_mismatch")
-    target_dir = job_root / "base"
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = _ensure_child_directory(
+        job_root,
+        "base",
+        code="staged_base_directory_invalid",
+    )
     target = target_dir / "base.gguf"
     if target.exists():
         _require_regular_unlinked(target, code="staged_base_invalid")
@@ -1145,11 +1217,7 @@ def _train_one_step(
     ) = _import_training_stack()
 
     set_seed(config.seed)
-    job_root = _job_root(config, request)
-    try:
-        job_root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        _fail("job_output_root_failed")
+    job_root = _ensure_job_root(config, request)
     staged_base = _copy_verified_base(config, request, job_root)
     previous_checkpoint = _resume_checkpoint(job_root, request)
 
@@ -1207,7 +1275,16 @@ def _train_one_step(
             config.max_sequence_length,
         )
         collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-        trainer_root = job_root / "trainer"
+        trainer_root = _ensure_child_directory(
+            job_root,
+            "trainer",
+            code="trainer_output_directory_invalid",
+        )
+        _ensure_child_directory(
+            trainer_root,
+            f"checkpoint-{request.step_index + 1}",
+            code="trainer_checkpoint_directory_invalid",
+        )
         arguments = TrainingArguments(
             output_dir=os.fspath(trainer_root),
             per_device_train_batch_size=1,
@@ -1274,10 +1351,16 @@ def _train_one_step(
         return resume_state, None
 
     candidate = candidate_artifact_path(config.output_root, request.candidate_artifact_ref)
-    candidate.parent.mkdir(parents=True, exist_ok=True)
-    if candidate.exists():
-        _fail("candidate_publish_conflict")
-    temporary = candidate.parent / f".{_CANDIDATE_FILE}.tmp"
+    candidate_parent = _ensure_child_directory(
+        job_root,
+        "candidate",
+        code="candidate_publish_failed",
+    )
+    if candidate.parent != candidate_parent:
+        _fail("candidate_publish_failed")
+    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+        _fail("checkpoint_payload_changed_before_candidate")
+    temporary = _reserve_candidate_temporary(candidate)
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
@@ -1285,6 +1368,9 @@ def _train_one_step(
         consumed=consumed,
         adapter_config=adapter_config,
     )
+    temporary_sha256: str | None = None
+    temporary_identity: tuple[int, int] | None = None
+    published = False
     try:
         with safe_open(os.fspath(adapter_file), framework="pt", device="cpu") as source:
             tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
@@ -1295,19 +1381,71 @@ def _train_one_step(
             os.fspath(temporary),
             metadata={"nika_adapter_manifest": manifest_json},
         )
-        _require_regular_unlinked(temporary, code="candidate_publish_failed")
-        os.replace(temporary, candidate)
+        if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+            _fail("checkpoint_payload_changed_during_candidate")
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="candidate_publish_failed",
+        )
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        temporary_sha256, _ = _hash_regular_snapshot(
+            temporary,
+            code="candidate_publish_failed",
+        )
+        os.link(temporary, candidate)
+        published = True
+    except FileExistsError:
+        _fail("candidate_publish_conflict")
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_publish_failed")
     finally:
-        try:
-            if temporary.exists():
-                temporary.unlink()
-        except OSError:
-            pass
-    candidate_sha256 = _sha256_file(candidate)
+        if not published:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+    try:
+        os.unlink(temporary)
+    except OSError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("candidate_publish_cleanup_failed")
+
+    candidate_stat = _require_regular_unlinked(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    if (
+        temporary_identity is None
+        or (candidate_stat.st_dev, candidate_stat.st_ino) != temporary_identity
+        or candidate_stat.st_nlink != 1
+    ):
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("candidate_publish_digest_mismatch")
+
+    candidate_sha256, _ = _hash_regular_snapshot(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    candidate_after = _require_regular_unlinked(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    if (
+        (candidate_after.st_dev, candidate_after.st_ino) != temporary_identity
+        or candidate_after.st_nlink != 1
+        or temporary_sha256 is None
+        or candidate_sha256 != temporary_sha256
+    ):
+        _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("candidate_publish_digest_mismatch")
+    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+        _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("checkpoint_payload_changed_after_candidate")
     return resume_state, candidate_sha256
 
 

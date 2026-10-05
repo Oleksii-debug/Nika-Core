@@ -665,3 +665,249 @@ def test_adapter_config_snapshot_removes_private_base_path_and_rejects_other_pat
     )
     with pytest.raises(peft.PeftTrainerError, match="adapter_config_private_path"):
         peft._adapter_config_snapshot(adapter_dir, request, config)
+
+
+def test_final_candidate_publish_race_never_overwrites(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_link = peft.os.link
+    raced = False
+
+    def _racing_link(source: object, target: object, *args: object, **kwargs: object) -> None:
+        nonlocal raced
+        target_path = Path(target)
+        if target_path == candidate and not raced:
+            raced = True
+            target_path.write_bytes(b"competitor")
+        real_link(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "link", _racing_link)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_conflict"):
+        peft._train_one_step(request, config, consumed)
+
+    assert raced is True
+    assert candidate.read_bytes() == b"competitor"
+
+
+def test_final_candidate_immediate_post_link_substitution_is_detected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_link = peft.os.link
+    substituted = False
+
+    def _substituting_link(
+        source: object,
+        target: object,
+        *args: object,
+        **kwargs: object,
+    ) -> None:
+        nonlocal substituted
+        real_link(source, target, *args, **kwargs)
+        target_path = Path(target)
+        if target_path == candidate:
+            target_path.unlink()
+            target_path.write_bytes(b"substituted")
+            substituted = True
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "link", _substituting_link)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_digest_mismatch"):
+        peft._train_one_step(request, config, consumed)
+
+    assert substituted is True
+    assert candidate.read_bytes() == b"substituted"
+
+
+def test_final_candidate_uses_unique_reserved_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    candidate.parent.mkdir(parents=True)
+    legacy_temporary = candidate.parent / ".adapter_model.safetensors.tmp"
+    legacy_temporary.write_bytes(b"other-attempt")
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    _, candidate_sha256 = peft._train_one_step(request, config, consumed)
+
+    assert candidate_sha256 == _sha256(candidate.read_bytes())
+    assert legacy_temporary.read_bytes() == b"other-attempt"
+    assert sorted(
+        path.name
+        for path in candidate.parent.iterdir()
+        if path.name.endswith(".tmp")
+    ) == [legacy_temporary.name]
+
+
+def test_final_candidate_cleanup_failure_rolls_back_published_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_unlink = peft.os.unlink
+
+    def _unlink(path: object, *args: object, **kwargs: object) -> None:
+        value = Path(path)
+        if (
+            value.parent == candidate.parent
+            and value.name.startswith(".adapter_model.safetensors.")
+            and value.name.endswith(".tmp")
+        ):
+            raise PermissionError("simulated temporary cleanup failure")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "unlink", _unlink)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_cleanup_failed"):
+        peft._train_one_step(request, config, consumed)
+
+    assert not candidate.exists()
+
+
+def test_final_candidate_rejects_extra_hardlink_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    alias = candidate.parent / "external-alias.safetensors"
+    real_link = peft.os.link
+
+    def _link(source: object, target: object, *args: object, **kwargs: object) -> None:
+        real_link(source, target, *args, **kwargs)
+        if Path(target) == candidate:
+            real_link(source, alias)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "link", _link)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_digest_mismatch"):
+        peft._train_one_step(request, config, consumed)
+
+    assert not candidate.exists()
+    assert alias.exists()
+
+
+def test_final_candidate_rejects_checkpoint_change_during_materialization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    checkpoint = peft._checkpoint_dir(peft._job_root(config, request), 1)
+    adapter_file = checkpoint / "adapter" / "adapter_model.safetensors"
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+
+    def _mutating_safe_save_file(
+        tensors: dict[str, object],
+        path: str,
+        *,
+        metadata: dict[str, str],
+    ) -> None:
+        adapter_file.write_bytes(adapter_file.read_bytes() + b"-tampered")
+        _fake_safe_save_file(tensors, path, metadata=metadata)
+
+    def _mutating_stack() -> tuple[object, ...]:
+        values = list(_fake_stack())
+        values[6] = _mutating_safe_save_file
+        return tuple(values)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _mutating_stack)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="checkpoint_payload_changed_during_candidate",
+    ):
+        peft._train_one_step(request, config, consumed)
+
+    assert not candidate.exists()
+
+
+def test_final_candidate_rejects_checkpoint_change_after_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    checkpoint = peft._checkpoint_dir(peft._job_root(config, request), 1)
+    adapter_file = checkpoint / "adapter" / "adapter_model.safetensors"
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_unlink = peft.os.unlink
+    mutated = False
+
+    def _unlink(path: object, *args: object, **kwargs: object) -> None:
+        nonlocal mutated
+        value = Path(path)
+        real_unlink(path, *args, **kwargs)
+        if (
+            not mutated
+            and value.parent == candidate.parent
+            and value.name.startswith(".adapter_model.safetensors.")
+            and value.name.endswith(".tmp")
+        ):
+            adapter_file.write_bytes(adapter_file.read_bytes() + b"-late-tamper")
+            mutated = True
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "unlink", _unlink)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="checkpoint_payload_changed_after_candidate",
+    ):
+        peft._train_one_step(request, config, consumed)
+
+    assert mutated is True
+    assert not candidate.exists()
