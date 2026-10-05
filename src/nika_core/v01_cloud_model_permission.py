@@ -582,7 +582,12 @@ class V01CloudModelPermissionService:
         permission_id = self._bound_permission_id(record.task_id, strict=False)
         if permission_id is None:
             return None
-        permission = self._permissions.get(permission_id)
+        try:
+            permission = self._permissions.get(permission_id)
+        except Exception:  # noqa: BLE001 - corrupt durable authority must fail closed
+            raise CloudModelPermissionDenied(
+                "Збережений дозвіл зовнішньої моделі пошкоджено."
+            ) from None
         if permission is None or permission.revoked_at is not None:
             return None
         if now < permission.granted_at or now >= permission.expires_at:

@@ -1458,3 +1458,39 @@ def test_recovered_reconsent_dates_new_grant_after_confirmation(
     assert permission.granted_at == instant[0]
     assert permission.expires_at == instant[0] + timedelta(hours=24)
     assert service.execution_authority_for_task(record.task_id) is not None
+
+
+def test_corrupt_standing_permission_fails_resume_without_reprompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    permission_id = service._bound_permission_id(record.task_id, strict=True)
+    assert permission_id is not None
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE standing_permissions SET scope_fingerprint = ? "
+            "WHERE permission_id = ?",
+            ("0" * 64, permission_id),
+        )
+
+    with pytest.raises(CloudModelPermissionDenied, match="дозвіл.*пошкоджено"):
+        service.admit_resumed_task(queue.get(record.task_id))
+
+    assert len(prompts) == 1
+    assert queue.get(record.task_id).state is TaskState.PAUSED
+    assert service.execution_authority_for_task(record.task_id) is None
