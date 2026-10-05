@@ -421,6 +421,42 @@ def test_same_job_single_flight_precedes_planner_side_effect(
     assert second.failure.retryable is False
 
 
+def test_same_job_single_flight_spans_distinct_worker_instances(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    entered: asyncio.Event
+    release: asyncio.Event
+
+    class BlockingPlanner:
+        async def plan(self, _job: CodingJob) -> LocalCodingPlan:
+            entered.set()
+            await release.wait()
+            return LocalCodingPlan((LocalFileEdit("src/value.py", b"VALUE = 2\n"),))
+
+    async def scenario():
+        nonlocal entered, release
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        first_worker = _worker(tmp_path, repository, BlockingPlanner())
+        second_worker = _worker(tmp_path, repository, _MustNotPlan())
+        first_job = _job(first_worker, base_sha)
+        second_job = _job(second_worker, base_sha)
+        first_task = asyncio.create_task(first_worker.execute(first_job))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        second = await second_worker.execute(second_job)
+        release.set()
+        first = await first_task
+        return first, second
+
+    first, second = _run(scenario())
+
+    assert first.failure is None
+    assert second.failure is not None
+    assert second.failure.kind is WorkerFailureKind.INVALID_REQUEST
+    assert second.failure.retryable is False
+
+
 def test_planner_mutation_cannot_rewrite_retained_job_authority(
     tmp_path: pathlib.Path,
 ) -> None:
