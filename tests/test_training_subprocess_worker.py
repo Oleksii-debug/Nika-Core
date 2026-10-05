@@ -1620,7 +1620,6 @@ def test_runtime_environment_manifest_digest_must_match_versions(tmp_path: Path)
         )
 
 
-
 @pytest.mark.skipif(os.name != "nt", reason="requires Windows file-sharing semantics")
 def test_windows_launch_guard_blocks_replace_at_popen_boundary(
     tmp_path: Path,
