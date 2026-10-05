@@ -993,7 +993,6 @@ def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path
     assert settings.snapshot()["revision"] == 1
 
 
-
 @pytest.mark.asyncio
 async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) -> None:
     result = await _promoted_comparison(tmp_path)
@@ -1100,6 +1099,7 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
 
     monkeypatch.setattr(settings, "for_task", unexpected_legacy_read)
     monkeypatch.setattr(settings, "artifact_pin_for_task", unexpected_legacy_read)
+    monkeypatch.setattr(TaskQueue, "get", unexpected_legacy_read)
 
     factory = V01BoundModelRuntimeFactory(
         store=store,
