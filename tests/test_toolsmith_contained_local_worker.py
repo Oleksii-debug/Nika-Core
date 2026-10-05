@@ -669,13 +669,12 @@ def test_no_candidate_replay_rejects_diff_digest_tamper(
     worker = _worker(
         tmp_path,
         repository,
-        _Planner(LocalFileEdit("src/value.py", b"VALUE = 2\n")),
+        _Planner(LocalFileEdit("docs/outside.md", b"no\n")),
     )
     job = _job(worker, base_sha)
-    object.__setattr__(job.resource_budget, "timeout_seconds", True)
     first = _run(worker.execute(job))
     assert first.failure is not None
-    assert first.failure.kind is WorkerFailureKind.INVALID_REQUEST
+    assert first.failure.kind is WorkerFailureKind.POLICY_VIOLATION
 
     state_path = worker.workspace_root_for(job.job_id) / "_nika_local_worker_state.json"
     payload = __import__("json").loads(state_path.read_text(encoding="utf-8"))
@@ -686,13 +685,12 @@ def test_no_candidate_replay_rejects_diff_digest_tamper(
         encoding="utf-8",
     )
 
-    clean_job = _job(worker, base_sha)
     reconstructed = ContainedLocalCodingWorker(
         workspace_parent=worker.workspace_parent,
         repositories={"repo-1": repository},
         planner=_MustNotPlan(),
     )
-    replayed = _run(reconstructed.execute(clean_job))
+    replayed = _run(reconstructed.execute(job))
 
     assert replayed.failure is not None
     assert replayed.failure.kind is WorkerFailureKind.INTERNAL_ERROR
