@@ -155,3 +155,84 @@ def test_upgrade_rejects_non_exact_expected_version(expected_version: object) ->
             lambda: _Adapter(replacement),
             expected_version=expected_version,  # type: ignore[arg-type]
         )
+
+class _BehavioralText(str):
+    touched = False
+
+    def __hash__(self) -> int:
+        type(self).touched = True
+        raise AssertionError("behavioral text hash must not execute")
+
+
+class _BehavioralTuple(tuple):
+    touched = False
+
+    def __iter__(self):
+        type(self).touched = True
+        raise AssertionError("behavioral tuple iteration must not execute")
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"plugin_id": _BehavioralText("snapshot.plugin")}, "plugin_id"),
+        (
+            {"plugin_id": "snapshot.plugin", "permission_ids": _BehavioralTuple()},
+            "permission_ids",
+        ),
+        (
+            {
+                "plugin_id": "snapshot.plugin",
+                "permission_ids": (_BehavioralText("snapshot.read"),),
+            },
+            "permission_ids",
+        ),
+        (
+            {"plugin_id": "snapshot.plugin", "approval_refs": _BehavioralTuple()},
+            "approval_refs",
+        ),
+        (
+            {
+                "plugin_id": "snapshot.plugin",
+                "approval_refs": (_BehavioralText("approval:1"),),
+            },
+            "approval_refs",
+        ),
+    ],
+)
+def test_activation_rejects_behavioral_carriers_before_effect(
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    _BehavioralText.touched = False
+    _BehavioralTuple.touched = False
+    factory_calls = 0
+    runtime = PluginRuntime()
+    manifest = _manifest()
+
+    def factory() -> _Adapter:
+        nonlocal factory_calls
+        factory_calls += 1
+        return _Adapter(manifest)
+
+    runtime.register(manifest, factory)
+    with pytest.raises(ValueError, match=message):
+        runtime.activate(**kwargs)  # type: ignore[arg-type]
+
+    assert _BehavioralText.touched is False
+    assert _BehavioralTuple.touched is False
+    assert factory_calls == 0
+
+
+def test_activation_preserves_exact_empty_carriers() -> None:
+    manifest = _manifest()
+    adapter = _Adapter(manifest)
+    runtime = PluginRuntime()
+    runtime.register(manifest, lambda: adapter)
+
+    assert runtime.activate(
+        "snapshot.plugin",
+        permission_ids=(),
+        approval_refs=(),
+    ) is adapter
+
