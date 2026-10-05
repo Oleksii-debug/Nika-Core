@@ -138,6 +138,49 @@ def test_keymap_known_failures_remain_localized_and_serializable(
     }
 
 
+def test_strict_keymap_rejections_remain_localized_and_atomic(tmp_path: Path) -> None:
+    bridge = build_bridge(tmp_path)
+
+    assert bridge.set_binding("nav.agents", "Alt+5")["ok"] is True
+    assert bridge.set_binding("nav.tasks", "Alt+2")["ok"] is True
+
+    conflict = bridge.restore_default("nav.agents")
+    assert conflict == {
+        "ok": False,
+        "message": (
+            "Не вдалося відновити комбінацію за замовчуванням: "
+            "перевірте конфлікти карти клавіш."
+        ),
+    }
+    actions = {item["action_id"]: item for item in bridge.list_actions()}
+    assert actions["nav.agents"]["binding"] == "Alt+5"
+    assert actions["nav.tasks"]["binding"] == "Alt+2"
+
+    control_laden = bridge.set_binding("nav.logs", "Ctrl+\nK")
+    assert control_laden == {
+        "ok": False,
+        "message": (
+            "Не вдалося зберегти комбінацію: "
+            "перевірте дію, формат і конфлікти."
+        ),
+    }
+
+    duplicate = bridge.import_keymap(
+        '{"format_version":1,"bindings":{"nav.logs":"Alt+8","nav.logs":"Alt+9"}}'
+    )
+    assert duplicate == {
+        "ok": False,
+        "message": (
+            "Не вдалося імпортувати карту клавіш: "
+            "перевірте JSON, дії та конфлікти."
+        ),
+    }
+    actions = {item["action_id"]: item for item in bridge.list_actions()}
+    assert actions["nav.logs"]["binding"] == "Alt+3"
+    assert actions["nav.agents"]["binding"] == "Alt+5"
+    assert actions["nav.tasks"]["binding"] == "Alt+2"
+
+
 def test_list_actions_exposes_resolved_bindings_without_handlers(tmp_path: Path) -> None:
     bridge = build_bridge(tmp_path)
     actions = {item["action_id"]: item for item in bridge.list_actions()}
