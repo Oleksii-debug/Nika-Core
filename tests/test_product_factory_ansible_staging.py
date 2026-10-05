@@ -333,6 +333,32 @@ def test_rollback_must_restore_exact_requested_previous_release() -> None:
     assert extravars["nika_previous_release_sha"] == previous
 
 
+@pytest.mark.parametrize(
+    "previous_release_sha",
+    [
+        True,
+        1.0,
+        "not-a-sha",
+        "A" * 40,
+        "0" * 39,
+        "0" * 41,
+    ],
+)
+def test_rollback_rejects_invalid_previous_release_before_runner_call(
+    previous_release_sha: object,
+) -> None:
+    adapter, runner = _adapter()
+    with pytest.raises(
+        StagingAdapterError,
+        match="previous_release_sha",
+    ):
+        adapter.rollback(
+            _intent(),
+            previous_release_sha,  # type: ignore[arg-type]
+        )
+    assert runner.calls == []
+
+
 def test_rollback_rejects_wrong_restored_sha() -> None:
     adapter, _ = _adapter(
         _execution(
@@ -658,6 +684,326 @@ def test_ansible_runner_client_evidence_is_deterministic_for_same_normalized_res
     first = AnsibleRunnerClient(module()).execute(**kwargs)
     second = AnsibleRunnerClient(module()).execute(**kwargs)
     assert first == second
+
+
+@pytest.mark.parametrize(
+    "rc",
+    [False, True, 0.0, "0"],
+)
+def test_ansible_runner_client_rejects_ambiguous_return_code_types(
+    rc: object,
+) -> None:
+    event = {
+        "event": "runner_on_ok",
+        "event_data": {
+            "task": "nika_pf3_result",
+            "res": {"nika_pf3": {"applied": True}},
+        },
+    }
+
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(
+            status="successful",
+            rc=rc,
+            events=[event],
+        )
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(
+        StagingAdapterError,
+        match="rc must be an integer or null",
+    ):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_ansible_runner_client_rejects_non_text_status() -> None:
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(
+            status=0,
+            rc=0,
+            events=[],
+        )
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(
+        StagingAdapterError,
+        match="status must be bounded non-empty text",
+    ):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_ansible_runner_client_rejects_non_text_contract_keys() -> None:
+    event = {
+        "event": "runner_on_ok",
+        "event_data": {
+            "task": "nika_pf3_result",
+            "res": {"nika_pf3": {1: "unexpected"}},
+        },
+    }
+
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(
+            status="successful",
+            rc=0,
+            events=[event],
+        )
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(
+        StagingAdapterError,
+        match="contract keys must be non-empty text",
+    ):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_ansible_runner_client_rejects_non_iterable_events() -> None:
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(
+            status="successful",
+            rc=0,
+            events=None,
+        )
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(
+        StagingAdapterError,
+        match="events must be iterable",
+    ):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_runner_execution_rejects_boolean_rc_at_canonical_carrier() -> None:
+    with pytest.raises(
+        StagingAdapterError,
+        match="rc must be an integer or null",
+    ):
+        RunnerExecution(
+            "successful",
+            False,
+            {"applied": True},
+            "ansible-runner:evidence-deploy",
+        )
+
+
+def test_runner_execution_deep_snapshots_mutable_contract() -> None:
+    contract = {
+        "applied": True,
+        "meta": {"release": "one"},
+    }
+    execution = RunnerExecution(
+        "successful",
+        0,
+        contract,
+        "ansible-runner:evidence-deploy",
+    )
+    contract["applied"] = False
+    meta = contract["meta"]
+    assert isinstance(meta, dict)
+    meta["release"] = "two"
+    assert execution.contract == {
+        "applied": True,
+        "meta": {"release": "one"},
+    }
+
+
+def test_adapter_revalidates_tampered_runner_execution() -> None:
+    execution = RunnerExecution(
+        "successful",
+        0,
+        {"applied": True},
+        "ansible-runner:evidence-deploy",
+    )
+    object.__setattr__(
+        execution,
+        "rc",
+        False,
+    )
+    adapter, _ = _adapter(execution)
+
+    with pytest.raises(
+        StagingAdapterError,
+        match="rc must be an integer or null",
+    ):
+        adapter.deploy(_intent())
+
+
+def test_ansible_runner_client_bounds_event_stream() -> None:
+    events = (
+        {"event": "verbose"}
+        for _ in range(10_001)
+    )
+
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(
+            status="successful",
+            rc=0,
+            events=events,
+        )
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(
+        StagingAdapterError,
+        match="emitted too many events",
+    ):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+@pytest.mark.parametrize(
+    "contract",
+    [
+        {"unsupported": object()},
+        {"score": float("nan")},
+        {"score": float("inf")},
+    ],
+)
+def test_runner_execution_rejects_non_json_or_nonfinite_contracts(
+    contract: Mapping[str, object],
+) -> None:
+    with pytest.raises(
+        StagingAdapterError,
+        match="JSON-compatible finite values",
+    ):
+        RunnerExecution(
+            "successful",
+            0,
+            contract,
+            "ansible-runner:evidence-deploy",
+        )
+
+
+def test_runner_execution_bounds_contract_and_evidence_text() -> None:
+    with pytest.raises(
+        StagingAdapterError,
+        match="evidence size limit",
+    ):
+        RunnerExecution(
+            "successful",
+            0,
+            {"detail": "x" * (64 * 1024)},
+            "ansible-runner:evidence-deploy",
+        )
+    with pytest.raises(
+        StagingAdapterError,
+        match="bounded non-empty text",
+    ):
+        RunnerExecution(
+            "successful",
+            0,
+            {"applied": True},
+            "x" * 513,
+        )
+
+
+def test_ansible_runner_client_evidence_canonicalizes_nested_mapping_order() -> None:
+    first_event = {
+        "event": "runner_on_ok",
+        "event_data": {
+            "task": "nika_pf3_result",
+            "res": {
+                "nika_pf3": {
+                    "applied": True,
+                    "meta": {"b": 2, "a": 1},
+                }
+            },
+        },
+    }
+    second_event = {
+        "event": "runner_on_ok",
+        "event_data": {
+            "task": "nika_pf3_result",
+            "res": {
+                "nika_pf3": {
+                    "meta": {"a": 1, "b": 2},
+                    "applied": True,
+                }
+            },
+        },
+    }
+
+    def execute(event: dict[str, object]) -> RunnerExecution:
+        module = SimpleNamespace(
+            run=lambda **kwargs: SimpleNamespace(
+                status="successful",
+                rc=0,
+                events=[event],
+            )
+        )
+        return AnsibleRunnerClient(module).execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+    assert (
+        execute(first_event).evidence_ref
+        == execute(second_event).evidence_ref
+    )
+
+
+def test_runner_execution_rejects_oversized_status() -> None:
+    with pytest.raises(
+        StagingAdapterError,
+        match="bounded non-empty text",
+    ):
+        RunnerExecution(
+            "s" * 65,
+            0,
+            {"applied": True},
+            "ansible-runner:evidence-deploy",
+        )
+
+
+def test_ansible_runner_client_rejects_malformed_result_carrier() -> None:
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(
+            status="successful",
+            events=[],
+        )
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(
+        StagingAdapterError,
+        match="malformed execution result",
+    ):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
 
 
 def test_default_runner_loader_rejects_native_windows(
