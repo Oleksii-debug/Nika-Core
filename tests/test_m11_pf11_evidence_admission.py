@@ -40,7 +40,7 @@ def _proof(
     writer: Callable[[Path], None],
 ) -> Path:
     bundle = tmp_path / "NikaCore"
-    bundle.mkdir()
+    bundle.mkdir(exist_ok=True)
     (bundle / "NikaCore.exe").write_bytes(b"candidate")
 
     def fake_run(argv, *, check, env, timeout):
