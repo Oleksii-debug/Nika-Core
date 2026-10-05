@@ -250,6 +250,53 @@ class _ControlledDeadlineTimer:
         self.function(*self.args, **self.kwargs)
 
 
+class _ImmediateDeadlineTimer(_ControlledDeadlineTimer):
+    def start(self) -> None:
+        super().start()
+        self.fire()
+
+
+def test_deadline_before_first_request_does_not_prove_reachability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timers: list[_ImmediateDeadlineTimer] = []
+
+    def timer_factory(
+        interval: float,
+        function: Callable[..., object],
+        args: tuple[object, ...] | None = None,
+        kwargs: dict[str, object] | None = None,
+    ) -> _ImmediateDeadlineTimer:
+        timer = _ImmediateDeadlineTimer(interval, function, args, kwargs)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(
+        "nika_core.diagnostics.model_health.Timer",
+        timer_factory,
+    )
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return _response([{"model": "selected:1"}])
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="selected:1",
+        timeout_seconds=30.0,
+        client_factory=_client_factory(handler),
+    ).snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.UNKNOWN
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == []
+    assert len(timers) == 1
+    assert timers[0].started
+    assert timers[0].cancelled
+    assert timers[0].joined
+
+
 class _DeadlineProgressBody(httpx.SyncByteStream):
     def __init__(self, timers: list[_ControlledDeadlineTimer]) -> None:
         self.timers = timers
