@@ -9,7 +9,10 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_command.contracts import EvidenceReference
 from nika_core.product_command.deployment_adapter import deployment_status_entries
 from nika_core.product_command.factory_status_adapter import deployment_execution_status_entries
-from nika_core.product_command.product_project_adapter import ProductProjectCommandService
+from nika_core.product_command.product_project_adapter import (
+    ProductProjectCommandService,
+    _evidence as product_project_evidence,
+)
 from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_factory_deployment import (
     DeploymentFabricSnapshot,
@@ -90,6 +93,13 @@ def test_public_evidence_reference_rejects_invalid_utf8() -> None:
 
     with pytest.raises(ValidationError, match="valid UTF-8"):
         EvidenceReference(kind="test", reference=malformed, label="Evidence")
+
+
+def test_product_project_evidence_cannot_bypass_utf8_admission() -> None:
+    malformed = "evidence://" + "x" * 600 + "\ud800"
+
+    with pytest.raises(ValidationError, match="valid UTF-8"):
+        product_project_evidence("test", malformed, "Evidence")
 
 
 def test_execution_projection_never_surfaces_raw_credential_use_event_id() -> None:
