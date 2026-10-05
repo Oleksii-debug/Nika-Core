@@ -136,6 +136,11 @@ async function main() {
   await Promise.resolve();
   await Promise.resolve();
   assert.equal(requests.length, 6);
+  assert.equal(
+    context.document.documentElement.dataset.nikaReady,
+    "false",
+    "Uncertain durable effect must drop packaged readiness before reconciliation completes",
+  );
   await ui.dispatch("task.pause", trigger);
   assert.equal(requests.length, 6, "retry must stay blocked while reconciliation is pending");
   assert(messages.at(-1)[0].includes("Попередню команду"));
