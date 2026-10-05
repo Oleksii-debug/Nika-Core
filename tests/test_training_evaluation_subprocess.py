@@ -542,3 +542,34 @@ async def test_direct_non_request_carrier_is_typed_no_effect_failure(
 
     assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
     assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+
+
+
+@pytest.mark.asyncio
+async def test_unknown_request_metadata_is_rejected_before_subprocess_effect(
+    tmp_path: Path,
+) -> None:
+    script = _success_script(tmp_path)
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+    request = _request()
+    request = ModelRequest(
+        request_id=request.request_id,
+        messages=request.messages,
+        model=request.model,
+        provider_id=request.provider_id,
+        provider_kind=request.provider_kind,
+        fallback_provider_ids=request.fallback_provider_ids,
+        privacy=request.privacy,
+        timeout_seconds=request.timeout_seconds,
+        temperature=request.temperature,
+        metadata={
+            **dict(request.metadata),
+            "unexpected_private_context": "must-not-cross-process-boundary",
+        },
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(request, binding=_binding(descriptor))
+
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
