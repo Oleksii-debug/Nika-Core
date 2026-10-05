@@ -84,6 +84,7 @@ def _binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBinding:
         challenger_sha256=_CHALLENGER_SHA256,
         candidate_artifact_ref="models/challenger",
         frozen_package_sha256=_sha(b"package"),
+        execution_plan_sha256=_sha(b"training-execution-plan"),
         evaluation_set_sha256=evaluation_set.content_sha256,
         base_descriptor_digest=_sha(b"base-descriptor"),
         base_descriptor_registry_key=_sha(b"base-registry"),

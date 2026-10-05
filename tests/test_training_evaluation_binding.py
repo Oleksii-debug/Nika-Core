@@ -32,6 +32,7 @@ from nika_core.training_runtime import (
     TrainingJobSpec,
     TrainingRunEvidence,
     TrainingRunState,
+    training_job_fingerprint,
 )
 
 
@@ -116,6 +117,7 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         candidate_artifact_ref="models/candidate/job-1",
         max_steps=3,
     )
+    execution_plan_sha256 = _sha(b"trainer-execution-plan")
     evidence = TrainingRunEvidence(
         job_id=spec.job_id,
         state=TrainingRunState.COMPLETED,
@@ -123,6 +125,11 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         base_artifact=spec.base_artifact,
         frozen_package_sha256=spec.frozen_package_sha256,
         training_material_sha256=spec.training_material_sha256,
+        execution_plan_sha256=execution_plan_sha256,
+        job_fingerprint=training_job_fingerprint(
+            spec,
+            execution_plan_sha256=execution_plan_sha256,
+        ),
         candidate_artifact_ref=spec.candidate_artifact_ref,
         candidate_sha256=candidate_sha256,
         checkpoint_id="checkpoint-1",
@@ -218,6 +225,7 @@ def test_completed_training_binds_exact_old_new_and_held_out_identity(
     assert isinstance(base_descriptor, ModelArtifactDescriptor)
     assert isinstance(descriptor, ModelArtifactDescriptor)
     assert isinstance(evaluation_set, EvaluationSet)
+    assert binding.execution_plan_sha256 == evidence.execution_plan_sha256
     assert binding.job_id == "job-1"
     assert binding.base_provider_id == "ollama"
     assert binding.base_model_id == "base-model"
@@ -531,3 +539,18 @@ def test_binding_rejects_invalid_utf8_identity_text(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         _ = binding.binding_sha256
+
+
+def test_training_execution_plan_tamper_is_rejected_before_evaluation(
+    tmp_path: Path,
+) -> None:
+    values = _fixture(tmp_path)
+    evidence = values["evidence"]
+    assert isinstance(evidence, TrainingRunEvidence)
+    values["evidence"] = replace(
+        evidence,
+        execution_plan_sha256=_sha(b"different-execution-plan"),
+    )
+
+    with pytest.raises(TrainingEvaluationBindingError, match="exact training job"):
+        _bind(values, allowed_root=tmp_path)
