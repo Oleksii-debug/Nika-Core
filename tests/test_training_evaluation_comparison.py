@@ -1020,13 +1020,93 @@ def test_direct_promotion_retry_keeps_first_committed_activation_proof(tmp_path)
 
 
 
+@pytest.mark.asyncio
+async def test_v2_promotion_database_migrates_without_fabricating_attestation(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    original = await activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_ChallengerPort("activation-ok"),
+    )
+    assert original.activated_revision == 2
+
+    with store.connection() as conn:
+        conn.execute(
+            "ALTER TABLE v01_model_promotions RENAME TO v01_model_promotions_v3"
+        )
+        conn.execute(
+            "CREATE TABLE v01_model_promotions ("
+            "decision_sha256 TEXT PRIMARY KEY, "
+            "binding_sha256 TEXT NOT NULL, "
+            "base_artifact_sha256 TEXT NOT NULL, "
+            "base_descriptor_digest TEXT NOT NULL, "
+            "challenger_artifact_sha256 TEXT NOT NULL, "
+            "challenger_descriptor_digest TEXT NOT NULL, "
+            "previous_selection_id TEXT NOT NULL, "
+            "activated_selection_id TEXT NOT NULL, "
+            "activated_revision INTEGER NOT NULL CHECK(activated_revision > 0), "
+            "rollback_revision INTEGER, "
+            "CHECK(rollback_revision IS NULL OR rollback_revision > activated_revision))"
+        )
+        conn.execute(
+            "INSERT INTO v01_model_promotions "
+            "(decision_sha256, binding_sha256, base_artifact_sha256, "
+            "base_descriptor_digest, challenger_artifact_sha256, "
+            "challenger_descriptor_digest, previous_selection_id, "
+            "activated_selection_id, activated_revision, rollback_revision) "
+            "SELECT decision_sha256, binding_sha256, base_artifact_sha256, "
+            "base_descriptor_digest, challenger_artifact_sha256, "
+            "challenger_descriptor_digest, previous_selection_id, "
+            "activated_selection_id, activated_revision, rollback_revision "
+            "FROM v01_model_promotions_v3"
+        )
+        conn.execute("DROP TABLE v01_model_promotions_v3")
+        conn.execute(
+            "DELETE FROM v01_model_settings_schema WHERE version = 3"
+        )
+
+    reopened = V01ModelSettings(SQLiteStore(store.path))
+    legacy = reopened.promotion_receipt(result.evidence_sha256)
+    assert legacy is not None
+    assert legacy.activation_request_sha256 is None
+    assert legacy.activation_attestation_sha256 is None
+    assert reopened.snapshot()["model"] == "challenger-model"
+    assert reopened.snapshot()["revision"] == 2
+
+    port = _ChallengerPort("must-not-run")
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="predates fresh loaded-model attestation",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=reopened,
+            expected_revision=2,
+            effect_port=port,
+        )
+    assert port.calls == 0
+
+    rolled_back = rollback_attested_training_promotion(
+        result=result,
+        settings=reopened,
+        expected_revision=2,
+    )
+    assert rolled_back.rollback_revision == 3
+    assert reopened.snapshot()["model"] == "base-model"
+    assert reopened.snapshot()["revision"] == 3
+
+
 def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     store, settings = _configured_model_settings(tmp_path)
     before = settings.snapshot()
     with store.connection() as conn:
         conn.execute("DROP TABLE v01_model_promotions")
         conn.execute(
-            "DELETE FROM v01_model_settings_schema WHERE version = 2"
+            "DELETE FROM v01_model_settings_schema WHERE version >= 2"
         )
 
     reopened = V01ModelSettings(SQLiteStore(store.path))
@@ -1034,8 +1114,8 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     assert reopened.snapshot() == before
     with store.connection() as conn:
         assert conn.execute(
-            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version = 2"
-        ).fetchone()[0] == 1
+            "SELECT COUNT(*) FROM v01_model_settings_schema WHERE version IN (2, 3)"
+        ).fetchone()[0] == 2
         assert conn.execute(
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type = 'table' AND name = 'v01_model_promotions'"
