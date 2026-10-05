@@ -32,6 +32,7 @@ async function main() {
   let bridge = null;
   let stateRead = async () => true;
   let stateReads = 0;
+  const stateReadOptions = [];
   let focusCount = 0;
   let keymapReads = 0;
   let keymapReady = true;
@@ -53,7 +54,11 @@ async function main() {
     requestId: () => `req-${++nextId}`,
     commandInput: {value: "  Створити завдання  "},
     sourceInputs: {root: {value: "C:\\\\Українська папка"}, source_a: {value: "а.txt"}, source_b: {value: "б.txt"}},
-    refreshState: async () => {stateReads += 1; return stateRead();},
+    refreshState: async (options = {}) => {
+      stateReads += 1;
+      stateReadOptions.push(options);
+      return stateRead(options);
+    },
     refreshKeymap: async () => {keymapReads += 1; return keymapReady;},
     reportStateUnavailable: () => messages.push(["Стан недоступний", true]),
     document: {documentElement: {dataset: {nikaReady: "true"}}},
@@ -126,6 +131,7 @@ async function main() {
   finishStateReconcile(true);
   await uncertainDispatch;
   assert(messages.at(-1)[0].includes("Стан перечитано"));
+  assert.equal(stateReadOptions.at(-1).requireCurrentGeneration, true);
   assert(!JSON.stringify(messages).includes("SECRET_CONNECTION_DETAIL"));
   assert(focusCount > 0, "keyboard focus restored after uncertain reconciliation");
   console.log("PASS: transport-uncertain task remains locked until successful state reconciliation");
@@ -145,6 +151,24 @@ async function main() {
   assert(messages.at(-1)[0].includes("Дію підтверджено"));
   assert(logs.includes("Записано."));
   console.log("PASS: confirmed effect distinguished from stale projection");
+
+  const requestsBeforeStrictFailure = requests.length;
+  bridge = async () => {throw Error("UNCERTAIN_AFTER_READY_STATE");};
+  stateRead = async () => false;
+  await ui.dispatch("task.create", trigger);
+  assert.equal(stateReadOptions.at(-1).requireCurrentGeneration, true);
+  let blockedAfterStrictFailureCalled = false;
+  bridge = async () => {
+    blockedAfterStrictFailureCalled = true;
+    return {status: "completed", message: "must stay blocked"};
+  };
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(blockedAfterStrictFailureCalled, false);
+  assert.equal(requests.length, requestsBeforeStrictFailure + 1);
+  assert(messages.at(-1)[0].includes("Попередню команду"));
+  assert(!JSON.stringify(messages).includes("UNCERTAIN_AFTER_READY_STATE"));
+  console.log("PASS: failed current-generation reconciliation retains task-control lock");
+
   let finishKeymap;
   const keymapInput = {focus: () => {focusCount += 1;}};
   const saveKeymap = ui.mutateKeymap(

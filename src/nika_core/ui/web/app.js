@@ -1134,7 +1134,9 @@
         focusTarget.disabled = false;
       }
       const focusApplied = focusId ? focusElementById(focusId) : false;
-      if (!await refreshState({ announceTeamTransitions: false })) renderModelSettings(null);
+      if (!await refreshState({ announceTeamTransitions: false, requireCurrentGeneration: result === null })) {
+        renderModelSettings(null);
+      }
       if (!focusApplied) {
         const refreshedFocusApplied = focusId ? focusElementById(focusId) : false;
         if (!refreshedFocusApplied) {
@@ -1181,6 +1183,7 @@
     autostartGeneration += 1;
     autostartInput.disabled = true;
     autostartSave.disabled = true;
+    let uncertain = false;
     try {
       const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
       if (!["completed", "failed", "rejected"].includes(result?.status)) throw new Error("Invalid acknowledgement");
@@ -1190,11 +1193,14 @@
       appendLog(result.message);
     } catch {
       // The OS write may have completed before the bridge disconnected. No blind retry.
+      uncertain = true;
       announce("Немає підтвердження зміни автозапуску. Перечитайте стан перед повтором.", true);
     } finally {
       autostartPending = false;
       autostartGeneration += 1;
-      if (!await refreshState({ announceTeamTransitions: false })) renderAutostart(null);
+      if (!await refreshState({ announceTeamTransitions: false, requireCurrentGeneration: uncertain })) {
+        renderAutostart(null);
+      }
       if (!autostartInput.disabled) autostartInput.focus();
       else if (trigger && !trigger.disabled) trigger.focus();
       else focusElementById("autostart-heading");
@@ -1231,7 +1237,7 @@
     if (await refreshState()) announce("Збережені налаштування перечитано.");
   });
 
-  async function refreshState({ announceTeamTransitions = true } = {}) {
+  async function refreshState({ announceTeamTransitions = true, requireCurrentGeneration = false } = {}) {
     const stateReadGeneration = ++stateRefreshGeneration;
     const isCurrentStateRead = () => stateReadGeneration === stateRefreshGeneration;
     const autostartReadGeneration = autostartGeneration;
@@ -1247,14 +1253,14 @@
     try {
       response = await globalThis.pywebview.api.get_state();
     } catch {
-      if (!isCurrentStateRead()) return lastStateReady;
+      if (!isCurrentStateRead()) return requireCurrentGeneration ? false : lastStateReady;
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
       lastStateReady = false;
       reportStateUnavailable();
       return false;
     }
-    if (!isCurrentStateRead()) return lastStateReady;
+    if (!isCurrentStateRead()) return requireCurrentGeneration ? false : lastStateReady;
     if (!response?.ok) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
@@ -1336,7 +1342,7 @@
       appendLog(message);
       let stateReady = false;
       try {
-        stateReady = await refreshState();
+        stateReady = await refreshState({ requireCurrentGeneration: true });
       } catch {
         reportStateUnavailable();
       }

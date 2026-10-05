@@ -131,7 +131,7 @@ def test_model_settings_backend_focus_precedes_potentially_slow_state_refresh() 
     end = app.index("\n  function renderAutostart(", start)
     body = app[start:end]
     focus_attempt = "const focusApplied = focusId ? focusElementById(focusId) : false;"
-    refresh = "await refreshState({ announceTeamTransitions: false })"
+    refresh = "await refreshState({ announceTeamTransitions: false, requireCurrentGeneration: result === null })"
     assert focus_attempt in body
     assert body.index(focus_attempt) < body.index(refresh)
     assert "if (!focusApplied)" in body
