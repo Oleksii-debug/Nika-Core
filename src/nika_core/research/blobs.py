@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import tempfile
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,6 +12,15 @@ from nika_core.research.models import BlobArtifact
 
 class BlobStoreError(RuntimeError):
     pass
+
+
+_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+
+
+def _workspace_key(workspace_id: str) -> str:
+    if type(workspace_id) is not str or not workspace_id.strip():
+        raise ValueError("workspace_id must be nonempty text")
+    return hashlib.sha256(workspace_id.encode("utf-8")).hexdigest()
 
 
 def _sha256_file(path: Path) -> str:
@@ -28,6 +38,14 @@ class ContentAddressedBlobStore:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
 
+    def _ensure_directory(self, path: Path) -> None:
+        # Existing aliases must not redirect a workspace or temporary write outside the root.
+        if path.is_symlink() or not path.parent.resolve().is_relative_to(self.root):
+            raise BlobStoreError("blob storage directory is not a trusted directory")
+        path.mkdir(exist_ok=True)
+        if path.is_symlink() or not path.is_dir() or not path.resolve().is_relative_to(self.root):
+            raise BlobStoreError("blob storage directory is not a trusted directory")
+
     def _put_chunks(
         self,
         workspace_id: str,
@@ -35,14 +53,12 @@ class ContentAddressedBlobStore:
         *,
         max_bytes: int,
     ) -> BlobArtifact:
-        if not workspace_id.strip():
-            raise ValueError("workspace_id is required")
-        if max_bytes < 1:
-            raise ValueError("max_bytes must be positive")
+        workspace_key = _workspace_key(workspace_id)
+        if type(max_bytes) is not int or max_bytes < 1:
+            raise ValueError("max_bytes must be a positive integer")
 
-        workspace_key = hashlib.sha256(workspace_id.encode()).hexdigest()
         temp_dir = self.root / ".tmp"
-        temp_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_directory(temp_dir)
         digest = hashlib.sha256()
         total = 0
         temp_path: Path | None = None
@@ -50,6 +66,8 @@ class ContentAddressedBlobStore:
             with tempfile.NamedTemporaryFile(dir=temp_dir, delete=False) as temp:
                 temp_path = Path(temp.name)
                 for chunk in chunks:
+                    if type(chunk) is not bytes:
+                        raise BlobStoreError("artifact chunks must be bytes")
                     total += len(chunk)
                     if total > max_bytes:
                         raise BlobStoreError(f"artifact exceeds {max_bytes} byte storage limit")
@@ -61,7 +79,10 @@ class ContentAddressedBlobStore:
             raw_sha256 = digest.hexdigest()
             relative = Path(workspace_key) / raw_sha256[:2] / raw_sha256
             destination = self.root / relative
-            destination.parent.mkdir(parents=True, exist_ok=True)
+            self._ensure_directory(self.root / workspace_key)
+            self._ensure_directory(destination.parent)
+            if destination.is_symlink():
+                raise BlobStoreError("content-addressed blob must not be a symbolic link")
             if destination.exists():
                 if destination.stat().st_size != total:
                     raise BlobStoreError("existing content-addressed blob has unexpected size")
@@ -111,8 +132,30 @@ class ContentAddressedBlobStore:
         return self._put_chunks(workspace_id, (payload,), max_bytes=max_bytes)
 
     def resolve(self, artifact: BlobArtifact) -> Path:
-        candidate = (self.root / artifact.storage_relpath).resolve()
-        if not candidate.is_relative_to(self.root):
+        if type(artifact) is not BlobArtifact:
+            raise BlobStoreError("artifact metadata has an invalid carrier")
+        try:
+            workspace_key = _workspace_key(artifact.workspace_id)
+        except (TypeError, ValueError, UnicodeError) as exc:
+            raise BlobStoreError("artifact workspace identity is invalid") from exc
+        if type(artifact.raw_sha256) is not str or _SHA256.fullmatch(artifact.raw_sha256) is None:
+            raise BlobStoreError("artifact raw digest is invalid")
+        if type(artifact.byte_size) is not int or artifact.byte_size < 0:
+            raise BlobStoreError("artifact byte size is invalid")
+
+        relative = Path(workspace_key) / artifact.raw_sha256[:2] / artifact.raw_sha256
+        if type(artifact.storage_relpath) is not str or artifact.storage_relpath != relative.as_posix():
+            raise BlobStoreError("artifact storage path does not match workspace and digest")
+        expected_id = hashlib.sha256(
+            f"{artifact.workspace_id}\0{artifact.raw_sha256}".encode("utf-8")
+        ).hexdigest()
+        if type(artifact.artifact_id) is not str or artifact.artifact_id != expected_id:
+            raise BlobStoreError("artifact ID does not match workspace and digest")
+
+        candidate = self.root / relative
+        if any(path.is_symlink() for path in (candidate.parent.parent, candidate.parent, candidate)):
+            raise BlobStoreError("artifact path must not contain symbolic links")
+        if not candidate.resolve().is_relative_to(self.root):
             raise BlobStoreError("artifact storage path escapes blob root")
         if not candidate.is_file():
             raise BlobStoreError("content-addressed blob is missing")
