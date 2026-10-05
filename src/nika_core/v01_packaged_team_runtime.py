@@ -53,6 +53,10 @@ from nika_core.runtime.contracts import (
     RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
+from nika_core.security.model_cloud_authority import (
+    StandingPermissionCloudEffectAuthorizer,
+    StandingPermissionExecutionAuthority,
+)
 from nika_core.tools import ToolRisk, ToolSpec
 from nika_core.v01_model_settings import (
     ModelSelection,
@@ -90,7 +94,19 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         model_settings: V01ModelSettings | None = None,
         model_runtime_factory: V01BoundModelRuntimeFactory | None = None,
         model_health_probe_factory: Callable[[ModelSelection], ModelHealthProbePort] | None = None,
+        cloud_effect_authorizer: StandingPermissionCloudEffectAuthorizer | None = None,
+        cloud_execution_authority_resolver: (
+            Callable[[str], StandingPermissionExecutionAuthority | None] | None
+        ) = None,
     ) -> None:
+        if model_runtime_factory is not None and (
+            cloud_effect_authorizer is not None
+            or cloud_execution_authority_resolver is not None
+        ):
+            raise TypeError(
+                "cloud authority must be configured on either the packaged runtime "
+                "or the custom model runtime factory, not both"
+            )
         self._sqlite = store
         self._sources = source_settings or V01SourceSettings(store, config)
         self._multi_store = MultiAgentStore(store)
@@ -100,6 +116,8 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
             store=store,
             definitions=self._definitions,
             settings=self._model_settings,
+            cloud_effect_authorizer=cloud_effect_authorizer,
+            cloud_execution_authority_resolver=cloud_execution_authority_resolver,
         )
         self._model_health_probe_factory = (
             model_health_probe_factory or self._default_model_health_probe
