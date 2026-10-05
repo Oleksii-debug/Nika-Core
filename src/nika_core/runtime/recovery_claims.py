@@ -16,6 +16,7 @@ from nika_core.runtime.idempotency import (
 RECOVERY_RESUME_OPERATION_TYPE = "runtime.recovery_resume"
 RECOVERY_CLAIM_SCHEMA = "nika-runtime-recovery-claim-v1"
 _RECOVERY_CLAIM_ACTIVATION_LEASE = timedelta(seconds=10)
+_PAUSE_AUTHORITY_OPERATION_TYPES = ("runtime.pause", "runtime.pause.outcome")
 
 
 class RecoveryClaimPhase(StrEnum):
@@ -138,13 +139,17 @@ def write_pending_recovery_claim(
     metadata: RecoveryClaimMetadata,
 ) -> None:
     row = conn.execute(
-        "SELECT status FROM idempotency_records WHERE operation_key = ?",
+        "SELECT status, task_id FROM idempotency_records WHERE operation_key = ?",
         (operation_key,),
     ).fetchone()
     if row is None:
         raise KeyError(f"Unknown idempotency operation: {operation_key}")
     if IdempotencyStatus(row["status"]) is not IdempotencyStatus.PENDING:
         raise IdempotencyConflictError("only pending recovery claims may change ownership phase")
+    if _unresolved_pause_authority_with_connection(conn, str(row["task_id"])) is not None:
+        raise IdempotencyConflictError(
+            "runtime pause is pending or uncertain; reconcile it before resume"
+        )
     now = datetime.now(UTC).isoformat()
     conn.execute(
         """
@@ -191,6 +196,29 @@ def begin_recovery_effect(
         raise IdempotencyConflictError("recovery claim ownership changed before resume effect")
     if metadata.phase is not RecoveryClaimPhase.CLAIMED:
         raise IdempotencyConflictError("recovery resume effect was already started")
+    if _unresolved_pause_authority_with_connection(conn, record.task_id) is not None:
+        deleted = conn.execute(
+            """
+            DELETE FROM idempotency_records
+            WHERE operation_key = ? AND operation_type = ? AND status = ?
+            """,
+            (
+                operation_key,
+                RECOVERY_RESUME_OPERATION_TYPE,
+                IdempotencyStatus.PENDING.value,
+            ),
+        ).rowcount
+        if deleted != 1:
+            raise IdempotencyConflictError(
+                "recovery claim changed while yielding to durable pause authority"
+            )
+        # This conflict is intentionally committed before it is propagated: the recovery
+        # effect has not started, Pause owns the serialized boundary, and leaving this exact
+        # losing claim PENDING would falsely block a later explicit retry after reconciliation.
+        conn.commit()
+        raise IdempotencyConflictError(
+            "runtime pause is pending or uncertain; reconcile it before resume"
+        )
     started = replace(
         metadata,
         phase=RecoveryClaimPhase.EFFECT_STARTED,
@@ -202,6 +230,30 @@ def begin_recovery_effect(
         metadata=started,
     )
     return started
+
+
+def _unresolved_pause_authority_with_connection(
+    conn: sqlite3.Connection,
+    task_id: str,
+) -> str | None:
+    row = conn.execute(
+        """
+        SELECT operation_key
+        FROM idempotency_records
+        WHERE task_id = ?
+          AND operation_type IN (?, ?)
+          AND status IN (?, ?)
+        ORDER BY created_at, operation_key
+        LIMIT 1
+        """,
+        (
+            task_id,
+            *_PAUSE_AUTHORITY_OPERATION_TYPES,
+            IdempotencyStatus.PENDING.value,
+            IdempotencyStatus.UNCERTAIN.value,
+        ),
+    ).fetchone()
+    return None if row is None else str(row["operation_key"])
 
 
 def _result_text(result: Mapping[str, object], key: str) -> str:
