@@ -75,6 +75,8 @@ def _binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBinding:
     return TrainingEvaluationBinding(
         job_id="training-job-1",
         base_candidate_id="models/base",
+        base_provider_id="ollama",
+        base_model_id="base-model",
         challenger_candidate_id="models/challenger",
         challenger_provider_id="ollama",
         challenger_model_id="challenger-model",
@@ -83,6 +85,9 @@ def _binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBinding:
         candidate_artifact_ref="models/challenger",
         frozen_package_sha256=_sha(b"package"),
         evaluation_set_sha256=evaluation_set.content_sha256,
+        base_descriptor_digest=_sha(b"base-descriptor"),
+        base_descriptor_registry_key=_sha(b"base-registry"),
+        base_size_bytes=len(b"base"),
         descriptor_digest=_DESCRIPTOR_SHA256,
         descriptor_registry_key=_REGISTRY_KEY,
         challenger_size_bytes=len(b"trained-challenger"),

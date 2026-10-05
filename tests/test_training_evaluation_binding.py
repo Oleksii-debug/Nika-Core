@@ -91,7 +91,10 @@ def _package(
 
 
 def _fixture(tmp_path: Path) -> dict[str, object]:
-    base_sha256 = _sha(b"base-model")
+    base_bytes = b"base-model"
+    base_sha256 = _sha(base_bytes)
+    base_path = tmp_path / "base.bin"
+    base_path.write_bytes(base_bytes)
     candidate_bytes = b"candidate-model-weights"
     candidate_sha256 = _sha(candidate_bytes)
     candidate_path = tmp_path / "candidate.bin"
@@ -123,6 +126,17 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         candidate_artifact_ref=spec.candidate_artifact_ref,
         candidate_sha256=candidate_sha256,
         checkpoint_id="checkpoint-1",
+    )
+    base_descriptor = ModelArtifactDescriptor(
+        kind=ModelArtifactKind.EXTERNAL_LOCAL,
+        provider_id="ollama",
+        model_id="base-model",
+        model_version="base-v1",
+        source_reference="base-provenance",
+        license_reference="base-license",
+        integrity_basis=ModelIntegrityBasis.SHA256,
+        sha256=base_sha256,
+        size_bytes=len(base_bytes),
     )
     descriptor = ModelArtifactDescriptor(
         kind=ModelArtifactKind.EXTERNAL_LOCAL,
@@ -160,6 +174,8 @@ def _fixture(tmp_path: Path) -> dict[str, object]:
         model_sha256=candidate_sha256,
     )
     return {
+        "base_descriptor": base_descriptor,
+        "base_path": base_path,
         "candidate_path": candidate_path,
         "challenger": challenger,
         "champion": champion,
@@ -176,6 +192,8 @@ def _bind(values: dict[str, object], *, allowed_root: Path):
         spec=values["spec"],  # type: ignore[arg-type]
         evidence=values["evidence"],  # type: ignore[arg-type]
         package=values["package"],  # type: ignore[arg-type]
+        base_path=values["base_path"],  # type: ignore[arg-type]
+        base_descriptor=values["base_descriptor"],  # type: ignore[arg-type]
         candidate_path=values["candidate_path"],  # type: ignore[arg-type]
         descriptor=values["descriptor"],  # type: ignore[arg-type]
         champion=values["champion"],  # type: ignore[arg-type]
@@ -193,12 +211,19 @@ def test_completed_training_binds_exact_old_new_and_held_out_identity(
     binding = _bind(values, allowed_root=tmp_path)
 
     evidence = values["evidence"]
+    base_descriptor = values["base_descriptor"]
     descriptor = values["descriptor"]
     evaluation_set = values["evaluation_set"]
     assert isinstance(evidence, TrainingRunEvidence)
+    assert isinstance(base_descriptor, ModelArtifactDescriptor)
     assert isinstance(descriptor, ModelArtifactDescriptor)
     assert isinstance(evaluation_set, EvaluationSet)
     assert binding.job_id == "job-1"
+    assert binding.base_provider_id == "ollama"
+    assert binding.base_model_id == "base-model"
+    assert binding.base_descriptor_digest == base_descriptor.descriptor_digest
+    assert binding.base_descriptor_registry_key == base_descriptor.registry_key
+    assert binding.base_size_bytes == len(b"base-model")
     assert binding.challenger_provider_id == "ollama"
     assert binding.challenger_model_id == "candidate-model"
     assert binding.challenger_sha256 == evidence.candidate_sha256
@@ -255,6 +280,85 @@ def test_base_candidate_must_bind_training_base_digest(tmp_path: Path) -> None:
     with pytest.raises(
         TrainingEvaluationBindingError,
         match="base Model-Lab candidate digest",
+    ):
+        _bind(values, allowed_root=tmp_path)
+
+
+def test_base_route_must_bind_descriptor_provider_and_model(
+    tmp_path: Path,
+) -> None:
+    values = _fixture(tmp_path)
+    champion = values["champion"]
+    assert isinstance(champion, ModelCandidate)
+    values["champion"] = replace(champion, request_model="different-base-model")
+
+    with pytest.raises(
+        TrainingEvaluationBindingError,
+        match="base provider/model route",
+    ):
+        _bind(values, allowed_root=tmp_path)
+
+
+def test_base_provenance_must_bind_descriptor(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    champion = values["champion"]
+    assert isinstance(champion, ModelCandidate)
+    values["champion"] = replace(
+        champion,
+        model_provenance_ref="different-base-provenance",
+    )
+
+    with pytest.raises(
+        TrainingEvaluationBindingError,
+        match="base provenance",
+    ):
+        _bind(values, allowed_root=tmp_path)
+
+
+def test_physical_base_tamper_fails_closed(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    base_path = values["base_path"]
+    assert isinstance(base_path, Path)
+    original = base_path.read_bytes()
+    base_path.write_bytes(b"x" * len(original))
+
+    with pytest.raises(
+        TrainingEvaluationBindingError,
+        match="base physical artifact verification failed",
+    ):
+        _bind(values, allowed_root=tmp_path)
+
+
+def test_base_descriptor_must_bind_training_base_bytes(tmp_path: Path) -> None:
+    values = _fixture(tmp_path)
+    descriptor = values["base_descriptor"]
+    assert isinstance(descriptor, ModelArtifactDescriptor)
+    values["base_descriptor"] = replace(
+        descriptor,
+        sha256=_sha(b"different-base"),
+    )
+
+    with pytest.raises(
+        TrainingEvaluationBindingError,
+        match="base descriptor does not match training base bytes",
+    ):
+        _bind(values, allowed_root=tmp_path)
+
+
+def test_cloud_descriptor_cannot_authorize_physical_base(
+    tmp_path: Path,
+) -> None:
+    values = _fixture(tmp_path)
+    descriptor = values["base_descriptor"]
+    assert isinstance(descriptor, ModelArtifactDescriptor)
+    values["base_descriptor"] = replace(
+        descriptor,
+        kind=ModelArtifactKind.CLOUD,
+    )
+
+    with pytest.raises(
+        TrainingEvaluationBindingError,
+        match="base descriptor must represent a local model artifact",
     ):
         _bind(values, allowed_root=tmp_path)
 

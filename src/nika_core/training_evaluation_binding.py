@@ -59,14 +59,16 @@ class TrainingEvaluationBinding:
     """Secret-free identity proof prepared before any old/new benchmark effect.
 
     This receipt proves that the completed Loop-C run, frozen package, physical
-    challenger artifact, canonical model descriptor, Model-Lab candidate identities,
-    and held-out evaluation set agree. It does not prove that a model provider later
-    loads these exact bytes. The provider/evaluator boundary must separately attest
-    the actually loaded artifact before promotion can be authorized.
+    base/challenger artifacts, canonical model descriptors, Model-Lab candidate
+    identities, and held-out evaluation set agree. It does not prove that a model
+    provider later loads these exact bytes. The provider/evaluator boundary must
+    separately attest the actually loaded artifact before promotion can be authorized.
     """
 
     job_id: str
     base_candidate_id: str
+    base_provider_id: str
+    base_model_id: str
     challenger_candidate_id: str
     challenger_provider_id: str
     challenger_model_id: str
@@ -75,6 +77,9 @@ class TrainingEvaluationBinding:
     candidate_artifact_ref: str
     frozen_package_sha256: str
     evaluation_set_sha256: str
+    base_descriptor_digest: str
+    base_descriptor_registry_key: str
+    base_size_bytes: int
     descriptor_digest: str
     descriptor_registry_key: str
     challenger_size_bytes: int
@@ -83,6 +88,8 @@ class TrainingEvaluationBinding:
         for value, name in (
             (self.job_id, "job_id"),
             (self.base_candidate_id, "base_candidate_id"),
+            (self.base_provider_id, "base_provider_id"),
+            (self.base_model_id, "base_model_id"),
             (self.challenger_candidate_id, "challenger_candidate_id"),
             (self.challenger_provider_id, "challenger_provider_id"),
             (self.challenger_model_id, "challenger_model_id"),
@@ -94,11 +101,15 @@ class TrainingEvaluationBinding:
             (self.challenger_sha256, "challenger_sha256"),
             (self.frozen_package_sha256, "frozen_package_sha256"),
             (self.evaluation_set_sha256, "evaluation_set_sha256"),
+            (self.base_descriptor_digest, "base_descriptor_digest"),
+            (self.base_descriptor_registry_key, "base_descriptor_registry_key"),
             (self.descriptor_digest, "descriptor_digest"),
             (self.descriptor_registry_key, "descriptor_registry_key"),
         ):
             if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
                 raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        if type(self.base_size_bytes) is not int or self.base_size_bytes <= 0:
+            raise ValueError("base_size_bytes must be a positive integer")
         if (
             type(self.challenger_size_bytes) is not int
             or self.challenger_size_bytes <= 0
@@ -114,6 +125,8 @@ class TrainingEvaluationBinding:
             return TrainingEvaluationBinding(
                 job_id=self.job_id,
                 base_candidate_id=self.base_candidate_id,
+                base_provider_id=self.base_provider_id,
+                base_model_id=self.base_model_id,
                 challenger_candidate_id=self.challenger_candidate_id,
                 challenger_provider_id=self.challenger_provider_id,
                 challenger_model_id=self.challenger_model_id,
@@ -122,6 +135,9 @@ class TrainingEvaluationBinding:
                 candidate_artifact_ref=self.candidate_artifact_ref,
                 frozen_package_sha256=self.frozen_package_sha256,
                 evaluation_set_sha256=self.evaluation_set_sha256,
+                base_descriptor_digest=self.base_descriptor_digest,
+                base_descriptor_registry_key=self.base_descriptor_registry_key,
+                base_size_bytes=self.base_size_bytes,
                 descriptor_digest=self.descriptor_digest,
                 descriptor_registry_key=self.descriptor_registry_key,
                 challenger_size_bytes=self.challenger_size_bytes,
@@ -131,9 +147,11 @@ class TrainingEvaluationBinding:
 
     def _binding_sha256_unchecked(self) -> str:
         payload = {
-            "schema": "nika-training-evaluation-binding-v1",
+            "schema": "nika-training-evaluation-binding-v2",
             "job_id": self.job_id,
             "base_candidate_id": self.base_candidate_id,
+            "base_provider_id": self.base_provider_id,
+            "base_model_id": self.base_model_id,
             "challenger_candidate_id": self.challenger_candidate_id,
             "challenger_provider_id": self.challenger_provider_id,
             "challenger_model_id": self.challenger_model_id,
@@ -142,6 +160,9 @@ class TrainingEvaluationBinding:
             "candidate_artifact_ref": self.candidate_artifact_ref,
             "frozen_package_sha256": self.frozen_package_sha256,
             "evaluation_set_sha256": self.evaluation_set_sha256,
+            "base_descriptor_digest": self.base_descriptor_digest,
+            "base_descriptor_registry_key": self.base_descriptor_registry_key,
+            "base_size_bytes": self.base_size_bytes,
             "descriptor_digest": self.descriptor_digest,
             "descriptor_registry_key": self.descriptor_registry_key,
             "challenger_size_bytes": self.challenger_size_bytes,
@@ -223,14 +244,18 @@ def _snapshot_package(
 
 def _snapshot_descriptor(
     descriptor: ModelArtifactDescriptor,
+    *,
+    role: str,
 ) -> ModelArtifactDescriptor:
     if type(descriptor) is not ModelArtifactDescriptor:
         raise TypeError("descriptor must be an exact ModelArtifactDescriptor")
+    if role not in {"base", "challenger"}:
+        raise ValueError("descriptor role is invalid")
     try:
         return ModelArtifactDescriptor.from_json(descriptor.canonical_json())
     except (AttributeError, ModelArtifactRegistryError, TypeError, ValueError) as exc:
         raise TrainingEvaluationBindingError(
-            "challenger model descriptor is not canonical"
+            f"{role} model descriptor is not canonical"
         ) from exc
 
 
@@ -318,6 +343,7 @@ def _validate_champion(
     champion: ModelCandidate,
     *,
     spec: TrainingJobSpec,
+    descriptor: ModelArtifactDescriptor,
 ) -> None:
     try:
         validate_model_candidate(champion)
@@ -329,9 +355,28 @@ def _validate_champion(
         raise TrainingEvaluationBindingError(
             "base Model-Lab candidate identity does not match training base artifact"
         )
+    if champion.provider_kind is not ProviderKind.LOCAL:
+        raise TrainingEvaluationBindingError(
+            "physical base candidate must use the local provider boundary"
+        )
+    if (
+        champion.provider_id != descriptor.provider_id
+        or champion.request_model != descriptor.model_id
+        or champion.expected_response_model != descriptor.model_id
+    ):
+        raise TrainingEvaluationBindingError(
+            "base provider/model route does not match its model descriptor"
+        )
     if champion.model_sha256 != spec.base_artifact.sha256:
         raise TrainingEvaluationBindingError(
             "base Model-Lab candidate digest does not match training base artifact"
+        )
+    if (
+        champion.model_provenance_ref != descriptor.source_reference
+        or champion.model_license_ref != descriptor.license_reference
+    ):
+        raise TrainingEvaluationBindingError(
+            "base provenance does not match its model descriptor"
         )
 
 
@@ -383,6 +428,8 @@ def bind_training_result_for_evaluation(
     spec: TrainingJobSpec,
     evidence: TrainingRunEvidence,
     package: FrozenLearningPackage,
+    base_path: str | Path,
+    base_descriptor: ModelArtifactDescriptor,
     candidate_path: str | Path,
     descriptor: ModelArtifactDescriptor,
     champion: ModelCandidate,
@@ -412,7 +459,32 @@ def bind_training_result_for_evaluation(
         evidence,
         spec=canonical_spec,
     )
-    canonical_descriptor = _snapshot_descriptor(descriptor)
+    canonical_base_descriptor = _snapshot_descriptor(
+        base_descriptor,
+        role="base",
+    )
+    canonical_descriptor = _snapshot_descriptor(
+        descriptor,
+        role="challenger",
+    )
+    if canonical_base_descriptor.kind not in {
+        ModelArtifactKind.EMBEDDED,
+        ModelArtifactKind.EXTERNAL_LOCAL,
+    }:
+        raise TrainingEvaluationBindingError(
+            "base descriptor must represent a local model artifact"
+        )
+    if canonical_base_descriptor.integrity_basis is not ModelIntegrityBasis.SHA256:
+        raise TrainingEvaluationBindingError(
+            "base descriptor requires SHA-256 integrity"
+        )
+    if (
+        canonical_base_descriptor.sha256 != canonical_spec.base_artifact.sha256
+        or canonical_base_descriptor.size_bytes is None
+    ):
+        raise TrainingEvaluationBindingError(
+            "base descriptor does not match training base bytes"
+        )
     if canonical_descriptor.kind not in {
         ModelArtifactKind.EMBEDDED,
         ModelArtifactKind.EXTERNAL_LOCAL,
@@ -436,7 +508,11 @@ def bind_training_result_for_evaluation(
         evaluation_set,
         expected_sha256=canonical_package.evaluation_set_sha256,
     )
-    _validate_champion(champion, spec=canonical_spec)
+    _validate_champion(
+        champion,
+        spec=canonical_spec,
+        descriptor=canonical_base_descriptor,
+    )
     _validate_challenger(
         challenger,
         spec=canonical_spec,
@@ -446,6 +522,28 @@ def bind_training_result_for_evaluation(
     if champion.candidate_id == challenger.candidate_id:
         raise TrainingEvaluationBindingError(
             "old/new evaluation requires distinct candidate identities"
+        )
+
+    try:
+        base_receipt = verify_candidate_artifact(
+            base_path,
+            canonical_base_descriptor,
+            allowed_root=allowed_root,
+        )
+    except (CandidateArtifactIntegrityError, TypeError, ValueError) as exc:
+        raise TrainingEvaluationBindingError(
+            "base physical artifact verification failed"
+        ) from exc
+
+    if (
+        base_receipt.sha256 != canonical_spec.base_artifact.sha256
+        or base_receipt.descriptor_digest
+        != canonical_base_descriptor.descriptor_digest
+        or base_receipt.registry_key != canonical_base_descriptor.registry_key
+        or base_receipt.size_bytes != canonical_base_descriptor.size_bytes
+    ):
+        raise TrainingEvaluationBindingError(
+            "base physical verification evidence is inconsistent"
         )
 
     try:
@@ -472,6 +570,8 @@ def bind_training_result_for_evaluation(
     return TrainingEvaluationBinding(
         job_id=canonical_spec.job_id,
         base_candidate_id=champion.candidate_id,
+        base_provider_id=champion.provider_id,
+        base_model_id=champion.request_model,
         challenger_candidate_id=challenger.candidate_id,
         challenger_provider_id=challenger.provider_id,
         challenger_model_id=challenger.request_model,
@@ -480,6 +580,9 @@ def bind_training_result_for_evaluation(
         candidate_artifact_ref=canonical_spec.candidate_artifact_ref,
         frozen_package_sha256=canonical_spec.frozen_package_sha256,
         evaluation_set_sha256=canonical_package.evaluation_set_sha256,
+        base_descriptor_digest=canonical_base_descriptor.descriptor_digest,
+        base_descriptor_registry_key=canonical_base_descriptor.registry_key,
+        base_size_bytes=canonical_base_descriptor.size_bytes,
         descriptor_digest=canonical_descriptor.descriptor_digest,
         descriptor_registry_key=canonical_descriptor.registry_key,
         challenger_size_bytes=canonical_descriptor.size_bytes,
