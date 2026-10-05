@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from nika_core.product_factory_deployment_execution import (
     DeploymentExecutionCoordinator,
+    DeploymentExecutionError,
     DeploymentExecutionRecord,
     DeploymentExecutionSnapshot,
     DeploymentExecutionSpec,
@@ -134,8 +135,22 @@ class DeploymentWaveCoordinator:
             if existing.plan != plan:
                 raise DeploymentWaveError("rollout plan id conflicts with prior payload")
             return existing
+        ordered_services = sorted(
+            plan.services,
+            key=lambda item: (item.wave, item.service_id),
+        )
+        for service in ordered_services:
+            try:
+                incumbent = self.executions.get(service.execution.operation_id)
+            except DeploymentExecutionError:
+                continue
+            if incumbent.spec != service.execution:
+                raise DeploymentWaveError(
+                    "rollout execution operation conflicts with prior payload"
+                )
+
         services: list[ServiceRolloutRecord] = []
-        for service in sorted(plan.services, key=lambda item: (item.wave, item.service_id)):
+        for service in ordered_services:
             execution = self.executions.submit(service.execution)
             services.append(self._service_record(service, execution))
         record = DeploymentWaveRecord(plan, RolloutState.PENDING, tuple(services))
