@@ -842,6 +842,7 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     )
     manifest = json.loads(raw)
     assert peft._validate_candidate_manifest_payload(manifest) == manifest
+    assert manifest["trainer_parameters"]["torch_num_threads"] == config.torch_num_threads
 
     bad_sha = json.loads(raw)
     bad_sha["base_artifact_sha256"] = "0" * 63
@@ -852,6 +853,16 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     bad_parameter["trainer_parameters"]["lora_r"] = config.lora_r + 1
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(bad_parameter)
+
+    bad_thread_count = json.loads(raw)
+    bad_thread_count["trainer_parameters"]["torch_num_threads"] = 0
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_thread_count)
+
+    missing_thread_count = json.loads(raw)
+    del missing_thread_count["trainer_parameters"]["torch_num_threads"]
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(missing_thread_count)
 
     private_ref = json.loads(raw)
     private_ref["base_artifact_ref"] = "C:/private/base.gguf"
