@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -547,6 +548,23 @@ def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     ):
         _fail(code)
     return digest.hexdigest(), total
+
+
+def _publish_regular_file_no_replace(source: Path, target: Path) -> None:
+    _require_regular_unlinked(source, code="candidate_publish_failed")
+    try:
+        if os.name == "nt":
+            os.rename(source, target)
+        else:
+            os.link(source, target)
+    except FileExistsError:
+        _fail("candidate_publish_conflict")
+    except OSError:
+        try:
+            os.lstat(target)
+        except OSError:
+            _fail("candidate_publish_failed")
+        _fail("candidate_publish_conflict")
 
 
 def _parse_jsonl_record(raw_line: bytes) -> TrainingExample:
@@ -1277,11 +1295,16 @@ def _train_one_step(
     candidate.parent.mkdir(parents=True, exist_ok=True)
     if candidate.exists():
         _fail("candidate_publish_conflict")
-    temporary = candidate.parent / (
-        f".{_CANDIDATE_FILE}.{os.getpid()}.{request.step_id[:16]}.tmp"
-    )
-    if temporary.exists():
-        _fail("candidate_publish_temp_conflict")
+    try:
+        temporary_fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{_CANDIDATE_FILE}.{request.step_id[:16]}.",
+            suffix=".tmp",
+            dir=candidate.parent,
+        )
+        os.close(temporary_fd)
+    except OSError:
+        _fail("candidate_publish_temp_failed")
+    temporary = Path(temporary_name)
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
@@ -1304,10 +1327,7 @@ def _train_one_step(
         _require_regular_unlinked(temporary, code="candidate_publish_failed")
         if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
             _fail("checkpoint_payload_changed_during_publish")
-        try:
-            os.link(temporary, candidate)
-        except FileExistsError:
-            _fail("candidate_publish_conflict")
+        _publish_regular_file_no_replace(temporary, candidate)
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
