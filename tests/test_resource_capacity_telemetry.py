@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +11,7 @@ from nika_core.resources import (
     ResourceBudget,
     ResourceManager,
     ResourceSnapshot,
+    ResourceTelemetryError,
     psutil_adapter,
 )
 
@@ -176,3 +178,210 @@ def test_psutil_observer_keeps_optional_telemetry_unavailable_instead_of_guessin
     assert snapshot.process_rss_bytes is None
     assert snapshot.battery_percent is None
     assert snapshot.power_plugged is None
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("cpu_percent", float("nan")),
+        ("cpu_percent", float("inf")),
+        ("cpu_percent", True),
+        ("cpu_percent", -1.0),
+        ("cpu_percent", 100.1),
+        ("memory_percent", True),
+        ("memory_percent", -1.0),
+        ("available_memory_bytes", True),
+        ("available_memory_bytes", -1),
+        ("logical_cpu_count", True),
+        ("logical_cpu_count", 0),
+        ("total_memory_bytes", True),
+        ("total_memory_bytes", -1),
+        ("process_rss_bytes", True),
+        ("process_rss_bytes", -1),
+        ("battery_percent", True),
+        ("battery_percent", 101.0),
+        ("power_plugged", 1),
+    ),
+)
+def test_invalid_snapshot_fails_closed_for_admission_status_and_revalidation(
+    tmp_path,
+    field_name: str,
+    value: object,
+) -> None:
+    valid = ResourceSnapshot(
+        cpu_percent=20.0,
+        memory_percent=30.0,
+        available_memory_bytes=4_000_000_000,
+        logical_cpu_count=8,
+        total_memory_bytes=8_000_000_000,
+        process_rss_bytes=100_000_000,
+        battery_percent=60.0,
+        power_plugged=True,
+    )
+    observer = FakeObserver(valid)
+    manager = ResourceManager(_store(tmp_path), observer)
+    manager.set_budget(
+        ResourceBudget(
+            scope="training",
+            owner_id="owner",
+            max_cpu_percent=80.0,
+            max_memory_percent=80.0,
+        )
+    )
+    assert manager.request(
+        scope="training", owner_id="owner", request_id="active"
+    ).granted
+
+    observer.value = replace(valid, **{field_name: value})
+
+    revalidated = manager.revalidate(
+        scope="training", owner_id="owner", request_id="active"
+    )
+    assert (revalidated.granted, revalidated.reason) == (
+        False,
+        "invalid_observation",
+    )
+    assert manager.active_count(scope="training", owner_id="owner") == 1
+    with pytest.raises(ResourceTelemetryError, match="resource telemetry invalid"):
+        manager.status(scope="training", owner_id="owner")
+
+    manager.release(scope="training", owner_id="owner", request_id="active")
+    waiting = manager.request(
+        scope="training", owner_id="owner", request_id="waiting"
+    )
+    assert (waiting.granted, waiting.reason, waiting.queue_position) == (
+        False,
+        "invalid_observation",
+        1,
+    )
+    assert manager.queued(scope="training", owner_id="owner") == ("waiting",)
+
+    observer.value = valid
+    recovered = manager.request(
+        scope="training", owner_id="owner", request_id="waiting"
+    )
+    assert recovered.granted
+    assert manager.queued(scope="training", owner_id="owner") == ()
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    (
+        "cpu_percent",
+        "memory_percent",
+        "available_memory_bytes",
+        "logical_cpu_count",
+        "total_memory_bytes",
+        "process_rss_bytes",
+        "battery_percent",
+        "power_plugged",
+    ),
+)
+def test_incomplete_snapshot_is_sanitized_and_never_grants(
+    tmp_path,
+    missing_field: str,
+) -> None:
+    sample = ResourceSnapshot(
+        cpu_percent=20.0,
+        memory_percent=30.0,
+        available_memory_bytes=4_000_000_000,
+    )
+    object.__delattr__(sample, missing_field)
+    observer = FakeObserver(sample)
+    manager = ResourceManager(_store(tmp_path), observer)
+
+    decision = manager.request(
+        scope="agent", owner_id="worker", request_id="waiting"
+    )
+
+    assert (decision.granted, decision.reason) == (False, "invalid_observation")
+    assert manager.queued(scope="agent", owner_id="worker") == ("waiting",)
+    with pytest.raises(ResourceTelemetryError, match="resource telemetry invalid"):
+        manager.status(scope="agent", owner_id="worker")
+
+
+def test_non_snapshot_observer_result_fails_closed_without_attribute_leak(
+    tmp_path,
+) -> None:
+    observer = FakeObserver(
+        ResourceSnapshot(
+            cpu_percent=20.0,
+            memory_percent=30.0,
+            available_memory_bytes=4_000_000_000,
+        )
+    )
+    observer.value = object()  # type: ignore[assignment]
+    manager = ResourceManager(_store(tmp_path), observer)
+
+    decision = manager.request(
+        scope="agent", owner_id="worker", request_id="waiting"
+    )
+
+    assert (decision.granted, decision.reason) == (False, "invalid_observation")
+    with pytest.raises(ResourceTelemetryError, match="resource telemetry invalid"):
+        manager.status(scope="agent", owner_id="worker")
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("max_concurrent", True),
+        ("max_concurrent", 0),
+        ("max_concurrent", 1 << 63),
+        ("max_cpu_percent", True),
+        ("max_cpu_percent", float("nan")),
+        ("max_cpu_percent", float("inf")),
+        ("max_memory_percent", True),
+        ("max_memory_percent", "80"),
+    ),
+)
+def test_resource_budget_rejects_noncanonical_or_unstorable_limits(
+    tmp_path,
+    field_name: str,
+    value: object,
+) -> None:
+    manager = ResourceManager(
+        _store(tmp_path),
+        FakeObserver(
+            ResourceSnapshot(
+                cpu_percent=20.0,
+                memory_percent=30.0,
+                available_memory_bytes=4_000_000_000,
+            )
+        ),
+    )
+    malformed = replace(
+        ResourceBudget(scope="agent", owner_id="worker"),
+        **{field_name: value},
+    )
+
+    with pytest.raises(ValueError):
+        manager.set_budget(malformed)  # type: ignore[arg-type]
+
+    assert manager.get_budget(scope="agent", owner_id="worker") == ResourceBudget(
+        scope="agent",
+        owner_id="worker",
+    )
+
+
+def test_sqlite_max_concurrency_boundary_round_trips(tmp_path) -> None:
+    manager = ResourceManager(
+        _store(tmp_path),
+        FakeObserver(
+            ResourceSnapshot(
+                cpu_percent=20.0,
+                memory_percent=30.0,
+                available_memory_bytes=4_000_000_000,
+            )
+        ),
+    )
+    budget = ResourceBudget(
+        scope="agent",
+        owner_id="worker",
+        max_concurrent=(1 << 63) - 1,
+    )
+
+    manager.set_budget(budget)
+
+    assert manager.get_budget(scope="agent", owner_id="worker") == budget
+

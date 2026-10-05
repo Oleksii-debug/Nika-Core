@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from collections import deque
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -9,7 +10,14 @@ from nika_core.resources.contracts import (
     ResourceBudget,
     ResourceCapacityStatus,
     ResourceObserverPort,
+    ResourceSnapshot,
 )
+
+_SQLITE_MAX_INT64 = (1 << 63) - 1
+
+
+class ResourceTelemetryError(RuntimeError):
+    """Raised when host resource telemetry cannot be trusted."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +77,8 @@ class ResourceManager:
         """Return deterministic read-only capacity telemetry without changing admission state."""
         budget = self.get_budget(scope=scope, owner_id=owner_id)
         snapshot = self._observer.snapshot()
+        if not _valid_snapshot(snapshot):
+            raise ResourceTelemetryError("resource telemetry invalid")
         active_count = self.active_count(scope=scope, owner_id=owner_id)
         queued_count = len(self.queued(scope=scope, owner_id=owner_id))
         pressure_reasons: list[str] = []
@@ -120,6 +130,8 @@ class ResourceManager:
         if len(active) >= budget.max_concurrent:
             return ResourceDecision(False, "concurrency_limit", position)
         snapshot = self._observer.snapshot()
+        if not _valid_snapshot(snapshot):
+            return ResourceDecision(False, "invalid_observation", position)
         if budget.max_cpu_percent is not None and snapshot.cpu_percent > budget.max_cpu_percent:
             return ResourceDecision(False, "cpu_limit", position)
         if (
@@ -146,6 +158,8 @@ class ResourceManager:
             return ResourceDecision(False, "concurrency_limit")
 
         snapshot = self._observer.snapshot()
+        if not _valid_snapshot(snapshot):
+            return ResourceDecision(False, "invalid_observation")
         if budget.max_cpu_percent is not None and snapshot.cpu_percent > budget.max_cpu_percent:
             return ResourceDecision(False, "cpu_limit")
         if (
@@ -178,14 +192,68 @@ class ResourceManager:
         return tuple(self._queues.get((scope, owner_id), ()))
 
 
+def _valid_snapshot(snapshot: object) -> bool:
+    if type(snapshot) is not ResourceSnapshot:
+        return False
+    try:
+        cpu_percent = snapshot.cpu_percent
+        memory_percent = snapshot.memory_percent
+        available_memory_bytes = snapshot.available_memory_bytes
+        logical_cpu_count = snapshot.logical_cpu_count
+        total_memory_bytes = snapshot.total_memory_bytes
+        process_rss_bytes = snapshot.process_rss_bytes
+        battery_percent = snapshot.battery_percent
+        power_plugged = snapshot.power_plugged
+    except AttributeError:
+        return False
+
+    for value in (cpu_percent, memory_percent):
+        if (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or not 0 <= value <= 100
+        ):
+            return False
+    if type(available_memory_bytes) is not int or available_memory_bytes < 0:
+        return False
+    if logical_cpu_count is not None and (
+        type(logical_cpu_count) is not int or logical_cpu_count <= 0
+    ):
+        return False
+    for value in (total_memory_bytes, process_rss_bytes):
+        if value is not None and (type(value) is not int or value < 0):
+            return False
+    if battery_percent is not None and (
+        type(battery_percent) not in (int, float)
+        or not math.isfinite(battery_percent)
+        or not 0 <= battery_percent <= 100
+    ):
+        return False
+    return power_plugged is None or type(power_plugged) is bool
+
+
 def _validate_budget(budget: ResourceBudget) -> None:
-    if not budget.scope.strip() or not budget.owner_id.strip():
+    if type(budget) is not ResourceBudget:
+        raise ValueError("resource budget must be an exact ResourceBudget")
+    if (
+        type(budget.scope) is not str
+        or not budget.scope.strip()
+        or type(budget.owner_id) is not str
+        or not budget.owner_id.strip()
+    ):
         raise ValueError("resource budget scope and owner_id must not be empty")
-    if budget.max_concurrent <= 0:
-        raise ValueError("max_concurrent must be greater than zero")
+    if (
+        type(budget.max_concurrent) is not int
+        or not 1 <= budget.max_concurrent <= _SQLITE_MAX_INT64
+    ):
+        raise ValueError("max_concurrent must be a positive SQLite-sized integer")
     for name, value in (
         ("max_cpu_percent", budget.max_cpu_percent),
         ("max_memory_percent", budget.max_memory_percent),
     ):
-        if value is not None and not 0 < value <= 100:
-            raise ValueError(f"{name} must be in the range (0, 100]")
+        if value is not None and (
+            type(value) not in (int, float)
+            or not math.isfinite(value)
+            or not 0 < value <= 100
+        ):
+            raise ValueError(f"{name} must be a finite number in the range (0, 100]")
