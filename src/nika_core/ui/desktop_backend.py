@@ -100,6 +100,7 @@ class DesktopBackend:
         runtime: AgentRuntimePort | None = None,
         prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         admit_created_task: Callable[[TaskRecord], None] | None = None,
+        admit_resumed_task: Callable[[TaskRecord], None] | None = None,
         autostart_service: WindowsAutostartService | None = None,
     ) -> None:
         self._queue = queue
@@ -110,6 +111,7 @@ class DesktopBackend:
         self._runtime = runtime or ReferenceRuntime()
         self._prepare_task_payload = prepare_task_payload
         self._admit_created_task = admit_created_task
+        self._admit_resumed_task = admit_resumed_task
         self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.RLock()
@@ -245,6 +247,11 @@ class DesktopBackend:
                 raise ValueError(
                     "Runtime ще завершує безпечне призупинення; продовження поки недоступне."
                 )
+
+        if self._admit_resumed_task is not None:
+            self._admit_resumed_task(record)
+        if self._queue.get(record.task_id).state is not TaskState.PAUSED:
+            raise RuntimeError("task resume admission changed task state before submission")
 
         session = self._coordinator.sessions.get(record.task_id)
         if session is not None:
