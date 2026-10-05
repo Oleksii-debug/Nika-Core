@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hmac
 import json
 import logging
 import math
@@ -65,6 +66,13 @@ _MAX_MESSAGES_PER_CASE = 128
 _MAX_COMMAND_FILES = 16
 _MAX_SWITCHES = 16
 _SWITCH_RE = re.compile(r"^--[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 
 _TOP_LEVEL_KEYS = frozenset(
     {
@@ -880,7 +888,187 @@ def _canonical_report_payload(
     }
 
 
+def _canonical_report_output_path(path: Path) -> tuple[Path, os.stat_result]:
+    if type(path) is not type(Path()) or not path.is_absolute():
+        _fail("physical evaluation report path must be an absolute canonical platform Path")
+    parent = path.parent
+    try:
+        resolved_parent = parent.resolve(strict=True)
+        parent_snapshot = os.lstat(parent)
+    except OSError as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical evaluation report parent directory is unavailable"
+        ) from exc
+    if (
+        resolved_parent != parent
+        or stat.S_ISLNK(parent_snapshot.st_mode)
+        or _is_reparse(parent_snapshot)
+        or not stat.S_ISDIR(parent_snapshot.st_mode)
+    ):
+        _fail("physical evaluation report parent must be a canonical non-linked directory")
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise PhysicalEvaluationDriverError(
+            "physical evaluation report destination could not be inspected"
+        ) from exc
+    else:
+        _fail("physical evaluation report already exists; refusing to repeat model effects")
+    return path, parent_snapshot
+
+
+def _close_windows_stability_lock(handle: int | None) -> None:
+    if handle is None:
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(ctypes.c_void_p(handle))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        pass
+
+
+def _open_windows_parent_stability_lock(
+    path: Path,
+    expected_snapshot: os.stat_result,
+) -> int | None:
+    if os.name != "nt":
+        return None
+    handle_value: int | None = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            0,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS
+            | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        handle_value = int(handle)
+        current = os.lstat(path)
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or _is_reparse(current)
+            or not stat.S_ISDIR(current.st_mode)
+            or (current.st_dev, current.st_ino)
+            != (expected_snapshot.st_dev, expected_snapshot.st_ino)
+        ):
+            raise OSError("report parent changed while acquiring stability lock")
+        return handle_value
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        _close_windows_stability_lock(handle_value)
+        raise PhysicalEvaluationDriverError(
+            "physical evaluation report parent could not be locked"
+        ) from exc
+
+
+def _open_windows_report_stability_lock(path: Path) -> int | None:
+    if os.name != "nt":
+        return None
+    handle_value: int | None = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        handle_value = int(handle)
+        return handle_value
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        _close_windows_stability_lock(handle_value)
+        raise PhysicalEvaluationDriverError(
+            "published physical evaluation report could not be locked"
+        ) from exc
+
+
+def _unlink_report_if_owned(
+    path: Path,
+    expected_identity: tuple[int, int] | None,
+) -> None:
+    if expected_identity is None:
+        return
+    try:
+        current = os.lstat(path)
+    except OSError:
+        return
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+        or (current.st_dev, current.st_ino) != expected_identity
+    ):
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+def _strict_report_parse_back(body: bytes) -> dict[str, object]:
+    try:
+        value = json.loads(
+            body.decode("utf-8", errors="strict"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeError, json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "published physical evaluation report is invalid JSON"
+        ) from exc
+    if type(value) is not dict:
+        _fail("published physical evaluation report must be a JSON object")
+    return value
+
+
 def _write_report(path: Path, payload: dict[str, object]) -> None:
+    if type(payload) is not dict:
+        raise TypeError("physical evaluation report payload must be an exact dict")
     try:
         body = (
             json.dumps(
@@ -898,41 +1086,125 @@ def _write_report(path: Path, payload: dict[str, object]) -> None:
         ) from exc
     if len(body) > _REPORT_MAX_BYTES:
         _fail("physical evaluation report exceeds the output byte limit")
-    if path.exists():
-        _fail("physical evaluation report already exists; refusing to repeat model effects")
+    if _strict_report_parse_back(body) != payload:
+        _fail("physical evaluation report does not round-trip through strict JSON")
+
+    destination, parent_before = _canonical_report_output_path(path)
+    parent_lock = _open_windows_parent_stability_lock(
+        destination.parent,
+        parent_before,
+    )
     temporary: Path | None = None
+    descriptor: int | None = None
+    published_identity: tuple[int, int] | None = None
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="wb",
+        descriptor, temporary_name = tempfile.mkstemp(
             prefix=".physical-evaluation-report.",
             suffix=".tmp",
-            dir=path.parent,
-            delete=False,
-        ) as handle:
-            temporary = Path(handle.name)
+            dir=destination.parent,
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = None
             handle.write(body)
             handle.flush()
             os.fsync(handle.fileno())
-        if os.name == "nt":
-            os.rename(temporary, path)
-        else:
-            os.link(temporary, path, follow_symlinks=False)
-            temporary.unlink()
+
+        temporary_snapshot = os.lstat(temporary)
+        if (
+            stat.S_ISLNK(temporary_snapshot.st_mode)
+            or _is_reparse(temporary_snapshot)
+            or not stat.S_ISREG(temporary_snapshot.st_mode)
+            or int(getattr(temporary_snapshot, "st_nlink", 1)) != 1
+        ):
+            _fail("physical evaluation report temporary is not a canonical regular file")
+        published_identity = (
+            int(temporary_snapshot.st_dev),
+            int(temporary_snapshot.st_ino),
+        )
+
+        parent_during = os.lstat(destination.parent)
+        if (
+            stat.S_ISLNK(parent_during.st_mode)
+            or _is_reparse(parent_during)
+            or not stat.S_ISDIR(parent_during.st_mode)
+            or (parent_during.st_dev, parent_during.st_ino)
+            != (parent_before.st_dev, parent_before.st_ino)
+        ):
+            _fail("physical evaluation report parent changed during publication")
+
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as exc:
+            raise PhysicalEvaluationDriverError(
+                "physical evaluation report already exists"
+            ) from exc
+        linked_snapshot = os.lstat(destination)
+        if (
+            stat.S_ISLNK(linked_snapshot.st_mode)
+            or _is_reparse(linked_snapshot)
+            or not stat.S_ISREG(linked_snapshot.st_mode)
+            or (linked_snapshot.st_dev, linked_snapshot.st_ino)
+            != published_identity
+            or int(getattr(linked_snapshot, "st_nlink", 1)) != 2
+        ):
+            _fail("physical evaluation report publication changed file identity")
+
+        os.unlink(temporary)
         temporary = None
-    except FileExistsError as exc:
-        raise PhysicalEvaluationDriverError(
-            "physical evaluation report already exists"
-        ) from exc
+        destination_lock = _open_windows_report_stability_lock(destination)
+        try:
+            final_snapshot = os.lstat(destination)
+            if (
+                stat.S_ISLNK(final_snapshot.st_mode)
+                or _is_reparse(final_snapshot)
+                or not stat.S_ISREG(final_snapshot.st_mode)
+                or (final_snapshot.st_dev, final_snapshot.st_ino)
+                != published_identity
+                or int(getattr(final_snapshot, "st_nlink", 1)) != 1
+            ):
+                _fail("published physical evaluation report is not canonical")
+            published_body = _read_regular_file(
+                destination,
+                name="published physical evaluation report",
+                max_bytes=_REPORT_MAX_BYTES,
+            )
+            if not hmac.compare_digest(published_body, body):
+                _fail("published physical evaluation report bytes changed")
+            if _strict_report_parse_back(published_body) != payload:
+                _fail("published physical evaluation report changed during parse-back")
+
+            parent_after = os.lstat(destination.parent)
+            if (
+                stat.S_ISLNK(parent_after.st_mode)
+                or _is_reparse(parent_after)
+                or not stat.S_ISDIR(parent_after.st_mode)
+                or (parent_after.st_dev, parent_after.st_ino)
+                != (parent_before.st_dev, parent_before.st_ino)
+            ):
+                _fail("physical evaluation report parent changed during publication")
+        finally:
+            _close_windows_stability_lock(destination_lock)
+    except PhysicalEvaluationDriverError:
+        _unlink_report_if_owned(destination, published_identity)
+        raise
     except OSError as exc:
+        _unlink_report_if_owned(destination, published_identity)
         raise PhysicalEvaluationDriverError(
             "physical evaluation report could not be persisted"
         ) from exc
     finally:
-        if temporary is not None:
+        if descriptor is not None:
             try:
-                temporary.unlink(missing_ok=True)
+                os.close(descriptor)
             except OSError:
                 pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        _close_windows_stability_lock(parent_lock)
 
 
 def _is_windows() -> bool:
@@ -1037,8 +1309,7 @@ def run_physical_evaluation_from_config(
         name="physical_pilot_output_root",
     )
     report_path = output_root / "physical-old-new-evaluation-report.json"
-    if report_path.exists():
-        _fail("physical evaluation report already exists; refusing to repeat model effects")
+    _canonical_report_output_path(report_path)
 
     database_path = output_root / "physical-pilot.sqlite3"
     _canonical_file(database_path, name="physical pilot database")
