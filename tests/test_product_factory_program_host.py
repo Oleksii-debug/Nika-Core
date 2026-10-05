@@ -2281,3 +2281,42 @@ def test_fenced_recovery_rejects_malformed_state_and_releases_claim_for_retry(
     assert IdempotencyLedger(store).require(
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.COMPLETED
+
+
+def test_fenced_recovery_accepts_boundary_sized_utf8_state(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    worker.fail_dispatch.add(request.component_id)
+    host = ProductFactoryProgramHost(store, worker)
+
+    _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    phase = "p" * 1024
+    token = "т" * (64 * 1024 // 2)
+    worker.recovery_states[request.work_id] = RecoveryState(phase, token)
+
+    recovered = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+
+    assert recovered[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    assert len(worker.recover_calls) == 1
+    recovered_request, recovered_state = worker.recover_calls[0]
+    assert recovered_request.work_id == request.work_id
+    assert recovered_state == RecoveryState(phase, token)
+    assert len(recovered_state.opaque_token.encode("utf-8")) == 64 * 1024
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.COMPLETED
