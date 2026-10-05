@@ -61,10 +61,37 @@ class WindowsBuildPlan:
         for label, path in (("entrypoint", self.entrypoint), ("web_assets", self.web_assets)):
             if not path.exists():
                 raise FileNotFoundError(f"{label} does not exist: {path}")
+        for label, path in (("entrypoint", self.entrypoint), ("web_assets", self.web_assets)):
+            # Canonical #1051/#1052 source-input authority: linked ancestors
+            # can redirect ordinary leaf paths outside the exact checkout.
+            for component in (path, *path.parents):
+                if component.is_symlink() or component.is_junction():
+                    raise ValueError(
+                        f"{label} path traverses a symbolic link or junction: {component}"
+                    )
         if not self.entrypoint.is_file():
             raise ValueError("entrypoint must be a file")
         if not self.web_assets.is_dir():
             raise ValueError("web_assets must be a directory")
+        # Check every entry before descending so a nested link/junction cannot
+        # import bytes from outside the intended accessible UI payload.
+        pending = [self.web_assets]
+        while pending:
+            directory = pending.pop()
+            for asset in directory.iterdir():
+                if asset.is_symlink() or asset.is_junction():
+                    relative = asset.relative_to(self.web_assets)
+                    raise ValueError(
+                        "web_assets contains a symbolic link or junction: "
+                        f"{relative}"
+                    )
+                if asset.is_dir():
+                    pending.append(asset)
+        # The installed WebView2 journey depends on all three source assets.
+        for required in ("index.html", "app.js", "styles.css"):
+            asset = self.web_assets / required
+            if not asset.is_file() or asset.stat().st_size == 0:
+                raise ValueError(f"web_assets must contain a non-empty {required}")
 
     def pyinstaller_args(self) -> tuple[str, ...]:
         self.validate()
