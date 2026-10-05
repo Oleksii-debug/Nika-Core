@@ -140,9 +140,9 @@ def test_public_authority_rejects_behavioral_primitive_subclasses_before_use(tmp
 @pytest.mark.parametrize(
     "value",
     (
-        "worker\\nunsafe",
-        "worker\\x7funsafe",
-        "\\ud800",
+        "worker\nunsafe",
+        "worker\x7funsafe",
+        "\ud800",
         "a" * 4097,
         "€" * 1366,
     ),
@@ -192,8 +192,8 @@ def test_public_identity_admission_accepts_exact_4096_byte_boundary(tmp_path) ->
 @pytest.mark.parametrize(
     "owner_id",
     (
-        "worker\\nunsafe",
-        "worker\\x7funsafe",
+        "worker\nunsafe",
+        "worker\x7funsafe",
         "a" * 4097,
         "т" * 2049,
     ),
