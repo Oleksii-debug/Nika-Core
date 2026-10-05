@@ -18,9 +18,15 @@ from nika_core.product_command.reference_safety import safe_evidence_reference
         "https://service.invalid/callback?password=raw-password",
         "https://service.invalid/callback?session_token=raw-session-token",
         "https://service.invalid/callback?secret=raw-secret",
+        "https://service.invalid/callback?secret_key=raw-secret-key",
+        "https://service.invalid/callback?private_key=raw-private-key",
+        "https://service.invalid/callback?access_key=raw-access-key",
+        "https://service.invalid/callback?id_token=raw-id-token",
+        "https://service.invalid/callback?auth_token=raw-auth-token",
         "authorization=Basic raw-authorization",
         "X-API-Key: raw-header-key",
         "Proxy-Authorization: Basic raw-proxy-authorization",
+        "Bearer+raw-form-token",
     ),
 )
 def test_public_evidence_hashes_common_credential_url_and_header_shapes(
@@ -55,6 +61,7 @@ def test_deeply_encoded_credential_marker_cannot_escape_public_boundary() -> Non
     for _ in range(24):
         reference = quote(reference, safe="")
 
+    assert len(reference.encode("utf-8")) <= 512
     protected = safe_evidence_reference(reference)
 
     assert protected.startswith("evidence-sha256:")
