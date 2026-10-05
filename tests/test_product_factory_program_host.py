@@ -3295,24 +3295,28 @@ def test_manual_block_rejects_running_work_that_requires_recovery(tmp_path: Path
             requests=(request,),
             leases=(lease,),
         )
+
+        with pytest.raises(
+            ProductFactoryProgramError,
+            match="requires recovery-aware blocking",
+        ):
+            host.block_and_checkpoint(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                component_id=request.component_id,
+                reason="manual operator block",
+            )
+
+        assert ProductFactoryWorkOwnership(store).current(
+            project_id=request.project_id,
+            work_id=request.work_id,
+        ) == lease
+        assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+        restored = host.restore_latest(host_task_id=task_id, binding=binding)
+        assert _record(restored, request.component_id).state is WorkState.RUNNING
     finally:
         host._release_best_effort(lease)
-
-    with pytest.raises(
-        ProductFactoryProgramError,
-        match="requires recovery-aware blocking",
-    ):
-        host.block_and_checkpoint(
-            host_task_id=task_id,
-            binding=binding,
-            coordinator=coordinator,
-            component_id=request.component_id,
-            reason="manual operator block",
-        )
-
-    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
-    restored = host.restore_latest(host_task_id=task_id, binding=binding)
-    assert _record(restored, request.component_id).state is WorkState.RUNNING
 
 
 def test_manual_block_cannot_erase_completed_worker_evidence(tmp_path: Path) -> None:
