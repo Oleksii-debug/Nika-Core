@@ -9,6 +9,7 @@ from nika_core.data.sqlite import SQLiteStore
 
 
 _MAX_IDENTITY_UTF8_BYTES = 4096
+_IDENTITY_ERROR = "work ownership identity must be exact canonical bounded non-empty text"
 
 
 class WorkOwnershipError(ValueError):
@@ -255,7 +256,7 @@ def _select_ownership_row(
     connection: sqlite3.Connection,
     project_id: str,
     work_id: str,
-):
+) -> sqlite3.Row | None:
     try:
         return connection.execute(
             "SELECT owner_id, fence, issued_at, expires_at "
@@ -320,10 +321,10 @@ def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
 
 def _identity(*values: str) -> None:
     if not values:
-        raise WorkOwnershipError("work ownership identity must be exact canonical bounded non-empty text")
+        raise WorkOwnershipError(_IDENTITY_ERROR)
     for value in values:
         if type(value) is not str or not value or value != value.strip():
-            raise WorkOwnershipError("work ownership identity must be exact canonical bounded non-empty text")
+            raise WorkOwnershipError(_IDENTITY_ERROR)
         try:
             encoded = value.encode("utf-8")
         except UnicodeEncodeError as exc:
@@ -334,7 +335,7 @@ def _identity(*values: str) -> None:
             len(encoded) > _MAX_IDENTITY_UTF8_BYTES
             or any(ord(character) < 32 or ord(character) == 127 for character in value)
         ):
-            raise WorkOwnershipError("work ownership identity must be exact canonical bounded non-empty text")
+            raise WorkOwnershipError(_IDENTITY_ERROR)
 
 
 def _persisted_owner(value: object) -> str:
