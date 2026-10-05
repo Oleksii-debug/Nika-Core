@@ -162,6 +162,8 @@ class ProductProjectLifecycleService:
         )
 
         with self.store.connection() as conn:
+            # Keep replay/state classification in the same serialized writer interval.
+            conn.execute("BEGIN IMMEDIATE")
             replay = conn.execute(
                 "SELECT project_id,operation_kind,entity_id,entity_version,"
                 "input_fingerprint FROM product_project_mutation_idempotency "

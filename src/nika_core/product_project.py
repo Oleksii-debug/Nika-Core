@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import hashlib
 import json
 import re
@@ -529,6 +531,7 @@ class ProductProjectRepository:
         ).hexdigest()
         now = _now()
         with self.store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT project_id, input_fingerprint FROM product_project_idempotency "
                 "WHERE operation_key = ?",
@@ -583,6 +586,7 @@ class ProductProjectRepository:
         expected_row_version: int,
         change_reason: str = "specification revision",
         idempotency_key: str | None = None,
+        read_only_precondition: Callable[[Any], None] | None = None,
     ) -> ProductProject:
         # One authoritative PF0/PF12 transaction primitive owns every specification write.
         # The compatibility service delegates to the same primitive; there is no second writer.
@@ -595,6 +599,7 @@ class ProductProjectRepository:
             expected_row_version=expected_row_version,
             change_reason=change_reason,
             idempotency_key=idempotency_key,
+            read_only_precondition=read_only_precondition,
         )
 
     def spec_history(self, project_id: str) -> tuple[ProductSpecRevision, ...]:

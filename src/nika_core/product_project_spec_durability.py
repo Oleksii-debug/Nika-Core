@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import hashlib
 import json
 from dataclasses import dataclass, replace
@@ -379,6 +381,7 @@ def update_product_project_spec(
     expected_row_version: int,
     change_reason: str = "specification revision",
     idempotency_key: str | None = None,
+    read_only_precondition: Callable[[Any], None] | None = None,
 ) -> ProductProject:
     """Single authoritative PF0/PF12 transaction primitive for specification mutation."""
     if type(project_id) is not str or not project_id.strip():
@@ -393,6 +396,8 @@ def update_product_project_spec(
         type(idempotency_key) is not str or not idempotency_key.strip()
     ):
         raise ProductProjectError("idempotency_key must be a non-empty string when supplied")
+    if read_only_precondition is not None and not callable(read_only_precondition):
+        raise ProductProjectError("read_only_precondition must be callable when supplied")
 
     fingerprint = _input_fingerprint(
         project_id,
@@ -410,6 +415,13 @@ def update_product_project_spec(
             "SELECT * FROM product_project_spec_idempotency WHERE operation_key=?",
             (operation_key,),
         ).fetchone()
+        if read_only_precondition is not None:
+            changes_before = conn.total_changes
+            read_only_precondition(conn)
+            if conn.total_changes != changes_before:
+                raise ProductProjectError(
+                    "read_only_precondition must not mutate ProductProject durable state"
+                )
         if replay is not None:
             result = _validate_replay(
                 conn,

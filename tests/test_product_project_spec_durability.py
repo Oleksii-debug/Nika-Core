@@ -289,3 +289,90 @@ def test_sixty_spec_revisions_survive_repeated_store_reconstruction(tmp_path) ->
     history = restarted.spec_history("p1")
     assert len(history) == 61
     assert history[-1].supersedes_spec_version == 60
+
+
+def test_read_only_precondition_runs_in_writer_transaction_before_spec_mutation(tmp_path) -> None:
+    _, repo = _repo(tmp_path)
+    created = _create(repo)
+    observations: list[tuple[bool, int, int]] = []
+
+    def verify(conn) -> None:
+        project = conn.execute(
+            "SELECT row_version FROM product_projects WHERE project_id='p1'"
+        ).fetchone()
+        spec_count = conn.execute(
+            "SELECT COUNT(*) FROM product_project_specs WHERE project_id='p1'"
+        ).fetchone()[0]
+        observations.append((conn.in_transaction, project["row_version"], spec_count))
+
+    updated = repo.update_spec(
+        "p1",
+        _spec("precondition"),
+        expected_row_version=created.row_version,
+        idempotency_key="spec:precondition",
+        read_only_precondition=verify,
+    )
+
+    assert observations == [(True, 0, 1)]
+    assert (updated.spec_version, updated.row_version) == (2, 1)
+
+
+def test_read_only_precondition_failure_blocks_fresh_write_and_idempotent_replay(tmp_path) -> None:
+    store, repo = _repo(tmp_path)
+    created = _create(repo)
+
+    def stale_authority(_conn) -> None:
+        raise ProductProjectError("external authority is stale")
+
+    with pytest.raises(ProductProjectError, match="external authority is stale"):
+        repo.update_spec(
+            "p1",
+            _spec("blocked fresh"),
+            expected_row_version=created.row_version,
+            idempotency_key="spec:blocked-fresh",
+            read_only_precondition=stale_authority,
+        )
+    assert repo.get("p1") == created
+
+    committed = repo.update_spec(
+        "p1",
+        _spec("committed"),
+        expected_row_version=created.row_version,
+        idempotency_key="spec:replay-authority",
+    )
+    with pytest.raises(ProductProjectError, match="external authority is stale"):
+        repo.update_spec(
+            "p1",
+            _spec("committed"),
+            expected_row_version=created.row_version,
+            idempotency_key="spec:replay-authority",
+            read_only_precondition=stale_authority,
+        )
+
+    assert repo.get("p1") == committed
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM product_project_specs WHERE project_id='p1'"
+        ).fetchone()[0] == 2
+
+
+def test_read_only_precondition_cannot_smuggle_a_database_write(tmp_path) -> None:
+    _, repo = _repo(tmp_path)
+    created = _create(repo)
+
+    def illegal_write(conn) -> None:
+        conn.execute("UPDATE product_projects SET name='mutated' WHERE project_id='p1'")
+
+    with pytest.raises(ProductProjectError, match="must not mutate"):
+        repo.update_spec(
+            "p1",
+            _spec("must rollback"),
+            expected_row_version=created.row_version,
+            idempotency_key="spec:illegal-precondition-write",
+            read_only_precondition=illegal_write,
+        )
+
+    recovered = repo.get("p1")
+    assert recovered == created
+    assert recovered.name == "Durable"
+

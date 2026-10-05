@@ -16,6 +16,10 @@ The transaction reserves the SQLite writer before checking the idempotency ledge
 
 The receipt binds project identity, expected row version, previous/result specification versions, result row version, canonical input fingerprint, SHA-256 of the exact stored specification, change reason and timestamp. SHA-256 is integrity/correlation evidence, not authentication or signing.
 
+## Transaction-bound external authority precondition
+
+`ProductProjectRepository.update_spec()` accepts one optional internal `read_only_precondition`. The canonical writer acquires `BEGIN IMMEDIATE`, classifies any retry receipt, then invokes the precondition on that same SQLite connection before either replay is returned or a new specification mutation begins. A verification failure aborts the transaction. The writer rejects a precondition that changes SQLite durable rows, so this seam can revalidate external authority without becoming a second ProductProject write path. The precondition is deliberately excluded from mutation identity: it is a fresh authority check, not mutation payload.
+
 ## Mutation return linearizability
 
 The public mutation result is bound to the revision owned by that exact operation. A new write materializes its `ProductProject` result while the authoritative writer transaction still owns the exact specification and row-version transition. An idempotent replay materializes the result from the durable receipt plus the exact immutable specification row, rather than from whatever revision happens to be current later.

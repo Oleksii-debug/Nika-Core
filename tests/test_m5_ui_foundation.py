@@ -163,8 +163,20 @@ def test_javascript_preserves_edit_shortcuts_and_wires_keymap_transfer() -> None
 def test_packaged_uia_gate_waits_for_bridge_readiness_before_hotkeys() -> None:
     proof = Path(__file__).parents[1] / "scripts" / "m5_uia_proof.ps1"
     script = proof.read_text(encoding="utf-8")
-    ready_wait = script.index("Wait-DescendantName 'Nika Core готова до роботи.'")
+    ready_wait = script.index("Wait-BoundTextEvidence 'Nika Core готова до роботи.'")
     alt_hotkey = script.index("SendWait('%1')")
     command_hotkey = script.index("SendWait('^+p')")
     assert ready_wait < alt_hotkey < command_hotkey
     assert "keyboard/focus flow verified successfully" in script
+
+
+def test_packaged_uia_source_status_oracle_matches_production_contract() -> None:
+    root = Path(__file__).parents[1]
+    proof = (root / "scripts" / "m5_uia_proof.ps1").read_text(encoding="utf-8")
+    source_settings = (root / "src" / "nika_core" / "v01_source_settings.py").read_text(
+        encoding="utf-8"
+    )
+    status = "Джерела збережено для нових завдань. Можна створити командне завдання."
+    assert status in source_settings
+    assert f"Wait-BoundTextEvidence '{status}'" in proof
+    assert "Джерела збережено. Можна створити нове командне завдання." not in proof
