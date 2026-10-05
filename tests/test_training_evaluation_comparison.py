@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
+import httpx
 import pytest
 
 from nika_core.builder.repository import AgentDefinitionRepository
@@ -54,6 +56,12 @@ from nika_core.training_model_activation import (
     TrainingModelActivationError,
     activate_attested_training_promotion,
     rollback_attested_training_promotion,
+)
+from nika_core.training_ollama_manifest import (
+    ManifestPinnedOllamaProvider,
+    OllamaManifestAuthority,
+    OllamaPreparedModelBinding,
+    OllamaPromotionManifestStore,
 )
 from nika_core.v01_model_settings import (
     ModelSetupError,
@@ -692,6 +700,123 @@ def _downgrade_task_binding_schema_without_artifact_pin(conn) -> None:
     conn.execute("DROP TABLE v01_task_model_bindings_v4")
 
 
+def _prepared_ollama_binding(
+    *,
+    model_id: str,
+    artifact_sha256: str,
+    descriptor_digest: str,
+    manifest_sha256: str,
+    base_url: str = "http://localhost:11434",
+) -> OllamaPreparedModelBinding:
+    create_request = {
+        "model": model_id,
+        "files": {"model.gguf": "sha256:" + artifact_sha256},
+        "stream": False,
+    }
+    create_request_sha256 = _sha(
+        json.dumps(
+            create_request,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    )
+    payload = {
+        "schema": "nika.training.ollama-prepared-model.v1",
+        "provider_id": "ollama",
+        "route_model_id": model_id,
+        "manifest_model_id": model_id,
+        "artifact_sha256": artifact_sha256,
+        "descriptor_digest": descriptor_digest,
+        "provider_manifest_sha256": manifest_sha256,
+        "endpoint_sha256": _sha(base_url.encode("utf-8")),
+        "create_request_sha256": create_request_sha256,
+    }
+    return OllamaPreparedModelBinding(
+        route_model_id=model_id,
+        manifest_model_id=model_id,
+        artifact_sha256=artifact_sha256,
+        descriptor_digest=descriptor_digest,
+        provider_manifest_sha256=manifest_sha256,
+        endpoint_sha256=payload["endpoint_sha256"],
+        create_request_sha256=create_request_sha256,
+        preparation_sha256=_sha(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ),
+    )
+
+
+def _promotion_manifest_args(result, store: SQLiteStore) -> dict[str, object]:
+    training = result.challenger_benchmark.binding.revalidated()
+    base = _prepared_ollama_binding(
+        model_id=training.base_model_id,
+        artifact_sha256=training.base_sha256,
+        descriptor_digest=training.base_descriptor_digest,
+        manifest_sha256=_sha(b"base-provider-manifest"),
+    )
+    challenger = _prepared_ollama_binding(
+        model_id=training.challenger_model_id,
+        artifact_sha256=training.challenger_sha256,
+        descriptor_digest=training.descriptor_digest,
+        manifest_sha256=_sha(b"challenger-provider-manifest"),
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path != "/api/tags":
+            raise AssertionError(request.url)
+        return httpx.Response(
+            200,
+            json={
+                "models": [
+                    {
+                        "name": base.route_model_id,
+                        "model": base.route_model_id,
+                        "digest": base.provider_manifest_sha256,
+                    },
+                    {
+                        "name": challenger.route_model_id,
+                        "model": challenger.route_model_id,
+                        "digest": challenger.provider_manifest_sha256,
+                    },
+                ]
+            },
+        )
+
+    transport = httpx.MockTransport(handler)
+
+    def client_factory(**kwargs):
+        return httpx.AsyncClient(transport=transport, **kwargs)
+
+    return {
+        "manifest_store": OllamaPromotionManifestStore(store),
+        "manifest_authority": OllamaManifestAuthority(client_factory=client_factory),
+        "base_prepared_model": base,
+        "challenger_prepared_model": challenger,
+    }
+
+
+async def _activate_with_manifests(
+    *,
+    result,
+    store: SQLiteStore,
+    settings: V01ModelSettings,
+    expected_revision: int,
+    effect_port=None,
+):
+    return await activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=expected_revision,
+        effect_port=effect_port,
+        **_promotion_manifest_args(result, store),
+    )
+
+
 async def _promoted_comparison(tmp_path):
     evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
     return run_attested_old_vs_new_comparison(
@@ -720,8 +845,9 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     )
 
     activation_port = _ChallengerPort("activation-ok")
-    receipt = await activate_attested_training_promotion(
+    receipt = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=activation_port,
@@ -744,8 +870,9 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
 
-    retried = await activate_attested_training_promotion(
+    retried = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
     )
@@ -790,8 +917,9 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         TrainingModelActivationError,
         match="rejected by the active route authority",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=restarted,
             expected_revision=3,
         )
@@ -896,7 +1024,7 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
     tmp_path,
 ) -> None:
     result = await _promoted_comparison(tmp_path)
-    _, settings = _configured_model_settings(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
 
     class _SwappedArtifactPort(_ChallengerPort):
         async def complete_attested(self, request, *, binding):
@@ -914,8 +1042,9 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
         TrainingModelActivationError,
         match="fresh loaded-model activation attestation failed",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=settings,
             expected_revision=1,
             effect_port=port,
@@ -929,9 +1058,10 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
 @pytest.mark.asyncio
 async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
     result = await _promoted_comparison(tmp_path)
-    _, settings = _configured_model_settings(tmp_path)
-    await activate_attested_training_promotion(
+    store, settings = _configured_model_settings(tmp_path)
+    await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -953,8 +1083,9 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
         TrainingModelActivationError,
         match="rejected by the active route authority",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=settings,
             expected_revision=3,
         )
@@ -1053,8 +1184,9 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    original = await activate_attested_training_promotion(
+    original = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -1157,8 +1289,9 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    receipt = await activate_attested_training_promotion(
+    receipt = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -1228,8 +1361,9 @@ async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) 
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
     training = result.challenger_benchmark.binding.revalidated()
-    await activate_attested_training_promotion(
+    await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -1312,8 +1446,9 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    await activate_attested_training_promotion(
+    await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -1333,6 +1468,16 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     monkeypatch.setattr(settings, "artifact_pin_for_task", unexpected_legacy_read)
     monkeypatch.setattr(TaskQueue, "get", unexpected_legacy_read)
 
+    seen_binding: list[OllamaPreparedModelBinding] = []
+
+    def observing_provider(**kwargs):
+        seen_binding.append(kwargs["binding"])
+        return ManifestPinnedOllamaProvider(**kwargs)
+
+    monkeypatch.setattr(
+        "nika_core.v01_model_settings.ManifestPinnedOllamaProvider",
+        observing_provider,
+    )
     factory = V01BoundModelRuntimeFactory(
         store=store,
         definitions=AgentDefinitionRepository(store),
@@ -1340,3 +1485,45 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     )
 
     assert factory.for_task(task.task_id) is not None
+    assert len(seen_binding) == 1
+    assert (
+        seen_binding[0].artifact_sha256
+        == result.challenger_benchmark.binding.challenger_sha256
+    )
+    assert seen_binding[0].route_model_id == "challenger-model"
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_fails_closed_when_promoted_manifest_mapping_is_missing(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    await _activate_with_manifests(
+        result=result,
+        store=store,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_ChallengerPort("activation-ok"),
+    )
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload(
+            {"command": "must retain provider manifest authority"}
+        ),
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM training_ollama_promotion_manifests "
+            "WHERE decision_sha256 = ? AND role = 'challenger'",
+            (result.evidence_sha256,),
+        )
+
+    factory = V01BoundModelRuntimeFactory(
+        store=store,
+        definitions=AgentDefinitionRepository(store),
+        settings=settings,
+    )
+    with pytest.raises(ModelSetupError, match="provider manifest"):
+        factory.for_task(task.task_id)
