@@ -683,3 +683,30 @@ def test_final_candidate_immediate_post_link_substitution_is_detected(
     assert substituted is True
     assert candidate.read_bytes() == b"substituted"
 
+def test_final_candidate_uses_unique_reserved_temporary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    candidate.parent.mkdir(parents=True)
+    legacy_temporary = candidate.parent / ".adapter_model.safetensors.tmp"
+    legacy_temporary.write_bytes(b"other-attempt")
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    _, candidate_sha256 = peft._train_one_step(request, config, consumed)
+
+    assert candidate_sha256 == _sha256(candidate.read_bytes())
+    assert legacy_temporary.read_bytes() == b"other-attempt"
+    assert sorted(
+        path.name
+        for path in candidate.parent.iterdir()
+        if path.name.endswith(".tmp")
+    ) == [legacy_temporary.name]
+
