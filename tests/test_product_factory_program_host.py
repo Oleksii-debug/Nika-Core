@@ -1032,3 +1032,50 @@ def test_existing_matching_worker_reservation_preserves_safe_recovery(tmp_path) 
     assert ledger.require(operation_key).status is IdempotencyStatus.PENDING
     assert worker.dispatch_calls == []
     assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+
+
+def test_worker_reservation_collision_does_not_cancel_independent_component(
+    tmp_path,
+) -> None:
+    from nika_core.product_factory_program_host import _request_fingerprint
+
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    ready = coordinator.ready_requests()
+    assert len(ready) == 2
+    collided, independent = ready
+    ledger = IdempotencyLedger(store)
+    ledger.reserve_once(
+        operation_key=f"pf-worker:{collided.work_id}",
+        task_id="foreign-host-task",
+        operation_type="product_factory.coding_worker",
+        input_fingerprint=_request_fingerprint(collided),
+    )
+
+    host = ProductFactoryProgramHost(store, worker)
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_parallel=2,
+            max_count=2,
+        )
+    )
+    by_component = {item.component_id: item for item in outcomes}
+    assert by_component[collided.component_id].disposition is (
+        ProgramWorkDisposition.NEEDS_RECONCILIATION
+    )
+    assert by_component[independent.component_id].disposition is (
+        ProgramWorkDisposition.REVIEW_REQUIRED
+    )
+    assert [item.work_id for item in worker.dispatch_calls] == [independent.work_id]
+    assert ledger.require(f"pf-worker:{collided.work_id}").status is (
+        IdempotencyStatus.PENDING
+    )
+    assert ledger.require(f"pf-worker:{independent.work_id}").status is (
+        IdempotencyStatus.COMPLETED
+    )
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    assert _record(restored, collided.component_id).state is WorkState.RUNNING
+    assert _record(restored, independent.component_id).state is WorkState.REVIEW_REQUIRED
