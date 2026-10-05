@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import collections.abc
-import ctypes
 import dataclasses
 import os
 import pathlib
 import shutil
-import signal
 import stat
 import subprocess
 import threading
 import time
-from typing import Self
 
+from nika_core.process_containment import (
+    ProcessContainmentError,
+    WindowsJob as _WindowsJob,
+    process_group_popen_options,
+    terminate_process_tree as _terminate_process_tree,
+)
 from nika_core.toolsmith import contracts as toolsmith_contracts
 from nika_core.toolsmith.workspace_security import (
     SterileGitPlan,
@@ -56,111 +59,6 @@ class PreparedGitWorkspace:
             raise WorkspaceSecurityError("private workspace HEAD must equal the pinned base SHA")
         if self.remotes:
             raise WorkspaceSecurityError("worker-private Git metadata must not retain remotes")
-
-
-class _WindowsJob:
-    def __init__(self) -> None:
-        self._handle: int | None = None
-
-    @property
-    def active(self) -> bool:
-        return self._handle is not None
-
-    def assign(self, process_handle: int) -> None:
-        if os.name != "nt":
-            return
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        create_job = kernel32.CreateJobObjectW
-        create_job.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p)
-        create_job.restype = ctypes.c_void_p
-        set_information = kernel32.SetInformationJobObject
-        set_information.argtypes = (ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, ctypes.c_uint32)
-        set_information.restype = ctypes.c_int
-        assign_process = kernel32.AssignProcessToJobObject
-        assign_process.argtypes = (ctypes.c_void_p, ctypes.c_void_p)
-        assign_process.restype = ctypes.c_int
-
-        class IoCounters(ctypes.Structure):
-            _fields_ = [
-                ("ReadOperationCount", ctypes.c_uint64),
-                ("WriteOperationCount", ctypes.c_uint64),
-                ("OtherOperationCount", ctypes.c_uint64),
-                ("ReadTransferCount", ctypes.c_uint64),
-                ("WriteTransferCount", ctypes.c_uint64),
-                ("OtherTransferCount", ctypes.c_uint64),
-            ]
-
-        class BasicLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_int64),
-                ("PerJobUserTimeLimit", ctypes.c_int64),
-                ("LimitFlags", ctypes.c_uint32),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", ctypes.c_uint32),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", ctypes.c_uint32),
-                ("SchedulingClass", ctypes.c_uint32),
-            ]
-
-        class ExtendedLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", BasicLimitInformation),
-                ("IoInfo", IoCounters),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        job = create_job(None, None)
-        if not job:
-            raise ProcessExecutionError(
-                f"CreateJobObjectW failed with Win32 error {ctypes.get_last_error()}"
-            )
-        information = ExtendedLimitInformation()
-        information.BasicLimitInformation.LimitFlags = 0x00002000
-        if not set_information(job, 9, ctypes.byref(information), ctypes.sizeof(information)):
-            kernel32.CloseHandle(job)
-            raise ProcessExecutionError(
-                f"SetInformationJobObject failed with Win32 error {ctypes.get_last_error()}"
-            )
-        if not assign_process(job, ctypes.c_void_p(process_handle)):
-            kernel32.CloseHandle(job)
-            raise ProcessExecutionError(
-                f"AssignProcessToJobObject failed with Win32 error {ctypes.get_last_error()}"
-            )
-        self._handle = int(job)
-
-    def close(self) -> None:
-        if self._handle is None or os.name != "nt":
-            self._handle = None
-            return
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CloseHandle(ctypes.c_void_p(self._handle))
-        self._handle = None
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-
-def _terminate_process_tree(process: subprocess.Popen[bytes], job: _WindowsJob) -> None:
-    if process.poll() is not None:
-        return
-    if os.name == "nt" and job.active:
-        job.close()
-        return
-    if os.name != "nt":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-            return
-        except ProcessLookupError:
-            return
-    process.kill()
 
 
 def _resolution_chain_key(path: pathlib.Path) -> str:
@@ -329,9 +227,7 @@ def run_typed_process(
     overflow = threading.Event()
     output_lock = threading.Lock()
 
-    creationflags = 0
-    if os.name == "nt":
-        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    creationflags, start_new_session = process_group_popen_options()
 
     process = subprocess.Popen(
         typed_argv,
@@ -342,12 +238,22 @@ def run_typed_process(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         creationflags=creationflags,
-        start_new_session=os.name != "nt",
+        start_new_session=start_new_session,
     )
 
     with _WindowsJob() as job:
         if os.name == "nt":
-            job.assign(int(process._handle))  # type: ignore[attr-defined]
+            try:
+                job.assign(int(process._handle))  # type: ignore[attr-defined]
+            except ProcessContainmentError as exc:
+                _terminate_process_tree(process, job)
+                try:
+                    process.wait(timeout=5)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                raise ProcessExecutionError(
+                    "failed to establish Windows process-tree containment"
+                ) from exc
 
         def drain(stream_name: str, stream: collections.abc.Iterator[bytes]) -> None:
             nonlocal total_output
