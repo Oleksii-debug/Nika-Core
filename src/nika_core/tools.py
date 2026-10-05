@@ -14,6 +14,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
     IdempotencyLedger,
+    IdempotencyRecord,
     IdempotencyStatus,
 )
 
@@ -266,7 +267,7 @@ class ToolEffectGuard:
 
     @staticmethod
     def _reservation_from_record(
-        record,
+        record: IdempotencyRecord,
         *,
         completed_result: Mapping[str, object] | None = None,
     ) -> ToolEffectReservation:
