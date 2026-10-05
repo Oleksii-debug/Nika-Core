@@ -178,6 +178,7 @@ global.pywebview = { api: {
     }
     if (command.action_id === "settings.model.configure") {
       currentModel = safeModelSnapshot(command.payload);
+      if (dispatchMode === "commit-disconnect") throw new Error("PRIVATE_MODEL_CANARY");
       return { status: "completed", message: "Модель збережено для нових завдань.", focus_id: "command-input" };
     }
     return { status: "completed", message: "ok" };
@@ -561,5 +562,36 @@ const status = element("model-settings-status");
   assert.match(element("app-status").textContent, /Немає підтвердження зміни моделі/);
   assert.equal(JSON.stringify(Object.values(elements).map((e) => e.textContent)).includes("PRIVATE_MODEL_CANARY"), false);
 
-  console.log("PASS: model settings + startup recovery renderer, Ctrl+Space keymap, draft/race, keyboard focus, safe credential reference, no blind retry");
+  dispatchMode = "success";
+  click(reload);
+  await tick(); await tick(); await tick();
+  model.value = "committed-with-lost-ack";
+  fire(model, "input");
+  dispatchMode = "commit-disconnect";
+  const beforeCommittedDisconnect = calls.length;
+  click(save);
+  await tick(); await tick(); await tick();
+  assert.equal(
+    calls.length,
+    beforeCommittedDisconnect + 1,
+    "A committed write with a lost acknowledgement must never be replayed",
+  );
+  assert.equal(
+    save.disabled,
+    true,
+    "A refreshed newer revision after unknown write outcome must fence stale resubmission",
+  );
+  assert.match(status.textContent, /іншому вікні/);
+  assert.equal(
+    currentModel.model,
+    "committed-with-lost-ack",
+    "The mock backend must have durably committed before disconnecting",
+  );
+  dispatchMode = "success";
+  click(reload);
+  await tick(); await tick(); await tick();
+  assert.equal(model.value, "committed-with-lost-ack");
+  assert.equal(save.disabled, false);
+
+  console.log("PASS: model settings + startup recovery renderer, Ctrl+Space keymap, draft/race, keyboard focus, safe credential reference, no blind retry after lost acknowledgement");
 })().catch((error) => { console.error(error); process.exitCode = 1; });
