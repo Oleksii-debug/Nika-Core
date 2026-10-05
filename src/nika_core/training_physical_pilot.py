@@ -386,40 +386,6 @@ def _snapshot_run_evidence(
     )
 
 
-def _validate_restart_probe_before_effect(
-    paused: TrainingRunEvidence,
-    restart_probe: TrainingRunEvidence,
-) -> None:
-    if paused.next_step != 1:
-        _fail("physical pilot must pause exactly after its first trainer step")
-    if restart_probe.next_step != 1:
-        _fail("restarted runtime did not reopen the one-step durable checkpoint")
-    if paused.reason != "paused":
-        _fail("physical pilot pause must come from the explicit pause control")
-    if restart_probe.reason != "paused":
-        _fail("restart probe must come from the explicit pause control")
-    if paused.candidate_sha256 is not None or restart_probe.candidate_sha256 is not None:
-        _fail("paused pilot evidence must not already publish a candidate")
-    if paused.checkpoint_id is None or restart_probe.checkpoint_id is None:
-        _fail("physical pilot requires durable pause and restart-probe checkpoints")
-    if paused.checkpoint_id == restart_probe.checkpoint_id:
-        _fail("restart probe did not advance durable checkpoint identity")
-
-    identity_fields = (
-        "job_id",
-        "base_artifact",
-        "frozen_package_sha256",
-        "training_material_sha256",
-        "scale_authorization_sha256",
-        "execution_plan_sha256",
-        "job_fingerprint",
-        "candidate_artifact_ref",
-    )
-    for name in identity_fields:
-        if getattr(restart_probe, name) != getattr(paused, name):
-            _fail(f"restart probe changed {name} across reopen")
-
-
 def build_physical_training_pilot_report(
     *,
     paused: TrainingRunEvidence,
@@ -448,19 +414,27 @@ def build_physical_training_pilot_report(
         state=TrainingRunState.COMPLETED,
         label="completed run",
     )
-    _validate_restart_probe_before_effect(paused, restart_probe)
+    if paused.next_step != 1:
+        _fail("physical pilot must pause exactly after its first trainer step")
+    if restart_probe.next_step != 1:
+        _fail("restarted runtime did not reopen the one-step durable checkpoint")
     if completed.next_step < 2:
         _fail("physical pilot must complete after the restart boundary")
-    if completed.checkpoint_id is None:
-        _fail("physical pilot requires a durable completion checkpoint")
-    if len(
-        {
-            paused.checkpoint_id,
-            restart_probe.checkpoint_id,
-            completed.checkpoint_id,
-        }
-    ) != 3:
+    if paused.candidate_sha256 is not None or restart_probe.candidate_sha256 is not None:
+        _fail("paused pilot evidence must not already publish a candidate")
+    checkpoint_ids = (
+        paused.checkpoint_id,
+        restart_probe.checkpoint_id,
+        completed.checkpoint_id,
+    )
+    if any(checkpoint_id is None for checkpoint_id in checkpoint_ids):
+        _fail("physical pilot requires pause, restart-probe, and completion checkpoints")
+    if len(set(checkpoint_ids)) != 3:
         _fail("physical pilot did not advance all durable checkpoint identities")
+    if paused.reason != "paused":
+        _fail("physical pilot pause must come from the explicit pause control")
+    if restart_probe.reason != "paused_before_admission":
+        _fail("restart probe must pause before admission and trainer effects")
 
     identity_fields = (
         "job_id",
@@ -473,7 +447,10 @@ def build_physical_training_pilot_report(
         "candidate_artifact_ref",
     )
     for name in identity_fields:
-        if getattr(completed, name) != getattr(paused, name):
+        paused_value = getattr(paused, name)
+        if getattr(restart_probe, name) != paused_value:
+            _fail(f"restart probe changed {name} across reopen")
+        if getattr(completed, name) != paused_value:
             _fail(f"physical pilot changed {name} across restart")
     if completed.candidate_sha256 is None:
         _fail("completed pilot is missing candidate digest evidence")
@@ -616,7 +593,7 @@ def run_physical_training_pilot(
     if paused.next_step != 1:
         _fail("trainer did not reach the required one-step durable pause boundary")
     if paused.reason != "paused":
-        _fail("physical pilot pause must come from the explicit pause control")
+        _fail("initial pilot pause did not come from the explicit pause control")
 
     resumed_runtime = restart_runtime()
     resumed_worker = restart_worker()
@@ -647,7 +624,10 @@ def run_physical_training_pilot(
         state=TrainingRunState.PAUSED,
         label="restart probe",
     )
-    _validate_restart_probe_before_effect(paused, restart_probe)
+    if restart_probe.next_step != 1:
+        _fail("restarted runtime did not reopen the one-step durable checkpoint")
+    if restart_probe.reason != "paused_before_admission":
+        _fail("restart probe did not pause before admission and trainer effects")
 
     completed = resumed_runtime.run(
         canonical_spec,
