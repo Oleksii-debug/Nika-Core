@@ -18,6 +18,7 @@ from nika_core.trading_research.contracts import (
 from nika_core.trading_research.identity import instrument_identity
 from nika_core.trading_research.orders import (
     ExecutionPolicy,
+    OrderAuthority,
     OrderIntent,
     OrderState,
     OrderType,
@@ -35,6 +36,15 @@ from nika_core.trading_research.replay import (
 
 NOW = datetime(2026, 1, 1, tzinfo=UTC)
 INSTRUMENT = Instrument("TEST", Venue("SIM", "UTC"), "USD")
+
+
+def _authority(
+    order_id: str = "order-1",
+    *,
+    submitted_slice: int = 0,
+    submitted_at: datetime = NOW,
+) -> OrderAuthority:
+    return OrderAuthority("workspace", "run", order_id, submitted_at, submitted_slice)
 
 
 def _quote(at: datetime, *, bid: str = "99", ask: str = "101", size: str = "10") -> Quote:
@@ -61,6 +71,7 @@ def _approved(*, submitted_slice: int = 0, approved_slice: int = 0) -> RiskAppro
     return RiskApprovedOrder(
         "approval-1",
         intent,
+        _authority("order-1", submitted_slice=submitted_slice),
         NOW,
         approved_slice,
         ExecutionPolicy("v1"),
@@ -69,16 +80,17 @@ def _approved(*, submitted_slice: int = 0, approved_slice: int = 0) -> RiskAppro
 
 def _fill(fill_id: str = "fill-1") -> SimulatedFill:
     return SimulatedFill(
-        fill_id,
-        "approval-1",
-        "intent-1",
-        INSTRUMENT,
-        Side.BUY,
-        Decimal(2),
-        Decimal(100),
-        Decimal(1),
-        NOW,
-        1,
+        fill_id=fill_id,
+        approval_id="approval-1",
+        intent_id="intent-1",
+        authority=_authority(),
+        instrument=INSTRUMENT,
+        side=Side.BUY,
+        quantity=Decimal(2),
+        price=Decimal(100),
+        fee=Decimal(1),
+        filled_at=NOW,
+        filled_slice=1,
     )
 
 
@@ -143,6 +155,7 @@ def test_partial_fill_is_bounded_by_explicit_liquidity_fraction() -> None:
     order = RiskApprovedOrder(
         "risk:partial",
         intent,
+        _authority("partial"),
         NOW,
         0,
         ExecutionPolicy("half", max_fill_fraction=Decimal("0.5")),
@@ -168,7 +181,14 @@ def test_limit_order_does_not_fill_when_quote_does_not_cross() -> None:
         0,
         Decimal(100),
     )
-    order = RiskApprovedOrder("risk:limit", intent, NOW, 0, ExecutionPolicy("v1"))
+    order = RiskApprovedOrder(
+        "risk:limit",
+        intent,
+        _authority("limit"),
+        NOW,
+        0,
+        ExecutionPolicy("v1"),
+    )
     update = SimulationExecutionEngine().execute(
         order,
         TimeSlice(1, NOW, (_quote(NOW, ask="101"),)),
@@ -188,7 +208,14 @@ def test_expired_order_is_terminal_and_never_fills() -> None:
         0,
         expires_at=NOW + timedelta(seconds=1),
     )
-    order = RiskApprovedOrder("risk:expiry", intent, NOW, 0, ExecutionPolicy("v1"))
+    order = RiskApprovedOrder(
+        "risk:expiry",
+        intent,
+        _authority("expiry"),
+        NOW,
+        0,
+        ExecutionPolicy("v1"),
+    )
     book = ReplayBook(PortfolioLedger(Decimal(1000)))
     expired_at = NOW + timedelta(seconds=1)
     first = book.process_existing_order(order, TimeSlice(1, expired_at, (_quote(expired_at),)))
