@@ -50,8 +50,10 @@ class DeploymentExecutionSpec:
     node_lease_seconds: int = 300
 
     def __post_init__(self) -> None:
-        if not all(
-            value.strip()
+        if type(self.request) is not ExecutionRequest or type(self.intent) is not DeploymentIntent:
+            raise DeploymentExecutionError("invalid deployment request or intent")
+        if any(
+            type(value) is not str or not value.strip()
             for value in (
                 self.operation_id,
                 self.credential_ref,
@@ -59,11 +61,16 @@ class DeploymentExecutionSpec:
                 self.credential_scope,
             )
         ):
-            raise DeploymentExecutionError("deployment execution identity must not be empty")
+            raise DeploymentExecutionError("deployment execution identity must be nonempty text")
         if self.request.project_id != self.intent.project_id:
             raise DeploymentExecutionError("execution request and deployment intent project mismatch")
-        if self.credential_ttl_seconds <= 0 or self.node_lease_seconds <= 0:
-            raise DeploymentExecutionError("lease durations must be positive")
+        if (
+            type(self.credential_ttl_seconds) is not int
+            or self.credential_ttl_seconds <= 0
+            or type(self.node_lease_seconds) is not int
+            or self.node_lease_seconds <= 0
+        ):
+            raise DeploymentExecutionError("lease durations must be positive integers")
 
 
 @dataclass(frozen=True, slots=True)
@@ -283,6 +290,7 @@ class DeploymentExecutionCoordinator:
                 raise DeploymentExecutionError(
                     "deployment execution snapshot contains duplicate operations"
                 )
+            record.spec.__post_init__()
             if type(record.state) is not OperationState:
                 raise DeploymentExecutionError("invalid snapshot operation state")
             if type(record.attempt) is not int or record.attempt < 0:
