@@ -179,7 +179,8 @@ class SQLiteExperimentRepository:
         if row is None:
             raise KeyError(f"unknown experiment: {experiment_id}")
         observation_rows = conn.execute(
-            "SELECT candidate_id, replay_id, metric, value FROM experiment_observations "
+            "SELECT candidate_id, replay_id, metric, value, "
+            "typeof(value) AS value_storage_type FROM experiment_observations "
             "WHERE experiment_id = ? ORDER BY observation_id",
             (experiment_id,),
         ).fetchall()
@@ -188,7 +189,10 @@ class SQLiteExperimentRepository:
                 candidate_id=item["candidate_id"],
                 replay_id=item["replay_id"],
                 metric=item["metric"],
-                value=float(item["value"]),
+                value=_required_persisted_real(
+                    item["value"],
+                    item["value_storage_type"],
+                ),
             )
             for item in observation_rows
         )
@@ -201,6 +205,18 @@ class SQLiteExperimentRepository:
         )
         _validate_authority_state(snapshot)
         return snapshot
+
+
+def _required_persisted_real(value: object, storage_type: object) -> float:
+    if (
+        type(storage_type) is not str
+        or storage_type != "real"
+        or type(value) is not float
+    ):
+        raise TypeError(
+            "persisted experiment observation value must use SQLite REAL storage"
+        )
+    return value
 
 
 def _validate_new_snapshot(snapshot: ExperimentSnapshot) -> None:

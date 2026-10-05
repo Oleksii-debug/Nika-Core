@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -237,6 +238,46 @@ def test_dataset_provenance_and_cutoff_survive_sqlite_restart(tmp_path: Path) ->
     second.record("exp-data-safety", MetricObservation("challenger", "r1", "quality", 0.80))
     promoted = second.complete("exp-data-safety")
     assert promoted.status is ExperimentStatus.PROMOTED
+
+
+
+def test_corrupt_observation_storage_type_fails_closed_on_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "nika.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    repository = SQLiteExperimentRepository(store)
+    engine = ExperimentEngine(repository)
+    engine.create(_definition())
+    engine.start("exp-data-safety")
+    engine.record(
+        "exp-data-safety",
+        MetricObservation("champion", "r1", "quality", 0.70),
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE experiment_observations SET value = ? "
+            "WHERE experiment_id = ? AND candidate_id = ?",
+            (
+                sqlite3.Binary(b"0.80"),
+                "exp-data-safety",
+                "champion",
+            ),
+        )
+        row = conn.execute(
+            "SELECT typeof(value) AS storage_type "
+            "FROM experiment_observations WHERE experiment_id = ? "
+            "AND candidate_id = ?",
+            ("exp-data-safety", "champion"),
+        ).fetchone()
+        assert row is not None
+        assert row["storage_type"] == "blob"
+
+    restarted = SQLiteExperimentRepository(SQLiteStore(path))
+    with pytest.raises(TypeError, match="SQLite REAL storage"):
+        restarted.get("exp-data-safety")
 
 
 def test_legacy_persisted_definition_keeps_unknown_split_as_evaluation(tmp_path: Path) -> None:
