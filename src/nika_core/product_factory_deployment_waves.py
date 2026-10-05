@@ -115,6 +115,20 @@ class DeploymentWaveCoordinator:
     _plans: dict[str, DeploymentWaveRecord] = field(default_factory=dict, init=False, repr=False)
 
     def submit(self, plan: DeploymentWavePlan) -> DeploymentWaveRecord:
+        if (
+            type(plan) is not DeploymentWavePlan
+            or type(plan.services) is not tuple
+            or any(type(service) is not ServiceRolloutSpec for service in plan.services)
+        ):
+            raise DeploymentWaveError("invalid rollout plan")
+        try:
+            for service in plan.services:
+                service.__post_init__()
+                service.execution.__post_init__()
+            plan.__post_init__()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise DeploymentWaveError("invalid rollout plan") from exc
+
         existing = self._plans.get(plan.plan_id)
         if existing is not None:
             if existing.plan != plan:

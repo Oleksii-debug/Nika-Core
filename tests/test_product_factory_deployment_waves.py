@@ -472,3 +472,45 @@ def test_restore_rejects_execution_record_with_missing_spec_before_traversal() -
         target.restore(corrupted)
     assert target.snapshot() == before
     assert executions.records["operation-api"].state is OperationState.PENDING
+
+
+def test_submit_revalidates_full_service_collection_before_nested_publication() -> None:
+    coordinator, executions = _coordinator()
+    first = _execution("api")
+    second = _execution("worker")
+    plan = DeploymentWavePlan("plan", "social", (first, second))
+    object.__setattr__(plan, "services", (first, object()))
+
+    with pytest.raises(DeploymentWaveError, match="invalid rollout plan"):
+        coordinator.submit(plan)
+
+    assert executions.records == {}
+    assert coordinator.snapshot().plans == ()
+
+
+def test_submit_revalidates_nested_execution_before_any_service_publication() -> None:
+    coordinator, executions = _coordinator()
+    first = _execution("api")
+    second = _execution("worker")
+    plan = DeploymentWavePlan("plan", "social", (first, second))
+    object.__setattr__(second.execution, "request", object())
+
+    with pytest.raises(DeploymentWaveError, match="invalid rollout plan"):
+        coordinator.submit(plan)
+
+    assert executions.records == {}
+    assert coordinator.snapshot().plans == ()
+
+
+def test_submit_revalidates_postconstruction_wave_before_publication() -> None:
+    coordinator, executions = _coordinator()
+    first = _execution("api")
+    second = _execution("worker", wave=1)
+    plan = DeploymentWavePlan("plan", "social", (first, second))
+    object.__setattr__(second, "wave", True)
+
+    with pytest.raises(DeploymentWaveError, match="invalid rollout plan"):
+        coordinator.submit(plan)
+
+    assert executions.records == {}
+    assert coordinator.snapshot().plans == ()
