@@ -357,7 +357,12 @@ def test_dispatch_transport_failure_is_bounded_reconciled_and_not_retried() -> N
     ) in helper
     assert "await refreshState({ announceTeamTransitions: false })" in helper
     assert "reportStateUnavailable();" in helper
-    assert "if (stateReady) dispatchOutcomeUnconfirmed = false;" in helper
+    assert "if (stateReady) {" in helper
+    assert "dispatchOutcomeUnconfirmed = false;" in helper
+    assert (
+        "Немає підтвердження виконання дії, а поточний стан недоступний. "
+        "Не повторюйте дію до успішного перечитування."
+    ) in helper
     assert 'dataset.nikaReady = stateReady ? "true" : "false"' in helper
     assert "globalThis.pywebview.api.dispatch" not in helper
     assert "focusTarget?.focus?.();" in helper
