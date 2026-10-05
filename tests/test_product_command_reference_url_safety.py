@@ -82,3 +82,33 @@ def test_deeply_encoded_credential_marker_cannot_escape_public_boundary() -> Non
 )
 def test_public_evidence_retains_nonsensitive_references(reference: str) -> None:
     assert safe_evidence_reference(reference) == reference
+
+
+@pytest.mark.parametrize(
+    "key",
+    (
+        "api_key",
+        "api-key",
+        "apikey",
+        "client_secret",
+        "client-secret",
+        "password",
+        "passwd",
+        "secret",
+        "secret_key",
+        "private_key",
+        "access_key",
+        "id_token",
+        "session_token",
+        "auth_token",
+        "x-api-key",
+        "authorization",
+    ),
+)
+def test_public_evidence_hashes_all_common_credential_query_keys(key: str) -> None:
+    reference = f"https://service.invalid/evidence?{key}=raw-credential"
+
+    protected = safe_evidence_reference(reference)
+
+    assert protected.startswith("evidence-sha256:")
+    assert "raw-credential" not in protected
