@@ -1,8 +1,21 @@
 from __future__ import annotations
 
+import json
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+
+
+_MAX_AGENT_JSON_BYTES = 1024 * 1024
+
+
+def _unique_json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    obj: dict[str, object] = {}
+    for key, value in pairs:
+        if key in obj:
+            raise ValueError("duplicate JSON object key")
+        obj[key] = value
+    return obj
 
 
 class ToolGrant(BaseModel):
@@ -71,4 +84,21 @@ class AgentDefinition(BaseModel):
 
     @classmethod
     def import_json(cls, payload: str) -> AgentDefinition:
+        if not isinstance(payload, str):
+            raise ValueError("agent document JSON must be text")
+        if len(payload) > _MAX_AGENT_JSON_BYTES:
+            raise ValueError("agent document JSON exceeds the size limit")
+        try:
+            raw = payload.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("agent document JSON has invalid Unicode") from exc
+        if len(raw) > _MAX_AGENT_JSON_BYTES:
+            raise ValueError("agent document JSON exceeds the size limit")
+        try:
+            json.loads(payload, object_pairs_hook=_unique_json_object)
+        except json.JSONDecodeError:
+            # Preserve Pydantic's existing ValidationError for malformed JSON.
+            return cls.model_validate_json(payload)
+        except RecursionError as exc:
+            raise ValueError("agent document JSON is too deeply nested") from exc
         return cls.model_validate_json(payload)
