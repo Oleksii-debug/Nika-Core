@@ -259,3 +259,37 @@ def test_corrupt_replay_text_fails_closed_before_replay(tmp_path: Path) -> None:
             "SELECT COUNT(*) FROM product_decisions "
             "WHERE project_id='p1' AND decision_id='decision-1'"
         ).fetchone()[0] == 1
+
+def test_durable_replay_verifies_evidence_on_one_sqlite_snapshot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, projects, decisions = _setup(tmp_path)
+    decision = _decision()
+    stored = decisions.record(
+        "p1",
+        decision,
+        expected_row_version=0,
+        idempotency_key="decision:snapshot-replay",
+    )
+    original_replay = decisions._replay_conn
+    observed: list[bool] = []
+
+    def checked_replay(conn, *args, **kwargs):
+        observed.append(conn.in_transaction)
+        assert conn.in_transaction
+        return original_replay(conn, *args, **kwargs)
+
+    monkeypatch.setattr(decisions, "_replay_conn", checked_replay)
+
+    replay = decisions.record(
+        "p1",
+        decision,
+        expected_row_version=0,
+        idempotency_key="decision:snapshot-replay",
+    )
+
+    assert replay == stored
+    assert observed == [True]
+    assert projects.get("p1").row_version == 1
+
