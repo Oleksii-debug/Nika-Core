@@ -579,14 +579,14 @@ def test_concurrent_candidate_publish_never_overwrites_winner(
         config.output_root,
         request.candidate_artifact_ref,
     )
-    real_link = peft.os.link
+    real_publish = peft._publish_regular_file_no_replace
 
-    def racing_link(source: object, target: object, *args: object, **kwargs: object) -> None:
-        Path(target).write_bytes(b"concurrent-winner")
-        real_link(source, target, *args, **kwargs)
+    def racing_publish(source: Path, target: Path) -> None:
+        target.write_bytes(b"concurrent-winner")
+        real_publish(source, target)
 
     monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
-    monkeypatch.setattr(peft.os, "link", racing_link)
+    monkeypatch.setattr(peft, "_publish_regular_file_no_replace", racing_publish)
 
     with pytest.raises(peft.PeftTrainerError, match="candidate_publish_conflict"):
         peft._train_one_step(request, config, consumed)
