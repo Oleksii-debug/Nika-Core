@@ -90,7 +90,7 @@ class HttpCommandAdapter:
     """Decode one bounded HTTP command envelope and delegate to WebApplicationBoundary.
 
     Authentication is deliberately out of scope. The server layer must resolve a trusted
-    \`\`WebPrincipal\`\` before calling this adapter. Client headers or JSON never become identity.
+    ``WebPrincipal`` before calling this adapter. Client headers or JSON never become identity.
     """
 
     def __init__(self, boundary: WebApplicationBoundary) -> None:
