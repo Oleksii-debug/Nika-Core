@@ -872,26 +872,35 @@ class RegistrySubprocessLoadedModelAttestor:
                         raise ValueError("evaluation subprocess response exceeds byte limit")
                 return bytes(captured)
 
-            async def wait_and_contain() -> int:
-                returncode = await process.wait()
-                if os.name == "nt":
-                    job.close()
-                elif not terminate_process_group(process.pid):
-                    raise ProcessContainmentError(
-                        "POSIX evaluation process-group cleanup could not be established"
-                    )
-                return returncode
-
             writer = asyncio.create_task(write_request())
             reader = asyncio.create_task(read_response())
-            waiter = asyncio.create_task(wait_and_contain())
+            waiter = asyncio.create_task(process.wait())
             try:
                 async with asyncio.timeout(timeout_seconds):
-                    _, raw_response, returncode = await asyncio.gather(
-                        writer,
-                        reader,
-                        waiter,
+                    await writer
+                    done, _ = await asyncio.wait(
+                        (reader, waiter),
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
+                    if reader in done:
+                        raw_response = reader.result()
+                    returncode = await waiter
+                    if returncode != 0:
+                        await self._terminate(process, job)
+                        raise _error(
+                            ModelErrorCode.PROVIDER_ERROR,
+                            "evaluation subprocess exited unsuccessfully",
+                            provider_id=provider_id,
+                            effect=ModelFailureEffect.UNKNOWN,
+                        )
+                    if os.name == "nt":
+                        job.close()
+                    elif not terminate_process_group(process.pid):
+                        raise ProcessContainmentError(
+                            "POSIX evaluation process-group cleanup could not be established"
+                        )
+                    if reader not in done:
+                        raw_response = await reader
             except TimeoutError as exc:
                 await self._terminate(process, job)
                 raise _error(
@@ -925,14 +934,6 @@ class RegistrySubprocessLoadedModelAttestor:
                         task.cancel()
                 await asyncio.gather(writer, reader, waiter, return_exceptions=True)
 
-            if returncode != 0:
-                await self._terminate(process, job)
-                raise _error(
-                    ModelErrorCode.PROVIDER_ERROR,
-                    "evaluation subprocess exited unsuccessfully",
-                    provider_id=provider_id,
-                    effect=ModelFailureEffect.UNKNOWN,
-                )
             return raw_response
         except asyncio.CancelledError:
             await self._terminate(process, job)
