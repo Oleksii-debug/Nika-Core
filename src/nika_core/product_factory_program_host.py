@@ -22,6 +22,7 @@ from nika_core.product_factory_coordinator import (
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
 from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
     IdempotencyLedger,
     IdempotencyRecord,
     IdempotencyStatus,
@@ -294,12 +295,24 @@ class ProductFactoryProgramHost:
     ) -> ProgramWorkOutcome:
         async with semaphore:
             operation_key = _operation_key(request)
-            operation, created = self._ledger.reserve_once(
-                operation_key=operation_key,
-                task_id=host_task_id,
-                operation_type=_OPERATION_TYPE,
-                input_fingerprint=_request_fingerprint(request),
-            )
+            try:
+                operation, created = self._ledger.reserve_once(
+                    operation_key=operation_key,
+                    task_id=host_task_id,
+                    operation_type=_OPERATION_TYPE,
+                    input_fingerprint=_request_fingerprint(request),
+                )
+            except IdempotencyConflictError:
+                # A different task/type/input already owns this work key. This is
+                # not an external worker failure and must not abort sibling work.
+                occupied = self._ledger.get(operation_key)
+                return _outcome(
+                    request,
+                    coordinator,
+                    ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                    occupied.status if occupied is not None else None,
+                    "worker reservation identity requires explicit reconciliation",
+                )
             if not created:
                 # An occupied work ID is not proof that this host/request owns it.
                 # Check the exact reserved authority before allowing recovery.
