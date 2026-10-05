@@ -534,10 +534,6 @@ class V01ModelSettings:
                         != challenger_artifact_digest
                         or receipt.challenger_descriptor_digest
                         != challenger_descriptor
-                        or receipt.activation_request_sha256
-                        != activation_request_digest
-                        or receipt.activation_attestation_sha256
-                        != activation_attestation_digest
                     ):
                         raise ModelSetupError(
                             "Це рішення вже прив'язане до іншого навчального доказу."
