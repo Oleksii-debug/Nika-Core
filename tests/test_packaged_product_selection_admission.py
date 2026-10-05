@@ -78,3 +78,20 @@ def test_valid_colon_reopen_and_explicit_missing_id_are_preserved() -> None:
     assert packaged_product_reopen_target("Open ProductProject:" + project_id) == project_id
     with pytest.raises(PackagedProductJourneyError, match="64 hex"):
         packaged_product_reopen_target("Open ProductProject")
+
+def test_invalid_utf8_stored_as_sqlite_text_is_not_loaded_or_rewritten(
+    tmp_path: Path,
+) -> None:
+    store, selection = _selection(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO packaged_product_selection(slot, project_id) "
+            "VALUES (1, CAST(X'80' AS TEXT))"
+        )
+    assert selection.load() is None
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT hex(CAST(project_id AS BLOB)) AS raw_id "
+            "FROM packaged_product_selection WHERE slot = 1"
+        ).fetchone()
+    assert row is not None and row["raw_id"] == "80"
