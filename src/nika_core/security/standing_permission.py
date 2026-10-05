@@ -174,6 +174,21 @@ class StoredStandingPermission:
     _scope: _ScopeRecord
 
 
+class _StandingPermissionCursor:
+    """Cursor results without an escape hatch to the owning connection."""
+
+    __slots__ = ("__cursor",)
+
+    def __init__(self, cursor: sqlite3.Cursor) -> None:
+        self.__cursor = cursor
+
+    def fetchone(self) -> sqlite3.Row | None:
+        return self.__cursor.fetchone()
+
+    def fetchall(self) -> list[sqlite3.Row]:
+        return self.__cursor.fetchall()
+
+
 class _StandingPermissionTransaction:
     """Execute-only view of a store-owned authority transaction."""
 
@@ -182,12 +197,29 @@ class _StandingPermissionTransaction:
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.__connection = connection
 
+    @staticmethod
+    def _authorizer(
+        action_code: int,
+        _arg1: str | None,
+        _arg2: str | None,
+        _database: str | None,
+        _trigger: str | None,
+    ) -> int:
+        if action_code == sqlite3.SQLITE_TRANSACTION:
+            return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+
     def execute(
         self,
         sql: str,
         parameters: tuple[object, ...] = (),
-    ) -> sqlite3.Cursor:
-        return self.__connection.execute(sql, parameters)
+    ) -> _StandingPermissionCursor:
+        self.__connection.set_authorizer(self._authorizer)
+        try:
+            cursor = self.__connection.execute(sql, parameters)
+        finally:
+            self.__connection.set_authorizer(None)
+        return _StandingPermissionCursor(cursor)
 
 
 class StandingPermissionStore:
