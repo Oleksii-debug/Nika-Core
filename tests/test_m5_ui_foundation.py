@@ -52,6 +52,7 @@ def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> 
         {"request_id": "4", "action_id": "task.create", "payload": {"command": "  "}}
     )
     conflict = bridge.set_binding("nav.agents", "Alt+1")
+    saved = bridge.set_binding("nav.agents", "Alt+5")
     assert accepted == {
         "request_id": "3",
         "status": "completed",
@@ -59,22 +60,50 @@ def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> 
         "focus_id": None,
     }
     assert empty["status"] == "rejected"
-    assert conflict["ok"] is False
-    assert "conflict" in conflict["message"].lower()
+    assert conflict == {
+        "ok": False,
+        "message": (
+            "Не вдалося зберегти комбінацію: "
+            "перевірте дію, формат і конфлікти."
+        ),
+    }
+    assert saved == {"ok": True, "message": "Комбінацію клавіш збережено."}
 
 
 def test_keymap_export_import_and_clear_round_trip(tmp_path: Path) -> None:
     bridge = build_bridge(tmp_path)
     assert bridge.set_binding("nav.workspaces", None)["ok"] is True
     exported = bridge.export_keymap()
+    assert exported["message"] == "Карту клавіш експортовано."
     payload = json.loads(exported["data"])
     assert payload["bindings"]["nav.workspaces"] is None
     payload["bindings"]["nav.workspaces"] = "Alt+4"
     imported = bridge.import_keymap(json.dumps(payload))
-    assert imported["ok"] is True
+    assert imported == {"ok": True, "message": "Карту клавіш імпортовано."}
     actions = {item["action_id"]: item for item in bridge.list_actions()}
     assert actions["nav.workspaces"]["binding"] == "Alt+4"
-    assert bridge.import_keymap("not-json")["ok"] is False
+    assert bridge.import_keymap("not-json") == {
+        "ok": False,
+        "message": (
+            "Не вдалося імпортувати карту клавіш: "
+            "перевірте JSON, дії та конфлікти."
+        ),
+    }
+    assert bridge.import_keymap(None) == {
+        "ok": False,
+        "message": "Карта клавіш має бути текстом JSON.",
+    }
+    assert bridge.restore_default("nav.workspaces") == {
+        "ok": True,
+        "message": "Комбінацію за замовчуванням відновлено.",
+    }
+    assert bridge.restore_default("missing.action") == {
+        "ok": False,
+        "message": (
+            "Не вдалося відновити комбінацію за замовчуванням: "
+            "невідома дія."
+        ),
+    }
 
 
 def test_list_actions_exposes_resolved_bindings_without_handlers(tmp_path: Path) -> None:
