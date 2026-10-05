@@ -611,6 +611,7 @@ def test_adapter_config_snapshot_removes_private_base_path_and_rejects_other_pat
     with pytest.raises(peft.PeftTrainerError, match="adapter_config_private_path"):
         peft._adapter_config_snapshot(adapter_dir, request, config)
 
+
 def test_final_candidate_publish_race_never_overwrites(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
