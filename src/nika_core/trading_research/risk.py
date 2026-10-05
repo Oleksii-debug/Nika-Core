@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from .accounting import AccountSnapshot
 from .contracts import TradingResearchError, require_aware_utc
-from .identity import InstrumentIdentity, instrument_identity
+from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
 from .orders import (
     ExecutionPolicy,
     OrderIntent,
@@ -214,7 +214,9 @@ class RiskEngine:
             raise RiskRejected("max_drawdown reached")
 
         return RiskApprovedOrder(
-            approval_id=f"risk:{intent.intent_id}",
+            approval_id=(
+                f"risk:{instrument_identity_sha256(intent.instrument)}:{intent.intent_id}"
+            ),
             intent=intent,
             approved_at=approved_at,
             approved_slice=approved_slice,
