@@ -308,6 +308,50 @@ def test_total_health_deadline_stops_progress_and_skips_second_endpoint(
     assert timers[0].joined
 
 
+def test_total_health_deadline_on_running_catalog_preserves_presence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timers: list[_ControlledDeadlineTimer] = []
+
+    def timer_factory(
+        interval: float,
+        function: Callable[..., object],
+        args: tuple[object, ...] | None = None,
+        kwargs: dict[str, object] | None = None,
+    ) -> _ControlledDeadlineTimer:
+        timer = _ControlledDeadlineTimer(interval, function, args, kwargs)
+        timers.append(timer)
+        return timer
+
+    monkeypatch.setattr(
+        "nika_core.diagnostics.model_health.Timer",
+        timer_factory,
+    )
+    running = _DeadlineProgressBody(timers)
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/tags":
+            return _response([{"model": "selected:1"}])
+        return httpx.Response(200, stream=running)
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="selected:1",
+        timeout_seconds=30.0,
+        client_factory=_client_factory(handler),
+    ).snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["/api/tags", "/api/ps"]
+    assert running.closed
+    assert len(timers) == 1
+    assert timers[0].cancelled
+    assert timers[0].joined
+
+
 class _ReadTimeoutBody(httpx.SyncByteStream):
     def __init__(self) -> None:
         self.closed = False
