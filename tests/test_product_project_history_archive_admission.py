@@ -77,6 +77,28 @@ def test_archive_byte_limit_is_checked_before_decode(tmp_path, monkeypatch) -> N
         service.verify(b"{" + (b"x" * 32) + b"}")
 
 
+def test_archive_rejects_oversized_numeric_token_before_conversion(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service, _ = _service(tmp_path)
+    monkeypatch.setattr(archive_module, "_MAX_JSON_NUMBER_CHARS", 4)
+
+    with pytest.raises(ProductProjectError, match="invalid ProductProject history archive"):
+        service.verify(b'{"digest_sha256":"0000","payload":{"score":12345}}')
+
+
+def test_build_never_emits_archive_that_its_verifier_size_gate_rejects(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    service, _ = _service(tmp_path)
+    monkeypatch.setattr(archive_module, "_MAX_ARCHIVE_BYTES", 128)
+
+    with pytest.raises(ProductProjectError, match="exceeds byte limit"):
+        service.build("project-1")
+
+
 def test_archive_requires_exact_bytes_carrier(tmp_path) -> None:
     service, _ = _service(tmp_path)
     archive = service.build("project-1")
@@ -91,7 +113,10 @@ def test_archive_rejects_unauthenticated_envelope_extensions(tmp_path) -> None:
     envelope = json.loads(archive.bytes)
     envelope["ignored_extension"] = {"would": "not be digest-bound"}
 
-    with pytest.raises(ProductProjectError, match="invalid ProductProject history archive envelope"):
+    with pytest.raises(
+        ProductProjectError,
+        match="invalid ProductProject history archive envelope",
+    ):
         service.verify(
             json.dumps(
                 envelope,
