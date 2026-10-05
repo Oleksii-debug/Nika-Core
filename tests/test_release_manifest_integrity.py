@@ -429,6 +429,12 @@ class _BehavioralText(str):
     def casefold(self) -> str:
         raise AssertionError("behavioral text method must not execute")
 
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("behavioral text comparison must not execute")
+
+    def __ne__(self, other: object) -> bool:
+        raise AssertionError("behavioral text comparison must not execute")
+
 
 def test_manifest_verifier_rejects_noncanonical_runtime_carriers(
     tmp_path: Path,
@@ -532,4 +538,14 @@ def test_release_verifiers_require_exact_source_sha_text(
         artifact_reference="./dist/NikaCore-1.0.0-windows-x64.zip",
         expected_product_version=PRODUCT_VERSION,
     ) == ("distributable:source-sha-format",)
+
+    assert verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=SOURCE_SHA,
+        artifact_reference=_BehavioralText(
+            "./dist/NikaCore-1.0.0-windows-x64.zip"
+        ),
+        expected_product_version=PRODUCT_VERSION,
+    ) == ("distributable:artifact-reference-format",)
 

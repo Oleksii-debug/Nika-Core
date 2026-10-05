@@ -652,6 +652,8 @@ def verify_distributable_evidence(
     normalized_source_sha = source_sha.casefold()
     if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
         return ("distributable:source-sha-format",)
+    if type(artifact_reference) is not str:
+        return ("distributable:artifact-reference-format",)
     if not _valid_product_version(expected_product_version):
         return ("distributable:expected-product-version-format",)
     if not artifact_path.is_file():
