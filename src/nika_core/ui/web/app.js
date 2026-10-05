@@ -110,6 +110,8 @@
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let teamStateSignature = null;
+  let stateUnavailableReported = false;
+  const maxActivityItems = 200;
 
   function announce(message, assertive = false) {
     statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite");
@@ -117,10 +119,14 @@
   }
 
   function appendLog(message) {
-    if (!message) return;
+    if (!message || activityLog.lastElementChild?.textContent === message) return;
     const item = document.createElement("li");
     item.textContent = message;
     activityLog.appendChild(item);
+    if (activityLog.childElementCount > maxActivityItems) {
+      activityLog.firstElementChild.remove();
+      activityLog.setAttribute("aria-label", "Журнал активності: останні 200 повідомлень");
+    }
   }
 
   function requestId() {
@@ -201,6 +207,8 @@
   function reportStateUnavailable() {
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
+    if (stateUnavailableReported) return;
+    stateUnavailableReported = true;
     announce(productProjectUnavailableMessage, true);
     appendLog(productProjectUnavailableMessage);
   }
@@ -571,6 +579,7 @@
       return false;
     }
     if (!productReady) return false;
+    stateUnavailableReported = false;
     if (announceTeamTransitions && teamRender.changed) {
       announce("Стан командного завдання оновлено.");
     }
