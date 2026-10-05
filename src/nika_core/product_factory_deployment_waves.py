@@ -243,7 +243,9 @@ class DeploymentWaveCoordinator:
             if type(operation_id) is not str or not operation_id.strip():
                 raise DeploymentWaveError("invalid rollout execution operation identity")
             if operation_id in execution_records:
-                raise DeploymentWaveError("rollout execution snapshot contains duplicate operations")
+                raise DeploymentWaveError(
+                    "rollout execution snapshot contains duplicate operations"
+                )
             execution_records[operation_id] = item
 
         restored: dict[str, DeploymentWaveRecord] = {}
