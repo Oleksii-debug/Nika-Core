@@ -111,6 +111,30 @@ def test_config_rejects_identifier_beyond_runtime_bound(tmp_path: Path) -> None:
         driver.PhysicalPilotConfig.from_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("base_artifact_ref", "C:\\private\\base.gguf"),
+        ("base_artifact_ref", "/private/base.gguf"),
+        ("candidate_artifact_ref", "\\private\\candidate"),
+        ("candidate_artifact_ref", "file:///C:/private/candidate"),
+    ),
+)
+def test_config_rejects_private_local_artifact_reference(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    payload = _payload(tmp_path)
+    payload[field] = value
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="public logical artifact reference",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
 def test_config_rejects_candidate_equal_to_base(tmp_path: Path) -> None:
     payload = _payload(tmp_path)
     payload["candidate_artifact_ref"] = payload["base_artifact_ref"]

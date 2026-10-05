@@ -140,6 +140,18 @@ def _require_text(value: object, *, name: str) -> str:
     return value
 
 
+def _require_logical_artifact_ref(value: object, *, name: str) -> str:
+    text = _require_text(value, name=name)
+    lowered = text.casefold()
+    if (
+        text.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:[\\\\/]", text) is not None
+        or lowered.startswith("file:")
+    ):
+        _fail(f"{name} must be a public logical artifact reference, not a local path")
+    return text
+
+
 def _require_sha256(value: object, *, name: str) -> str:
     if (
         type(value) is not str
@@ -398,7 +410,7 @@ class PhysicalPilotConfig:
             trainer_executable=_require_absolute_path(
                 value["trainer_executable"], name="trainer_executable"
             ),
-            base_artifact_ref=_require_text(
+            base_artifact_ref=_require_logical_artifact_ref(
                 value["base_artifact_ref"], name="base_artifact_ref"
             ),
             base_gguf_path=_require_absolute_path(
@@ -406,7 +418,7 @@ class PhysicalPilotConfig:
             ),
             model_dir=_require_absolute_path(value["model_dir"], name="model_dir"),
             output_root=_require_absolute_path(value["output_root"], name="output_root"),
-            candidate_artifact_ref=_require_text(
+            candidate_artifact_ref=_require_logical_artifact_ref(
                 value["candidate_artifact_ref"], name="candidate_artifact_ref"
             ),
             candidate_descriptor=CandidateDescriptorConfig.from_value(
