@@ -21,14 +21,24 @@ Windows-only. A successful call must:
 8. resume the same authorized job to `COMPLETED`;
 9. require a third distinct durable completion checkpoint;
 10. build the final candidate descriptor only from detached canonical completion evidence;
-11. reverify the final candidate through the existing canonical
-    `training_artifacts.verify_candidate_artifact` boundary; and
-12. require the verifier receipt SHA-256 to equal the completed runtime evidence.
+11. acquire a Windows read handle that denies write/delete replacement for the final
+    candidate while evidence is collected;
+12. reverify the final candidate through the existing canonical
+    `training_artifacts.verify_candidate_artifact` boundary;
+13. require the verifier receipt SHA-256 to equal the completed runtime evidence;
+14. under the same stability lock, re-read the canonical strict self-contained PEFT
+    candidate manifest through `training_peft_worker.candidate_adapter_manifest`;
+15. require its base reference/digest, candidate reference, job fingerprint, and final
+    step number to match the canonical COMPLETED runtime evidence; and
+16. bind the manifest digest plus trainer deployment, trainer implementation, model
+    directory, consumed-material, and runtime-manifest identities into the report.
 
 The resulting `PhysicalTrainingPilotReport` is path-free. It contains bounded identifiers,
-SHA-256 identities, descriptor/registry digests, the original pause, restart-probe, and
-completion checkpoint IDs, candidate byte count, completed step count, schema version, and
-the literal platform value `windows`. It does not
+SHA-256 identities, descriptor/registry digests, strict PEFT candidate-manifest digest,
+trainer deployment/implementation/runtime provenance, consumed-material and model-directory
+manifest digests, the original pause, restart-probe, and completion checkpoint IDs, candidate
+byte count, completed step count, schema version, and the literal platform value `windows`.
+It does not
 serialize training/validation records, model paths, credentials, environment variables,
 prompts, responses, or checkpoint payloads.
 
@@ -57,9 +67,11 @@ Pass a `candidate_descriptor_factory` that receives detached canonical COMPLETED
 Only then should it create or retrieve the SHA-256 `ModelArtifactDescriptor` for the final
 published `adapter_model.safetensors`; its size and digest must describe those exact bytes.
 The factory may use the completed candidate digest plus the now-materialized file size and the
-project's canonical public provenance/license references. The harness then delegates physical
-byte/containment/Windows-handle verification to the existing candidate-artifact integrity
-authority rather than implementing another verifier.
+project's canonical public provenance/license references. The harness then delegates physical byte/containment verification to the existing
+candidate-artifact integrity authority and strict manifest parsing to the existing PEFT
+candidate reader rather than implementing another verifier or parser. On Windows it holds a
+read-only deny-write/delete handle across both checks so a pathname replacement cannot splice
+manifest evidence from different candidate bytes.
 
 Keep generated report JSON outside Git when it contains run-specific operational identifiers.
 A report can be shared as evidence after reviewing it for the intended run.
@@ -85,8 +97,8 @@ print(report.evidence_sha256)
 ```
 
 The helper supplies both the control sequence required to create the one-step pause and the
-effect-free restart probe. Reports use schema version 2 because the durable-reopen checkpoint
-is now part of the evidence identity.
+effect-free restart probe. Reports use schema version 3 because strict candidate-manifest and persisted trainer/runtime
+provenance are now part of the evidence identity in addition to the durable-reopen checkpoint.
 
 ## Evidence boundaries
 
