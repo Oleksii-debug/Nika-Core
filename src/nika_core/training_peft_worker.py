@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import math
 import os
@@ -32,6 +33,18 @@ _CHECKPOINT_MARKER = "nika_checkpoint.json"
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
+_MAX_RUNTIME_VERSION_BYTES = 256
+_TRAINING_RUNTIME_DISTRIBUTIONS = (
+    ("torch", "NIKA_TRAINER_TORCH_VERSION"),
+    ("transformers", "NIKA_TRAINER_TRANSFORMERS_VERSION"),
+    ("peft", "NIKA_TRAINER_PEFT_VERSION"),
+    ("accelerate", "NIKA_TRAINER_ACCELERATE_VERSION"),
+    ("gguf", "NIKA_TRAINER_GGUF_VERSION"),
+    ("safetensors", "NIKA_TRAINER_SAFETENSORS_VERSION"),
+)
+_MAX_MODEL_DIR_FILES = 10_000
+_MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
+_MODEL_SNAPSHOT_DIR = "model-snapshot"
 
 
 class PeftTrainerError(RuntimeError):
@@ -274,6 +287,10 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
         job["candidate_artifact_ref"],
         field="candidate_artifact_ref",
     )
+    if _looks_like_private_local_path(base_artifact_ref) or _looks_like_private_local_path(
+        candidate_ref
+    ):
+        _fail("artifact_ref_private_path")
     max_steps = job["max_steps"]
     if type(max_steps) is not int or not 1 <= max_steps <= 100_000:
         _fail("max_steps_invalid")
@@ -348,6 +365,81 @@ def _is_reparse(value: os.stat_result) -> bool:
     return bool(attributes & reparse_flag)
 
 
+def _stable_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _hash_model_directory_file(
+    path: Path,
+    *,
+    expected: os.stat_result | None = None,
+) -> tuple[str, int]:
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise ValueError("model_dir entry is not accessible") from exc
+    if stat.S_ISLNK(before.st_mode) or _is_reparse(before) or not stat.S_ISREG(before.st_mode):
+        raise ValueError("model_dir must contain regular non-linked files only")
+    if expected is not None and _stable_stat_identity(before) != _stable_stat_identity(expected):
+        raise ValueError("model_dir entry changed before hashing")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError("model_dir entry changed before hashing") from exc
+
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size != before.st_size
+        ):
+            raise ValueError("model_dir entry changed before hashing")
+        while True:
+            chunk = os.read(fd, _READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_MODEL_DIR_BYTES:
+                raise ValueError("model_dir exceeds manifest bounds")
+            digest.update(chunk)
+        after = os.fstat(fd)
+    except OSError as exc:
+        raise ValueError("model_dir entry could not be hashed") from exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    try:
+        current = os.lstat(path)
+    except OSError as exc:
+        raise ValueError("model_dir entry changed during hashing") from exc
+    identity = _stable_stat_identity(opened)
+    if (
+        total != opened.st_size
+        or identity != _stable_stat_identity(after)
+        or identity != _stable_stat_identity(current)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        raise ValueError("model_dir entry changed during hashing")
+    return digest.hexdigest(), total
+
+
 def model_directory_manifest_sha256(model_dir: Path) -> str:
     """Hash the exact local tokenizer/config directory used around GGUF loading."""
     root = Path(model_dir)
@@ -363,15 +455,24 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
         or not stat.S_ISDIR(root_stat.st_mode)
     ):
         raise ValueError("model_dir must be a non-linked directory")
+    root_identity = _stable_stat_identity(root_stat)
 
-    entries: list[dict[str, object]] = []
-    total_files = 0
-    total_bytes = 0
     try:
         paths = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
     except OSError as exc:
         raise ValueError("model_dir could not be enumerated") from exc
-    for path in paths:
+    relative_paths = [path.relative_to(root).as_posix() for path in paths]
+
+    entries: list[dict[str, object]] = []
+    directory_identities: dict[str, tuple[int, int, int, int, int]] = {}
+    seen_paths: set[str] = set()
+    total_files = 0
+    total_bytes = 0
+    for path, relative in zip(paths, relative_paths, strict=True):
+        folded = relative.casefold()
+        if folded in seen_paths:
+            raise ValueError("model_dir contains case-fold path collisions")
+        seen_paths.add(folded)
         try:
             value = os.lstat(path)
         except OSError as exc:
@@ -379,23 +480,53 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
         if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
             raise ValueError("model_dir must not contain links or reparse points")
         if stat.S_ISDIR(value.st_mode):
+            directory_identities[relative] = _stable_stat_identity(value)
             continue
         if not stat.S_ISREG(value.st_mode):
             raise ValueError("model_dir must contain regular files only")
+        digest, size_bytes = _hash_model_directory_file(path, expected=value)
         total_files += 1
-        total_bytes += value.st_size
-        if total_files > 10_000 or total_bytes > 16 * 1024 * 1024 * 1024:
+        total_bytes += size_bytes
+        if total_files > _MAX_MODEL_DIR_FILES or total_bytes > _MAX_MODEL_DIR_BYTES:
             raise ValueError("model_dir exceeds manifest bounds")
-        relative = path.relative_to(root).as_posix()
         entries.append(
             {
                 "path": relative,
-                "sha256": _sha256_file(path),
-                "size_bytes": value.st_size,
+                "sha256": digest,
+                "size_bytes": size_bytes,
             }
         )
     if not entries:
         raise ValueError("model_dir must not be empty")
+
+    try:
+        root_after = os.lstat(root)
+        paths_after = sorted(
+            root.rglob("*"),
+            key=lambda item: item.relative_to(root).as_posix(),
+        )
+    except OSError as exc:
+        raise ValueError("model_dir changed during manifest") from exc
+    if (
+        stat.S_ISLNK(root_after.st_mode)
+        or _is_reparse(root_after)
+        or not stat.S_ISDIR(root_after.st_mode)
+        or _stable_stat_identity(root_after) != root_identity
+        or [path.relative_to(root).as_posix() for path in paths_after] != relative_paths
+    ):
+        raise ValueError("model_dir changed during manifest")
+    for relative, identity in directory_identities.items():
+        try:
+            value = os.lstat(root / relative)
+        except OSError as exc:
+            raise ValueError("model_dir changed during manifest") from exc
+        if (
+            stat.S_ISLNK(value.st_mode)
+            or _is_reparse(value)
+            or not stat.S_ISDIR(value.st_mode)
+            or _stable_stat_identity(value) != identity
+        ):
+            raise ValueError("model_dir changed during manifest")
     encoded = json.dumps(
         entries,
         allow_nan=False,
@@ -404,6 +535,44 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(b"nika-peft-model-dir-v1\x00" + encoded).hexdigest()
+
+
+def _installed_training_runtime_versions() -> dict[str, str]:
+    versions: dict[str, str] = {}
+    for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        try:
+            observed = importlib.metadata.version(distribution)
+        except importlib.metadata.PackageNotFoundError as exc:
+            raise ValueError(
+                f"training dependency is unavailable: {distribution}"
+            ) from exc
+        if (
+            type(observed) is not str
+            or not observed
+            or observed != observed.strip()
+            or len(observed.encode("utf-8", errors="strict")) > _MAX_RUNTIME_VERSION_BYTES
+            or any(ord(character) < 32 or ord(character) == 127 for character in observed)
+        ):
+            raise ValueError(
+                f"training dependency has invalid version metadata: {distribution}"
+            )
+        versions[distribution] = observed
+    return versions
+
+
+def _verify_training_runtime_versions() -> None:
+    try:
+        observed = _installed_training_runtime_versions()
+    except (UnicodeEncodeError, ValueError):
+        _fail("nika_trainer_runtime_versions_unavailable")
+    for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        expected = _require_bounded_text(
+            os.environ.get(environment_key),
+            field=environment_key.lower(),
+            max_bytes=_MAX_RUNTIME_VERSION_BYTES,
+        )
+        if observed[distribution] != expected:
+            _fail("nika_trainer_runtime_version_mismatch")
 
 
 def build_trainer_environment(
@@ -463,6 +632,10 @@ def build_trainer_environment(
         )
     ):
         raise ValueError("lora_target_modules is invalid")
+    try:
+        runtime_versions = _installed_training_runtime_versions()
+    except (UnicodeEncodeError, ValueError) as exc:
+        raise ValueError("training runtime dependencies are unavailable or invalid") from exc
     output.mkdir(parents=True, exist_ok=True)
     try:
         output_stat = os.lstat(output)
@@ -474,7 +647,7 @@ def build_trainer_environment(
         or not stat.S_ISDIR(output_stat.st_mode)
     ):
         raise ValueError("output_root must be a non-linked directory")
-    return {
+    environment = {
         "NIKA_TRAINER_BASE_GGUF": os.fspath(base),
         "NIKA_TRAINER_IMPLEMENTATION_SHA256": trainer_implementation_sha256(),
         "NIKA_TRAINER_LEARNING_RATE": format(learning_rate, ".17g"),
@@ -489,6 +662,9 @@ def build_trainer_environment(
         "NIKA_TRAINER_OUTPUT_ROOT": os.fspath(output),
         "NIKA_TRAINER_SEED": str(seed),
     }
+    for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
+        environment[environment_key] = runtime_versions[distribution]
+    return environment
 
 
 def _require_regular_unlinked(path: Path, *, code: str) -> os.stat_result:
@@ -497,6 +673,164 @@ def _require_regular_unlinked(path: Path, *, code: str) -> os.stat_result:
     except OSError:
         _fail(code)
     if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISREG(value.st_mode):
+        _fail(code)
+    return value
+
+
+def _copy_model_snapshot_file(
+    source: Path,
+    destination: Path,
+    *,
+    expected_size: int,
+) -> None:
+    before = _require_regular_unlinked(source, code="model_dir_source_changed")
+    if before.st_size != expected_size:
+        _fail("model_dir_source_changed")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(source, flags)
+    except OSError:
+        _fail("model_dir_source_changed")
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size != expected_size
+        ):
+            _fail("model_dir_source_changed")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("xb") as target:
+            while True:
+                chunk = os.read(fd, _READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > expected_size or total > _MAX_MODEL_DIR_BYTES:
+                    _fail("model_dir_source_changed")
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        after = os.fstat(fd)
+    except PeftTrainerError:
+        raise
+    except OSError:
+        _fail("model_dir_snapshot_failed")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        current = os.lstat(source)
+    except OSError:
+        _fail("model_dir_source_changed")
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    if (
+        total != expected_size
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+    ):
+        _fail("model_dir_source_changed")
+
+
+def _model_directory_snapshot(config: TrainerConfig, job_root: Path) -> Path:
+    target = job_root / _MODEL_SNAPSHOT_DIR
+    if target.exists():
+        try:
+            digest = model_directory_manifest_sha256(target)
+        except ValueError:
+            _fail("model_dir_snapshot_invalid")
+        if digest != config.model_dir_manifest_sha256:
+            _fail("model_dir_snapshot_mismatch")
+        return target
+
+    try:
+        root_stat = os.lstat(config.model_dir)
+    except OSError:
+        _fail("model_dir_source_changed")
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or _is_reparse(root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        _fail("model_dir_source_changed")
+    try:
+        paths = sorted(
+            config.model_dir.rglob("*"),
+            key=lambda item: item.relative_to(config.model_dir).as_posix(),
+        )
+        temporary = Path(
+            tempfile.mkdtemp(
+                prefix=".model-snapshot-",
+                dir=os.fspath(job_root),
+            )
+        )
+    except OSError:
+        _fail("model_dir_snapshot_failed")
+
+    seen_paths: set[str] = set()
+    file_count = 0
+    total_bytes = 0
+    for source in paths:
+        relative = source.relative_to(config.model_dir)
+        normalized = relative.as_posix()
+        folded = normalized.casefold()
+        if folded in seen_paths:
+            _fail("model_dir_snapshot_path_collision")
+        seen_paths.add(folded)
+        try:
+            value = os.lstat(source)
+        except OSError:
+            _fail("model_dir_source_changed")
+        if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+            _fail("model_dir_snapshot_link_forbidden")
+        destination = temporary / relative
+        if stat.S_ISDIR(value.st_mode):
+            try:
+                destination.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                _fail("model_dir_snapshot_failed")
+            continue
+        if not stat.S_ISREG(value.st_mode):
+            _fail("model_dir_snapshot_invalid")
+        file_count += 1
+        total_bytes += value.st_size
+        if file_count > _MAX_MODEL_DIR_FILES or total_bytes > _MAX_MODEL_DIR_BYTES:
+            _fail("model_dir_snapshot_bounds_exceeded")
+        _copy_model_snapshot_file(source, destination, expected_size=value.st_size)
+    if file_count == 0:
+        _fail("model_dir_snapshot_empty")
+    try:
+        snapshot_digest = model_directory_manifest_sha256(temporary)
+    except ValueError:
+        _fail("model_dir_snapshot_invalid")
+    if snapshot_digest != config.model_dir_manifest_sha256:
+        _fail("model_dir_snapshot_mismatch")
+    try:
+        os.rename(temporary, target)
+    except OSError:
+        if not target.exists():
+            _fail("model_dir_snapshot_publish_failed")
+        try:
+            existing_digest = model_directory_manifest_sha256(target)
+        except ValueError:
+            _fail("model_dir_snapshot_publish_failed")
+        if existing_digest != config.model_dir_manifest_sha256:
+            _fail("model_dir_snapshot_publish_failed")
+    return target
+
+
+def _require_directory_unlinked(path: Path, *, code: str) -> os.stat_result:
+    try:
+        value = os.lstat(path)
+    except OSError:
+        _fail(code)
+    if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISDIR(value.st_mode):
         _fail(code)
     return value
 
@@ -548,23 +882,6 @@ def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     ):
         _fail(code)
     return digest.hexdigest(), total
-
-
-def _publish_regular_file_no_replace(source: Path, target: Path) -> None:
-    _require_regular_unlinked(source, code="candidate_publish_failed")
-    try:
-        if os.name == "nt":
-            os.rename(source, target)
-        else:
-            os.link(source, target)
-    except FileExistsError:
-        _fail("candidate_publish_conflict")
-    except OSError:
-        try:
-            os.lstat(target)
-        except OSError:
-            _fail("candidate_publish_failed")
-        _fail("candidate_publish_conflict")
 
 
 def _parse_jsonl_record(raw_line: bytes) -> TrainingExample:
@@ -749,6 +1066,7 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
 
 
 def _read_config() -> TrainerConfig:
+    _verify_training_runtime_versions()
     expected_implementation_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_IMPLEMENTATION_SHA256"),
         field="nika_trainer_implementation_sha256",
@@ -838,16 +1156,77 @@ def candidate_artifact_path(output_root: Path, candidate_artifact_ref: str) -> P
     return root / _candidate_key(ref) / "candidate" / _CANDIDATE_FILE
 
 
+def _reserve_candidate_temporary(candidate: Path) -> Path:
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{_CANDIDATE_FILE}.",
+            suffix=".tmp",
+            dir=candidate.parent,
+            delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+    except OSError:
+        _fail("candidate_publish_failed")
+    _require_regular_unlinked(temporary, code="candidate_publish_failed")
+    return temporary
+
+
+def _best_effort_unlink_identity(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        value = os.lstat(path)
+    except OSError:
+        return
+    if (
+        stat.S_ISREG(value.st_mode)
+        and not stat.S_ISLNK(value.st_mode)
+        and not _is_reparse(value)
+        and (value.st_dev, value.st_ino) == identity
+    ):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def _job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     return config.output_root / _candidate_key(request.candidate_artifact_ref)
+
+
+def _ensure_child_directory(parent: Path, name: str, *, code: str) -> Path:
+    parent_before = _require_directory_unlinked(parent, code=code)
+    child = parent / name
+    try:
+        child.mkdir(parents=False, exist_ok=True)
+    except OSError:
+        _fail(code)
+    _require_directory_unlinked(child, code=code)
+    parent_after = _require_directory_unlinked(parent, code=code)
+    if (parent_before.st_dev, parent_before.st_ino) != (
+        parent_after.st_dev,
+        parent_after.st_ino,
+    ):
+        _fail(code)
+    return child
+
+
+def _ensure_job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
+    return _ensure_child_directory(
+        config.output_root,
+        _candidate_key(request.candidate_artifact_ref),
+        code="job_output_root_failed",
+    )
 
 
 def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root: Path) -> Path:
     source = config.base_gguf
     if _sha256_file(source) != request.base_artifact_sha256:
         _fail("base_gguf_digest_mismatch")
-    target_dir = job_root / "base"
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = _ensure_child_directory(
+        job_root,
+        "base",
+        code="staged_base_directory_invalid",
+    )
     target = target_dir / "base.gguf"
     if target.exists():
         _require_regular_unlinked(target, code="staged_base_invalid")
@@ -1163,17 +1542,14 @@ def _train_one_step(
     ) = _import_training_stack()
 
     set_seed(config.seed)
-    job_root = _job_root(config, request)
-    try:
-        job_root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        _fail("job_output_root_failed")
+    job_root = _ensure_job_root(config, request)
     staged_base = _copy_verified_base(config, request, job_root)
+    staged_model_dir = _model_directory_snapshot(config, job_root)
     previous_checkpoint = _resume_checkpoint(job_root, request)
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(
-            os.fspath(config.model_dir),
+            os.fspath(staged_model_dir),
             gguf_file=os.fspath(staged_base),
             local_files_only=True,
             trust_remote_code=False,
@@ -1183,14 +1559,14 @@ def _train_one_step(
                 _fail("tokenizer_padding_unavailable")
             tokenizer.pad_token = tokenizer.eos_token
         model = AutoModelForCausalLM.from_pretrained(
-            os.fspath(config.model_dir),
+            os.fspath(staged_model_dir),
             gguf_file=os.fspath(staged_base),
             local_files_only=True,
             trust_remote_code=False,
             dtype="auto",
         )
         try:
-            after_load_manifest = model_directory_manifest_sha256(config.model_dir)
+            after_load_manifest = model_directory_manifest_sha256(staged_model_dir)
         except ValueError:
             _fail("model_dir_changed_during_load")
         if after_load_manifest != config.model_dir_manifest_sha256:
@@ -1225,7 +1601,16 @@ def _train_one_step(
             config.max_sequence_length,
         )
         collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-        trainer_root = job_root / "trainer"
+        trainer_root = _ensure_child_directory(
+            job_root,
+            "trainer",
+            code="trainer_output_directory_invalid",
+        )
+        _ensure_child_directory(
+            trainer_root,
+            f"checkpoint-{request.step_index + 1}",
+            code="trainer_checkpoint_directory_invalid",
+        )
         arguments = TrainingArguments(
             output_dir=os.fspath(trainer_root),
             per_device_train_batch_size=1,
@@ -1292,19 +1677,16 @@ def _train_one_step(
         return resume_state, None
 
     candidate = candidate_artifact_path(config.output_root, request.candidate_artifact_ref)
-    candidate.parent.mkdir(parents=True, exist_ok=True)
-    if candidate.exists():
-        _fail("candidate_publish_conflict")
-    try:
-        temporary_fd, temporary_name = tempfile.mkstemp(
-            prefix=f".{_CANDIDATE_FILE}.{request.step_id[:16]}.",
-            suffix=".tmp",
-            dir=candidate.parent,
-        )
-        os.close(temporary_fd)
-    except OSError:
-        _fail("candidate_publish_temp_failed")
-    temporary = Path(temporary_name)
+    candidate_parent = _ensure_child_directory(
+        job_root,
+        "candidate",
+        code="candidate_publish_failed",
+    )
+    if candidate.parent != candidate_parent:
+        _fail("candidate_publish_failed")
+    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+        _fail("checkpoint_payload_changed_before_candidate")
+    temporary = _reserve_candidate_temporary(candidate)
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
@@ -1312,8 +1694,9 @@ def _train_one_step(
         consumed=consumed,
         adapter_config=adapter_config,
     )
-    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
-        _fail("checkpoint_payload_changed_before_publish")
+    temporary_sha256: str | None = None
+    temporary_identity: tuple[int, int] | None = None
+    published = False
     try:
         with safe_open(os.fspath(adapter_file), framework="pt", device="cpu") as source:
             tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
@@ -1324,21 +1707,71 @@ def _train_one_step(
             os.fspath(temporary),
             metadata={"nika_adapter_manifest": manifest_json},
         )
-        _require_regular_unlinked(temporary, code="candidate_publish_failed")
         if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
-            _fail("checkpoint_payload_changed_during_publish")
-        _publish_regular_file_no_replace(temporary, candidate)
+            _fail("checkpoint_payload_changed_during_candidate")
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="candidate_publish_failed",
+        )
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        temporary_sha256, _ = _hash_regular_snapshot(
+            temporary,
+            code="candidate_publish_failed",
+        )
+        os.link(temporary, candidate)
+        published = True
+    except FileExistsError:
+        _fail("candidate_publish_conflict")
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_publish_failed")
     finally:
-        try:
-            if temporary.exists():
-                temporary.unlink()
-        except OSError:
-            pass
-    candidate_sha256 = _sha256_file(candidate)
+        if not published:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+    try:
+        os.unlink(temporary)
+    except OSError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("candidate_publish_cleanup_failed")
+
+    candidate_stat = _require_regular_unlinked(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    if (
+        temporary_identity is None
+        or (candidate_stat.st_dev, candidate_stat.st_ino) != temporary_identity
+        or candidate_stat.st_nlink != 1
+    ):
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("candidate_publish_digest_mismatch")
+
+    candidate_sha256, _ = _hash_regular_snapshot(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    candidate_after = _require_regular_unlinked(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    if (
+        (candidate_after.st_dev, candidate_after.st_ino) != temporary_identity
+        or candidate_after.st_nlink != 1
+        or temporary_sha256 is None
+        or candidate_sha256 != temporary_sha256
+    ):
+        _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("candidate_publish_digest_mismatch")
+    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+        _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("checkpoint_payload_changed_after_candidate")
     return resume_state, candidate_sha256
 
 
@@ -1441,6 +1874,7 @@ def _candidate_manifest_json(
     return _canonical_json_bytes(payload).decode("utf-8")
 
 
+
 def _validate_candidate_manifest_payload(
     value: dict[str, object],
 ) -> dict[str, object]:
@@ -1475,6 +1909,8 @@ def _validate_candidate_manifest_payload(
         or candidate_ref != candidate_ref.strip()
         or len(base_ref_bytes) > 4096
         or len(candidate_ref_bytes) > 4096
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in base_ref)
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in candidate_ref)
         or _looks_like_private_local_path(base_ref)
         or _looks_like_private_local_path(candidate_ref)
     ):
@@ -1552,6 +1988,7 @@ def _validate_candidate_manifest_payload(
         or adapter.get("task_type") != "CAUSAL_LM"
         or type(adapter_targets) is not list
         or any(type(item) is not str for item in adapter_targets)
+        or len(set(adapter_targets)) != len(adapter_targets)
         or set(adapter_targets) != set(targets)
     ):
         _fail("candidate_manifest_invalid")
