@@ -31,7 +31,9 @@ Windows-only. A successful call must:
 15. require its base reference/digest, candidate reference, job fingerprint, and final
     step number to match the canonical COMPLETED runtime evidence; and
 16. bind the manifest digest plus trainer deployment, trainer implementation, model
-    directory, consumed-material, and runtime-manifest identities into the report.
+    directory, consumed-material, and runtime-manifest identities into the report; and
+17. when persisted, publish the canonical report through the provided atomic/no-clobber
+    writer rather than a direct truncating file write.
 
 The resulting `PhysicalTrainingPilotReport` is path-free. It contains bounded identifiers,
 SHA-256 identities, descriptor/registry digests, strict PEFT candidate-manifest digest,
@@ -75,7 +77,10 @@ read-only deny-write/delete handle across both checks so a pathname replacement 
 manifest evidence from different candidate bytes.
 
 Keep generated report JSON outside Git when it contains run-specific operational identifiers.
-A report can be shared as evidence after reviewing it for the intended run.
+Persist it with `write_physical_training_pilot_report`, which writes a flushed temporary file
+in the destination directory, atomically links it into place without replacing an existing
+report, re-verifies the exact canonical bytes, and removes temporary state on failure. A report
+can be shared as evidence after reviewing it for the intended run.
 
 ## Example control flow
 
@@ -93,7 +98,7 @@ report = run_physical_training_pilot(
     candidate_descriptor_factory=build_candidate_descriptor_after_completion,
     candidate_root=candidate_artifact_root,
 )
-report_path.write_text(report.to_json(), encoding="utf-8")
+write_physical_training_pilot_report(report, report_path)
 print(report.evidence_sha256)
 ```
 
