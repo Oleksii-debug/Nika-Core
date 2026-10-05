@@ -78,9 +78,15 @@ class SpeechToTextPolicy:
         _positive_int(self.max_transcript_chars, "max_transcript_chars")
         if type(self.timeout_seconds) not in (int, float):
             raise TypeError("timeout_seconds must be a finite number")
-        timeout = float(self.timeout_seconds)
+        try:
+            timeout = float(self.timeout_seconds)
+        except (OverflowError, ValueError) as error:
+            raise ValueError(
+                "timeout_seconds must be in the range (0, 3600]"
+            ) from error
         if not math.isfinite(timeout) or not 0 < timeout <= 3_600.0:
             raise ValueError("timeout_seconds must be in the range (0, 3600]")
+        object.__setattr__(self, "timeout_seconds", timeout)
 
 
 @dataclass(frozen=True, slots=True)
@@ -479,7 +485,12 @@ def _validated_latency(value: float | None) -> float | None:
         return None
     if type(value) not in (int, float):
         raise TypeError("latency_ms must be a finite non-negative number or None")
-    normalized = float(value)
+    try:
+        normalized = float(value)
+    except (OverflowError, ValueError) as error:
+        raise ValueError(
+            "latency_ms must be a finite non-negative number or None"
+        ) from error
     if not math.isfinite(normalized) or normalized < 0:
         raise ValueError("latency_ms must be a finite non-negative number or None")
     return normalized

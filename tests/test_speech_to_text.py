@@ -524,6 +524,31 @@ def test_unknown_adapter_exception_becomes_provider_error_without_diagnostic() -
     assert "diagnostic" not in repr(result.evidence.as_dict())
 
 
+def test_huge_integer_timeout_is_normalized_to_value_error() -> None:
+    with pytest.raises(ValueError, match="timeout_seconds"):
+        SpeechToTextPolicy(timeout_seconds=1 << 100_000)
+
+
+def test_huge_adapter_latency_fails_closed_as_provider_error() -> None:
+    request = _request()
+    adapter = _RecordingAdapter(
+        SpeechToTextAdapterResponse(
+            request_id=request.request_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            text="valid transcript",
+            latency_ms=1 << 100_000,
+        )
+    )
+
+    result = asyncio.run(SpeechToTextService(adapter).transcribe(request))
+
+    assert result.text is None
+    assert result.evidence.status is SpeechToTextStatus.FAILED
+    assert result.evidence.error_code is SpeechToTextFailureCode.PROVIDER_ERROR
+    assert result.evidence.latency_ms is None
+
+
 def test_timeout_is_bounded_and_reported_without_transcript() -> None:
     request = _request(policy=SpeechToTextPolicy(timeout_seconds=0.01))
     adapter = _BlockedAdapter()
