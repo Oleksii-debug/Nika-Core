@@ -346,6 +346,7 @@ class CaseBenchmarkResult:
     accelerator_before: AcceleratorSnapshot | None
     accelerator_after: AcceleratorSnapshot | None
     evaluation_weight: float = 1.0
+    evaluation_pass_score: float = 1.0
 
     def __post_init__(self) -> None:
         _identity(self.candidate_id, "candidate_id")
@@ -359,6 +360,11 @@ class CaseBenchmarkResult:
         score = float(self.score)
         if not isfinite(score) or not 0 <= score <= 1:
             raise ValueError("score must be finite and in [0, 1]")
+        if type(self.evaluation_pass_score) not in (int, float):
+            raise TypeError("evaluation_pass_score must be numeric")
+        evaluation_pass_score = float(self.evaluation_pass_score)
+        if not isfinite(evaluation_pass_score) or not 0 <= evaluation_pass_score <= 1:
+            raise ValueError("evaluation_pass_score must be finite and in [0, 1]")
         if type(self.evaluation_weight) not in (int, float):
             raise TypeError("evaluation_weight must be numeric")
         evaluation_weight = float(self.evaluation_weight)
@@ -389,6 +395,16 @@ class CaseBenchmarkResult:
         ):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer")
+        if (
+            self.total_tokens is not None
+            and self.input_tokens is not None
+            and self.output_tokens is not None
+            and self.total_tokens < self.input_tokens + self.output_tokens
+        ):
+            raise ValueError("total_tokens is smaller than known token components")
+        expected_passed = self.completion_succeeded and score >= evaluation_pass_score
+        if self.passed is not expected_passed:
+            raise ValueError("passed must match score and evaluation threshold")
         if self.error_code is not None and not any(
             self.error_code is member for member in ModelErrorCode
         ):
