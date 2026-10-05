@@ -1022,6 +1022,17 @@ class SubprocessTrainingWorker:
             execution_plan_sha256=self._execution_plan_sha256,
         )
 
+    def verified_trainer_deployment_identity(self) -> ArtifactIdentity:
+        """Return Registry-verified trainer deployment identity at the call boundary."""
+
+        command_records = self._get_command_records()
+        self._verify_command_artifacts(command_records)
+        trainer_record = command_records[0]
+        return ArtifactIdentity(
+            trainer_record.artifact_id,
+            trainer_record.sha256,
+        )
+
     def step(
         self,
         *,
