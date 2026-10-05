@@ -15,6 +15,7 @@ _JSON_MAX_BYTES = 1024 * 1024
 _JSON_MAX_DEPTH = 64
 _JSON_MAX_NODES = 10_000
 _JSON_MAX_INTEGER_BITS = 4096
+_TEXT_MAX_BYTES = 4096
 _CHECKSUM_HEX_LENGTH = 64
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
@@ -51,6 +52,18 @@ def _checked_json_bytes(total: int, amount: int) -> int:
     if total > _JSON_MAX_BYTES:
         raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
     return total
+
+
+def _require_text(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"Checkpoint {field_name} must be str")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"Checkpoint {field_name} must be valid UTF-8") from exc
+    if len(encoded) > _TEXT_MAX_BYTES:
+        raise ValueError(f"Checkpoint {field_name} exceeds the UTF-8 byte limit")
+    return value
 
 
 def _json_key_utf8_size(key: object) -> int:
@@ -149,6 +162,27 @@ def _require_sqlite_text(value: object, field_name: str) -> str:
     return value
 
 
+def _decode_persisted_text(
+    *,
+    storage_type: object,
+    byte_length: object,
+    blob: object,
+    field_name: str,
+) -> str:
+    if storage_type != "text":
+        raise TypeError(f"Checkpoint {field_name} storage must be SQLite TEXT")
+    if type(byte_length) is not int:
+        raise TypeError(f"Checkpoint {field_name} byte length must be an integer")
+    if byte_length > _TEXT_MAX_BYTES:
+        raise ValueError(f"Checkpoint {field_name} exceeds the UTF-8 byte limit")
+    if type(blob) is not bytes or len(blob) != byte_length:
+        raise ValueError(f"Checkpoint {field_name} bytes are incomplete")
+    try:
+        return blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"Checkpoint {field_name} is invalid UTF-8") from exc
+
+
 def _require_checksum(checksum_sha256: object) -> str:
     checksum_text = _require_sqlite_text(checksum_sha256, "checksum")
     if (
@@ -223,6 +257,8 @@ class CheckpointService:
         self.store = store
 
     def save(self, *, task_id: str, stage: str, payload: dict[str, object]) -> Checkpoint:
+        task_id = _require_text(task_id, "task_id")
+        stage = _require_text(stage, "stage")
         body = _canonical_json(payload)
         checksum = hashlib.sha256(body.encode("utf-8")).hexdigest()
         public_payload = _decode_payload(body, checksum)
@@ -244,12 +280,19 @@ class CheckpointService:
         return Checkpoint(checkpoint_id, task_id, stage, public_payload, checksum)
 
     def latest(self, task_id: str) -> Checkpoint | None:
+        task_id = _require_text(task_id, "task_id")
         with self.store.connection() as conn:
             row = conn.execute(
                 """
-                SELECT checkpoint_id,
-                       task_id,
-                       stage,
+                SELECT typeof(checkpoint_id) AS checkpoint_id_storage_type,
+                       length(CAST(checkpoint_id AS BLOB)) AS checkpoint_id_byte_length,
+                       substr(CAST(checkpoint_id AS BLOB), 1, ?) AS checkpoint_id_blob,
+                       typeof(task_id) AS task_id_storage_type,
+                       length(CAST(task_id AS BLOB)) AS task_id_byte_length,
+                       substr(CAST(task_id AS BLOB), 1, ?) AS task_id_blob,
+                       typeof(stage) AS stage_storage_type,
+                       length(CAST(stage AS BLOB)) AS stage_byte_length,
+                       substr(CAST(stage AS BLOB), 1, ?) AS stage_blob,
                        typeof(payload_json) AS payload_storage_type,
                        length(CAST(payload_json AS BLOB)) AS payload_byte_length,
                        substr(CAST(payload_json AS BLOB), 1, ?) AS payload_blob,
@@ -261,10 +304,37 @@ class CheckpointService:
                 ORDER BY rowid DESC
                 LIMIT 1
                 """,
-                (_JSON_MAX_BYTES + 1, _CHECKSUM_HEX_LENGTH + 1, task_id),
+                (
+                    _TEXT_MAX_BYTES + 1,
+                    _TEXT_MAX_BYTES + 1,
+                    _TEXT_MAX_BYTES + 1,
+                    _JSON_MAX_BYTES + 1,
+                    _CHECKSUM_HEX_LENGTH + 1,
+                    task_id,
+                ),
             ).fetchone()
         if row is None:
             return None
+        checkpoint_id = _decode_persisted_text(
+            storage_type=row["checkpoint_id_storage_type"],
+            byte_length=row["checkpoint_id_byte_length"],
+            blob=row["checkpoint_id_blob"],
+            field_name="checkpoint_id",
+        )
+        persisted_task_id = _decode_persisted_text(
+            storage_type=row["task_id_storage_type"],
+            byte_length=row["task_id_byte_length"],
+            blob=row["task_id_blob"],
+            field_name="task_id",
+        )
+        if persisted_task_id != task_id:
+            raise ValueError("Checkpoint task identity mismatch")
+        stage = _decode_persisted_text(
+            storage_type=row["stage_storage_type"],
+            byte_length=row["stage_byte_length"],
+            blob=row["stage_blob"],
+            field_name="stage",
+        )
         payload = _decode_persisted_payload(
             payload_storage_type=row["payload_storage_type"],
             payload_byte_length=row["payload_byte_length"],
@@ -274,9 +344,9 @@ class CheckpointService:
             checksum_blob=row["checksum_blob"],
         )
         return Checkpoint(
-            row["checkpoint_id"],
-            row["task_id"],
-            row["stage"],
+            checkpoint_id,
+            persisted_task_id,
+            stage,
             payload,
             row["checksum_blob"].decode("ascii"),
         )
