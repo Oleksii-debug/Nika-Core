@@ -713,6 +713,8 @@ def _install_runner_fakes(
     resumed_probe: TrainingRunEvidence,
     completed: TrainingRunEvidence,
     initial_pause: TrainingRunEvidence | None = None,
+    initial_trainer_job_fingerprint: str = _TRAINER_JOB_FINGERPRINT,
+    resumed_trainer_job_fingerprint: str = _TRAINER_JOB_FINGERPRINT,
 ) -> tuple[object, object, list[tuple[str, bool]]]:
     calls: list[tuple[str, bool]] = []
 
@@ -737,12 +739,15 @@ def _install_runner_fakes(
             return completed
 
     class FakeWorker:
+        def __init__(self, trainer_job_fingerprint: str) -> None:
+            self.trainer_job_fingerprint = trainer_job_fingerprint
+
         @property
         def execution_plan_sha256(self) -> str:
             return "e" * 64
 
         def protocol_job_fingerprint(self, _: object) -> str:
-            return _TRAINER_JOB_FINGERPRINT
+            return self.trainer_job_fingerprint
 
     class FakeSpec:
         max_steps = 2
@@ -762,8 +767,8 @@ def _install_runner_fakes(
 
     initial_runtime = FakeRuntime("initial")
     resumed_runtime = FakeRuntime("resumed")
-    initial_worker = FakeWorker()
-    resumed_worker = FakeWorker()
+    initial_worker = FakeWorker(initial_trainer_job_fingerprint)
+    resumed_worker = FakeWorker(resumed_trainer_job_fingerprint)
     sentinel = object()
 
     monkeypatch.setattr(pilot, "TrainingRuntime", FakeRuntime)
@@ -780,10 +785,14 @@ def _install_runner_fakes(
         "_resolve_candidate_descriptor",
         lambda *_: object(),
     )
+    def fake_build_report(**kwargs: object) -> object:
+        assert kwargs["trainer_job_fingerprint"] == resumed_trainer_job_fingerprint
+        return sentinel
+
     monkeypatch.setattr(
         pilot,
         "build_physical_training_pilot_report",
-        lambda **_: sentinel,
+        fake_build_report,
     )
 
     result = pilot.run_physical_training_pilot(
@@ -832,6 +841,19 @@ def test_physical_runner_rejects_non_control_initial_pause_before_restart(
             initial_pause=initial_pause,
             resumed_probe=_restart_probe(),
             completed=_completed_for(b"candidate"),
+        )
+
+
+def test_physical_runner_rejects_trainer_protocol_identity_drift_across_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(PhysicalTrainingPilotError, match="protocol job identity"):
+        _install_runner_fakes(
+            monkeypatch,
+            resumed_probe=_restart_probe(),
+            completed=_completed_for(b"candidate"),
+            initial_trainer_job_fingerprint="7" * 64,
+            resumed_trainer_job_fingerprint="8" * 64,
         )
 
 
