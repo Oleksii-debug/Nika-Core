@@ -127,7 +127,7 @@ def _step(
     step_index: int,
     resume_state: dict[str, object],
 ) -> TrainingStepResult:
-    return _step(worker, tmp_path, 
+    return worker.step(
         spec=spec,
         step_index=step_index,
         resume_state=resume_state,
@@ -178,6 +178,122 @@ sys.stdout.write(json.dumps(response))
     second = _step(worker, tmp_path, spec=_spec(), step_index=1, resume_state=first.resume_state)
     assert second.completed is True
     assert second.candidate_sha256 == "b" * 64
+
+
+def test_request_binds_exact_material_paths_and_digests(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import os
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+materials = request["training_materials"]
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": 2,
+    "resume_state": {
+        "all_paths_absolute": all(os.path.isabs(item["path"]) for item in materials["materials"]),
+        "count": len(materials["materials"]),
+        "package_manifest_sha256": materials["package_manifest_sha256"],
+        "training_material_sha256": materials["training_material_sha256"],
+    },
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    worker = _worker(tmp_path, (sys.executable, str(trainer)))
+    spec = _spec()
+
+    result = _step(worker, tmp_path, spec=spec, step_index=0, resume_state={})
+
+    envelope = result.resume_state["_nika_subprocess"]
+    assert isinstance(envelope, dict)
+    trainer_state = envelope["trainer_state"]
+    assert isinstance(trainer_state, dict)
+    assert trainer_state["all_paths_absolute"] is True
+    assert trainer_state["count"] == 2
+    assert trainer_state["package_manifest_sha256"] == spec.frozen_package_sha256
+    assert trainer_state["training_material_sha256"] == spec.training_material_sha256
+
+
+def test_resume_rejects_changed_command_before_process_effect(tmp_path: Path) -> None:
+    marker = tmp_path / "changed-command-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+if request["step_index"] == 1:
+    Path({str(marker)!r}).write_text("started", encoding="utf-8")
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": 2,
+    "resume_state": {{}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    first_worker = _worker(
+        tmp_path,
+        (sys.executable, str(trainer), "mode-a"),
+        idempotency_key="trainer-command",
+    )
+    first = _step(first_worker, tmp_path, spec=_spec(), step_index=0, resume_state={})
+    changed_worker = _worker(
+        tmp_path,
+        (sys.executable, str(trainer), "mode-b"),
+        idempotency_key="trainer-command",
+    )
+
+    with pytest.raises(TrainingSubprocessError, match="trainer artifact") as exc_info:
+        _step(
+            changed_worker,
+            tmp_path,
+            spec=_spec(),
+            step_index=1,
+            resume_state=first.resume_state,
+        )
+
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_registry_path_mismatch_fails_before_process_effect(tmp_path: Path) -> None:
+    marker = tmp_path / "registry-mismatch-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    registry = _artifact_registry(tmp_path)
+    record = registry.register_file(
+        workspace_id="training",
+        idempotency_key="wrong-trainer-artifact",
+        path=trainer,
+        kind="training_executable",
+    )
+    worker = SubprocessTrainingWorker(
+        (sys.executable, str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=record.artifact_id,
+    )
+
+    with pytest.raises(TrainingSubprocessError, match="registered trainer artifact") as exc_info:
+        _step(worker, tmp_path, spec=_spec(), step_index=0, resume_state={})
+
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
 
 
 def test_step_identity_is_stable_for_replay(tmp_path: Path) -> None:
@@ -466,13 +582,16 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
     )
     worker = _worker(tmp_path, (sys.executable, str(trainer)))
 
-    with pytest.raises(TrainingSubprocessError, match="non-JSON"):
-        _step(worker, tmp_path, 
+    with pytest.raises(TrainingSubprocessError, match="non-JSON") as exc_info:
+        _step(
+            worker,
+            tmp_path,
             spec=_spec(),
             step_index=1,
             resume_state={"bad": object()},
         )
 
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
     assert not marker.exists()
 
 
