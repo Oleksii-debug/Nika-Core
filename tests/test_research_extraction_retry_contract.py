@@ -21,9 +21,11 @@ from nika_core.research import (
 from nika_core.research.local import LocalIngestionError
 
 
-def test_failed_extraction_retry_reuses_fetched_artifact(
+@pytest.mark.parametrize("lost_evidence", ["none", "blob", "snapshot"])
+def test_failed_extraction_retry_reuses_or_refetches_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    lost_evidence: str,
 ) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -32,12 +34,14 @@ def test_failed_extraction_retry_reuses_fetched_artifact(
     network = NetworkResearchRepository(store)
 
     fetch_calls = 0
+    sent_validators: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal fetch_calls
         fetch_calls += 1
-        if fetch_calls > 1:
-            raise AssertionError("extraction retry must not fetch the source again")
+        sent_validators.append(request.headers.get("If-None-Match"))
+        if fetch_calls > (1 if lost_evidence == "none" else 2):
+            raise AssertionError("extraction retry performed redundant network fetches")
         return httpx.Response(
             200,
             headers={"Content-Type": "text/plain", "ETag": '"v1"'},
@@ -82,10 +86,25 @@ def test_failed_extraction_retry_reuses_fetched_artifact(
     assert fetch_calls == 1
     assert extraction_calls == 1
 
+    if lost_evidence == "blob":
+        with store.connection() as conn:
+            row = conn.execute(
+                "SELECT storage_relpath FROM corpus_artifacts LIMIT 1"
+            ).fetchone()
+        assert row is not None
+        (tmp_path / "blobs" / row["storage_relpath"]).unlink()
+    elif lost_evidence == "snapshot":
+        with store.connection() as conn:
+            conn.execute(
+                "DELETE FROM research_http_snapshots WHERE source_id=?",
+                ("retry-source",),
+            )
+
     second = service.refresh_source("retry-source")
 
     assert second.disposition is RefreshDisposition.CHANGED
     assert second.document_id is not None
-    assert fetch_calls == 1
+    assert fetch_calls == (1 if lost_evidence == "none" else 2)
+    assert sent_validators[-1] is None
     assert extraction_calls == 2
     assert repository.search("ws", "повторне")

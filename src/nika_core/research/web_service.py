@@ -392,24 +392,37 @@ class HttpResearchService:
             locator=state.url,
         )
 
+        # After extraction failure, only a verified pending blob can avoid a
+        # fresh GET. An orphaned snapshot must not inherit stale validators.
+        force_unconditional = state.last_error_code == "extraction_failed"
         if state.last_error_code == "extraction_failed":
             pending = self._pending_failed_snapshot(source_id)
             if pending is not None:
                 artifact, media_type, final_url, etag, last_modified, status_code = pending
-                return self._extract_artifact(
-                    source=source,
-                    artifact=artifact,
-                    media_type=media_type,
-                    final_url=final_url or state.final_url or state.url,
-                    etag=etag,
-                    last_modified=last_modified,
-                    status_code=status_code,
-                    task_id=task_id,
-                    attempts=0,
-                    fetch_result=None,
-                )
+                try:
+                    self._blobs.resolve(artifact)
+                except (BlobStoreError, OSError, RuntimeError, TypeError, ValueError):
+                    # A missing or damaged blob requires unconditional recovery.
+                    pass
+                else:
+                    return self._extract_artifact(
+                        source=source,
+                        artifact=artifact,
+                        media_type=media_type,
+                        final_url=final_url or state.final_url or state.url,
+                        etag=etag,
+                        last_modified=last_modified,
+                        status_code=status_code,
+                        task_id=task_id,
+                        attempts=0,
+                        fetch_result=None,
+                    )
 
-        validators = HttpValidators(etag=state.etag, last_modified=state.last_modified)
+        validators = (
+            HttpValidators()
+            if force_unconditional
+            else HttpValidators(etag=state.etag, last_modified=state.last_modified)
+        )
         if state.current_raw_sha256 is not None and (
             validators.etag or validators.last_modified
         ) and not self._cached_blob_is_verified(state):
