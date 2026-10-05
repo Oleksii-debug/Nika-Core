@@ -303,7 +303,9 @@ class ProductFactoryProgramHost:
             operation_key = _operation_key(record.request)
             operation = self._ledger.get(operation_key)
             if operation is None:
-                continue
+                raise ProductFactoryProgramError(
+                    "durable worker result is missing its idempotency operation"
+                )
             if (
                 operation.task_id != host_task_id
                 or operation.operation_type != _OPERATION_TYPE
