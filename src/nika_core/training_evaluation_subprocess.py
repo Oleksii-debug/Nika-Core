@@ -84,6 +84,18 @@ _SECRET_ENVIRONMENT_MARKERS = (
     "secret",
     "token",
 )
+_EVALUATION_METADATA_KEYS = frozenset(
+    {
+        "benchmark_configuration_sha256",
+        "benchmark_execution_config_sha256",
+        "benchmark_run_id",
+        "evaluation_case_id",
+        "evaluation_set_id",
+        "evaluation_set_sha256",
+        "evaluation_set_version",
+        "model_candidate_id",
+    }
+)
 
 
 def _error(
@@ -542,6 +554,7 @@ class RegistrySubprocessLoadedModelAttestor:
             or request.model != binding.challenger_model_id
             or request.fallback_provider_ids
             or request.metadata.get("model_candidate_id") != binding.challenger_candidate_id
+            or any(key not in _EVALUATION_METADATA_KEYS for key in request.metadata)
         ):
             raise _error(
                 ModelErrorCode.INVALID_REQUEST,
