@@ -443,15 +443,18 @@ class ProductFactoryProgramHost:
                 )
             # inspect() is an external boundary: do not let a forged/malformed
             # state carrier reach worker.recover(), even after a valid work-ID lookup.
-            if (
-                type(state) is not RecoveryState
-                or type(state.phase) is not str
-                or not state.phase.strip()
-                or (
-                    state.opaque_token is not None
-                    and type(state.opaque_token) is not str
-                )
-            ):
+            try:
+                if type(state) is not RecoveryState:
+                    raise TypeError("invalid recovery state carrier")
+                # Read the two slots exactly once: a forged incomplete carrier or
+                # a concurrent mutation must not turn inspection into an effect.
+                phase, token = state.phase, state.opaque_token
+                if type(phase) is not str or not phase.strip():
+                    raise ValueError("invalid recovery phase")
+                if token is not None and type(token) is not str:
+                    raise TypeError("invalid recovery token")
+                recovery_state = RecoveryState(phase, token)
+            except (AttributeError, TypeError, ValueError):
                 self._mark_uncertain(operation_key)
                 return _outcome(
                     request,
@@ -460,8 +463,6 @@ class ProductFactoryProgramHost:
                     IdempotencyStatus.UNCERTAIN,
                     "worker inspection returned invalid recovery state",
                 )
-            # Snapshot the admitted built-in scalars independently of the provider.
-            recovery_state = RecoveryState(state.phase, state.opaque_token)
             try:
                 envelope = await self.worker.recover(request, recovery_state)
             except asyncio.CancelledError:
