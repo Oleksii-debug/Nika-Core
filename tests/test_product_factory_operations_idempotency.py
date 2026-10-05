@@ -205,7 +205,11 @@ def test_runtime_ledger_reservation_and_result_survive_adapter_recreation(tmp_pa
     assert replay.state is MaintenanceEffectState.PENDING
 
     result = MaintenanceResult(True, False, ("provider:completed",))
-    restarted.complete(first.operation_key, result)
+    with pytest.raises(ProductOperationsError, match="exact created reservation"):
+        restarted.complete(first.operation_key, result)
+    assert ledger.require(first.operation_key).status is IdempotencyStatus.PENDING
+
+    journal.complete(first.operation_key, result)
     assert ledger.require(first.operation_key).status is IdempotencyStatus.COMPLETED
 
     second_restart = RuntimeIdempotencyMaintenanceJournal(
@@ -467,3 +471,86 @@ def test_corrupt_durable_result_fails_closed_without_provider_dispatch(tmp_path)
 
     assert port.apply_calls == 0
     assert port.inspect_calls == 0
+
+def test_stale_creator_cannot_complete_replacement_reservation(tmp_path) -> None:
+    store, task_id, ledger, stale_journal = _runtime_journal(tmp_path)
+    service = _service()
+    request = _request(service)
+    stale = stale_journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    original = ledger.require(stale.operation_key)
+
+    ledger.release_pending_if_matches(
+        operation_key=original.operation_key,
+        task_id=original.task_id,
+        operation_type=original.operation_type,
+        input_fingerprint=original.input_fingerprint,
+        created_at=original.created_at,
+    )
+    replacement_journal = RuntimeIdempotencyMaintenanceJournal(
+        IdempotencyLedger(store),
+        task_id=task_id,
+    )
+    replacement = replacement_journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    replacement_record = ledger.require(replacement.operation_key)
+    assert replacement.created is True
+    assert replacement_record.created_at != original.created_at
+
+    with pytest.raises(ProductOperationsError, match="exact reservation"):
+        stale_journal.complete(
+            stale.operation_key,
+            MaintenanceResult(True, False, ("provider:stale-result",)),
+        )
+
+    current = ledger.require(replacement.operation_key)
+    assert current.created_at == replacement_record.created_at
+    assert current.status is IdempotencyStatus.PENDING
+    assert current.result is None
+
+
+def test_stale_creator_cannot_mark_replacement_reservation_uncertain(tmp_path) -> None:
+    store, task_id, ledger, stale_journal = _runtime_journal(tmp_path)
+    service = _service()
+    request = _request(service)
+    stale = stale_journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    original = ledger.require(stale.operation_key)
+
+    ledger.release_pending_if_matches(
+        operation_key=original.operation_key,
+        task_id=original.task_id,
+        operation_type=original.operation_type,
+        input_fingerprint=original.input_fingerprint,
+        created_at=original.created_at,
+    )
+    replacement_journal = RuntimeIdempotencyMaintenanceJournal(
+        IdempotencyLedger(store),
+        task_id=task_id,
+    )
+    replacement = replacement_journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    replacement_record = ledger.require(replacement.operation_key)
+    assert replacement.created is True
+    assert replacement_record.created_at != original.created_at
+
+    with pytest.raises(ProductOperationsError, match="exact reservation"):
+        stale_journal.mark_uncertain(stale.operation_key)
+
+    current = ledger.require(replacement.operation_key)
+    assert current.created_at == replacement_record.created_at
+    assert current.status is IdempotencyStatus.PENDING
+    assert current.result is None
+
