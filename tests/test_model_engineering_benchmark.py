@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -225,6 +226,8 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
     assert report.peak_accelerator_memory_bytes == 500
 
     first, second = report.case_results
+    assert first.evaluation_weight == 1.0
+    assert second.evaluation_weight == 3.0
     assert first.response_sha256 == hashlib.sha256(
         "очікувана відповідь".encode()
     ).hexdigest()
@@ -233,6 +236,32 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
 
     machine = benchmark_report_json(report)
     accessible_machine = benchmark_accessible_report_json(report)
+    machine_payload = json.loads(machine)
+    assert [item["evaluation_weight"] for item in machine_payload["cases"]] == [
+        1.0,
+        3.0,
+    ]
+    substitutions = {
+        "weighted_quality_score": 0.5,
+        "task_pass_rate": 0.75,
+        "completion_rate": 0.75,
+        "mean_latency_ms": 101.0,
+        "p95_latency_ms": 101.0,
+        "peak_cpu_percent": 49.0,
+        "peak_memory_percent": 44.0,
+        "min_available_memory_bytes": 5_001,
+        "peak_accelerator_percent": 59.0,
+        "peak_accelerator_memory_bytes": 499,
+    }
+    for field, value in substitutions.items():
+        forged = replace(report, **{field: value})
+        for serializer in (
+            benchmark_report_json,
+            benchmark_accessible_report_json,
+        ):
+            with pytest.raises(ValueError, match="aggregate metrics"):
+                serializer(forged)
+
     accessible = render_text_report(report)
     json.loads(machine)
     accessible_payload = json.loads(accessible_machine)
