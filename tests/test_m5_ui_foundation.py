@@ -37,10 +37,18 @@ def test_bridge_rejects_unknown_action_and_unconfigured_registered_action(tmp_pa
     bridge = build_bridge(tmp_path)
     unknown = bridge.dispatch({"request_id": "1", "action_id": "shell.exec", "payload": {}})
     unavailable = bridge.dispatch({"request_id": "2", "action_id": "agent.stop", "payload": {}})
-    assert unknown["status"] == "rejected"
-    assert "Unknown action" in unknown["message"]
-    assert unavailable["status"] == "rejected"
-    assert "not available" in unavailable["message"]
+    assert unknown == {
+        "request_id": "1",
+        "status": "rejected",
+        "message": "Невідома дія інтерфейсу.",
+        "focus_id": None,
+    }
+    assert unavailable == {
+        "request_id": "2",
+        "status": "rejected",
+        "message": "Ця дія недоступна в поточному контексті.",
+        "focus_id": None,
+    }
 
 
 def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> None:
@@ -59,8 +67,10 @@ def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> 
         "focus_id": None,
     }
     assert empty["status"] == "rejected"
-    assert conflict["ok"] is False
-    assert "conflict" in conflict["message"].lower()
+    assert conflict == {
+        "ok": False,
+        "message": "Не вдалося зберегти комбінацію: перевірте дію, формат і конфлікти.",
+    }
 
 
 def test_keymap_export_import_and_clear_round_trip(tmp_path: Path) -> None:
