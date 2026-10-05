@@ -394,6 +394,7 @@ class DeploymentFabric:
     )
 
     def deploy(self, intent: DeploymentIntent) -> DeploymentRecord:
+        intent = _snapshot_deployment_intent(intent)
         existing = self._records.get(intent.intent_id)
         if existing is not None:
             if existing.intent != intent:
@@ -545,7 +546,10 @@ class DeploymentFabric:
             for project_id, release in sorted(self._healthy_staging.items())
         )
         return DeploymentFabricSnapshot(
-            tuple(self._records[key] for key in sorted(self._records)),
+            tuple(
+                _snapshot_deployment_record(self._records[key])
+                for key in sorted(self._records)
+            ),
             healthy_staging,
             current_releases,
             exact_healthy_staging,
@@ -553,6 +557,7 @@ class DeploymentFabric:
         )
 
     def restore(self, snapshot: DeploymentFabricSnapshot) -> None:
+        snapshot = _snapshot_deployment_fabric_snapshot(snapshot)
         ids = [record.intent.intent_id for record in snapshot.records]
         if len(ids) != len(set(ids)):
             raise DeploymentFabricError("deployment snapshot contains duplicate intents")
@@ -789,6 +794,155 @@ def local_linux_node() -> ExecutionNode:
     )
 
 
+def _snapshot_deployment_intent(value: object) -> DeploymentIntent:
+    if type(value) is not DeploymentIntent:
+        raise DeploymentFabricError("deployment intent carrier is invalid")
+    if type(value.intent_id) is not str or type(value.project_id) is not str:
+        raise DeploymentFabricError("deployment intent identity must be text")
+    environment = _snapshot_environment_identity(value.environment)
+    release = _snapshot_provider_release(value.release, "deployment")
+    migration_refs = _snapshot_text_tuple(
+        value.migration_refs,
+        "deployment migration refs",
+        allow_empty=True,
+        allow_empty_items=True,
+    )
+    return DeploymentIntent(
+        value.intent_id,
+        value.project_id,
+        environment,
+        release,
+        migration_refs,
+    )
+
+
+def _snapshot_environment_identity(value: object) -> EnvironmentIdentity:
+    if type(value) is not EnvironmentIdentity:
+        raise DeploymentFabricError("deployment environment carrier is invalid")
+    if type(value.tier) is not EnvironmentTier:
+        raise DeploymentFabricError("deployment environment tier carrier is invalid")
+    for name, field_value in (
+        ("environment_id", value.environment_id),
+        ("project_id", value.project_id),
+        ("provider_ref", value.provider_ref),
+    ):
+        if type(field_value) is not str:
+            raise DeploymentFabricError(
+                f"deployment environment {name} must be text"
+            )
+    return EnvironmentIdentity(
+        value.environment_id,
+        value.project_id,
+        value.tier,
+        value.provider_ref,
+    )
+
+
+def _snapshot_deployment_record(value: object) -> DeploymentRecord:
+    if type(value) is not DeploymentRecord:
+        raise DeploymentFabricError("deployment record carrier is invalid")
+    if type(value.state) is not DeploymentState:
+        raise DeploymentFabricError("deployment record state carrier is invalid")
+    if (
+        value.previous_release_sha is not None
+        and type(value.previous_release_sha) is not str
+    ):
+        raise DeploymentFabricError(
+            "deployment previous release SHA must be text or null"
+        )
+    previous_release = (
+        None
+        if value.previous_release is None
+        else _snapshot_provider_release(value.previous_release, "previous")
+    )
+    health = (
+        None
+        if value.health is None
+        else _snapshot_health_evidence(value.health)
+    )
+    rollback = (
+        None
+        if value.rollback is None
+        else _snapshot_rollback_evidence(value.rollback)
+    )
+    return DeploymentRecord(
+        _snapshot_deployment_intent(value.intent),
+        value.state,
+        _snapshot_provider_evidence_refs(
+            value.provider_evidence_refs,
+            allow_empty=True,
+        ),
+        health=health,
+        rollback=rollback,
+        previous_release_sha=value.previous_release_sha,
+        previous_release=previous_release,
+    )
+
+
+def _snapshot_deployment_fabric_snapshot(
+    value: object,
+) -> DeploymentFabricSnapshot:
+    if type(value) is not DeploymentFabricSnapshot:
+        raise DeploymentFabricError("deployment snapshot carrier is invalid")
+    if type(value.records) is not tuple:
+        raise DeploymentFabricError("deployment snapshot records carrier is invalid")
+    return DeploymentFabricSnapshot(
+        tuple(_snapshot_deployment_record(record) for record in value.records),
+        _snapshot_snapshot_entries(value.healthy_staging, "healthy staging"),
+        _snapshot_snapshot_entries(value.current_releases, "current release"),
+        _snapshot_snapshot_entries(
+            value.exact_healthy_staging,
+            "exact healthy staging",
+        ),
+        _snapshot_snapshot_entries(
+            value.exact_current_releases,
+            "exact current release",
+        ),
+    )
+
+
+def _snapshot_snapshot_entries(
+    value: object,
+    label: str,
+) -> tuple[tuple[str, ...], ...]:
+    if type(value) is not tuple:
+        raise DeploymentFabricError(f"{label} snapshot collection must be a tuple")
+    entries: list[tuple[str, ...]] = []
+    for entry in value:
+        if type(entry) is not tuple:
+            raise DeploymentFabricError(f"{label} snapshot entry must be a tuple")
+        entries.append(
+            _snapshot_text_tuple(
+                entry,
+                f"{label} snapshot entry",
+                allow_empty=True,
+                allow_empty_items=True,
+            )
+        )
+    return tuple(entries)
+
+
+def _snapshot_text_tuple(
+    value: object,
+    label: str,
+    *,
+    allow_empty: bool,
+    allow_empty_items: bool = False,
+) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise DeploymentFabricError(f"{label} carrier must be a tuple")
+    if not allow_empty and not value:
+        raise DeploymentFabricError(f"{label} must not be empty")
+    items: list[str] = []
+    for item in value:
+        if type(item) is not str or (not allow_empty_items and not item.strip()):
+            raise DeploymentFabricError(
+                f"{label} must contain exact non-empty text"
+            )
+        items.append(item)
+    return tuple(items)
+
+
 def _snapshot_provider_deployment_result(
     value: object,
 ) -> ProviderDeploymentResult:
@@ -910,16 +1064,11 @@ def _snapshot_provider_evidence_refs(
     *,
     allow_empty: bool = False,
 ) -> tuple[str, ...]:
-    if type(value) is not tuple:
-        raise DeploymentFabricError("provider evidence refs carrier must be a tuple")
-    if not allow_empty and not value:
-        raise DeploymentFabricError("provider evidence refs must not be empty")
-    for ref in value:
-        if type(ref) is not str or not ref.strip():
-            raise DeploymentFabricError(
-                "provider evidence refs must contain non-empty text"
-            )
-    return tuple(value)
+    return _snapshot_text_tuple(
+        value,
+        "provider evidence refs",
+        allow_empty=allow_empty,
+    )
 
 
 def _environment_key(intent: DeploymentIntent) -> tuple[str, str]:
