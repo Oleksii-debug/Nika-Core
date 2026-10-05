@@ -135,7 +135,7 @@ def test_release_version_rejects_shell_or_filename_metacharacters(
     pyproject = tmp_path / "pyproject.toml"
     escaped = version.replace("\\", "\\\\").replace('"', '\\"')
     pyproject.write_text(
-        f'[project]\\nname = "nika-core"\\nversion = "{escaped}"\\n',
+        f'[project]\nname = "nika-core"\nversion = "{escaped}"\n',
         encoding="utf-8",
     )
 
