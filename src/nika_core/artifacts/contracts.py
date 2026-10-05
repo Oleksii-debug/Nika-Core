@@ -92,6 +92,13 @@ class ArtifactRecord(FrozenModel):
             raise ValueError("artifact identifiers must not be blank")
         return value
 
+    @field_validator("idempotency_key", "workspace_id")
+    @classmethod
+    def reject_ambiguous_identity_delimiters(cls, value: str) -> str:
+        if "\x00" in value:
+            raise ValueError("artifact identity fields must not contain NUL")
+        return value
+
     @field_validator("locator")
     @classmethod
     def reject_locator_credentials(cls, value: str) -> str:

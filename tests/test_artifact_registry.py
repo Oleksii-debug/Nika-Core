@@ -131,6 +131,33 @@ def test_register_file_is_durable_and_idempotent_across_restart(tmp_path: Path) 
     assert first.sha256 == hashlib.sha256(source.read_bytes()).hexdigest()
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("workspace_id", "workspace-a\x00shared"),
+        ("idempotency_key", "shared\x00effect"),
+    ),
+)
+def test_artifact_identity_fields_reject_nul_delimiter_collisions(
+    field: str,
+    value: str,
+) -> None:
+    payload = {
+        "artifact_id": "a" * 64,
+        "idempotency_key": "effect",
+        "workspace_id": "workspace-a",
+        "kind": "result",
+        "location_kind": ArtifactLocationKind.OPAQUE_REFERENCE,
+        "locator": "blob:safe",
+        "sha256": "b" * 64,
+        "size_bytes": 1,
+    }
+    payload[field] = value
+
+    with pytest.raises(ValidationError, match="must not contain NUL"):
+        ArtifactRecord(**payload)
+
+
 def test_idempotency_key_rejects_changed_immutable_metadata(tmp_path: Path) -> None:
     registry = _registry(tmp_path / "state.sqlite3")
     source = tmp_path / "result.bin"
