@@ -95,6 +95,66 @@ def test_conditional_create_does_not_cleanup_corrupt_expired_record(
     assert row["expires_at"] == expired_at.isoformat()
 
 
+@pytest.mark.parametrize(
+    ("corrupt_json", "match"),
+    [
+        ("[" * 65 + "0" + "]" * 65, "depth limit"),
+        ('{"value":' + "9" * 1235 + "}", "digit limit"),
+        ('{"value":' + str(1 << 4096) + "}", "bit limit"),
+    ],
+)
+def test_persisted_memory_resource_carriers_fail_closed_before_use(
+    tmp_path: Path,
+    corrupt_json: str,
+    match: str,
+) -> None:
+    store = _store(tmp_path)
+    memory = MemoryService(store)
+    memory.put(**_identity(), value={"state": "original"})
+
+    with store.connection() as conn:
+        cursor = conn.execute(
+            "UPDATE memory_records SET value_json = ? "
+            "WHERE scope = ? AND owner_id = ? AND namespace = ? AND memory_key = ?",
+            (
+                corrupt_json,
+                "workspace",
+                "research",
+                "policy",
+                "ranking",
+            ),
+        )
+        assert cursor.rowcount == 1
+
+    with pytest.raises(ValueError, match=match):
+        memory.get(**_identity())
+
+
+def test_persisted_memory_integer_accepts_exact_bit_boundary(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    memory = MemoryService(store)
+    memory.put(**_identity(), value={"state": "original"})
+    boundary = 1 << 4095
+
+    with store.connection() as conn:
+        cursor = conn.execute(
+            "UPDATE memory_records SET value_json = ? "
+            "WHERE scope = ? AND owner_id = ? AND namespace = ? AND memory_key = ?",
+            (
+                '{"value":' + str(boundary) + "}",
+                "workspace",
+                "research",
+                "policy",
+                "ranking",
+            ),
+        )
+        assert cursor.rowcount == 1
+
+    restored = memory.get(**_identity())
+    assert restored is not None
+    assert restored.value == {"value": boundary}
+
+
 def test_compare_and_delete_validates_full_record_before_mutation(tmp_path: Path) -> None:
     store = _store(tmp_path)
     audit = AuditLog(store)
