@@ -6,6 +6,7 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.research.models import ResearchWorkspace, SourceKind, SourceSpec
+from nika_core.research.network_repository import NetworkResearchRepository
 from nika_core.research.repository import ResearchRepository
 
 BAD_UNICODE = chr(0xD800)
@@ -67,24 +68,29 @@ def test_local_source_re_registration_inside_original_workspace_is_supported(
 
 def test_local_source_id_cannot_relabel_existing_http_source(tmp_path: Path) -> None:
     store, repository = _repository(tmp_path)
-    with store.connection() as conn:
-        conn.execute(
-            """INSERT INTO research_sources(
-                source_id, workspace_id, kind, locator, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?)""",
-            ("source-id", "owner-a", "http", "https://example.test/source", "now", "now"),
+    network = NetworkResearchRepository(store)
+    network.register_source(
+        SourceSpec(
+            "source-id",
+            "owner-a",
+            SourceKind.HTTP,
+            "https://example.test/source",
         )
+    )
 
     with pytest.raises(ValueError, match="another workspace or source kind"):
         repository.upsert_source(
             SourceSpec("source-id", "owner-a", SourceKind.LOCAL_FILE, "/local.txt")
         )
+
+    http_source = network.get_source("source-id")
+    assert http_source.workspace_id == "owner-a"
+    assert http_source.url == "https://example.test/source"
     with store.connection() as conn:
-        row = conn.execute(
-            "SELECT workspace_id, kind, locator FROM research_sources WHERE source_id=?",
+        assert conn.execute(
+            "SELECT COUNT(*) FROM research_sources WHERE source_id=?",
             ("source-id",),
-        ).fetchone()
-    assert tuple(row) == ("owner-a", "http", "https://example.test/source")
+        ).fetchone()[0] == 0
 
 
 @pytest.mark.parametrize(
