@@ -1148,3 +1148,55 @@ def test_invalid_inspected_recovery_state_cannot_reach_worker_and_can_retry(
     assert IdempotencyLedger(store).require(
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.COMPLETED
+
+
+@pytest.mark.parametrize("field", ("max_parallel", "max_count"))
+@pytest.mark.parametrize("invalid", (True, 1.5, float("inf"), float("nan"), 0, -1, "2", None))
+def test_invalid_dispatch_budget_fails_before_durable_state_change(
+    tmp_path, field: str, invalid: object
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    original = coordinator.snapshot()
+    checkpoint_host = ProductFactoryCheckpointHost(store)
+    original_checkpoint = checkpoint_host.latest(
+        host_task_id=task_id, project_id="project-1"
+    )
+    kwargs = {"max_parallel": 2, "max_count": 1}
+    kwargs[field] = invalid
+    with pytest.raises(ValueError, match="positive integers"):
+        _run(
+            ProductFactoryProgramHost(store, worker).dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                **kwargs,
+            )
+        )
+    assert coordinator.snapshot() == original
+    assert checkpoint_host.latest(
+        host_task_id=task_id, project_id="project-1"
+    ) == original_checkpoint
+    assert IdempotencyLedger(store).list_for_task(task_id) == ()
+    assert worker.dispatch_calls == []
+
+
+@pytest.mark.parametrize("invalid", (True, 1.5, float("inf"), float("nan"), 0, -1, "2", None))
+def test_invalid_recovery_concurrency_budget_fails_before_worker_access(
+    tmp_path, invalid: object
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    before = coordinator.snapshot()
+    with pytest.raises(ValueError, match="positive integer"):
+        _run(
+            ProductFactoryProgramHost(store, worker).recover_running(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=invalid,
+            )
+        )
+    assert coordinator.snapshot() == before
+    assert worker.inspect_calls == []
+    assert worker.dispatch_calls == []
