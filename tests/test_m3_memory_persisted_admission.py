@@ -576,3 +576,58 @@ def test_purge_does_not_delete_expired_record_before_full_carrier_validation(
         assert conn.execute(
             "SELECT COUNT(*) FROM memory_records WHERE memory_key = 'entry'"
         ).fetchone()[0] == 1
+
+@pytest.mark.parametrize(
+    ("scope", "column", "stored", "message"),
+    [
+        (
+            MemoryScope.TASK,
+            "value_json",
+            "NaN",
+            "invalid stored memory JSON constant",
+        ),
+        (
+            MemoryScope.TASK,
+            "updated_at",
+            "2038-01-01T00:00:00",
+            "stored memory updated_at must be timezone-aware",
+        ),
+        (
+            MemoryScope.USER,
+            "user_approved",
+            0,
+            "user memory lacks durable explicit approval",
+        ),
+    ],
+)
+def test_explicit_delete_preserves_corrupt_durable_record(
+    tmp_path: Path,
+    scope: MemoryScope,
+    column: str,
+    stored: object,
+    message: str,
+) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory, scope=scope)
+    with store.connection() as conn:
+        conn.execute(
+            f"UPDATE memory_records SET {column} = ? WHERE memory_key = 'entry'",
+            (stored,),
+        )
+
+    with pytest.raises(ValueError, match=message):
+        memory.delete(
+            scope=scope,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+        )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT value_json, user_approved, updated_at FROM memory_records "
+            "WHERE memory_key = 'entry'"
+        ).fetchone()
+    assert row is not None
+    assert row[column] == stored
+
