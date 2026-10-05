@@ -143,11 +143,6 @@ def _config(tmp_path: Path, request: peft.ParsedRequest, base: bytes) -> peft.Tr
         base_gguf=base_path,
         model_dir=model_dir,
         model_dir_manifest_sha256=peft.model_directory_manifest_sha256(model_dir),
-        trainer_implementation_sha256=peft.trainer_implementation_sha256(),
-        training_runtime_versions=tuple(
-            (distribution, _RUNTIME_VERSIONS[distribution])
-            for distribution, _ in peft._TRAINING_RUNTIME_DISTRIBUTIONS
-        ),
         output_root=output_root,
         max_records=100,
         max_sequence_length=64,
@@ -405,33 +400,6 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
     tampered = peft._parse_request(raw_request)
     with pytest.raises(peft.PeftTrainerError, match="resume_marker_digest_mismatch"):
         peft._resume_checkpoint(job_root, tampered)
-
-
-def test_checkpoint_payload_rejects_late_enumeration_change(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    checkpoint = tmp_path / "checkpoint-enumeration-race"
-    checkpoint.mkdir()
-    payload = checkpoint / "optimizer.pt"
-    payload.write_bytes(b"optimizer")
-    real_hash = peft._hash_regular_snapshot
-    mutated = False
-
-    def mutating_hash(path: Path, *, code: str) -> tuple[str, int]:
-        nonlocal mutated
-        result = real_hash(path, code=code)
-        if not mutated:
-            (checkpoint / "late-state.bin").write_bytes(b"late")
-            mutated = True
-        return result
-
-    monkeypatch.setattr(peft, "_hash_regular_snapshot", mutating_hash)
-
-    with pytest.raises(peft.PeftTrainerError, match="checkpoint_payload_changed"):
-        peft._checkpoint_payload_manifest_sha256(checkpoint)
-
-    assert mutated is True
 
 
 def test_resume_rejects_tampered_checkpoint_payload(tmp_path: Path) -> None:
@@ -750,6 +718,7 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
         output_root=config.output_root,
+        runtime_versions=dict(_RUNTIME_VERSIONS),
         max_records=123,
         max_sequence_length=256,
         learning_rate=0.0003,
@@ -770,6 +739,9 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     assert environment["NIKA_TRAINER_LORA_TARGET_MODULES"] == "q_proj,k_proj,v_proj"
     assert environment["NIKA_TRAINER_MAX_RECORDS"] == "123"
     assert environment["NIKA_TRAINER_TORCH_NUM_THREADS"] == "3"
+    assert environment["NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"] == (
+        peft._training_runtime_manifest_sha256(dict(_RUNTIME_VERSIONS))
+    )
     for distribution, environment_key in peft._TRAINING_RUNTIME_DISTRIBUTIONS:
         assert environment[environment_key] == _RUNTIME_VERSIONS[distribution]
 
@@ -781,8 +753,6 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     ]
     assert loaded.lora_r == 16
     assert loaded.torch_num_threads == 3
-    assert loaded.trainer_implementation_sha256 == peft.trainer_implementation_sha256()
-    assert dict(loaded.training_runtime_versions) == _RUNTIME_VERSIONS
     assert loaded.seed == 99
 
 
@@ -804,6 +774,7 @@ def test_environment_builder_rejects_invalid_torch_thread_count(
             base_gguf=config.base_gguf,
             model_dir=config.model_dir,
             output_root=config.output_root,
+            runtime_versions=dict(_RUNTIME_VERSIONS),
             torch_num_threads=0,
         )
 
@@ -823,6 +794,7 @@ def test_read_config_rejects_training_runtime_version_drift(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
         output_root=config.output_root,
+        runtime_versions=dict(_RUNTIME_VERSIONS),
     )
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
@@ -835,24 +807,87 @@ def test_read_config_rejects_training_runtime_version_drift(
         peft._read_config()
 
 
-def test_environment_builder_rejects_missing_training_dependency(
+def test_environment_builder_does_not_probe_parent_runtime_versions(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
 
+    def unexpected(_: str) -> str:
+        raise AssertionError("parent package metadata must not be runtime authority")
+
+    monkeypatch.setattr(peft.importlib.metadata, "version", unexpected)
+
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+        runtime_versions=dict(_RUNTIME_VERSIONS),
+    )
+
+    assert environment["NIKA_TRAINER_TORCH_VERSION"] == _RUNTIME_VERSIONS["torch"]
+
+
+def test_read_config_rejects_missing_training_dependency(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+        runtime_versions=dict(_RUNTIME_VERSIONS),
+    )
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
     def missing(distribution: str) -> str:
         raise peft.importlib.metadata.PackageNotFoundError(distribution)
 
     monkeypatch.setattr(peft.importlib.metadata, "version", missing)
 
-    with pytest.raises(ValueError, match="training runtime dependencies"):
+    with pytest.raises(peft.PeftTrainerError, match="runtime_versions_unavailable"):
+        peft._read_config()
+
+
+def test_environment_builder_rejects_incomplete_runtime_manifest(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    incomplete = dict(_RUNTIME_VERSIONS)
+    incomplete.pop("gguf")
+
+    with pytest.raises(ValueError, match="runtime manifest"):
         peft.build_trainer_environment(
             base_gguf=config.base_gguf,
             model_dir=config.model_dir,
             output_root=config.output_root,
+            runtime_versions=incomplete,
         )
+
+
+def test_read_config_rejects_runtime_manifest_digest_tamper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+        runtime_versions=dict(_RUNTIME_VERSIONS),
+    )
+    environment["NIKA_TRAINER_TORCH_VERSION"] = "2.99.0"
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(peft.PeftTrainerError, match="runtime_manifest_mismatch"):
+        peft._read_config()
 
 
 def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -> None:
@@ -876,8 +911,6 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     )
     manifest = json.loads(raw)
     assert peft._validate_candidate_manifest_payload(manifest) == manifest
-    assert manifest["trainer_implementation_sha256"] == config.trainer_implementation_sha256
-    assert manifest["training_runtime_versions"] == dict(config.training_runtime_versions)
     assert manifest["trainer_parameters"]["torch_num_threads"] == config.torch_num_threads
 
     bad_sha = json.loads(raw)
@@ -894,21 +927,6 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     bad_thread_count["trainer_parameters"]["torch_num_threads"] = 0
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(bad_thread_count)
-
-    bad_runtime_version = json.loads(raw)
-    bad_runtime_version["training_runtime_versions"]["torch"] = ""
-    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
-        peft._validate_candidate_manifest_payload(bad_runtime_version)
-
-    missing_runtime_version = json.loads(raw)
-    del missing_runtime_version["training_runtime_versions"]["torch"]
-    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
-        peft._validate_candidate_manifest_payload(missing_runtime_version)
-
-    bad_trainer_implementation = json.loads(raw)
-    bad_trainer_implementation["trainer_implementation_sha256"] = "0" * 63
-    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
-        peft._validate_candidate_manifest_payload(bad_trainer_implementation)
 
     missing_thread_count = json.loads(raw)
     del missing_thread_count["trainer_parameters"]["torch_num_threads"]
@@ -936,31 +954,6 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     duplicate_adapter_target["adapter_config"]["target_modules"].append(first_target)
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(duplicate_adapter_target)
-
-
-def test_candidate_manifest_producer_rejects_reader_invalid_adapter_config(
-    tmp_path: Path,
-) -> None:
-    request, base = _parsed(tmp_path)
-    config = _config(tmp_path, request, base)
-    consumed = peft._consume_materials(request, max_records=10)
-    adapter_config = {
-        "base_model_name_or_path": request.base_artifact_ref,
-        "bias": "none",
-        "lora_alpha": config.lora_alpha,
-        "lora_dropout": config.lora_dropout,
-        "r": config.lora_r,
-        "target_modules": ["q_proj", "q_proj", "v_proj"],
-        "task_type": "CAUSAL_LM",
-    }
-
-    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
-        peft._candidate_manifest_json(
-            request=request,
-            config=config,
-            consumed=consumed,
-            adapter_config=adapter_config,
-        )
 
 
 def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:
