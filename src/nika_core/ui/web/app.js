@@ -163,7 +163,15 @@
     } catch {
       reportStateUnavailable();
     }
-    if (stateReady) dispatchOutcomeUnconfirmed = false;
+    if (stateReady) {
+      dispatchOutcomeUnconfirmed = false;
+    } else {
+      announce(
+        "Немає підтвердження виконання дії, а поточний стан недоступний. "
+          + "Не повторюйте дію до успішного перечитування.",
+        true,
+      );
+    }
     document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
     focusTarget?.focus?.();
   }
