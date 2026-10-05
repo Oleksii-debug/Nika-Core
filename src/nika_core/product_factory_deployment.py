@@ -414,9 +414,11 @@ class DeploymentFabric:
         )
         self._save(uncertain)
         try:
-            result = self.provider.deploy(intent)
+            result = _snapshot_provider_deployment_result(
+                self.provider.deploy(intent)
+            )
         except Exception:  # noqa: BLE001
-            # A provider may mutate the target before failing to return a result.
+            # A provider may mutate the target before failing to return valid evidence.
             return self._mark_uncertain(uncertain)
         if not result.evidence_refs:
             return self._mark_uncertain(uncertain)
@@ -448,9 +450,9 @@ class DeploymentFabric:
             previous_release=previous_release,
         )
         try:
-            health = self.provider.health(intent)
+            health = _snapshot_health_evidence(self.provider.health(intent))
         except Exception:  # noqa: BLE001
-            # Provider failures after an applied effect must become durable uncertainty.
+            # Invalid provider evidence after an applied effect is still uncertain.
             return self._mark_uncertain(record)
         try:
             return self._finish_health(record, health)
@@ -461,7 +463,9 @@ class DeploymentFabric:
         record = self._record(intent_id)
         if record.state is not DeploymentState.UNCERTAIN:
             return record
-        inspection = self.provider.inspect(record.intent)
+        inspection = _snapshot_provider_inspection(
+            self.provider.inspect(record.intent)
+        )
         if not inspection.evidence_refs:
             raise DeploymentFabricError("provider inspection requires evidence refs")
         if inspection.release_sha is None:
@@ -666,11 +670,14 @@ class DeploymentFabric:
             return self._mark_uncertain(record, health.evidence_refs)
         try:
             if callable(rollback_exact):
-                rollback = rollback_exact(intent, record.previous_release)
+                rollback_result = rollback_exact(intent, record.previous_release)
             else:
-                rollback = self.provider.rollback(intent, record.previous_release_sha)
+                rollback_result = self.provider.rollback(
+                    intent, record.previous_release_sha
+                )
+            rollback = _snapshot_rollback_evidence(rollback_result)
         except Exception:  # noqa: BLE001
-            # Provider failures after an applied effect must become durable uncertainty.
+            # Invalid rollback evidence cannot prove the external effect outcome.
             return self._mark_uncertain(record, health.evidence_refs)
         if rollback.environment_id != intent.environment.environment_id:
             return self._mark_uncertain(
@@ -779,6 +786,139 @@ def local_linux_node() -> ExecutionNode:
         ),
         ResourceEnvelope(2, 2048, 4096),
     )
+
+
+def _snapshot_provider_deployment_result(
+    value: object,
+) -> ProviderDeploymentResult:
+    if type(value) is not ProviderDeploymentResult:
+        raise DeploymentFabricError("provider deploy result carrier is invalid")
+    if type(value.applied) is not bool or type(value.uncertain) is not bool:
+        raise DeploymentFabricError("provider deploy result flags must be booleans")
+    evidence_refs = _snapshot_provider_evidence_refs(
+        value.evidence_refs,
+        allow_empty=True,
+    )
+    return ProviderDeploymentResult(value.applied, value.uncertain, evidence_refs)
+
+
+def _snapshot_health_evidence(value: object) -> HealthEvidence:
+    if type(value) is not HealthEvidence:
+        raise DeploymentFabricError("provider health evidence carrier is invalid")
+    if type(value.environment_id) is not str or not value.environment_id.strip():
+        raise DeploymentFabricError("health evidence environment identity is invalid")
+    if type(value.release_sha) is not str:
+        raise DeploymentFabricError("health evidence release SHA must be text")
+    if type(value.healthy) is not bool:
+        raise DeploymentFabricError("health evidence healthy flag must be boolean")
+    if type(value.checked_at) is not datetime:
+        raise DeploymentFabricError("health evidence timestamp carrier is invalid")
+    release = (
+        None
+        if value.release is None
+        else _snapshot_provider_release(value.release, "health")
+    )
+    return HealthEvidence(
+        value.environment_id,
+        value.release_sha,
+        value.healthy,
+        _snapshot_provider_evidence_refs(value.evidence_refs),
+        _aware(value.checked_at),
+        release=release,
+    )
+
+
+def _snapshot_provider_inspection(value: object) -> ProviderInspection:
+    if type(value) is not ProviderInspection:
+        raise DeploymentFabricError("provider inspection carrier is invalid")
+    if value.release_sha is not None and type(value.release_sha) is not str:
+        raise DeploymentFabricError("provider inspection release SHA must be text or null")
+    if value.healthy is not None and type(value.healthy) is not bool:
+        raise DeploymentFabricError("provider inspection healthy must be boolean or null")
+    release = (
+        None
+        if value.release is None
+        else _snapshot_provider_release(value.release, "inspection")
+    )
+    return ProviderInspection(
+        value.release_sha,
+        value.healthy,
+        _snapshot_provider_evidence_refs(value.evidence_refs),
+        release=release,
+    )
+
+
+def _snapshot_rollback_evidence(value: object) -> RollbackEvidence:
+    if type(value) is not RollbackEvidence:
+        raise DeploymentFabricError("provider rollback evidence carrier is invalid")
+    if type(value.environment_id) is not str or not value.environment_id.strip():
+        raise DeploymentFabricError("rollback evidence environment identity is invalid")
+    if type(value.failed_release_sha) is not str:
+        raise DeploymentFabricError("rollback failed release SHA must be text")
+    if (
+        value.restored_release_sha is not None
+        and type(value.restored_release_sha) is not str
+    ):
+        raise DeploymentFabricError(
+            "rollback restored release SHA must be text or null"
+        )
+    if type(value.succeeded) is not bool:
+        raise DeploymentFabricError("rollback succeeded flag must be boolean")
+    failed_release = (
+        None
+        if value.failed_release is None
+        else _snapshot_provider_release(value.failed_release, "rollback failed")
+    )
+    restored_release = (
+        None
+        if value.restored_release is None
+        else _snapshot_provider_release(value.restored_release, "rollback restored")
+    )
+    return RollbackEvidence(
+        value.environment_id,
+        value.failed_release_sha,
+        value.restored_release_sha,
+        value.succeeded,
+        _snapshot_provider_evidence_refs(value.evidence_refs),
+        failed_release=failed_release,
+        restored_release=restored_release,
+    )
+
+
+def _snapshot_provider_release(value: object, label: str) -> ReleaseRef:
+    if type(value) is not ReleaseRef:
+        raise DeploymentFabricError(f"{label} release carrier is invalid")
+    for name, field_value in (
+        ("project_id", value.project_id),
+        ("version", value.version),
+        ("source_sha", value.source_sha),
+        ("artifact_digest", value.artifact_digest),
+    ):
+        if type(field_value) is not str:
+            raise DeploymentFabricError(f"{label} release {name} must be text")
+    return ReleaseRef(
+        value.project_id,
+        value.version,
+        value.source_sha,
+        value.artifact_digest,
+    )
+
+
+def _snapshot_provider_evidence_refs(
+    value: object,
+    *,
+    allow_empty: bool = False,
+) -> tuple[str, ...]:
+    if type(value) is not tuple:
+        raise DeploymentFabricError("provider evidence refs carrier must be a tuple")
+    if not allow_empty and not value:
+        raise DeploymentFabricError("provider evidence refs must not be empty")
+    for ref in value:
+        if type(ref) is not str or not ref.strip():
+            raise DeploymentFabricError(
+                "provider evidence refs must contain non-empty text"
+            )
+    return tuple(value)
 
 
 def _environment_key(intent: DeploymentIntent) -> tuple[str, str]:
