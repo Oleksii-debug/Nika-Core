@@ -68,6 +68,10 @@ def activate_attested_training_promotion(
             challenger_model_id=training.challenger_model_id,
             decision_sha256=canonical.evidence_sha256,
             binding_sha256=training.binding_sha256,
+            base_artifact_sha256=training.base_sha256,
+            base_descriptor_digest=training.base_descriptor_digest,
+            challenger_artifact_sha256=training.challenger_sha256,
+            challenger_descriptor_digest=training.descriptor_digest,
         )
     except ModelSetupError as exc:
         raise TrainingModelActivationError(
