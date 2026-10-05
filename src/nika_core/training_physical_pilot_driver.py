@@ -5,6 +5,7 @@ import json
 import logging
 import math
 import os
+import re
 import stat
 import tempfile
 from dataclasses import dataclass
@@ -30,6 +31,7 @@ from nika_core.training_peft_worker import (
     build_training_runtime_metadata,
     candidate_adapter_manifest,
     candidate_artifact_path,
+    model_directory_manifest_sha256,
 )
 from nika_core.training_physical_pilot import (
     PhysicalTrainingPilotError,
@@ -49,6 +51,7 @@ _CONFIG_SCHEMA_VERSION = 1
 _CONFIG_MAX_BYTES = 64 * 1024
 _MAX_TEXT_BYTES = 4096
 _MAX_REPORT_BYTES = 64 * 1024
+_TARGET_MODULE_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
 _RUNTIME_VERSION_KEYS = frozenset(
     {"torch", "transformers", "peft", "accelerate", "gguf", "safetensors"}
 )
@@ -263,6 +266,11 @@ class TrainerParameters:
         )
         if len(set(targets)) != len(targets):
             _fail("trainer_parameters.lora_target_modules contains duplicates")
+        if any(_TARGET_MODULE_RE.fullmatch(item) is None for item in targets):
+            _fail(
+                "trainer_parameters.lora_target_modules must match "
+                "the canonical trainer token grammar"
+            )
         return cls(
             max_sequence_length=_require_int(
                 value["max_sequence_length"],
@@ -661,6 +669,12 @@ def run_physical_pilot_from_config(
     if base_gguf_path.suffix.casefold() != ".gguf":
         _fail("base_gguf_path must use the .gguf suffix")
     model_dir = _require_existing_directory(config.model_dir, name="model_dir")
+    try:
+        model_directory_manifest_sha256(model_dir)
+    except ValueError as exc:
+        raise PhysicalPilotDriverError(
+            "model_dir is not a canonical local model directory"
+        ) from exc
 
     try:
         package_bytes = frozen_package_path.read_bytes()

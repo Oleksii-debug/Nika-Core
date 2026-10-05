@@ -97,6 +97,23 @@ def test_config_rejects_duplicate_target_module(tmp_path: Path) -> None:
         driver.PhysicalPilotConfig.from_json(json.dumps(payload))
 
 
+@pytest.mark.parametrize(
+    "target",
+    ("q proj", "модуль", "q,proj", "q\\proj"),
+)
+def test_config_rejects_worker_incompatible_target_module(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    payload = _payload(tmp_path)
+    trainer_parameters = payload["trainer_parameters"]
+    assert isinstance(trainer_parameters, dict)
+    trainer_parameters["lora_target_modules"] = [target]
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="trainer token grammar"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
 def test_config_rejects_nonpublic_candidate_reference(tmp_path: Path) -> None:
     payload = _payload(tmp_path)
     descriptor = payload["candidate_descriptor"]
@@ -115,6 +132,27 @@ def test_non_windows_gate_precedes_filesystem_effects(
     monkeypatch.setattr(driver, "_is_windows", lambda: False)
 
     with pytest.raises(driver.PhysicalPilotDriverError, match="must execute on Windows"):
+        driver.run_physical_pilot_from_config(config)
+
+    assert not config.output_root.exists()
+
+
+def test_invalid_model_directory_fails_before_durable_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+    config.blob_store_root.mkdir()
+    config.frozen_package_path.write_text("{}", encoding="utf-8")
+    config.trainer_executable.write_bytes(b"MZ")
+    config.base_gguf_path.write_bytes(b"GGUF")
+    config.model_dir.mkdir()
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="model_dir is not a canonical local model directory",
+    ):
         driver.run_physical_pilot_from_config(config)
 
     assert not config.output_root.exists()
