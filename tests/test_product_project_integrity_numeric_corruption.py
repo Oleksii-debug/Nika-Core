@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 
 import pytest
+
+from product_decision_authority_support import AuthorizingProductDecisionRepository
 import test_product_project_integrity as baseline
 
 from nika_core.product_decisions import ProductDecisionRepository
@@ -50,7 +52,7 @@ def test_integrity_rejects_non_integer_decision_version(tmp_path) -> None:
     store, projects, project = baseline._repos(tmp_path)
     baseline._approve(
         projects,
-        ProductDecisionRepository(store),
+        AuthorizingProductDecisionRepository(store),
         row_version=project.row_version,
     )
     with store.connection() as conn:
