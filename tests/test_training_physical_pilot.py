@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.training_physical_pilot as pilot
 from nika_core.model_artifacts import (
     ModelArtifactDescriptor,
     ModelArtifactKind,
@@ -327,6 +328,109 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             candidate_byte_count=report.candidate_byte_count,
             completed_steps=report.completed_steps,
             platform="linux",
+        )
+
+
+def _install_runner_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    resumed_probe: TrainingRunEvidence,
+    completed: TrainingRunEvidence,
+) -> tuple[object, object, list[tuple[str, bool]]]:
+    calls: list[tuple[str, bool]] = []
+
+    class FakeRuntime:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.calls = 0
+
+        def run(self, *_: object, control: object = None, **__: object) -> TrainingRunEvidence:
+            self.calls += 1
+            calls.append((self.name, control is not None))
+            if self.name == "initial":
+                return _run_evidence(
+                    state=TrainingRunState.PAUSED,
+                    next_step=1,
+                    checkpoint_id="checkpoint-paused",
+                )
+            if self.calls == 1:
+                return resumed_probe
+            return completed
+
+    class FakeWorker:
+        @property
+        def execution_plan_sha256(self) -> str:
+            return "e" * 64
+
+    class FakeSpec:
+        max_steps = 2
+
+    class FakeAuthorization:
+        pass
+
+    class FakeDescriptor:
+        pass
+
+    initial_runtime = FakeRuntime("initial")
+    resumed_runtime = FakeRuntime("resumed")
+    initial_worker = FakeWorker()
+    resumed_worker = FakeWorker()
+    sentinel = object()
+
+    monkeypatch.setattr(pilot, "_is_windows", lambda: True)
+    monkeypatch.setattr(pilot, "TrainingRuntime", FakeRuntime)
+    monkeypatch.setattr(pilot, "SubprocessTrainingWorker", FakeWorker)
+    monkeypatch.setattr(pilot, "TrainingJobSpec", FakeSpec)
+    monkeypatch.setattr(pilot, "TrainingScaleAuthorization", FakeAuthorization)
+    monkeypatch.setattr(pilot, "ModelArtifactDescriptor", FakeDescriptor)
+    monkeypatch.setattr(
+        pilot,
+        "build_physical_training_pilot_report",
+        lambda **_: sentinel,
+    )
+
+    result = pilot.run_physical_training_pilot(
+        runtime=initial_runtime,
+        restart_runtime=lambda: resumed_runtime,
+        spec=FakeSpec(),
+        worker=initial_worker,
+        restart_worker=lambda: resumed_worker,
+        scale_authorization=FakeAuthorization(),
+        candidate_path=Path("candidate"),
+        candidate_descriptor=FakeDescriptor(),
+    )
+    return result, sentinel, calls
+
+
+def test_physical_runner_probes_reopened_checkpoint_before_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, sentinel, calls = _install_runner_fakes(
+        monkeypatch,
+        resumed_probe=_restart_probe(),
+        completed=_completed_for(b"candidate"),
+    )
+
+    assert result is sentinel
+    assert calls == [
+        ("initial", True),
+        ("resumed", True),
+        ("resumed", False),
+    ]
+
+
+def test_physical_runner_rejects_empty_restart_store_before_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(PhysicalTrainingPilotError, match="reopen"):
+        _install_runner_fakes(
+            monkeypatch,
+            resumed_probe=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=0,
+                checkpoint_id="checkpoint-restart",
+            ),
+            completed=_completed_for(b"candidate"),
         )
 
 
