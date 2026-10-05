@@ -50,6 +50,7 @@ def test_public_evidence_contract_hashes_sensitive_and_oversized_references() ->
         "provider-session:raw-session",
         "https://example.invalid/callback?access_token=raw-token",
         "https://example.invalid/callback?access%5Ftoken=raw-token",
+        "https://example.invalid/callback?%41ccess%5Ftoken=raw-token",
         "https://example.invalid/callback?access%255Ftoken%253Draw-token",
         "authorization%3ABearer+raw-value",
         "credential%253A%252F%252Fprovider%252Fproject-1%252Fwriter",
