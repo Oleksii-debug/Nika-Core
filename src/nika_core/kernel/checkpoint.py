@@ -28,7 +28,7 @@ def _canonical_json(payload: dict[str, object]) -> str:
             sort_keys=True,
             separators=(",", ":"),
         )
-    except (TypeError, ValueError) as exc:
+    except (RecursionError, TypeError, ValueError) as exc:
         raise ValueError("Checkpoint payload must be a JSON object with finite values") from exc
 
 
@@ -36,17 +36,25 @@ def _reject_non_finite(_value: str) -> NoReturn:
     raise ValueError("Checkpoint payload contains a non-finite number")
 
 
-def _decode_payload(payload_json: str, checksum_sha256: str) -> dict[str, object]:
-    expected = hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
-    if expected != checksum_sha256:
+def _require_sqlite_text(value: object, field_name: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"Checkpoint {field_name} storage must be SQLite TEXT")
+    return value
+
+
+def _decode_payload(payload_json: object, checksum_sha256: object) -> dict[str, object]:
+    payload_text = _require_sqlite_text(payload_json, "payload")
+    checksum_text = _require_sqlite_text(checksum_sha256, "checksum")
+    expected = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+    if expected != checksum_text:
         raise ValueError("Checkpoint checksum mismatch")
     try:
-        payload = json.loads(payload_json, parse_constant=_reject_non_finite)
-    except (json.JSONDecodeError, ValueError) as exc:
+        payload = json.loads(payload_text, parse_constant=_reject_non_finite)
+    except (json.JSONDecodeError, RecursionError, ValueError) as exc:
         raise ValueError("Checkpoint payload is invalid JSON") from exc
     if not isinstance(payload, dict):
         raise TypeError("Checkpoint payload must be a JSON object")
-    if _canonical_json(payload) != payload_json:
+    if _canonical_json(payload) != payload_text:
         raise ValueError("Checkpoint payload is not canonical JSON")
     return payload
 
