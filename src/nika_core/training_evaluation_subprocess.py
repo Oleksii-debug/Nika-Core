@@ -595,6 +595,8 @@ class RegistrySubprocessLoadedModelAttestor:
             or request.model != binding.challenger_model_id
             or request.fallback_provider_ids
             or request.metadata.get("model_candidate_id") != binding.challenger_candidate_id
+            or request.metadata.get("evaluation_set_sha256")
+            != binding.evaluation_set_sha256
             or any(key not in _EVALUATION_METADATA_KEYS for key in request.metadata)
         ):
             raise _error(
