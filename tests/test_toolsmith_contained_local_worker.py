@@ -380,6 +380,71 @@ def test_corrupt_durable_state_fails_closed_to_manual_reconciliation(
     assert recovered.failure.retryable is False
 
 
+def test_same_job_single_flight_precedes_planner_side_effect(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    entered: asyncio.Event
+    release: asyncio.Event
+
+    class BlockingPlanner:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def plan(self, _job: CodingJob) -> LocalCodingPlan:
+            self.calls += 1
+            entered.set()
+            await release.wait()
+            return LocalCodingPlan((LocalFileEdit("src/value.py", b"VALUE = 2\n"),))
+
+    async def scenario():
+        nonlocal entered, release
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        planner = BlockingPlanner()
+        worker = _worker(tmp_path, repository, planner)
+        job = _job(worker, base_sha)
+        first_task = asyncio.create_task(worker.execute(job))
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        assert worker.is_active(job.job_id)
+        second = await worker.execute(job)
+        release.set()
+        first = await first_task
+        return planner, first, second
+
+    planner, first, second = _run(scenario())
+
+    assert planner.calls == 1
+    assert first.failure is None
+    assert second.failure is not None
+    assert second.failure.kind is WorkerFailureKind.INVALID_REQUEST
+    assert second.failure.retryable is False
+
+
+def test_planner_mutation_cannot_rewrite_retained_job_authority(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+
+    class MutatingPlanner:
+        async def plan(self, planning_job: CodingJob) -> LocalCodingPlan:
+            object.__setattr__(planning_job.resource_budget, "max_changed_files", 0)
+            object.__setattr__(planning_job.allowed_paths, "roots", ("docs",))
+            object.__setattr__(planning_job.repository, "tree_digest", "0" * 40)
+            return LocalCodingPlan((LocalFileEdit("src/value.py", b"VALUE = 2\n"),))
+
+    worker = _worker(tmp_path, repository, MutatingPlanner())
+    job = _job(worker, base_sha)
+
+    result = _run(worker.execute(job))
+
+    assert result.failure is None
+    assert [item.path for item in result.changed_files] == ["src/value.py"]
+    evidence = worker.execution_evidence(job.job_id)
+    assert evidence.base_sha == base_sha
+    assert evidence.result_sha != base_sha
+
+
 def test_terminal_replay_rejects_candidate_worktree_tamper(
     tmp_path: pathlib.Path,
 ) -> None:
