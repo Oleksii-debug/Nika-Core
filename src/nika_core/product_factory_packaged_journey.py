@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping
 from typing import Any
@@ -58,7 +59,15 @@ def packaged_product_reopen_target(command: str) -> str | None:
     """
     normalized = " ".join(command.split())
     lowered = normalized.casefold()
-    prefix = next((item for item in _REOPEN_PREFIXES if lowered.startswith(item)), None)
+    prefix = next(
+        (
+            item
+            for item in _REOPEN_PREFIXES
+            if lowered.startswith(item)
+            and lowered[len(item) : len(item) + 1] in ("", " ", ":", "#")
+        ),
+        None,
+    )
     if prefix is None:
         return None
     remainder = normalized[len(prefix) :].strip(" :#")
@@ -73,6 +82,19 @@ def packaged_current_product_command(command: str) -> bool:
     """Recognize an exact keyboard command that reports the durable presentation selection."""
     normalized = " ".join(command.split()).casefold().strip(" :")
     return normalized in _CURRENT_PROJECT_COMMANDS
+
+
+def _valid_selection_id(value: object) -> bool:
+    if type(value) is not str or not value or value != value.strip():
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return not any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    )
 
 
 class PackagedProductSelectionStore:
@@ -98,13 +120,15 @@ class PackagedProductSelectionStore:
             ).fetchone()
         if row is None:
             return None
-        project_id = str(row["project_id"]).strip()
-        return project_id or None
+        project_id = row["project_id"]
+        return project_id if _valid_selection_id(project_id) else None
 
     def select(self, project_id: str) -> None:
+        if type(project_id) is not str:
+            raise PackagedProductJourneyError("selected ProductProject id must be text")
         normalized = project_id.strip()
-        if not normalized:
-            raise PackagedProductJourneyError("selected ProductProject id must not be empty")
+        if not _valid_selection_id(normalized):
+            raise PackagedProductJourneyError("selected ProductProject id contains invalid text")
         with self._store.connection() as conn:
             conn.execute(
                 "INSERT INTO packaged_product_selection(slot, project_id) VALUES (1, ?) "
