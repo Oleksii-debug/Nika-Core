@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -9,6 +10,7 @@ import httpx
 
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelRequest,
     ModelResponse,
@@ -16,6 +18,8 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
+
+_SHA256_DIGEST = re.compile(r"[0-9a-f]{64}")
 
 
 def _require_provider_text(name: str, value: object) -> str:
@@ -28,6 +32,87 @@ def _require_provider_text(name: str, value: object) -> str:
     if any(not char.isprintable() for char in value):
         raise ValueError(f"{name} must not contain control characters")
     return value
+
+
+def _require_sha256_digest(name: str, value: object) -> str:
+    if type(value) is not str or _SHA256_DIGEST.fullmatch(value) is None:
+        raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+    return value
+
+
+async def _verify_ollama_model_digest(
+    client: httpx.AsyncClient,
+    *,
+    base_url: str,
+    model: str,
+    expected_digest: str,
+    endpoint: str,
+    failure_effect: ModelFailureEffect,
+) -> None:
+    try:
+        response = await client.get(f"{base_url}{endpoint}")
+        response.raise_for_status()
+        media_type = response.headers.get("content-type", "").partition(";")[0]
+        if media_type.strip().casefold() != "application/json":
+            raise ValueError("Ollama model inventory must be JSON")
+        body = response.json()
+    except httpx.TimeoutException as exc:
+        raise ModelGatewayError(
+            ModelErrorCode.TIMEOUT,
+            "Ollama model digest verification timed out",
+            provider_id="ollama",
+            retryable=False,
+            failure_effect=failure_effect,
+        ) from exc
+    except httpx.HTTPStatusError as exc:
+        code, retryable = _classify_http_status(exc.response.status_code)
+        raise ModelGatewayError(
+            code,
+            f"Ollama model digest verification returned HTTP {exc.response.status_code}",
+            provider_id="ollama",
+            retryable=retryable if failure_effect is ModelFailureEffect.NO_EFFECT else False,
+            failure_effect=failure_effect,
+        ) from exc
+    except (httpx.HTTPError, ValueError, TypeError) as exc:
+        raise ModelGatewayError(
+            ModelErrorCode.PROVIDER_ERROR,
+            "Ollama model digest verification could not be processed",
+            provider_id="ollama",
+            retryable=False,
+            failure_effect=failure_effect,
+        ) from exc
+
+    try:
+        if type(body) is not dict:
+            raise TypeError("inventory must be an object")
+        models = body.get("models")
+        if type(models) is not list or len(models) > 4096:
+            raise TypeError("inventory models must be a bounded list")
+        matches: list[str] = []
+        for item in models:
+            if type(item) is not dict:
+                raise TypeError("inventory entry must be an object")
+            if item.get("model") == model:
+                matches.append(
+                    _require_sha256_digest("Ollama model digest", item.get("digest"))
+                )
+        if len(matches) != 1:
+            raise ValueError("Ollama model identity is missing or ambiguous")
+        if matches[0] != expected_digest:
+            raise ValueError("Ollama model digest differs from the accepted artifact")
+    except (TypeError, ValueError) as exc:
+        code = (
+            ModelErrorCode.INVALID_REQUEST
+            if failure_effect is ModelFailureEffect.NO_EFFECT
+            else ModelErrorCode.PROVIDER_ERROR
+        )
+        raise ModelGatewayError(
+            code,
+            "Ollama model artifact does not match the accepted task",
+            provider_id="ollama",
+            retryable=False,
+            failure_effect=failure_effect,
+        ) from exc
 
 
 class DeterministicMockProvider:
@@ -214,6 +299,7 @@ class OllamaProvider:
         default_model: str,
         base_url: str = "http://localhost:11434",
         think: bool | str = False,
+        expected_model_digest: str | None = None,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
         default_model = _require_provider_text("default_model", default_model)
@@ -249,6 +335,11 @@ class OllamaProvider:
         self._default_model = default_model
         self._base_url = base_url.rstrip("/")
         self._think = _normalize_ollama_think(think)
+        self._expected_model_digest = (
+            _require_sha256_digest("expected_model_digest", expected_model_digest)
+            if expected_model_digest is not None
+            else None
+        )
         self._client_factory = client_factory
 
     @property
@@ -276,6 +367,15 @@ class OllamaProvider:
                 trust_env=False,
                 follow_redirects=False,
             ) as client:
+                if self._expected_model_digest is not None:
+                    await _verify_ollama_model_digest(
+                        client,
+                        base_url=self._base_url,
+                        model=model,
+                        expected_digest=self._expected_model_digest,
+                        endpoint="/api/tags",
+                        failure_effect=ModelFailureEffect.NO_EFFECT,
+                    )
                 response = await client.post(f"{self._base_url}/api/chat", json=payload)
                 response.raise_for_status()
                 media_type = response.headers.get("content-type", "").partition(";")[0]
@@ -335,6 +435,24 @@ class OllamaProvider:
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             ) from exc
+
+        if self._expected_model_digest is not None:
+            try:
+                async with self._client_factory(
+                    timeout=request.timeout_seconds,
+                    trust_env=False,
+                    follow_redirects=False,
+                ) as client:
+                    await _verify_ollama_model_digest(
+                        client,
+                        base_url=self._base_url,
+                        model=model,
+                        expected_digest=self._expected_model_digest,
+                        endpoint="/api/ps",
+                        failure_effect=ModelFailureEffect.UNKNOWN,
+                    )
+            except ModelGatewayError:
+                raise
 
         return ModelResponse(
             request_id=request.request_id,
