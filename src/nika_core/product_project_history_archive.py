@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from typing import Any
 
@@ -11,11 +12,120 @@ from nika_core.product_project_history_integrity import (
 )
 
 _ARCHIVE_SCHEMA = "nika-product-project-history-archive-v1"
+_MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
+_MAX_DURABLE_JSON_BYTES = 2 * 1024 * 1024
+_MAX_JSON_DEPTH = 128
+_MAX_JSON_NODES = 500_000
+_ARCHIVE_ENVELOPE_KEYS = frozenset({"digest_sha256", "payload"})
+_ARCHIVE_PAYLOAD_KEYS = frozenset(
+    {"schema", "project_id", "spec_version", "row_version", "history"}
+)
+_ARCHIVE_HISTORY_KEYS = frozenset(
+    {
+        "project",
+        "specs",
+        "research_handoffs",
+        "decisions",
+        "creation_idempotency",
+        "mutation_idempotency",
+        "audit_events",
+    }
+)
 _JSON_COLUMNS = {
     "spec_json": "spec",
     "payload_json": "payload",
     "evidence_package_ids_json": "evidence_package_ids",
 }
+
+
+class _StrictJsonError(ValueError):
+    pass
+
+
+def _reject_json_constant(value: str) -> Any:
+    raise _StrictJsonError(f"non-finite JSON constant: {value}")
+
+
+def _parse_finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise _StrictJsonError("non-finite JSON number")
+    return parsed
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _StrictJsonError("duplicate JSON object key")
+        result[key] = value
+    return result
+
+
+def _validate_json_shape(value: Any, *, label: str) -> Any:
+    stack: list[tuple[Any, int]] = [(value, 0)]
+    nodes = 0
+    while stack:
+        current, depth = stack.pop()
+        nodes += 1
+        if nodes > _MAX_JSON_NODES:
+            raise ProductProjectError(f"{label} exceeds JSON node limit")
+        if depth > _MAX_JSON_DEPTH:
+            raise ProductProjectError(f"{label} exceeds JSON nesting limit")
+        if isinstance(current, dict):
+            for key, child in current.items():
+                try:
+                    key.encode("utf-8")
+                except UnicodeEncodeError as exc:
+                    raise ProductProjectError(f"{label} contains invalid Unicode") from exc
+                stack.append((child, depth + 1))
+        elif isinstance(current, list):
+            stack.extend((child, depth + 1) for child in current)
+        elif isinstance(current, str):
+            try:
+                current.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ProductProjectError(f"{label} contains invalid Unicode") from exc
+    return value
+
+
+def _strict_json_text(value: Any, *, label: str, max_bytes: int) -> Any:
+    if type(value) is not str:
+        raise ProductProjectError(f"{label} must be JSON text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProductProjectError(f"{label} is not valid UTF-8 text") from exc
+    if len(encoded) > max_bytes:
+        raise ProductProjectError(f"{label} exceeds byte limit")
+    try:
+        parsed = json.loads(
+            value,
+            object_pairs_hook=_unique_json_object,
+            parse_constant=_reject_json_constant,
+            parse_float=_parse_finite_float,
+        )
+    except (
+        json.JSONDecodeError,
+        _StrictJsonError,
+        OverflowError,
+        RecursionError,
+        ValueError,
+    ) as exc:
+        raise ProductProjectError(f"invalid {label}") from exc
+    return _validate_json_shape(parsed, label=label)
+
+
+def _strict_json_bytes(value: Any, *, label: str, max_bytes: int) -> Any:
+    if type(value) is not bytes:
+        raise ProductProjectError(f"{label} must be exact bytes")
+    if len(value) > max_bytes:
+        raise ProductProjectError(f"{label} exceeds byte limit")
+    try:
+        text = value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProductProjectError(f"invalid {label} encoding") from exc
+    return _strict_json_text(text, label=label, max_bytes=max_bytes)
 
 
 def _canonical(value: Any) -> str:
@@ -197,25 +307,32 @@ class ProductProjectHistoryArchiveService:
             if mapped is None:
                 result[key] = value
                 continue
-            try:
-                parsed = json.loads(value)
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise ProductProjectError(f"invalid durable JSON column: {key}") from exc
-            result[mapped] = parsed
+            result[mapped] = _strict_json_text(
+                value,
+                label=f"durable JSON column: {key}",
+                max_bytes=_MAX_DURABLE_JSON_BYTES,
+            )
         return result
 
     @staticmethod
     def _decode(archive_bytes: bytes) -> tuple[dict[str, Any], str]:
-        try:
-            envelope = json.loads(archive_bytes.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ProductProjectError("invalid ProductProject history archive encoding") from exc
-        if not isinstance(envelope, dict):
+        envelope = _strict_json_bytes(
+            archive_bytes,
+            label="ProductProject history archive",
+            max_bytes=_MAX_ARCHIVE_BYTES,
+        )
+        if type(envelope) is not dict or set(envelope) != _ARCHIVE_ENVELOPE_KEYS:
             raise ProductProjectError("invalid ProductProject history archive envelope")
-        payload = envelope.get("payload")
-        digest = envelope.get("digest_sha256")
-        if not isinstance(payload, dict) or not isinstance(digest, str) or not digest.strip():
-            raise ProductProjectError("incomplete ProductProject history archive envelope")
+        payload = envelope["payload"]
+        digest = envelope["digest_sha256"]
+        if type(payload) is not dict or set(payload) != _ARCHIVE_PAYLOAD_KEYS:
+            raise ProductProjectError("invalid ProductProject history archive payload")
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ProductProjectError("invalid ProductProject history archive digest")
         if payload.get("schema") != _ARCHIVE_SCHEMA:
             raise ProductProjectError("unsupported ProductProject history archive schema")
         if _sha256(payload) != digest:
@@ -363,8 +480,10 @@ class ProductProjectHistoryArchiveService:
         digest: str,
     ) -> ProductProjectHistoryArchiveSummary:
         history = payload.get("history")
-        if not isinstance(history, dict):
+        if type(history) is not dict:
             raise ProductProjectError("ProductProject history archive has no history object")
+        if set(history) != _ARCHIVE_HISTORY_KEYS:
+            raise ProductProjectError("ProductProject history archive has invalid history schema")
         required_lists = (
             "specs",
             "research_handoffs",
