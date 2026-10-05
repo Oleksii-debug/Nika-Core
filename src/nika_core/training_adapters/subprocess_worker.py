@@ -399,6 +399,38 @@ def _normalized_executable_path(value: str) -> str:
     return os.path.normcase(os.path.normpath(os.path.abspath(value)))
 
 
+def _snapshot_spec(spec: TrainingJobSpec) -> TrainingJobSpec:
+    if type(spec) is not TrainingJobSpec:
+        raise _error(
+            "training_spec_invalid_type",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        )
+    try:
+        base = spec.base_artifact
+        if type(base) is not ArtifactIdentity:
+            raise TypeError("base_artifact must be an exact ArtifactIdentity")
+        return TrainingJobSpec(
+            job_id=spec.job_id,
+            task_id=spec.task_id,
+            project_id=spec.project_id,
+            owner_id=spec.owner_id,
+            base_artifact=ArtifactIdentity(
+                artifact_ref=base.artifact_ref,
+                sha256=base.sha256,
+            ),
+            frozen_package_sha256=spec.frozen_package_sha256,
+            training_material_sha256=spec.training_material_sha256,
+            candidate_artifact_ref=spec.candidate_artifact_ref,
+            max_steps=spec.max_steps,
+            resource_scope=spec.resource_scope,
+        )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise _error(
+            "training_spec_invalid",
+            effect=TrainingWorkerFailureEffect.NO_EFFECT,
+        ) from exc
+
+
 def _materials_match_spec(
     spec: TrainingJobSpec,
     training_materials: ResolvedTrainingPackage,
@@ -496,7 +528,12 @@ class SubprocessTrainingWorker:
         resume_state: dict[str, object],
         training_materials: ResolvedTrainingPackage,
     ) -> TrainingStepResult:
-        if type(step_index) is not int or step_index < 0 or step_index >= spec.max_steps:
+        canonical_spec = _snapshot_spec(spec)
+        if (
+            type(step_index) is not int
+            or step_index < 0
+            or step_index >= canonical_spec.max_steps
+        ):
             raise _error("step_index_out_of_bounds", effect=TrainingWorkerFailureEffect.NO_EFFECT)
         if type(resume_state) is not dict:
             raise _error("resume_state_invalid_type", effect=TrainingWorkerFailureEffect.NO_EFFECT)
@@ -505,7 +542,7 @@ class SubprocessTrainingWorker:
                 "training_materials_invalid_type",
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             )
-        if not _materials_match_spec(spec, training_materials):
+        if not _materials_match_spec(canonical_spec, training_materials):
             raise _error(
                 "training_material_identity_mismatch",
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
@@ -515,7 +552,7 @@ class SubprocessTrainingWorker:
         trainer_record = command_records[0]
         trainer_sha256 = trainer_record.sha256
         job_fingerprint = _job_fingerprint(
-            spec,
+            canonical_spec,
             command_sha256=self._command_sha256,
         )
         trainer_state, previous_step_id = self._unwrap_resume_state(
@@ -536,7 +573,7 @@ class SubprocessTrainingWorker:
                 for index, record in sorted(command_records.items())
             ],
             "command_sha256": self._command_sha256,
-            "job": _job_identity(spec, command_sha256=self._command_sha256),
+            "job": _job_identity(canonical_spec, command_sha256=self._command_sha256),
             "job_fingerprint": job_fingerprint,
             "previous_step_id": previous_step_id,
             "protocol_version": _PROTOCOL_VERSION,
