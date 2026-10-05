@@ -21,14 +21,20 @@ Windows-only. A successful call must:
 8. resume the same authorized job to `COMPLETED`;
 9. require a third distinct durable completion checkpoint;
 10. build the final candidate descriptor only from detached canonical completion evidence;
-11. reverify the final candidate through the existing canonical
+11. strictly admit the canonical self-contained PEFT candidate manifest and require a
+    non-empty safetensors tensor set;
+12. require that manifest to match the completed base/candidate/job/step identity;
+13. bind the exact previous durable-checkpoint adapter SHA-256 and newly trained adapter
+    SHA-256, and require those digests to differ;
+14. reverify the final candidate through the existing canonical
     `training_artifacts.verify_candidate_artifact` boundary; and
-12. require the verifier receipt SHA-256 to equal the completed runtime evidence.
+15. require the verifier receipt SHA-256 to equal the completed runtime evidence.
 
 The resulting `PhysicalTrainingPilotReport` is path-free. It contains bounded identifiers,
-SHA-256 identities, descriptor/registry digests, the original pause, restart-probe, and
-completion checkpoint IDs, candidate byte count, completed step count, schema version, and
-the literal platform value `windows`. It does not
+SHA-256 identities, descriptor/registry digests, consumed-material identity, model-directory
+manifest identity, exact trainer/deployment/runtime identities, previous and trained adapter
+digests, the original pause, restart-probe, and completion checkpoint IDs, candidate byte
+count, completed step count, schema version, and the literal platform value `windows`. It does not
 serialize training/validation records, model paths, credentials, environment variables,
 prompts, responses, or checkpoint payloads.
 
@@ -41,7 +47,9 @@ Register the exact local trainer executable in the canonical Artifact Registry a
 
 Resolve the frozen training package through the canonical training-material resolver. Build
 the pilot-tier `TrainingScaleAuthorization` from the same material evidence and the
-`SubprocessTrainingWorker.execution_plan_sha256`. The job must use `max_steps >= 2`.
+`SubprocessTrainingWorker.execution_plan_sha256`. The physical pilot is intentionally
+bounded to exactly `max_steps == 2`: step 1 creates the durable pre-restart adapter checkpoint
+and step 2 must produce a different trained adapter digest after reopen.
 
 The restart factory must reopen the same durable checkpoint state rather than returning the
 original `TrainingRuntime` object or a new runtime backed by an empty store. The harness proves
@@ -85,8 +93,10 @@ print(report.evidence_sha256)
 ```
 
 The helper supplies both the control sequence required to create the one-step pause and the
-effect-free restart probe. Reports use schema version 2 because the durable-reopen checkpoint
-is now part of the evidence identity.
+effect-free restart probe. Reports use schema version 3 because the evidence now also binds
+the exact consumed-material, model-directory, trainer/deployment/runtime and prior-vs-trained
+adapter identities. A schema-v3 report cannot be constructed when the two adapter digests are
+equal.
 
 ## Evidence boundaries
 
@@ -94,6 +104,9 @@ A unit test, green CI run, or merely constructing a report is not physical-train
 The physical acceptance claim requires an observed successful run on the intended Windows/CPU
 ML environment with the exact Registry/runtime/material authorities that the report binds.
 
-This harness never sets or implies `HUMAN_TESTED`, `NVDA_VERIFIED`,
-`TRAINING_WEIGHTS_PROVEN`, old-vs-new model superiority, promotion eligibility, or
-`PRODUCTION_RELEASE_READY`. Those remain separate gates.
+The harness never self-sets project status flags. An observed successful schema-v3 physical
+run provides concrete evidence that the exact Registry-authorized PEFT deployment changed the
+adapter weights between the durable first-step checkpoint and the trained second-step
+checkpoint. That is weight-mutation evidence only; it does not prove old-vs-new model
+superiority, promotion eligibility, human/NVDA acceptance, or release readiness. Those remain
+separate gates and must be recorded only after their own acceptance evidence exists.
