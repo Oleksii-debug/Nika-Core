@@ -7,6 +7,7 @@ import pytest
 
 import nika_core.training_physical_evaluation_driver as driver
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.experiments import ExperimentStatus, SQLiteExperimentRepository
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.model_artifacts import (
     ModelArtifactDescriptor,
@@ -343,6 +344,130 @@ def test_model_size_preflight_does_not_read_model_bytes(
 
     assert driver._model_size(model, name="model") == 8192
 
+
+
+def _physical_candidates(
+    tmp_path: Path,
+) -> tuple[driver.ModelCandidate, driver.ModelCandidate]:
+    config = _config(tmp_path)
+    base_descriptor = ModelArtifactDescriptor(
+        kind=ModelArtifactKind.EXTERNAL_LOCAL,
+        provider_id="local-base",
+        model_id="base-model",
+        model_version="v1",
+        source_reference="https://example.com/models/base",
+        license_reference="https://example.com/licenses/base",
+        integrity_basis=ModelIntegrityBasis.SHA256,
+        sha256="1" * 64,
+        size_bytes=456,
+        capabilities=("text",),
+    )
+    challenger_descriptor = _candidate_descriptor()
+    return (
+        driver._candidate(
+            candidate_id="models/base",
+            descriptor=base_descriptor,
+            evaluator=config.evaluator,
+        ),
+        driver._candidate(
+            candidate_id="models/pilot-candidate",
+            descriptor=challenger_descriptor,
+            evaluator=config.evaluator,
+        ),
+    )
+
+
+def test_durable_attempt_claim_precedes_and_fences_repeat_effects(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    champion, challenger = _physical_candidates(tmp_path)
+    evaluation = driver._evaluation_set_from_json(
+        json.dumps(_evaluation_payload(), ensure_ascii=False)
+    )
+    store = SQLiteStore(tmp_path / "attempt.sqlite3")
+    store.initialize()
+    repository = SQLiteExperimentRepository(store)
+    attempt_id = driver._physical_attempt_id(
+        requested_experiment_id=config.experiment_id,
+        pilot=_pilot_report(),
+        training_binding_sha256="a" * 64,
+        champion_binding_sha256="b" * 64,
+        champion=champion,
+        challenger=challenger,
+        evaluation_set=evaluation,
+        execution_config=config.benchmark,
+        policy=config.policy,
+        permission_fingerprint=config.permission_fingerprint,
+        attestor_id="evaluator-artifact",
+        attestor_sha256="c" * 64,
+    )
+
+    driver._claim_evaluation_attempt(
+        repository=repository,
+        experiment_id=attempt_id,
+        champion=champion,
+        challenger=challenger,
+        evaluation_set=evaluation,
+        execution_config=config.benchmark,
+        policy=config.policy,
+        permission_fingerprint=config.permission_fingerprint,
+    )
+
+    snapshot = repository.get(attempt_id)
+    assert snapshot.status is ExperimentStatus.RUNNING
+    assert snapshot.observations == ()
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="will not repeat champion/challenger effects",
+    ):
+        driver._claim_evaluation_attempt(
+            repository=repository,
+            experiment_id=attempt_id,
+            champion=champion,
+            challenger=challenger,
+            evaluation_set=evaluation,
+            execution_config=config.benchmark,
+            policy=config.policy,
+            permission_fingerprint=config.permission_fingerprint,
+        )
+
+
+def test_physical_attempt_identity_binds_exact_attestor(
+    tmp_path: Path,
+) -> None:
+    config = _config(tmp_path)
+    champion, challenger = _physical_candidates(tmp_path)
+    evaluation = driver._evaluation_set_from_json(
+        json.dumps(_evaluation_payload(), ensure_ascii=False)
+    )
+    common = {
+        "requested_experiment_id": config.experiment_id,
+        "pilot": _pilot_report(),
+        "training_binding_sha256": "a" * 64,
+        "champion_binding_sha256": "b" * 64,
+        "champion": champion,
+        "challenger": challenger,
+        "evaluation_set": evaluation,
+        "execution_config": config.benchmark,
+        "policy": config.policy,
+        "permission_fingerprint": config.permission_fingerprint,
+        "attestor_id": "evaluator-artifact",
+    }
+
+    first = driver._physical_attempt_id(
+        **common,
+        attestor_sha256="c" * 64,
+    )
+    second = driver._physical_attempt_id(
+        **common,
+        attestor_sha256="d" * 64,
+    )
+
+    assert first != second
+    assert first.startswith("nika-physical-old-new-")
+    assert len(first.rsplit("-", 1)[1]) == 64
 
 def test_report_writer_is_no_clobber(tmp_path: Path) -> None:
     path = tmp_path / "physical-old-new-evaluation-report.json"
