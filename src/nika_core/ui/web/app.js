@@ -183,6 +183,30 @@
   let keymapMutationPending = false;
   let stateUnavailableReported = false;
   const maxActivityItems = 200;
+
+  function validDispatchResponse(response, expectedRequestId) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && response.request_id === expectedRequestId
+      && ["accepted", "completed", "failed", "rejected"].includes(response.status)
+      && typeof response.message === "string"
+      && (response.focus_id == null || typeof response.focus_id === "string"),
+    );
+  }
+
+  function validKeymapResponse(response, requireData = false) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && typeof response.ok === "boolean"
+      && typeof response.message === "string"
+      && (!requireData || !response.ok || typeof response.data === "string"),
+    );
+  }
+
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let stateRefreshGeneration = 0;
@@ -1371,10 +1395,11 @@
         payload.revision = sourceRevision;
         for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
       }
+      const dispatchRequestId = requestId();
       let result;
       try {
         result = await globalThis.pywebview.api.dispatch({
-          request_id: requestId(), action_id: actionId, payload,
+          request_id: dispatchRequestId, action_id: actionId, payload,
         });
       } catch {
         // The durable effect may have committed before the bridge disconnected. Never retry blindly.
@@ -1383,7 +1408,7 @@
         );
         return;
       }
-      if (!result || !["accepted", "completed", "failed", "rejected"].includes(result.status)) {
+      if (!validDispatchResponse(result, dispatchRequestId)) {
         await reconcileUncertain(
           "Міст повернув непідтверджений результат. Стан буде перечитано перед можливим повтором.",
         );
@@ -1471,7 +1496,7 @@
         );
         return;
       }
-      if (!response || typeof response.ok !== "boolean") {
+      if (!validKeymapResponse(response)) {
         await reconcileUncertainKeymap(
           "Міст повернув непідтверджену зміну клавіш. Карта буде перечитана перед можливим повтором.",
         );
@@ -1615,8 +1640,7 @@
     }
     try {
       const response = await globalThis.pywebview.api.export_keymap();
-      if (!response || typeof response.ok !== "boolean"
-          || (response.ok && typeof response.data !== "string")) {
+      if (!validKeymapResponse(response, true)) {
         throw new Error("invalid keymap export acknowledgement");
       }
       const message = typeof response.message === "string" && response.message
