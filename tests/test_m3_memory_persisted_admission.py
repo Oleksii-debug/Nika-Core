@@ -464,6 +464,99 @@ def test_corrupt_created_at_blocks_put_before_mutation(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    ("scope", "column", "stored", "message"),
+    [
+        (
+            MemoryScope.TASK,
+            "value_json",
+            "NaN",
+            "invalid stored memory JSON constant",
+        ),
+        (
+            MemoryScope.TASK,
+            "updated_at",
+            "2038-01-01T00:00:00",
+            "stored memory updated_at must be timezone-aware",
+        ),
+        (
+            MemoryScope.TASK,
+            "expires_at",
+            b"2038-01-01T00:00:00+00:00",
+            "stored memory expiry must be text",
+        ),
+        (
+            MemoryScope.USER,
+            "user_approved",
+            0,
+            "user memory lacks durable explicit approval",
+        ),
+    ],
+)
+def test_put_preserves_corrupt_existing_record_before_replacement(
+    tmp_path: Path,
+    scope: MemoryScope,
+    column: str,
+    stored: object,
+    message: str,
+) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory, scope=scope)
+    with store.connection() as conn:
+        conn.execute(
+            f"UPDATE memory_records SET {column} = ? WHERE memory_key = 'entry'",
+            (stored,),
+        )
+
+    with pytest.raises(ValueError, match=message):
+        memory.put(
+            scope=scope,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+            value={"replacement": True},
+            user_approved=scope is MemoryScope.USER,
+        )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            f"SELECT {column}, value_json FROM memory_records "
+            "WHERE memory_key = 'entry'"
+        ).fetchone()
+    assert row is not None
+    assert row[column] == stored
+    if column != "value_json":
+        assert row["value_json"] == '{"safe":true}'
+
+
+def test_rejected_replacement_put_does_not_emit_second_upsert_audit(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    audit = AuditLog(store)
+    memory = MemoryService(store, audit)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET value_json = 'NaN' "
+            "WHERE memory_key = 'entry'"
+        )
+
+    with pytest.raises(ValueError, match="invalid stored memory JSON constant"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+            value={"replacement": True},
+        )
+
+    events = audit.list_for(
+        entity_type="memory",
+        entity_id="task:owner:scratch:entry",
+    )
+    assert [event.event_type for event in events] == ["memory.upserted"]
+
+
+@pytest.mark.parametrize(
     "invalid",
     [
         "bad\x00key",
