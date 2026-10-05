@@ -13,6 +13,9 @@ from nika_core.artifacts.contracts import (
 from nika_core.data.sqlite import SQLiteStore
 
 
+_MAX_DURABLE_JSON_BYTES = 1_048_576
+
+
 def _same_registration(left: ArtifactRecord, right: ArtifactRecord) -> bool:
     left_data = left.model_dump(exclude={"created_at"})
     right_data = right.model_dump(exclude={"created_at"})
@@ -38,12 +41,25 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return value
 
 
-def _load_durable_json(value: object, *, field: str) -> dict[str, Any]:
+def _bounded_durable_json_text(value: object, *, field: str) -> str:
     if type(value) is not str:
         raise ArtifactRegistryError(f"{field} must be stored as SQLite TEXT")
+    if len(value) > _MAX_DURABLE_JSON_BYTES:
+        raise ArtifactRegistryError(f"{field} exceeds the 1 MiB durable JSON limit")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ArtifactRegistryError(f"{field} is invalid UTF-8 text") from exc
+    if len(encoded) > _MAX_DURABLE_JSON_BYTES:
+        raise ArtifactRegistryError(f"{field} exceeds the 1 MiB durable JSON limit")
+    return value
+
+
+def _load_durable_json(value: object, *, field: str) -> dict[str, Any]:
+    text = _bounded_durable_json_text(value, field=field)
     try:
         payload = json.loads(
-            value,
+            text,
             parse_constant=_reject_nonfinite_json_constant,
             object_pairs_hook=_unique_json_object,
         )
@@ -119,6 +135,10 @@ class SQLiteArtifactRepository:
         self._store = store
 
     def put_record(self, record: ArtifactRecord) -> ArtifactRecord:
+        record_json = _bounded_durable_json_text(
+            record.model_dump_json(),
+            field="artifact registry record payload",
+        )
         try:
             with self._store.connection() as conn:
                 conn.execute(
@@ -143,7 +163,7 @@ class SQLiteArtifactRepository:
                         record.size_bytes,
                         record.location_kind.value,
                         record.producer_id,
-                        record.model_dump_json(),
+                        record_json,
                         record.created_at.isoformat(),
                     ),
                 )
@@ -258,6 +278,10 @@ class SQLiteArtifactRepository:
         return records
 
     def put_verification(self, verification: ArtifactVerification) -> ArtifactVerification:
+        verification_json = _bounded_durable_json_text(
+            verification.model_dump_json(),
+            field="artifact verification payload",
+        )
         try:
             with self._store.connection() as conn:
                 conn.execute(
@@ -272,7 +296,7 @@ class SQLiteArtifactRepository:
                         verification.verification_id,
                         verification.artifact_id,
                         verification.state.value,
-                        verification.model_dump_json(),
+                        verification_json,
                         verification.checked_at.isoformat(),
                     ),
                 )

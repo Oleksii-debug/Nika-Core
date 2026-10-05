@@ -328,6 +328,39 @@ def test_common_credential_metadata_keys_are_rejected(key: str) -> None:
         )
 
 
+def test_metadata_entry_count_is_bounded_before_durable_serialization() -> None:
+    with pytest.raises(ValidationError, match="at most 256 entries"):
+        ArtifactRecord(
+            artifact_id="a" * 64,
+            idempotency_key="idempotent",
+            workspace_id="workspace",
+            kind="report",
+            location_kind=ArtifactLocationKind.OPAQUE_REFERENCE,
+            locator="blob:safe",
+            sha256="b" * 64,
+            size_bytes=1,
+            metadata={f"key-{index}": "value" for index in range(257)},
+        )
+
+
+def test_oversized_record_is_rejected_before_persistence(tmp_path: Path) -> None:
+    registry = _registry(tmp_path / "state.sqlite3")
+    metadata = {f"key-{index:03d}": "x" * 4096 for index in range(256)}
+
+    with pytest.raises(ArtifactRegistryError, match="1 MiB durable JSON limit"):
+        registry.register_reference(
+            workspace_id="workspace-a",
+            idempotency_key="oversized-record",
+            reference="blob:oversized",
+            sha256="b" * 64,
+            size_bytes=1,
+            kind="report",
+            metadata=metadata,
+        )
+
+    assert registry.list(workspace_id="workspace-a") == ()
+
+
 def test_find_by_digest_and_producer_filter_apply_before_limit(tmp_path: Path) -> None:
     registry = _registry(tmp_path / "state.sqlite3")
     digest = "c" * 64
@@ -435,6 +468,28 @@ def test_record_json_cannot_rebind_primary_key_identity(tmp_path: Path) -> None:
         )
 
     with pytest.raises(ArtifactRegistryError, match="indexed metadata"):
+        registry.get(record.artifact_id)
+
+
+def test_record_json_rejects_oversized_payload_before_rehydration(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    registry = ArtifactRegistry.from_store(store)
+    record = registry.register_reference(
+        workspace_id="workspace-a",
+        idempotency_key="artifact-a",
+        reference="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+        kind="evidence",
+    )
+    oversized = '{"workspace_id":"' + ("x" * 1_048_577) + '"}'
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE artifact_registry_records SET record_json = ? WHERE artifact_id = ?",
+            (oversized, record.artifact_id),
+        )
+
+    with pytest.raises(ArtifactRegistryError, match="1 MiB durable JSON limit"):
         registry.get(record.artifact_id)
 
 

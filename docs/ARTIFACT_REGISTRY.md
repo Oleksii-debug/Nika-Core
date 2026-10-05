@@ -25,6 +25,9 @@ bytes or metadata fails closed with `ArtifactConflictError`.
 
 Artifact rows are immutable. Verification observations are append-only records. This separates
 "what was registered" from "what was observed later" and makes missing/tampered files auditable.
+Durable record/evidence JSON is bounded to 1 MiB before parsing or persistence, and artifact
+metadata is limited to 256 entries, so corrupted or excessive payloads fail closed instead of
+turning durable rehydration into an unbounded resource-consumption path.
 
 ## SQLite ownership
 

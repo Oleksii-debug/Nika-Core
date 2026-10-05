@@ -24,6 +24,8 @@ class ArtifactVerificationState(StrEnum):
     UNAVAILABLE = "unavailable"
 
 
+_MAX_ARTIFACT_METADATA_ITEMS = 256
+
 _FORBIDDEN_SECRET_KEYS = {
     "api_key",
     "apikey",
@@ -103,6 +105,15 @@ class ArtifactRecord(FrozenModel):
     @classmethod
     def reject_locator_credentials(cls, value: str) -> str:
         return _reject_secret_locator(value)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def bound_metadata_items(cls, value: object) -> object:
+        if isinstance(value, dict) and len(value) > _MAX_ARTIFACT_METADATA_ITEMS:
+            raise ValueError(
+                f"artifact metadata must contain at most {_MAX_ARTIFACT_METADATA_ITEMS} entries"
+            )
+        return value
 
     @field_validator("metadata")
     @classmethod
