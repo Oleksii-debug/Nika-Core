@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -268,13 +269,15 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     )
 
     assert report.platform == "windows"
-    assert report.schema_version == 4
+    assert report.schema_version == 5
     assert report.completed_steps == 2
     assert report.job_fingerprint == "f" * 64
     assert report.trainer_job_fingerprint == _TRAINER_JOB_FINGERPRINT
     assert report.job_fingerprint != report.trainer_job_fingerprint
     assert report.consumed_materials_sha256 == "1" * 64
     assert report.model_dir_manifest_sha256 == "2" * 64
+    assert report.previous_adapter_tensors_sha256 == "7" * 64
+    assert report.trained_adapter_tensors_sha256 == "8" * 64
     assert report.trainer_artifact_id == "3" * 64
     assert report.trainer_implementation_sha256 == "4" * 64
     assert report.trainer_deployment_sha256 == "5" * 64
@@ -946,6 +949,16 @@ def test_build_report_requires_explicit_pause_reason(tmp_path: Path) -> None:
         )
 
 
+def test_report_rejects_equal_adapter_tensor_state(tmp_path: Path) -> None:
+    report = _build_report(tmp_path)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="tensor-state mutation"):
+        replace(
+            report,
+            trained_adapter_tensors_sha256=report.previous_adapter_tensors_sha256,
+        )
+
+
 def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
     report = _build_report(tmp_path)
 
@@ -970,6 +983,8 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             candidate_manifest_sha256=report.candidate_manifest_sha256,
             consumed_materials_sha256=report.consumed_materials_sha256,
             model_dir_manifest_sha256=report.model_dir_manifest_sha256,
+            previous_adapter_tensors_sha256=report.previous_adapter_tensors_sha256,
+            trained_adapter_tensors_sha256=report.trained_adapter_tensors_sha256,
             trainer_artifact_id=report.trainer_artifact_id,
             trainer_deployment_sha256=report.trainer_deployment_sha256,
             trainer_implementation_sha256=report.trainer_implementation_sha256,
@@ -992,6 +1007,7 @@ def _install_runner_fakes(
     initial_consumed_materials_sha256: str = "1" * 64,
     resumed_consumed_materials_sha256: str = "1" * 64,
     initial_worker_preaccepted_sha256: str | None = None,
+    max_steps: int = 2,
 ) -> tuple[object, object, list[tuple[str, bool]]]:
     calls: list[tuple[str, bool]] = []
 
@@ -1061,6 +1077,8 @@ def _install_runner_fakes(
         candidate_artifact_ref = "models/candidate/pilot"
         resource_scope = "model_training"
 
+    FakeSpec.max_steps = max_steps
+
     class FakeAuthorization:
         pass
 
@@ -1122,6 +1140,21 @@ def _install_runner_fakes(
         candidate_descriptor_factory=lambda _: object(),  # type: ignore[return-value]
     )
     return result, sentinel, calls
+
+
+def test_physical_runner_requires_exact_two_step_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(
+        PhysicalTrainingPilotError,
+        match="exactly max_steps == 2",
+    ):
+        _install_runner_fakes(
+            monkeypatch,
+            resumed_probe=_restart_probe(),
+            completed=_completed_for(b"candidate"),
+            max_steps=3,
+        )
 
 
 def test_physical_runner_rejects_preused_initial_worker(
