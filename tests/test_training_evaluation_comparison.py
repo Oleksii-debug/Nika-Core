@@ -1551,6 +1551,49 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_missing_durable_manifest_blocks_new_promoted_tasks_and_retry(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    port = _ChallengerPort("activation-ok")
+    await activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+        effect_port=port,
+        manifest_authority=_manifest_authority(),
+    )
+    assert port.calls == 1
+
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM v01_model_promotion_manifests "
+            "WHERE decision_sha256 = ?",
+            (result.evidence_sha256,),
+        )
+
+    with pytest.raises(ModelSetupError, match="provider manifest"):
+        settings.prepare_task_payload({"command": "must fail closed"})
+
+    retry_port = _ChallengerPort("must-not-run")
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="predates durable Ollama manifest evidence",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=2,
+            effect_port=retry_port,
+            manifest_authority=_manifest_authority(),
+        )
+    assert retry_port.calls == 0
+    assert settings.snapshot()["model"] == "challenger-model"
+    assert settings.snapshot()["revision"] == 2
+
+
+@pytest.mark.asyncio
 async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
     tmp_path,
 ) -> None:
