@@ -1075,15 +1075,28 @@ class V01ModelSettings:
             return {"status": "invalid"}
 
     def prepare_task_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Freeze the current route before TaskQueue accepts the new task."""
+        """Freeze the current route and any exact promoted artifact authority."""
 
         try:
             body = dict(payload)
-            if _TASK_SELECTION_FIELD in body:
-                raise ModelSetupError("Посилання на модель завдання задає лише Nika.")
+            if (
+                _TASK_SELECTION_FIELD in body
+                or _TASK_ARTIFACT_PIN_FIELD in body
+            ):
+                raise ModelSetupError(
+                    "Посилання на модель та її артефакт завдання задає лише Nika."
+                )
             with self._store.connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                selection = self._selected(conn)
+                row = conn.execute(
+                    "SELECT * FROM v01_model_settings WHERE singleton = 1"
+                ).fetchone()
+                revision = self._revision(row)
+                if row is None:
+                    raise ModelSetupError(
+                        "Спочатку виберіть режим та, якщо потрібно, модель."
+                    )
+                selection = ModelSelection.from_stored(row["selection_json"])
                 selection_id, selection_json = self._selection_id(selection)
                 conn.execute(
                     "INSERT OR IGNORE INTO v01_model_selections VALUES (?, ?)",
@@ -1091,7 +1104,14 @@ class V01ModelSettings:
                 )
                 if self._selection_by_id(conn, selection_id) != selection:
                     raise ModelSetupError("Не вдалося зафіксувати вибір моделі.")
+                pin = self._promotion_pin_for_revision(
+                    conn,
+                    selection_id=selection_id,
+                    revision=revision,
+                )
             body[_TASK_SELECTION_FIELD] = selection_id
+            if pin is not None:
+                body[_TASK_ARTIFACT_PIN_FIELD] = pin.to_payload()
             return body
         except ModelSetupError:
             raise
@@ -1113,15 +1133,27 @@ class V01ModelSettings:
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             accepted = self._selection_by_id(conn, selection_id)
+            accepted_pin = self._task_artifact_pin(
+                conn,
+                payload=payload,
+                selection_id=selection_id,
+            )
+            accepted_pin_sha256 = (
+                accepted_pin.pin_sha256 if accepted_pin is not None else None
+            )
             row = conn.execute(
-                "SELECT selection_id, selection_json FROM v01_task_model_bindings "
-                "WHERE task_id = ?",
+                "SELECT selection_id, selection_json, artifact_pin_sha256 "
+                "FROM v01_task_model_bindings WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
             if row is not None:
                 if row["selection_id"] != selection_id:
                     raise ModelSetupError(
                         "Модель не збігається з початковою конфігурацією завдання."
+                    )
+                if row["artifact_pin_sha256"] != accepted_pin_sha256:
+                    raise ModelSetupError(
+                        "Артефакт моделі не збігається з початковою конфігурацією завдання."
                     )
                 bound = ModelSelection.from_stored(row["selection_json"])
                 if bound != accepted:
@@ -1130,12 +1162,15 @@ class V01ModelSettings:
                     )
                 return bound
             conn.execute(
-                "INSERT INTO v01_task_model_bindings VALUES (?, ?, ?, ?)",
+                "INSERT INTO v01_task_model_bindings("
+                "task_id, selection_id, selection_json, created_at, artifact_pin_sha256"
+                ") VALUES (?, ?, ?, ?, ?)",
                 (
                     task_id,
                     selection_id,
                     accepted.canonical_json(),
                     datetime.now(UTC).isoformat(),
+                    accepted_pin_sha256,
                 ),
             )
             accepted_provider_kind = accepted.provider_kind
@@ -1158,9 +1193,41 @@ class V01ModelSettings:
                         if accepted.model is not None
                         else None
                     ),
+                    "artifact_pin_sha256": accepted_pin_sha256,
                 },
             )
             return accepted
+
+    def artifact_pin_for_task(self, task_id: str) -> TaskModelArtifactPin | None:
+        """Return the immutable digest pin accepted with a task, when present."""
+
+        self.for_task(task_id)
+        try:
+            payload = TaskQueue(self._store).get(task_id).payload
+        except KeyError as exc:
+            raise ModelSetupError("Завдання для вибраної моделі не знайдено.") from exc
+        selection_id = payload.get(_TASK_SELECTION_FIELD)
+        with self._store.connection() as conn:
+            pin = self._task_artifact_pin(
+                conn,
+                payload=payload,
+                selection_id=selection_id,
+            )
+            row = conn.execute(
+                "SELECT selection_id, artifact_pin_sha256 "
+                "FROM v01_task_model_bindings WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None or row["selection_id"] != selection_id:
+                raise ModelSetupError(
+                    "Не вдалося відновити прив'язку артефакту моделі завдання."
+                )
+            expected_pin = pin.pin_sha256 if pin is not None else None
+            if row["artifact_pin_sha256"] != expected_pin:
+                raise ModelSetupError(
+                    "Збережена прив'язка артефакту моделі завдання пошкоджена."
+                )
+            return pin
 
 
 class _TaskBoundCloudEffectAuthorizer:
