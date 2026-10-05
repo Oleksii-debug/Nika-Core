@@ -76,6 +76,7 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
         body = json.loads(request.content.decode("utf-8"))
         assert body["model"] == "dev97-local-model"
         assert body["stream"] is False
+        assert body["think"] is False
         calls.append(str(body["model"]))
         user_text = str(body["messages"][-1]["content"])
         answer = (
@@ -88,6 +89,8 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
             json={
                 "model": body["model"],
                 "message": {"role": "assistant", "content": answer},
+                "done": True,
+                "done_reason": "stop",
             },
         )
 
@@ -99,12 +102,14 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
     factory = V01BoundModelRuntimeFactory(
         store=store,
         definitions=AgentDefinitionRepository(store),
+        settings=models,
         client_factory=client_factory,
     )
     runtime = V01PackagedThreeAgentRuntime(
         store=store,
         config=config,
         source_settings=sources,
+        model_settings=models,
         model_runtime_factory=factory,
     )
     result = asyncio.run(
@@ -128,13 +133,19 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
         "provider_kind": "local",
         "model": "dev97-local-model",
     }
-    assert result.output["team_result"]["checker"]["output"]["model_analysis"] == (
-        expected_analysis
+    checker_output = result.output["team_result"]["checker"]["output"]
+    assert checker_output["model_analysis"] == expected_analysis
+    assert checker_output["model_analysis_provenance"]["intelligence_mode"] == (
+        "external_local"
     )
+    assert checker_output["model_analysis_provenance"]["status"] == "succeeded"
 
     durable_checker = MultiAgentStore(store).member_result(team_id, checker_member_id)
     assert durable_checker.outcome == "completed"
     assert durable_checker.payload["model_analysis"] == expected_analysis
+    assert durable_checker.payload["model_analysis_provenance"] == (
+        checker_output["model_analysis_provenance"]
+    )
     task_events = AuditLog(store).list_for(entity_type="task", entity_id=task.task_id)
     assert "v01.model.bound" in [event.event_type for event in task_events]
     assert task_events[-1].event_type == "runtime.finished"
@@ -145,15 +156,18 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
 
     restarted_store = SQLiteStore(store.path)
     restarted_sources = V01SourceSettings(restarted_store, config)
+    restarted_models = V01ModelSettings(restarted_store)
     restarted_factory = V01BoundModelRuntimeFactory(
         store=restarted_store,
         definitions=AgentDefinitionRepository(restarted_store),
+        settings=restarted_models,
         client_factory=forbidden_client_factory,
     )
     restarted_runtime = V01PackagedThreeAgentRuntime(
         store=restarted_store,
         config=config,
         source_settings=restarted_sources,
+        model_settings=restarted_models,
         model_runtime_factory=restarted_factory,
     )
     reconstructed = asyncio.run(
@@ -169,10 +183,9 @@ def test_local_model_result_is_durable_and_restart_readable_without_reinference(
     assert reconstructed.outcome is RuntimeOutcome.COMPLETED
     assert reconstructed.output == result.output
     assert (
-        MultiAgentStore(restarted_store).member_result(
-            team_id,
-            checker_member_id,
-        ).payload["model_analysis"]
+        MultiAgentStore(restarted_store)
+        .member_result(team_id, checker_member_id)
+        .payload["model_analysis"]
         == expected_analysis
     )
     assert calls == ["dev97-local-model"] * 3

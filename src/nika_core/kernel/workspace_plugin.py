@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import importlib.metadata
 from typing import Protocol, runtime_checkable
+
+from nika_core.plugins.entrypoints import EntrypointDescriptor, discover_entrypoints
 
 WORKSPACE_ENTRYPOINT_GROUP = "nika_core.workspaces"
 
@@ -16,6 +17,6 @@ class WorkspacePlugin(Protocol):
     def display_name(self) -> str: ...
 
 
-def discover_workspace_entrypoints() -> tuple[importlib.metadata.EntryPoint, ...]:
-    """Discover installed workspace packages without importing them eagerly."""
-    return tuple(importlib.metadata.entry_points(group=WORKSPACE_ENTRYPOINT_GROUP))
+def discover_workspace_entrypoints() -> tuple[EntrypointDescriptor, ...]:
+    """Discover installed workspace package metadata without importing plugin code."""
+    return discover_entrypoints(WORKSPACE_ENTRYPOINT_GROUP)
