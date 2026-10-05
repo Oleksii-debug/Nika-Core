@@ -36,7 +36,6 @@ def _reject_json_noninteger(_value: str) -> object:
     raise ValueError("keymap JSON must not contain floating-point or non-finite numbers")
 
 
-
 @dataclass(frozen=True, slots=True)
 class ActionDefinition:
     action_id: str
