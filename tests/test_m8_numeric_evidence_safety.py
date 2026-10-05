@@ -6,9 +6,18 @@ import pytest
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
-    ArtifactKind, ExperimentDefinition, ExperimentEngine, ExperimentSnapshot, ExperimentStatus,
-    InMemoryExperimentRepository, MetricObservation, MetricRule, PromotionPolicy,
-    ReplayCase, SQLiteExperimentRepository, StrategyRef,
+    ArtifactKind,
+    ExperimentDefinition,
+    ExperimentEngine,
+    ExperimentSnapshot,
+    ExperimentStatus,
+    InMemoryExperimentRepository,
+    MetricObservation,
+    MetricRule,
+    PromotionPolicy,
+    ReplayCase,
+    SQLiteExperimentRepository,
+    StrategyRef,
 )
 from nika_core.experiments.repository import _decode_definition, _encode_definition
 
