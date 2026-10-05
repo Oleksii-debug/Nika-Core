@@ -97,6 +97,13 @@ def normalize_subtitle_file(
             "pysubs2 is not installed; install the optional media component explicitly",
         ) from exc
     try:
+        source_sha = sha256_file(path)
+    except OSError as exc:
+        raise MediaError(
+            MediaErrorCode.INVALID_SUBTITLE,
+            "subtitle source could not be read",
+        ) from exc
+    try:
         subtitles = pysubs2.load(str(path), encoding="utf-8")
     except Exception as exc:
         raise MediaError(
@@ -162,7 +169,18 @@ def normalize_subtitle_file(
                         "automatic subtitle coverage is too low",
                     )
 
-    source_sha = sha256_file(path)
+    try:
+        unchanged = sha256_file(path) == source_sha
+    except OSError as exc:
+        raise MediaError(
+            MediaErrorCode.INVALID_SUBTITLE,
+            "subtitle source could not be revalidated",
+        ) from exc
+    if not unchanged:
+        raise MediaError(
+            MediaErrorCode.INVALID_SUBTITLE,
+            "subtitle source changed while it was being parsed",
+        )
     transcript_id = f"subtitle:{source_sha[:32]}"
     return Transcript(
         transcript_id=transcript_id,
