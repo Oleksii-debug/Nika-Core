@@ -195,6 +195,32 @@ class _InvalidResultWorker:
         return object()  # type: ignore[return-value]
 
 
+@dataclass
+class _ResourcePressureWorker:
+    observer: _Observer
+    execution_plan_sha256: str = field(
+        default=_EXECUTION_PLAN_SHA256,
+        kw_only=True,
+    )
+    calls: list[int] = field(default_factory=list)
+
+    def step(
+        self,
+        *,
+        spec: TrainingJobSpec,
+        step_index: int,
+        resume_state: dict[str, object],
+        training_materials: ResolvedTrainingPackage,
+    ) -> TrainingStepResult:
+        del spec, resume_state, training_materials
+        self.calls.append(step_index)
+        self.observer.cpu_percent = 95.0
+        return TrainingStepResult(
+            resume_state={"last_step": step_index},
+            completed=False,
+        )
+
+
 def _store_with_task(path: Path, task_id: str = "training-task") -> SQLiteStore:
     store = SQLiteStore(path)
     store.initialize()
@@ -476,6 +502,80 @@ def test_resource_pressure_waits_without_running_trainer(tmp_path: Path) -> None
     assert resources.cancel_waiting(
         scope="model_training", owner_id="owner-1", request_id="job-1"
     )
+
+
+def test_live_resource_pressure_pauses_before_next_training_effect_and_resumes(
+    tmp_path: Path,
+) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    observer = _Observer()
+    resources = ResourceManager(store, observer)
+    resources.set_budget(
+        ResourceBudget(
+            scope="model_training",
+            owner_id="owner-1",
+            max_concurrent=1,
+            max_cpu_percent=50.0,
+        )
+    )
+    materials = _resolved_materials(store.path.parent)
+    runtime = TrainingRuntime(
+        resources=resources,
+        checkpoints=CheckpointService(store),
+        training_materials=materials,
+    )
+    spec = _spec()
+    first_worker = _ResourcePressureWorker(observer)
+
+    paused = runtime.run(spec, first_worker)
+
+    assert paused.state is TrainingRunState.PAUSED
+    assert paused.next_step == 1
+    assert paused.reason == "resource_revalidation:cpu_limit"
+    assert first_worker.calls == [0]
+    assert resources.active_count(
+        scope="model_training", owner_id="owner-1"
+    ) == 0
+
+    observer.cpu_percent = 5.0
+    second_worker = _Worker(complete_at=1)
+    completed = TrainingRuntime(
+        resources=resources,
+        checkpoints=CheckpointService(store),
+        training_materials=materials,
+    ).run(spec, second_worker)
+
+    assert completed.state is TrainingRunState.COMPLETED
+    assert completed.next_step == 2
+    assert second_worker.calls == [1]
+    assert second_worker.seen_states == [{"last_step": 0}]
+
+
+def test_resource_revalidation_never_treats_own_concurrency_slot_as_pressure(
+    tmp_path: Path,
+) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    resources = ResourceManager(store, _Observer())
+    resources.set_budget(
+        ResourceBudget(
+            scope="model_training",
+            owner_id="owner-1",
+            max_concurrent=1,
+            max_cpu_percent=80.0,
+            max_memory_percent=80.0,
+        )
+    )
+    worker = _Worker(complete_at=0)
+    runtime = TrainingRuntime(
+        resources=resources,
+        checkpoints=CheckpointService(store),
+        training_materials=_resolved_materials(store.path.parent),
+    )
+
+    completed = runtime.run(_spec(), worker)
+
+    assert completed.state is TrainingRunState.COMPLETED
+    assert worker.calls == [0]
 
 
 def test_max_steps_is_hard_bound_and_never_promotes(tmp_path: Path) -> None:
