@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from nika_core.business_factory import (
+    BusinessFactoryError,
     BusinessFactorySnapshot,
     StaleBusinessStateError,
     dump_business_snapshot,
@@ -11,6 +12,8 @@ from nika_core.business_factory import (
 )
 
 BUSINESS_FACTORY_SCHEMA_VERSION = 1
+_MAX_SNAPSHOT_JSON_BYTES = 1_048_576
+
 BUSINESS_FACTORY_MIGRATIONS = {
     1: (
         (
@@ -138,6 +141,12 @@ class BusinessFactoryRepository:
                 "business snapshot must advance beyond expected_row_version"
             )
         payload = dump_business_snapshot(snapshot)
+        try:
+            payload_bytes = payload.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise BusinessFactoryError("business snapshot must be valid UTF-8") from exc
+        if len(payload_bytes) > _MAX_SNAPSHOT_JSON_BYTES:
+            raise BusinessFactoryError("business snapshot exceeds durable JSON byte limit")
         objective_id = snapshot.objective.objective_id
         now = datetime.now(UTC).isoformat()
         with self.store.connection() as conn:
@@ -202,9 +211,14 @@ class BusinessFactoryRepository:
             raise ValueError("objective_id must be non-empty text")
         with self.store.connection() as conn:
             row = conn.execute(
-                "SELECT row_version, payload_json FROM business_factory_snapshots "
-                "WHERE objective_id = ?",
-                (objective_id,),
+                "SELECT row_version, "
+                "typeof(payload_json) AS payload_type, "
+                "length(CAST(payload_json AS BLOB)) AS payload_bytes, "
+                "CASE WHEN typeof(payload_json) = 'text' "
+                "AND length(CAST(payload_json AS BLOB)) <= ? "
+                "THEN CAST(payload_json AS BLOB) ELSE NULL END AS payload_blob "
+                "FROM business_factory_snapshots WHERE objective_id = ?",
+                (_MAX_SNAPSHOT_JSON_BYTES, objective_id),
             ).fetchone()
         if row is None:
             return None
@@ -212,7 +226,22 @@ class BusinessFactoryRepository:
             row["row_version"],
             field="business aggregate row version",
         )
-        snapshot = load_business_snapshot(str(row["payload_json"]))
+        if row["payload_type"] != "text":
+            raise BusinessFactoryError("business snapshot must be stored as SQLite TEXT")
+        payload_bytes = _require_stored_integer(
+            row["payload_bytes"],
+            field="business snapshot UTF-8 byte length",
+        )
+        if payload_bytes > _MAX_SNAPSHOT_JSON_BYTES:
+            raise BusinessFactoryError("business snapshot exceeds durable JSON byte limit")
+        payload_blob = row["payload_blob"]
+        if type(payload_blob) is not bytes:
+            raise BusinessFactoryError("business snapshot durable payload is unavailable")
+        try:
+            payload = payload_blob.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise BusinessFactoryError("business snapshot must be valid UTF-8") from exc
+        snapshot = load_business_snapshot(payload)
         if snapshot.objective.objective_id != objective_id:
             raise RuntimeError("business snapshot objective identity does not match storage key")
         if snapshot.row_version != stored_row_version:

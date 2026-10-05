@@ -105,6 +105,91 @@ def test_initialize_rejects_malformed_owned_snapshot_table(tmp_path) -> None:
         repository.initialize()
 
 
+def test_load_rejects_blob_snapshot_before_json_coercion(tmp_path) -> None:
+    store, repository = _repository(tmp_path, "blob-snapshot.sqlite")
+    snapshot = _snapshot("objective-blob")
+    repository.save(snapshot, expected_row_version=0)
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE business_factory_snapshots "
+            "SET payload_json = CAST(payload_json AS BLOB) WHERE objective_id = ?",
+            (snapshot.objective.objective_id,),
+        )
+
+    with pytest.raises(BusinessFactoryError, match="stored as SQLite TEXT"):
+        repository.load(snapshot.objective.objective_id)
+
+
+def test_load_rejects_invalid_utf8_text_snapshot(tmp_path) -> None:
+    store, repository = _repository(tmp_path, "invalid-utf8.sqlite")
+    snapshot = _snapshot("objective-invalid-utf8")
+    repository.save(snapshot, expected_row_version=0)
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE business_factory_snapshots "
+            "SET payload_json = CAST(X'80' AS TEXT) WHERE objective_id = ?",
+            (snapshot.objective.objective_id,),
+        )
+
+    with pytest.raises(BusinessFactoryError, match="valid UTF-8"):
+        repository.load(snapshot.objective.objective_id)
+
+
+def test_load_rejects_oversized_snapshot_before_json_decode(tmp_path) -> None:
+    store, repository = _repository(tmp_path, "oversized-read.sqlite")
+    snapshot = _snapshot("objective-oversized-read")
+    repository.save(snapshot, expected_row_version=0)
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE business_factory_snapshots SET payload_json = ? "
+            "WHERE objective_id = ?",
+            ("x" * 1_048_577, snapshot.objective.objective_id),
+        )
+
+    with pytest.raises(BusinessFactoryError, match="durable JSON byte limit"):
+        repository.load(snapshot.objective.objective_id)
+
+
+def test_save_rejects_invalid_utf8_before_durable_mutation(tmp_path) -> None:
+    store, repository = _repository(tmp_path, "invalid-utf8-save.sqlite")
+    snapshot = _snapshot("\ud800")
+
+    with pytest.raises(BusinessFactoryError, match="valid UTF-8"):
+        repository.save(snapshot, expected_row_version=0)
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM business_factory_snapshots"
+        ).fetchone()
+    assert count["count"] == 0
+
+
+def test_save_rejects_oversized_snapshot_before_durable_mutation(tmp_path) -> None:
+    store, repository = _repository(tmp_path, "oversized-save.sqlite")
+    snapshot = _snapshot("objective-oversized-save")
+    oversized_objective = BusinessObjective(
+        objective_id=snapshot.objective.objective_id,
+        goal="x" * 1_048_577,
+        research_package=snapshot.objective.research_package,
+    )
+    oversized = BusinessFactory.start(
+        objective=oversized_objective,
+        policy=snapshot.policy,
+    ).snapshot()
+
+    with pytest.raises(BusinessFactoryError, match="durable JSON byte limit"):
+        repository.save(oversized, expected_row_version=0)
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) AS count FROM business_factory_snapshots"
+        ).fetchone()
+    assert count["count"] == 0
+
+
 def test_load_rejects_duplicate_key_durable_snapshot_json(tmp_path) -> None:
     store, repository = _repository(tmp_path, "duplicate-json.sqlite")
     snapshot = _snapshot("objective-duplicate-json")
