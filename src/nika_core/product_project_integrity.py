@@ -319,11 +319,12 @@ class ProductProjectIntegrityService:
                     raise ProductProjectError(
                         f"research package has incomplete product option: {package_id}"
                     ) from exc
-                evidence_refs = tuple(item.get("evidence_package_ids", ()))
-                if not evidence_refs:
+                raw_evidence_refs = item.get("evidence_package_ids")
+                if not isinstance(raw_evidence_refs, list) or not raw_evidence_refs:
                     raise ProductProjectError(
                         f"research package has incomplete product option: {package_id}"
                     )
+                evidence_refs = tuple(raw_evidence_refs)
                 if option_id in options:
                     raise ProductProjectError(
                         f"ambiguous product option identity across research handoffs: {option_id}"
