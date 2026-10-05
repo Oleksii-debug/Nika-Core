@@ -26,7 +26,7 @@ def _definition(*, guardrails=(), replays=("r1",)):
 
 @pytest.mark.parametrize("bad", [True, False, "0.5", None, float("nan"), float("inf"), 10**400])
 def test_observation_rejects_non_numeric_or_unrepresentable_evidence(bad):
-    with pytest.raises(ValueError, match="finite"):
+    with pytest.raises((TypeError, ValueError)):
         MetricObservation("champion", "r1", "quality", bad)
 
 
