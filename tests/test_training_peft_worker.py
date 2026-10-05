@@ -226,6 +226,18 @@ def test_candidate_path_is_stable_and_reference_specific(tmp_path: Path) -> None
     assert root in first.parents
 
 
+def test_request_rejects_private_local_artifact_refs(tmp_path: Path) -> None:
+    raw_request, _ = _request(tmp_path)
+    raw_request["job"]["base_artifact"]["artifact_ref"] = "C:/private/base.gguf"
+    with pytest.raises(peft.PeftTrainerError, match="artifact_ref_private_path"):
+        peft._parse_request(raw_request)
+
+    raw_request, _ = _request(tmp_path)
+    raw_request["job"]["candidate_artifact_ref"] = "/private/candidate"
+    with pytest.raises(peft.PeftTrainerError, match="artifact_ref_private_path"):
+        peft._parse_request(raw_request)
+
+
 def test_base_gguf_copy_is_digest_bound(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
@@ -648,6 +660,17 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     unknown_field["unexpected"] = True
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(unknown_field)
+
+    control_ref = json.loads(raw)
+    control_ref["candidate_artifact_ref"] = "models/candidate\nforged"
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(control_ref)
+
+    duplicate_adapter_target = json.loads(raw)
+    first_target = duplicate_adapter_target["adapter_config"]["target_modules"][0]
+    duplicate_adapter_target["adapter_config"]["target_modules"].append(first_target)
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(duplicate_adapter_target)
 
 
 def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:
