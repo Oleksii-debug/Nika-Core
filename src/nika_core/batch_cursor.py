@@ -992,6 +992,14 @@ def _decode_completion_result(
     if type(raw) is not dict:
         raise BatchCursorStateError("completed effect result is malformed")
 
+    has_envelope_key = any(
+        type(key) is str and key == _COMPLETION_ENVELOPE_KEY for key in raw
+    )
+    if has_envelope_key and not _has_exact_string_keys(
+        raw, {_COMPLETION_ENVELOPE_KEY}
+    ):
+        raise BatchCursorStateError("completed effect envelope is ambiguous")
+
     if _has_exact_string_keys(raw, {_COMPLETION_ENVELOPE_KEY}):
         envelope = raw[_COMPLETION_ENVELOPE_KEY]
         if type(envelope) is not dict or not _has_exact_string_keys(
@@ -1021,49 +1029,73 @@ def _decode_completion_result(
 
 
 def _durable_json_object(value: dict[str, Any]) -> dict[str, Any]:
-    copied = _durable_json_value(value)
+    try:
+        copied = _json_copy(value)
+    except BatchCursorStateError as exc:
+        raise BatchCursorStateError("completed effect result is malformed") from exc
     if type(copied) is not dict:
         raise BatchCursorStateError("completed effect result is malformed")
     return copied
 
 
-def _durable_json_value(value: Any) -> Any:
-    value_type = type(value)
-    if value is None or value_type in {bool, str, int}:
-        return value
-    if value_type is float:
-        if not math.isfinite(value):
-            raise BatchCursorStateError("completed effect result is malformed")
-        return value
-    if value_type is list:
-        return [_durable_json_value(item) for item in value]
-    if value_type is dict:
-        copied: dict[str, Any] = {}
-        for key, item in value.items():
-            if type(key) is not str:
-                raise BatchCursorStateError("completed effect result is malformed")
-            copied[key] = _durable_json_value(item)
-        return copied
-    raise BatchCursorStateError("completed effect result is malformed")
+_MAX_VALUE_BYTES = 1_048_576
+_MAX_VALUE_NODES = 10_000
+_MAX_VALUE_DEPTH = 32
+_MAX_INTEGER_BITS = 4_096
 
 
 def _json_copy(value: Any) -> Any:
-    return _public_json_value(value)
+    copied = _public_json_value(value)
+    try:
+        serialized = _canonical_json(copied)
+        encoded_size = len(serialized.encode("utf-8", errors="strict"))
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError, OverflowError) as exc:
+        raise BatchCursorStateError(
+            "batch cursor values must be JSON-serializable"
+        ) from exc
+    if encoded_size > _MAX_VALUE_BYTES:
+        raise BatchCursorStateError("batch cursor values must be JSON-serializable")
+    return copied
 
 
 def _public_json_value(
     value: Any,
     *,
     active_containers: set[int] | None = None,
+    budget: dict[str, int] | None = None,
+    depth: int = 0,
 ) -> Any:
+    budget = budget if budget is not None else {"nodes": 0, "text_bytes": 0}
+    budget["nodes"] += 1
+    if budget["nodes"] > _MAX_VALUE_NODES or depth > _MAX_VALUE_DEPTH:
+        raise BatchCursorStateError("batch cursor values must be JSON-serializable")
+
     value_type = type(value)
-    if value is None or value_type in {bool, int}:
+    if value is None or value_type is bool:
+        return value
+    if value_type is int:
+        if value.bit_length() > _MAX_INTEGER_BITS:
+            raise BatchCursorStateError(
+                "batch cursor values must be JSON-serializable"
+            )
         return value
     if value_type is str:
-        return _public_utf8_text(value)
+        text = _public_utf8_text(value)
+        if len(text) > _MAX_VALUE_BYTES:
+            raise BatchCursorStateError(
+                "batch cursor values must be JSON-serializable"
+            )
+        budget["text_bytes"] += len(text.encode("utf-8", errors="strict"))
+        if budget["text_bytes"] > _MAX_VALUE_BYTES:
+            raise BatchCursorStateError(
+                "batch cursor values must be JSON-serializable"
+            )
+        return text
     if value_type is float:
         if not math.isfinite(value):
-            raise BatchCursorStateError("batch cursor values must be JSON-serializable")
+            raise BatchCursorStateError(
+                "batch cursor values must be JSON-serializable"
+            )
         return value
     if value_type not in {list, dict}:
         raise BatchCursorStateError("batch cursor values must be JSON-serializable")
@@ -1076,20 +1108,39 @@ def _public_json_value(
     try:
         if value_type is list:
             return [
-                _public_json_value(item, active_containers=active_containers)
+                _public_json_value(
+                    item,
+                    active_containers=active_containers,
+                    budget=budget,
+                    depth=depth + 1,
+                )
                 for item in value
             ]
-        copied: dict[str, Any] = {}
+        copied_dict: dict[str, Any] = {}
         for key, item in value.items():
             if type(key) is not str:
                 raise BatchCursorStateError(
                     "batch cursor values must be JSON-serializable"
                 )
-            copied[_public_utf8_text(key)] = _public_json_value(
+            clean_key = _public_utf8_text(key)
+            if len(clean_key) > _MAX_VALUE_BYTES:
+                raise BatchCursorStateError(
+                    "batch cursor values must be JSON-serializable"
+                )
+            budget["text_bytes"] += len(
+                clean_key.encode("utf-8", errors="strict")
+            )
+            if budget["text_bytes"] > _MAX_VALUE_BYTES:
+                raise BatchCursorStateError(
+                    "batch cursor values must be JSON-serializable"
+                )
+            copied_dict[clean_key] = _public_json_value(
                 item,
                 active_containers=active_containers,
+                budget=budget,
+                depth=depth + 1,
             )
-        return copied
+        return copied_dict
     except RecursionError as exc:
         raise BatchCursorStateError(
             "batch cursor values must be JSON-serializable"
@@ -1101,7 +1152,7 @@ def _public_json_value(
 def _json_object(name: str, value: dict[str, Any]) -> dict[str, Any]:
     if type(value) is not dict:
         raise TypeError(f"{name} must be an exact JSON object")
-    copied = _public_json_value(value)
+    copied = _json_copy(value)
     if type(copied) is not dict:
         raise BatchCursorStateError(f"{name} must remain a JSON object")
     return copied
