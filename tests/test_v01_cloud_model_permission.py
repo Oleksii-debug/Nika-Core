@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from nika_core.v01_cloud_model_permission import (
     CloudModelPermissionDenied,
     V01CloudModelPermissionService,
 )
+from nika_core.tools import ToolRisk
 from nika_core.v01_model_settings import V01ModelSettings
 
 
@@ -605,6 +607,66 @@ def test_expired_grant_requires_new_resume_consent_and_new_authority(tmp_path: P
     queue.transition(record.task_id, TaskState.READY)
     queue.transition(record.task_id, TaskState.RUNNING)
     _authorize(service, record.task_id)
+
+
+def test_revoke_race_rolls_back_stale_revocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+    assert len(prompts) == 1
+
+    first_id = service._bound_permission_id(record.task_id, strict=True)
+    assert first_id is not None
+    second_id = service._new_permission_id(record.task_id)
+    service._permissions.grant(
+        permission_id=second_id,
+        scope=StandingPermissionScope(
+            subject_id="nika.packaged.model",
+            context=service._context(record),
+            action_class="model.cloud.complete",
+            targets=(prompts[0].provider_id,),
+            sites=(prompts[0].network_host,),
+            resources=(prompts[0].model,),
+            risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+            granted_at=NOW,
+            expires_at=NOW + timedelta(hours=24),
+        ),
+    )
+
+    original = service._permissions.revoke_transaction
+
+    @contextmanager
+    def raced_revoke(permission_id: str, *, revoked_at: datetime | None = None):
+        with store.connection() as conn:
+            conn.execute(
+                "UPDATE v01_cloud_model_permission_bindings "
+                "SET permission_id = ?, updated_at = ? WHERE task_id = ?",
+                (second_id, NOW.isoformat(), record.task_id),
+            )
+        with original(permission_id, revoked_at=revoked_at) as transaction:
+            yield transaction
+
+    monkeypatch.setattr(service._permissions, "revoke_transaction", raced_revoke)
+
+    with pytest.raises(CloudModelPermissionDenied, match="змінився під час відкликання"):
+        service.revoke_task(record.task_id)
+
+    first = service._permissions.get(first_id)
+    second = service._permissions.get(second_id)
+    assert first is not None and first.revoked_at is None
+    assert second is not None and second.revoked_at is None
+    assert service._bound_permission_id(record.task_id, strict=True) == second_id
 
 
 def test_revoked_grant_requires_new_resume_consent(tmp_path: Path) -> None:
