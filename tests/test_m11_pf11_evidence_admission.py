@@ -77,6 +77,19 @@ def test_valid_exact_pf11_evidence_remains_accepted(
     assert evidence["nvda_verified"] is False
 
 
+@pytest.mark.parametrize("state", ["failed", "archived", "completed"])
+def test_non_active_product_state_cannot_qualify_release_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    state: str,
+) -> None:
+    payload = _payload()
+    payload["state"] = state
+
+    with pytest.raises(RuntimeError, match="invalid state"):
+        _proof(monkeypatch, tmp_path, _json_writer(payload))
+
+
 def test_duplicate_json_keys_are_rejected(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
