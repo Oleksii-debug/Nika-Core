@@ -344,7 +344,7 @@ def test_ansible_runner_client_rejects_non_text_status() -> None:
         return SimpleNamespace(status=0, rc=0, events=[])
 
     client = AnsibleRunnerClient(SimpleNamespace(run=run))
-    with pytest.raises(StagingAdapterError, match="status must be non-empty text"):
+    with pytest.raises(StagingAdapterError, match="status must be bounded non-empty text"):
         client.execute(
             private_data_dir=_trusted_data_dir(),
             playbook="nika_pf3_deploy.yml",
@@ -474,6 +474,88 @@ def test_ansible_runner_client_bounds_event_stream_before_contract_processing() 
             inventory="inventory/staging.ini",
             ident="nika-pf3-deploy-1",
             extravars={"nika_release_sha": _sha(1)},
+        )
+
+
+def test_runner_execution_rejects_non_json_contract_values() -> None:
+    with pytest.raises(StagingAdapterError, match="JSON-compatible finite values"):
+        RunnerExecution(
+            "successful",
+            0,
+            {"unsupported": object()},
+            "ansible-runner:evidence-deploy",
+        )
+
+
+def test_runner_execution_rejects_nonfinite_contract_values() -> None:
+    with pytest.raises(StagingAdapterError, match="JSON-compatible finite values"):
+        RunnerExecution(
+            "successful",
+            0,
+            {"score": float("nan")},
+            "ansible-runner:evidence-deploy",
+        )
+
+
+def test_runner_execution_bounds_contract_and_evidence_text() -> None:
+    with pytest.raises(StagingAdapterError, match="evidence size limit"):
+        RunnerExecution(
+            "successful",
+            0,
+            {"detail": "x" * (64 * 1024)},
+            "ansible-runner:evidence-deploy",
+        )
+    with pytest.raises(StagingAdapterError, match="bounded non-empty text"):
+        RunnerExecution(
+            "successful",
+            0,
+            {"applied": True},
+            "x" * 513,
+        )
+
+
+def test_ansible_runner_client_evidence_canonicalizes_nested_mapping_order() -> None:
+    first_event = {
+        "event": "runner_on_ok",
+        "event_data": {
+            "task": "nika_pf3_result",
+            "res": {"nika_pf3": {"applied": True, "meta": {"b": 2, "a": 1}}},
+        },
+    }
+    second_event = {
+        "event": "runner_on_ok",
+        "event_data": {
+            "task": "nika_pf3_result",
+            "res": {"nika_pf3": {"meta": {"a": 1, "b": 2}, "applied": True}},
+        },
+    }
+
+    def execute(event: dict[str, object]) -> RunnerExecution:
+        module = SimpleNamespace(
+            run=lambda **kwargs: SimpleNamespace(
+                status="successful",
+                rc=0,
+                events=[event],
+            )
+        )
+        return AnsibleRunnerClient(module).execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+    assert execute(first_event).evidence_ref == execute(second_event).evidence_ref
+
+
+def test_runner_execution_rejects_oversized_status() -> None:
+    with pytest.raises(StagingAdapterError, match="bounded non-empty text"):
+        RunnerExecution(
+            "s" * 65,
+            0,
+            {"applied": True},
+            "ansible-runner:evidence-deploy",
         )
 
 
