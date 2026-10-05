@@ -34,6 +34,7 @@ RUNTIME_DISTRIBUTIONS = (
 
 _SECTION_RE = re.compile(r"^===== (?P<title>.+?) =====$")
 _MAX_NOTICES_BYTES = 16 * 1024 * 1024
+_MAX_DISTRIBUTION_PATH_BYTES = 4096
 
 
 def _python_license() -> str:
@@ -63,9 +64,16 @@ def _metadata_license(dist: metadata.Distribution) -> str | None:
 
 def _canonical_distribution_file(item: object) -> str:
     relative = str(item).replace("\\", "/")
+    try:
+        encoded = relative.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(
+            "Runtime distribution license path identity is invalid"
+        ) from exc
     if (
         not relative
         or relative != relative.strip()
+        or len(encoded) > _MAX_DISTRIBUTION_PATH_BYTES
         or relative.startswith("/")
         or (len(relative) >= 2 and relative[0].isalpha() and relative[1] == ":")
         or any(
@@ -74,20 +82,36 @@ def _canonical_distribution_file(item: object) -> str:
         )
     ):
         raise RuntimeError("Runtime distribution license path identity is invalid")
-    try:
-        relative.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise RuntimeError(
-            "Runtime distribution license path identity is invalid"
-        ) from exc
     parts = relative.split("/")
     if any(part in {"", ".", ".."} for part in parts):
         raise RuntimeError("Runtime distribution license path identity is invalid")
     return relative
 
 
+def _located_distribution_file(
+    dist: metadata.Distribution,
+    item: object,
+) -> Path:
+    try:
+        root = Path(dist.locate_file("")).resolve(strict=True)
+        target = Path(dist.locate_file(item))
+        parent = target.parent.resolve(strict=True)
+        common = os.path.commonpath((os.fspath(root), os.fspath(parent)))
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise RuntimeError(
+            "Runtime distribution license path containment is invalid"
+        ) from exc
+    if (
+        not root.is_dir()
+        or os.path.normcase(common) != os.path.normcase(os.fspath(root))
+    ):
+        raise RuntimeError("Runtime distribution license path containment is invalid")
+    return target
+
+
 def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
     collected: list[tuple[str, str]] = []
+    evidence_bytes = 0
     for item in dist.files or ():
         relative_path = str(item).replace("\\", "/")
         leaf = relative_path.rsplit("/", 1)[-1].casefold()
@@ -95,12 +119,19 @@ def _license_texts(dist: metadata.Distribution) -> tuple[tuple[str, str], ...]:
             continue
         relative_path = _canonical_distribution_file(item)
         try:
-            path = Path(dist.locate_file(item))
+            path = _located_distribution_file(dist, item)
             text = _read_notices(path)
             if text is None:
                 raise RuntimeError("Runtime distribution license evidence is invalid")
-            if text.strip():
-                collected.append((relative_path, text.strip()))
+            stripped = text.strip()
+            if stripped:
+                evidence_bytes += len(relative_path.encode("utf-8"))
+                evidence_bytes += len(stripped.encode("utf-8"))
+                if evidence_bytes > _MAX_NOTICES_BYTES:
+                    raise RuntimeError(
+                        "Runtime distribution license evidence exceeds the release size limit"
+                    )
+                collected.append((relative_path, stripped))
         except OSError as exc:
             raise RuntimeError("Runtime distribution license evidence is unreadable") from exc
     return tuple(sorted(collected))
@@ -228,14 +259,14 @@ def _open_notices_descriptor(target: Path) -> int:
         close_handle.restype = wintypes.BOOL
 
         generic_read = 0x80000000
-        share_read_write_delete = 0x00000001 | 0x00000002 | 0x00000004
+        share_read_delete = 0x00000001 | 0x00000004
         open_existing = 3
         file_attribute_normal = 0x00000080
         file_flag_open_reparse_point = 0x00200000
         handle = create_file(
             _windows_verbatim_path(target),
             generic_read,
-            share_read_write_delete,
+            share_read_delete,
             None,
             open_existing,
             file_attribute_normal | file_flag_open_reparse_point,
@@ -261,6 +292,16 @@ def _open_notices_descriptor(target: Path) -> int:
     return os.open(target, flags)
 
 
+def _snapshot_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
 def _read_notices(target: Path) -> str | None:
     """Admit only bounded, regular, stable UTF-8 license evidence."""
     descriptor = -1
@@ -272,24 +313,30 @@ def _read_notices(target: Path) -> str | None:
         opened = os.fstat(descriptor)
         if (
             not stat.S_ISREG(opened.st_mode)
-            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-            or (opened.st_size, opened.st_mtime_ns)
-            != (before.st_size, before.st_mtime_ns)
+            or _snapshot_identity(opened) != _snapshot_identity(before)
         ):
             return None
         with os.fdopen(descriptor, "rb", closefd=True) as source:
             descriptor = -1
             data = source.read(_MAX_NOTICES_BYTES + 1)
-            after = os.fstat(source.fileno())
+            after_first_read = os.fstat(source.fileno())
+            if (
+                len(data) > _MAX_NOTICES_BYTES
+                or len(data) != after_first_read.st_size
+                or _snapshot_identity(after_first_read) != _snapshot_identity(opened)
+            ):
+                return None
+            source.seek(0)
+            confirmed = source.read(_MAX_NOTICES_BYTES + 1)
+            after_second_read = os.fstat(source.fileno())
         current = target.lstat()
         if (
-            len(data) > _MAX_NOTICES_BYTES
-            or len(data) != after.st_size
-            or (opened.st_dev, opened.st_ino, opened.st_mtime_ns)
-            != (after.st_dev, after.st_ino, after.st_mtime_ns)
+            data != confirmed
+            or len(confirmed) > _MAX_NOTICES_BYTES
+            or len(confirmed) != after_second_read.st_size
+            or _snapshot_identity(after_second_read) != _snapshot_identity(opened)
             or not stat.S_ISREG(current.st_mode)
-            or (current.st_dev, current.st_ino, current.st_mtime_ns)
-            != (opened.st_dev, opened.st_ino, opened.st_mtime_ns)
+            or _snapshot_identity(current) != _snapshot_identity(opened)
         ):
             return None
         return data.decode("utf-8")
