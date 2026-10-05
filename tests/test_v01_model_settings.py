@@ -347,7 +347,6 @@ def test_model_capture_composes_after_existing_source_capture(tmp_path: Path) ->
     assert bound_model.model == "qwen3:8b"
 
 
-
 def test_v2_task_binding_schema_migrates_to_artifact_pin_column(tmp_path: Path) -> None:
     store = _store(tmp_path)
     settings = V01ModelSettings(store)
