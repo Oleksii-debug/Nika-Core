@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,6 +20,8 @@ from nika_core.training_runtime import (
     TrainingRunState,
     TrainingRuntime,
     TrainingStepResult,
+    TrainingWorkerError,
+    TrainingWorkerFailureEffect,
 )
 
 
@@ -63,6 +67,39 @@ class _Worker:
         )
 
 
+@dataclass
+class _TypedFailureWorker:
+    effect: TrainingWorkerFailureEffect
+    calls: list[int] = field(default_factory=list)
+
+    def step(
+        self,
+        *,
+        spec: TrainingJobSpec,
+        step_index: int,
+        resume_state: dict[str, object],
+    ) -> TrainingStepResult:
+        del spec, resume_state
+        self.calls.append(step_index)
+        raise TrainingWorkerError("simulated_failure", effect=self.effect)
+
+
+@dataclass
+class _InvalidResultWorker:
+    calls: list[int] = field(default_factory=list)
+
+    def step(
+        self,
+        *,
+        spec: TrainingJobSpec,
+        step_index: int,
+        resume_state: dict[str, object],
+    ) -> TrainingStepResult:
+        del spec, resume_state
+        self.calls.append(step_index)
+        return object()  # type: ignore[return-value]
+
+
 def _store_with_task(path: Path, task_id: str = "training-task") -> SQLiteStore:
     store = SQLiteStore(path)
     store.initialize()
@@ -84,11 +121,39 @@ def _spec(**overrides: object) -> TrainingJobSpec:
         "project_id": "project-1",
         "owner_id": "owner-1",
         "base_artifact": ArtifactIdentity("models/base", "a" * 64),
+        "frozen_package_sha256": "f" * 64,
         "candidate_artifact_ref": "models/candidate/job-1",
         "max_steps": 4,
     }
     values.update(overrides)
     return TrainingJobSpec(**values)  # type: ignore[arg-type]
+
+
+def _replace_latest_checkpoint_field(
+    store: SQLiteStore,
+    *,
+    field_name: str,
+    value: object,
+) -> None:
+    with store.connection() as conn:
+        row = conn.execute(
+            """
+            SELECT checkpoint_id, payload_json
+            FROM checkpoints
+            ORDER BY created_at DESC, rowid DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row[1])
+        payload[field_name] = value
+        body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        checksum = hashlib.sha256(body.encode()).hexdigest()
+        conn.execute(
+            "UPDATE checkpoints SET payload_json = ?, checksum_sha256 = ? "
+            "WHERE checkpoint_id = ?",
+            (body, checksum, row[0]),
+        )
 
 
 def _runtime(store: SQLiteStore, observer: _Observer | None = None) -> TrainingRuntime:
@@ -173,20 +238,63 @@ def test_cancel_is_durable_and_does_not_restart_worker(tmp_path: Path) -> None:
     assert worker.calls == []
 
 
-def test_worker_failure_is_checkpointed_and_resumable(tmp_path: Path) -> None:
+def test_typed_no_effect_worker_failure_is_resumable(tmp_path: Path) -> None:
     store = _store_with_task(tmp_path / "nika.db")
     spec = _spec()
-    failed_worker = _Worker(complete_at=2, fail_once_at=0)
+    failed_worker = _TypedFailureWorker(TrainingWorkerFailureEffect.NO_EFFECT)
 
     failed = _runtime(store).run(spec, failed_worker)
     assert failed.state is TrainingRunState.FAILED
     assert failed.next_step == 0
-    assert failed.reason == "worker_error:RuntimeError"
+    assert failed.reason == "worker_no_effect:simulated_failure"
 
     replacement = _Worker(complete_at=0)
     recovered = _runtime(SQLiteStore(store.path)).run(spec, replacement)
     assert recovered.state is TrainingRunState.COMPLETED
     assert replacement.calls == [0]
+
+
+def test_typed_unknown_worker_failure_requires_reconciliation(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    failed_worker = _TypedFailureWorker(TrainingWorkerFailureEffect.UNKNOWN)
+
+    failed = _runtime(store).run(spec, failed_worker)
+    assert failed.state is TrainingRunState.RECONCILE_REQUIRED
+    assert failed.next_step == 0
+    assert failed.reason == "worker_unknown:simulated_failure"
+
+    replacement = _Worker(complete_at=0)
+    restarted = _runtime(SQLiteStore(store.path)).run(spec, replacement)
+    assert restarted.state is TrainingRunState.RECONCILE_REQUIRED
+    assert replacement.calls == []
+
+
+def test_untyped_worker_crash_is_never_blindly_replayed(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    crashing = _Worker(complete_at=2, fail_once_at=0)
+
+    with pytest.raises(RuntimeError, match="simulated trainer failure"):
+        _runtime(store).run(spec, crashing)
+
+    replacement = _Worker(complete_at=0)
+    restarted = _runtime(SQLiteStore(store.path)).run(spec, replacement)
+    assert restarted.state is TrainingRunState.RECONCILE_REQUIRED
+    assert restarted.reason == "previous_worker_effect_unknown"
+    assert replacement.calls == []
+
+
+def test_invalid_worker_result_requires_reconciliation(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    invalid = _InvalidResultWorker()
+
+    result = _runtime(store).run(spec, invalid)
+
+    assert result.state is TrainingRunState.RECONCILE_REQUIRED
+    assert result.reason == "worker_unknown:invalid_result"
+    assert invalid.calls == [0]
 
 
 def test_resource_pressure_waits_without_running_trainer(tmp_path: Path) -> None:
@@ -225,3 +333,74 @@ def test_max_steps_is_hard_bound_and_never_promotes(tmp_path: Path) -> None:
     assert exhausted.next_step == 2
     assert exhausted.reason == "max_steps_exhausted"
     assert worker.calls == [0, 1]
+
+
+def test_frozen_package_identity_is_bound_across_restart(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    original = _spec()
+    _runtime(store).run(
+        original,
+        _Worker(complete_at=2),
+        control=_scripted_control(TrainingControl.PAUSE),
+    )
+
+    changed = _spec(frozen_package_sha256="e" * 64)
+    with pytest.raises(TrainingCheckpointError, match="identity mismatch"):
+        _runtime(SQLiteStore(store.path)).run(changed, _Worker(complete_at=0))
+
+
+def test_waiting_evidence_binds_frozen_package_identity(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    resources = ResourceManager(store, _Observer(cpu_percent=75.0))
+    resources.set_budget(
+        ResourceBudget(
+            scope="model_training",
+            owner_id="owner-1",
+            max_concurrent=1,
+            max_cpu_percent=25.0,
+        )
+    )
+    runtime = TrainingRuntime(resources=resources, checkpoints=CheckpointService(store))
+    spec = _spec()
+
+    waiting = runtime.run(spec, _Worker(complete_at=0))
+
+    assert waiting.state is TrainingRunState.WAITING
+    assert waiting.frozen_package_sha256 == spec.frozen_package_sha256
+
+
+def test_completed_checkpoint_requires_candidate_digest_on_restore(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    completed = _runtime(store).run(spec, _Worker(complete_at=0))
+    assert completed.state is TrainingRunState.COMPLETED
+
+    _replace_latest_checkpoint_field(store, field_name="candidate_sha256", value=None)
+
+    with pytest.raises(TrainingCheckpointError, match="result evidence"):
+        _runtime(SQLiteStore(store.path)).run(spec, _Worker(complete_at=0))
+
+
+def test_checkpoint_rejects_boolean_step_carrier(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+    spec = _spec()
+    _runtime(store).run(
+        spec,
+        _Worker(complete_at=2),
+        control=_scripted_control(TrainingControl.PAUSE),
+    )
+    _replace_latest_checkpoint_field(store, field_name="next_step", value=True)
+
+    with pytest.raises(TrainingCheckpointError, match="invalid training checkpoint step"):
+        _runtime(SQLiteStore(store.path)).run(spec, _Worker(complete_at=0))
+
+
+def test_control_callback_requires_exact_training_control(tmp_path: Path) -> None:
+    store = _store_with_task(tmp_path / "nika.db")
+
+    with pytest.raises(TypeError, match="exact TrainingControl"):
+        _runtime(store).run(
+            _spec(),
+            _Worker(complete_at=0),
+            control=lambda: "continue",  # type: ignore[return-value]
+        )
