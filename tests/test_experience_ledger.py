@@ -429,3 +429,58 @@ def test_record_rejects_behavioral_scalar_subclasses_before_persistence(
     assert row is not None
     assert row["event_count"] == 0
 
+
+
+def test_record_with_connection_participates_in_caller_transaction(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "Ніка Transaction Evidence" / "nika core.db")
+    store.initialize()
+    ledger = ExperienceLedger(store)
+    event_key = "runtime-connectivity:network_wait_deferred:atomic"
+
+    with pytest.raises(RuntimeError, match="rollback sentinel"):
+        with store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            event = ledger.record_with_connection(
+                conn,
+                event_key=event_key,
+                task_id="task-atomic",
+                kind=ContinuityKind.INTERNET,
+                outcome=ContinuityOutcome.WAITING,
+                reason_code="network_wait_deferred",
+                occurred_at=datetime(2026, 10, 5, 10, 0, tzinfo=UTC),
+                attempt=1,
+            )
+            assert event.event_key == event_key
+            row = conn.execute(
+                "SELECT COUNT(*) AS event_count FROM continuity_experience_events "
+                "WHERE event_key = ?",
+                (event_key,),
+            ).fetchone()
+            assert row is not None
+            assert row["event_count"] == 1
+            raise RuntimeError("rollback sentinel")
+
+    assert ledger.get(event_key) is None
+
+
+def test_record_with_connection_rejects_noncanonical_connection_before_write(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    ledger = ExperienceLedger(store)
+
+    with pytest.raises(TypeError, match="exact sqlite3.Connection"):
+        ledger.record_with_connection(  # type: ignore[arg-type]
+            object(),
+            event_key="runtime-connectivity:network_wait_deferred:invalid-connection",
+            task_id="task-invalid",
+            kind=ContinuityKind.INTERNET,
+            outcome=ContinuityOutcome.WAITING,
+            reason_code="network_wait_deferred",
+        )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS event_count FROM continuity_experience_events"
+        ).fetchone()
+    assert row is not None
+    assert row["event_count"] == 0
