@@ -105,3 +105,129 @@ def test_corrupt_workspace_enabled_does_not_become_truthy(tmp_path: Path) -> Non
         registry.list_latest()
     with pytest.raises(ValueError, match="invalid persisted workspace enabled flag"):
         registry.register(WorkspaceDefinition("research", "Research", 2))
+
+
+class _SpoofedText(str):
+    def strip(self, chars: str | None = None) -> str:
+        return "spoofed-nonempty"
+
+
+@pytest.mark.parametrize("value", (b"worker", 7, _SpoofedText("")))
+def test_agent_id_requires_exact_builtin_text(value: object) -> None:
+    with pytest.raises(ValueError, match="agent_id must be text"):
+        AgentDefinition(value, "Worker", 1, "Work")
+
+
+@pytest.mark.parametrize("value", (b"Worker", 7, _SpoofedText("Worker")))
+def test_agent_name_requires_exact_builtin_text(value: object) -> None:
+    with pytest.raises(ValueError, match="name must be text"):
+        AgentDefinition("worker", value, 1, "Work")
+
+
+@pytest.mark.parametrize("value", (b"Work", 7, _SpoofedText("Work")))
+def test_agent_goal_requires_exact_builtin_text(value: object) -> None:
+    with pytest.raises(ValueError, match="goal must be text"):
+        AgentDefinition("worker", "Worker", 1, value)
+
+
+@pytest.mark.parametrize("value", (b"research", 7, _SpoofedText("")))
+def test_workspace_id_requires_exact_builtin_text(value: object) -> None:
+    with pytest.raises(ValueError, match="workspace_id must be text"):
+        WorkspaceDefinition(value, "Research", 1)
+
+
+@pytest.mark.parametrize("value", (b"Research", 7, _SpoofedText("Research")))
+def test_workspace_name_requires_exact_builtin_text(value: object) -> None:
+    with pytest.raises(ValueError, match="name must be text"):
+        WorkspaceDefinition("research", value, 1)
+
+
+@pytest.mark.parametrize("value", (b"Description", 7, _SpoofedText("Description")))
+def test_workspace_description_requires_exact_builtin_text(value: object) -> None:
+    with pytest.raises(ValueError, match="description must be text"):
+        WorkspaceDefinition("research", "Research", 1, description=value)
+
+
+def test_registry_definitions_reject_non_utf8_unicode() -> None:
+    invalid = chr(0xD800)
+    with pytest.raises(ValueError, match="agent_id must be valid UTF-8 text"):
+        AgentDefinition(invalid, "Worker", 1, "Work")
+    with pytest.raises(ValueError, match="workspace_id must be valid UTF-8 text"):
+        WorkspaceDefinition(invalid, "Research", 1)
+
+
+def test_registry_lookups_reject_noncanonical_text_inputs(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    agents = AgentRegistry(store)
+    spaces = WorkspaceRegistry(store)
+    agents.register(AgentDefinition("worker", "Worker", 1, "Work"))
+    spaces.register(WorkspaceDefinition("research", "Research", 1))
+
+    for value in (b"worker", _SpoofedText("worker")):
+        with pytest.raises(ValueError, match="agent_id must be text"):
+            agents.get(value)
+    for value in (b"research", _SpoofedText("research")):
+        with pytest.raises(ValueError, match="workspace_id must be text"):
+            spaces.get(value)
+
+
+def test_corrupt_agent_name_fails_reads_and_successor_registration(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    registry = AgentRegistry(store)
+    registry.register(AgentDefinition("worker", "Worker", 1, "Work"))
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE agents SET name = ? WHERE agent_id = ?",
+            (b"Worker", "worker"),
+        )
+
+    with pytest.raises(ValueError, match="invalid persisted agent name"):
+        registry.get("worker")
+    with pytest.raises(ValueError, match="invalid persisted agent name"):
+        registry.list_latest()
+    with pytest.raises(ValueError, match="invalid persisted agent name"):
+        registry.register(AgentDefinition("worker", "Worker", 2, "Next"))
+
+
+def test_corrupt_workspace_description_fails_reads_and_successor_registration(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    registry = WorkspaceRegistry(store)
+    registry.register(
+        WorkspaceDefinition("research", "Research", 1, description="Stable")
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE workspaces SET description = ? WHERE workspace_id = ?",
+            (b"Stable", "research"),
+        )
+
+    with pytest.raises(ValueError, match="invalid persisted workspace description"):
+        registry.get("research")
+    with pytest.raises(ValueError, match="invalid persisted workspace description"):
+        registry.list_latest()
+    with pytest.raises(ValueError, match="invalid persisted workspace description"):
+        registry.register(WorkspaceDefinition("research", "Research", 2))
+
+
+def test_corrupt_registry_identity_storage_class_fails_list(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    agents = AgentRegistry(store)
+    spaces = WorkspaceRegistry(store)
+    agents.register(AgentDefinition("worker", "Worker", 1, "Work"))
+    spaces.register(WorkspaceDefinition("research", "Research", 1))
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE agents SET agent_id = ? WHERE agent_id = ?",
+            (b"worker", "worker"),
+        )
+        conn.execute(
+            "UPDATE workspaces SET workspace_id = ? WHERE workspace_id = ?",
+            (b"research", "research"),
+        )
+
+    with pytest.raises(ValueError, match="invalid persisted agent agent_id"):
+        agents.list_latest()
+    with pytest.raises(ValueError, match="invalid persisted workspace workspace_id"):
+        spaces.list_latest()
