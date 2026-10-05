@@ -162,6 +162,47 @@ class OllamaPreparedModelBinding:
         payload["preparation_sha256"] = self.preparation_sha256
         return payload
 
+    def canonical_json(self) -> str:
+        return json.dumps(
+            self.to_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_payload(cls, payload: object) -> OllamaPreparedModelBinding:
+        if type(payload) is not dict:
+            raise ValueError("prepared model binding must be an exact object")
+        expected = {
+            "schema",
+            "provider_id",
+            "route_model_id",
+            "manifest_model_id",
+            "artifact_sha256",
+            "descriptor_digest",
+            "provider_manifest_sha256",
+            "endpoint_sha256",
+            "create_request_sha256",
+            "preparation_sha256",
+        }
+        if (
+            set(payload) != expected
+            or payload.get("schema") != _BINDING_SCHEMA
+            or payload.get("provider_id") != _PROVIDER_ID
+        ):
+            raise ValueError("prepared model binding schema does not match")
+        return cls(
+            route_model_id=payload["route_model_id"],
+            manifest_model_id=payload["manifest_model_id"],
+            artifact_sha256=payload["artifact_sha256"],
+            descriptor_digest=payload["descriptor_digest"],
+            provider_manifest_sha256=payload["provider_manifest_sha256"],
+            endpoint_sha256=payload["endpoint_sha256"],
+            create_request_sha256=payload["create_request_sha256"],
+            preparation_sha256=payload["preparation_sha256"],
+        )
+
 
 class OllamaManifestAuthority:
     """Bind exact prepared GGUF blob identity to Ollama's distinct manifest digest.
