@@ -234,6 +234,43 @@ def test_snapshot_identity_rejects_same_size_path_replacement(tmp_path: Path) ->
     )
 
 
+def test_snapshot_rejects_path_outside_release_root(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    root.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+
+    assert (
+        release_module._stable_release_file_snapshot(
+            outside,
+            scan_secrets=False,
+            root=root,
+        )
+        is None
+    )
+
+
+def test_snapshot_rejects_external_symlink_target_when_supported(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    root.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    link = root / "payload.bin"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("file symlink creation is unavailable on this host")
+
+    assert (
+        release_module._stable_release_file_snapshot(
+            link,
+            scan_secrets=False,
+            root=root,
+        )
+        is None
+    )
+
+
 def test_builder_fails_closed_when_release_file_snapshot_is_unstable(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -241,10 +278,15 @@ def test_builder_fails_closed_when_release_file_snapshot_is_unstable(
     bundle, _ = _bundle(tmp_path)
     original = release_module._stable_release_file_snapshot
 
-    def unstable(path: Path, *, scan_secrets: bool):
+    def unstable(
+        path: Path,
+        *,
+        scan_secrets: bool,
+        root: Path | None = None,
+    ):
         if path.name == "NikaCore.exe":
             return None
-        return original(path, scan_secrets=scan_secrets)
+        return original(path, scan_secrets=scan_secrets, root=root)
 
     monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
 
@@ -270,10 +312,15 @@ def test_verifier_fails_closed_when_release_file_snapshot_is_unstable(
     )
     original = release_module._stable_release_file_snapshot
 
-    def unstable(path: Path, *, scan_secrets: bool):
+    def unstable(
+        path: Path,
+        *,
+        scan_secrets: bool,
+        root: Path | None = None,
+    ):
         if path.name == "NikaCore.exe":
             return None
-        return original(path, scan_secrets=scan_secrets)
+        return original(path, scan_secrets=scan_secrets, root=root)
 
     monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
 
@@ -319,10 +366,15 @@ def test_outer_evidence_fails_closed_when_artifact_snapshot_is_unstable(
     _write_outer_evidence(evidence, artifact)
     original = release_module._stable_release_file_snapshot
 
-    def unstable(path: Path, *, scan_secrets: bool):
+    def unstable(
+        path: Path,
+        *,
+        scan_secrets: bool,
+        root: Path | None = None,
+    ):
         if path == artifact:
             return None
-        return original(path, scan_secrets=scan_secrets)
+        return original(path, scan_secrets=scan_secrets, root=root)
 
     monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
 
