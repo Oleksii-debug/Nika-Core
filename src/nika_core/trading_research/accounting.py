@@ -35,7 +35,8 @@ class PortfolioLedger:
     _cash: Decimal = field(init=False)
     _fees: Decimal = field(default=Decimal(0), init=False)
     _positions: dict[InstrumentIdentity, Position] = field(default_factory=dict, init=False)
-    _applied_fill_ids: set[str] = field(default_factory=set, init=False)
+    _scope: tuple[str, str] | None = field(default=None, init=False)
+    _applied_fills: dict[str, tuple[object, ...]] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         if self.starting_cash < 0:
@@ -54,7 +55,16 @@ class PortfolioLedger:
         return self._positions.get(instrument_identity(instrument), Position(instrument))
 
     def apply_fill(self, fill: SimulatedFill) -> None:
-        if fill.fill_id in self._applied_fill_ids:
+        scope = (fill.authority.workspace_id, fill.authority.run_id)
+        if self._scope is None:
+            self._scope = scope
+        elif self._scope != scope:
+            raise TradingResearchError("portfolio ledger cannot mix workspace/run scope")
+        evidence = _fill_evidence(fill)
+        existing = self._applied_fills.get(fill.fill_id)
+        if existing is not None:
+            if existing != evidence:
+                raise TradingResearchError("conflicting in-memory fill identity")
             return
         current = self.position(fill.instrument)
         signed_fill = fill.quantity * Decimal(fill.side.sign)
@@ -64,7 +74,7 @@ class PortfolioLedger:
         self._positions[instrument_identity(fill.instrument)] = _apply_position_fill(
             current, signed_fill, fill.price
         )
-        self._applied_fill_ids.add(fill.fill_id)
+        self._applied_fills[fill.fill_id] = evidence
 
     def snapshot(self, marks: Mapping[InstrumentIdentity, Decimal]) -> AccountSnapshot:
         positions = tuple(
@@ -101,7 +111,26 @@ class PortfolioLedger:
         )
 
     def has_applied_fill(self, fill_id: str) -> bool:
-        return fill_id in self._applied_fill_ids
+        return fill_id in self._applied_fills
+
+
+
+
+def _fill_evidence(fill: SimulatedFill) -> tuple[object, ...]:
+    return (
+        fill.authority.workspace_id,
+        fill.authority.run_id,
+        fill.authority.order_id,
+        fill.approval_id,
+        fill.intent_id,
+        instrument_identity(fill.instrument),
+        fill.side,
+        fill.quantity,
+        fill.price,
+        fill.fee,
+        fill.filled_at,
+        fill.filled_slice,
+    )
 
 
 def _apply_position_fill(position: Position, signed_fill: Decimal, price: Decimal) -> Position:
