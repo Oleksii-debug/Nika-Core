@@ -14,7 +14,6 @@ from nika_core.builder.spec import AgentDefinition, ToolGrant
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import (
-    FoundryLocalModelHealthProbe,
     ModelHealthFact,
     ModelHealthProbePort,
     OllamaModelHealthProbe,
@@ -173,7 +172,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
 
         if selection.route_kind == "deterministic":
             return None
-        if selection.route_kind not in {"ollama", "foundry_local"}:
+        if selection.route_kind != "ollama":
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNVERIFIABLE,
                 reason=(
@@ -187,38 +186,29 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         except Exception:  # noqa: BLE001 - provider/health failures are fail-closed
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNVERIFIABLE,
-                reason="Selected local model health could not be verified.",
+                reason="Selected Ollama model health could not be verified.",
             )
         if snapshot.model_ready is not ModelHealthFact.YES:
             return RuntimeResumeProbe(
                 status=RuntimeResumeProbeStatus.UNVERIFIABLE,
-                reason="Selected local model is not ready for automatic resume.",
+                reason="Selected Ollama model is not ready for automatic resume.",
             )
         return None
 
     @staticmethod
     def _default_model_health_probe(selection: ModelSelection) -> ModelHealthProbePort:
         if (
-            selection.route_kind == "ollama"
-            and selection.provider_id == "ollama"
-            and selection.model is not None
-            and selection.base_url is not None
+            selection.route_kind != "ollama"
+            or selection.provider_id != "ollama"
+            or selection.model is None
+            or selection.base_url is None
         ):
-            return OllamaModelHealthProbe(
-                model_id=selection.model,
-                base_url=selection.base_url,
-                provider_id=selection.provider_id,
-            )
-        if (
-            selection.route_kind == "foundry_local"
-            and selection.provider_id == "foundry-local"
-            and selection.model is not None
-        ):
-            return FoundryLocalModelHealthProbe(
-                model_id=selection.model,
-                provider_id=selection.provider_id,
-            )
-        raise ValueError("automatic-resume health probe requires an exact local model route")
+            raise ValueError("automatic-resume health probe requires an exact Ollama route")
+        return OllamaModelHealthProbe(
+            model_id=selection.model,
+            base_url=selection.base_url,
+            provider_id=selection.provider_id,
+        )
 
     async def run(self, request: RuntimeRequest) -> RuntimeResult:
         if self._is_member_thread(request.thread_id):
