@@ -186,3 +186,63 @@ def test_oversized_catalog_fails_closed_without_runtime_inventory_probe() -> Non
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
     assert calls == ["http://localhost:11434/api/tags"]
 
+class _RecursiveResponse(_Response):
+    def __init__(self) -> None:
+        super().__init__({})
+
+    def json(self) -> object:
+        raise RecursionError("deep untrusted Ollama JSON")
+
+
+class _ResponseClient:
+    def __init__(
+        self,
+        responses: dict[str, _Response],
+        calls: list[str],
+    ) -> None:
+        self._responses = responses
+        self._calls = calls
+
+    def __enter__(self) -> "_ResponseClient":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def get(self, url: str) -> _Response:
+        self._calls.append(url)
+        return self._responses[url]
+
+
+def test_recursive_catalog_json_is_unknown_without_runtime_inventory_probe() -> None:
+    base = "http://localhost:11434"
+    calls: list[str] = []
+    responses = {f"{base}/api/tags": _RecursiveResponse()}
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="local-model:1",
+        client_factory=lambda **_kwargs: _ResponseClient(responses, calls),
+    ).snapshot()
+
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == [f"{base}/api/tags"]
+
+
+def test_recursive_running_json_preserves_known_presence() -> None:
+    base = "http://localhost:11434"
+    calls: list[str] = []
+    responses = {
+        f"{base}/api/tags": _Response({"models": [{"name": "local-model:1"}]}),
+        f"{base}/api/ps": _RecursiveResponse(),
+    }
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="local-model:1",
+        client_factory=lambda **_kwargs: _ResponseClient(responses, calls),
+    ).snapshot()
+
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == [f"{base}/api/tags", f"{base}/api/ps"]
+
