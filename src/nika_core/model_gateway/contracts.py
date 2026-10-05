@@ -185,23 +185,14 @@ class ModelDownloadAuthorization:
     expected_model_id: str | None = None
 
     def __post_init__(self) -> None:
-        if not self.provider_id.strip():
-            raise ValueError("provider_id must not be empty")
-        if self.provider_id != self.provider_id.strip():
-            raise ValueError("provider_id must not contain surrounding whitespace")
-        if not self.model.strip():
-            raise ValueError("model must not be empty")
-        if self.model != self.model.strip():
-            raise ValueError("model must not contain surrounding whitespace")
-        if not self.license_reference.strip():
-            raise ValueError("license_reference must not be empty")
-        if self.license_reference != self.license_reference.strip():
-            raise ValueError("license_reference must not contain surrounding whitespace")
-        if self.expected_model_id is not None:
-            if not self.expected_model_id.strip():
-                raise ValueError("expected_model_id must not be empty")
-            if self.expected_model_id != self.expected_model_id.strip():
-                raise ValueError("expected_model_id must not contain surrounding whitespace")
+        _require_canonical_identifier("provider_id", self.provider_id)
+        _require_canonical_identifier("model", self.model)
+        _require_canonical_identifier("license_reference", self.license_reference)
+        _require_canonical_identifier(
+            "expected_model_id",
+            self.expected_model_id,
+            optional=True,
+        )
 
 
 @dataclass(frozen=True, slots=True)
