@@ -476,8 +476,8 @@ class SQLiteRecoveryManager:
 
     def _recover_interrupted_restore_unlocked(self) -> InterruptedRestoreResult | None:
         target = self._resolve_direct_restore_target(self._store.path)
-        marker_path = self._restore_marker_path(target)
-        if not marker_path.exists():
+        marker_path = self._existing_restore_marker(target)
+        if marker_path is None:
             return None
         marker = self._read_restore_marker(marker_path, target)
         for name in (
@@ -572,7 +572,7 @@ class SQLiteRecoveryManager:
         backup: BackupArtifact,
     ) -> tuple[Path, Path]:
         marker_path = self._restore_marker_path(target)
-        if marker_path.exists():
+        if self._existing_restore_marker(target) is not None:
             raise RestoreSafetyError("an interrupted restore marker already exists")
         if plan.current_sha256 is None or not target.exists():
             raise RestorePlanStaleError(
@@ -867,11 +867,26 @@ class SQLiteRecoveryManager:
         ) and versions[-1] <= SCHEMA_VERSION
 
     def _ensure_no_interrupted_restore(self) -> None:
-        if self._restore_marker_path(self._store.path.resolve()).exists():
+        if self._existing_restore_marker(self._store.path.resolve()) is not None:
             raise RestoreSafetyError(
                 "an interrupted restore marker exists; call "
                 "recover_interrupted_restore() before new backup/restore work"
             )
+
+    @classmethod
+    def _existing_restore_marker(cls, target: Path) -> Path | None:
+        marker_path = cls._restore_marker_path(target)
+        if cls._is_indirect_path(marker_path):
+            raise RestoreSafetyError(
+                "interrupted restore marker must be a direct regular file"
+            )
+        if not marker_path.exists():
+            return None
+        if not marker_path.is_file():
+            raise RestoreSafetyError(
+                "interrupted restore marker must be a direct regular file"
+            )
+        return marker_path
 
     @contextmanager
     def _hold_recovery_lease(self) -> Iterator[None]:
@@ -1233,11 +1248,43 @@ class SQLiteRecoveryManager:
                 result[key] = value
             return result
 
+        def _snapshot(info: os.stat_result) -> tuple[int, int, int, int, int]:
+            return (
+                info.st_dev,
+                info.st_ino,
+                info.st_size,
+                info.st_mtime_ns,
+                info.st_ctime_ns,
+            )
+
+        def _direct_regular(info: os.stat_result) -> bool:
+            reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+            file_attributes = getattr(info, "st_file_attributes", 0)
+            return stat.S_ISREG(info.st_mode) and not bool(file_attributes & reparse_flag)
+
         try:
+            path_before = os.lstat(path)
+            if not _direct_regular(path_before):
+                raise ValueError("recovery metadata must be a direct regular file")
             with path.open("rb") as handle:
+                opened_before = os.fstat(handle.fileno())
+                if not _direct_regular(opened_before) or not os.path.samestat(
+                    path_before, opened_before
+                ):
+                    raise ValueError("recovery metadata identity changed before read")
                 raw = handle.read(65_537)
+                opened_after = os.fstat(handle.fileno())
+            path_after = os.lstat(path)
             if len(raw) > 65_536:
                 raise ValueError("recovery metadata exceeds 64 KiB")
+            if (
+                not _direct_regular(opened_after)
+                or not _direct_regular(path_after)
+                or _snapshot(opened_before) != _snapshot(opened_after)
+                or not os.path.samestat(opened_after, path_after)
+                or _snapshot(opened_after) != _snapshot(path_after)
+            ):
+                raise ValueError("recovery metadata changed while being read")
             content = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_keys)
         except (OSError, UnicodeError, ValueError, RecursionError) as exc:
             raise BackupVerificationError(
