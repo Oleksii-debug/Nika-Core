@@ -284,6 +284,32 @@ def test_stale_visible_spec_version_still_fails_closed(tmp_path) -> None:
         service.update_project("p1", expected_spec_version=1, goal="stale")
 
 
+@pytest.mark.parametrize(
+    "invalid_version",
+    [True, False, 1.0, "1", 0, -1],
+)
+def test_update_project_requires_exact_positive_spec_version_without_mutation(
+    tmp_path,
+    invalid_version,
+) -> None:
+    service, projects, _store = _service(tmp_path)
+    _create(service)
+    before = projects.get("p1")
+
+    with pytest.raises(
+        ValueError,
+        match="expected_spec_version must be a positive integer",
+    ):
+        service.update_project(
+            "p1",
+            expected_spec_version=invalid_version,
+            goal="must not persist",
+        )
+
+    assert projects.get("p1") == before
+    assert len(projects.spec_history("p1")) == 1
+
+
 def test_full_spec_replacement_cannot_mix_with_partial_update(tmp_path) -> None:
     service, _projects, _store = _service(tmp_path)
     _create(service)
