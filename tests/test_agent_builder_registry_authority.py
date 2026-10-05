@@ -177,3 +177,48 @@ def test_agent_document_retains_version_and_budget_bounds(field: str, value: int
     payload[field] = value
     with pytest.raises(ValidationError):
         AgentDefinition.model_validate(payload)
+
+@pytest.mark.parametrize(
+    ("field", "original", "duplicate"),
+    (
+        ("format_version", "1", "1"),
+        ("version", "1", "2"),
+        ("max_steps", "100", "100000"),
+        ("max_risk", "0", "4"),
+        ("tool_id", '"web.read"', '"release.publish"'),
+    ),
+)
+def test_imported_agent_rejects_duplicate_nested_and_authority_keys(
+    field: str, original: str, duplicate: str,
+) -> None:
+    raw = _definition("web.read", RiskTier.R0_READ_ONLY).export_json()
+    before = '"' + field + '": ' + original
+    assert before in raw
+    after = before + ', "' + field + '": ' + duplicate
+    with pytest.raises(ValueError, match="duplicate JSON object key"):
+        AgentDefinition.import_json(raw.replace(before, after, 1))
+
+
+def test_imported_agent_rejects_oversized_text_before_parsing() -> None:
+    raw = _definition("web.read", RiskTier.R0_READ_ONLY).export_json()
+    with pytest.raises(ValueError, match="size limit"):
+        AgentDefinition.import_json(raw + " " * (1024 * 1024))
+
+
+def test_imported_agent_accepts_exact_utf8_byte_budget_and_unicode_name() -> None:
+    payload = _definition("web.read", RiskTier.R0_READ_ONLY).model_dump()
+    payload["name"] = "Українська Ніка"
+    raw = AgentDefinition.model_validate(payload).export_json()
+    padded = raw + " " * (1024 * 1024 - len(raw.encode("utf-8")))
+    assert AgentDefinition.import_json(padded).name == "Українська Ніка"
+
+
+def test_imported_agent_keeps_existing_malformed_json_validation_error() -> None:
+    with pytest.raises(ValidationError):
+        AgentDefinition.import_json('{"agent_id":')
+
+
+def test_imported_agent_rejects_raw_surrogates() -> None:
+    raw = _definition("web.read", RiskTier.R0_READ_ONLY).export_json()
+    with pytest.raises(ValueError, match="invalid Unicode"):
+        AgentDefinition.import_json(raw + "\ud800")
