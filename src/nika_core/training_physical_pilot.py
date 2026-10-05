@@ -251,6 +251,7 @@ def _candidate_manifest_evidence(
     completed: TrainingRunEvidence,
     trainer_job_fingerprint: str,
     trainer_deployment_identity: ArtifactIdentity,
+    trainer_consumed_materials_sha256: str,
 ) -> _CandidateManifestEvidence:
     try:
         manifest = candidate_adapter_manifest(candidate_path)
@@ -292,6 +293,15 @@ def _candidate_manifest_evidence(
         manifest.get("consumed_materials_sha256"),
         name="candidate manifest consumed_materials_sha256",
     )
+    expected_consumed_materials_sha256 = _require_sha256(
+        trainer_consumed_materials_sha256,
+        name="worker accepted consumed_materials_sha256",
+    )
+    if not hmac.compare_digest(
+        consumed_materials_sha256,
+        expected_consumed_materials_sha256,
+    ):
+        _fail("PEFT candidate manifest changed consumed-material attestation")
     model_dir_manifest_sha256 = _require_sha256(
         manifest.get("model_dir_manifest_sha256"),
         name="candidate manifest model_dir_manifest_sha256",
@@ -762,6 +772,7 @@ def build_physical_training_pilot_report(
     completed: TrainingRunEvidence,
     trainer_job_fingerprint: str,
     trainer_deployment_identity: ArtifactIdentity,
+    trainer_consumed_materials_sha256: str,
     candidate_path: Path,
     candidate_descriptor: ModelArtifactDescriptor,
     candidate_root: Path | None = None,
@@ -841,6 +852,7 @@ def build_physical_training_pilot_report(
             completed=completed,
             trainer_job_fingerprint=trainer_job_fingerprint,
             trainer_deployment_identity=trainer_deployment_identity,
+            trainer_consumed_materials_sha256=trainer_consumed_materials_sha256,
         )
     finally:
         _close_windows_candidate_stability_lock(stability_lock)
@@ -993,6 +1005,10 @@ def run_physical_training_pilot(
         _fail("trainer did not reach the required one-step durable pause boundary")
     if paused.reason != "paused":
         _fail("initial pilot pause did not come from the explicit pause control")
+    initial_consumed_materials_sha256 = _require_sha256(
+        worker.last_accepted_consumed_materials_sha256,
+        name="initial worker accepted consumed_materials_sha256",
+    )
 
     resumed_runtime = restart_runtime()
     resumed_worker = restart_worker()
@@ -1002,6 +1018,8 @@ def run_physical_training_pilot(
         raise TypeError("restart_worker must return canonical SubprocessTrainingWorker")
     if resumed_runtime is runtime or resumed_worker is worker:
         _fail("restart factories must construct new runtime and worker objects")
+    if resumed_worker.last_accepted_consumed_materials_sha256 is not None:
+        _fail("restarted worker already carries accepted consumed-material evidence")
     resumed_execution_plan_sha256 = _require_sha256(
         resumed_worker.execution_plan_sha256,
         name="resumed worker execution_plan_sha256",
@@ -1043,6 +1061,8 @@ def run_physical_training_pilot(
         _fail("restarted runtime did not reopen the one-step durable checkpoint")
     if restart_probe.reason != "paused_before_admission":
         _fail("restart probe did not pause before admission and trainer effects")
+    if resumed_worker.last_accepted_consumed_materials_sha256 is not None:
+        _fail("restart probe produced unexpected consumed-material evidence")
 
     completed = resumed_runtime.run(
         canonical_spec,
@@ -1054,6 +1074,15 @@ def run_physical_training_pilot(
         state=TrainingRunState.COMPLETED,
         label="completed run",
     )
+    resumed_consumed_materials_sha256 = _require_sha256(
+        resumed_worker.last_accepted_consumed_materials_sha256,
+        name="resumed worker accepted consumed_materials_sha256",
+    )
+    if not hmac.compare_digest(
+        resumed_consumed_materials_sha256,
+        initial_consumed_materials_sha256,
+    ):
+        _fail("accepted consumed-material attestation changed across restart")
     candidate_descriptor = _resolve_candidate_descriptor(
         candidate_descriptor_factory,
         completed,
@@ -1064,6 +1093,7 @@ def run_physical_training_pilot(
         completed=completed,
         trainer_job_fingerprint=resumed_trainer_job_fingerprint,
         trainer_deployment_identity=resumed_trainer_deployment_identity,
+        trainer_consumed_materials_sha256=resumed_consumed_materials_sha256,
         candidate_path=candidate_path,
         candidate_descriptor=candidate_descriptor,
         candidate_root=candidate_root,
