@@ -50,6 +50,7 @@ class TradingStateRepository:
         workspace_id = fill.authority.workspace_id
         run_id = fill.authority.run_id
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT 1 FROM trading_research_run_fills "
                 "WHERE workspace_id = ? AND run_id = ? AND fill_id = ?",
