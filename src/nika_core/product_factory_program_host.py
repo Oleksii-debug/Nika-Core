@@ -476,13 +476,17 @@ class ProductFactoryProgramHost:
                         lease=lease,
                     )
                 except IdempotencyConflictError:
-                    occupied = self._ledger.get(operation_key)
+                    durable_status = self._matching_operation_status(
+                        operation_key,
+                        host_task_id=host_task_id,
+                        request=request,
+                    )
                     self._release_best_effort(lease)
                     return _outcome(
                         request,
                         coordinator,
                         ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                        occupied.status if occupied is not None else None,
+                        durable_status,
                         "worker reservation identity requires explicit reconciliation",
                     )
             except Exception:
@@ -573,7 +577,11 @@ class ProductFactoryProgramHost:
                 request,
                 coordinator,
                 ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                self._durable_operation_status(operation_key),
+                self._matching_operation_status(
+                    operation_key,
+                    host_task_id=host_task_id,
+                    request=request,
+                ),
                 (
                     "active Product Factory ownership forbids duplicate recovery; "
                     "independent running work may continue"
@@ -597,12 +605,16 @@ class ProductFactoryProgramHost:
                             lease=lease,
                         )
                     except IdempotencyConflictError:
-                        occupied = self._ledger.get(operation_key)
+                        durable_status = self._matching_operation_status(
+                            operation_key,
+                            host_task_id=host_task_id,
+                            request=request,
+                        )
                         return _outcome(
                             request,
                             coordinator,
                             ProgramWorkDisposition.NEEDS_RECONCILIATION,
-                            occupied.status if occupied is not None else None,
+                            durable_status,
                             "worker reservation identity requires explicit reconciliation",
                         )
                     if not created:
@@ -770,7 +782,11 @@ class ProductFactoryProgramHost:
                         work_id=request.work_id,
                         disposition=ProgramWorkDisposition.BLOCKED_MISSING_WORKER_STATE,
                         state=blocked.state,
-                        operation_status=self._durable_operation_status(operation_key),
+                        operation_status=self._matching_operation_status(
+                            operation_key,
+                            host_task_id=host_task_id,
+                            request=request,
+                        ),
                         detail="worker state is missing; duplicate execution is forbidden",
                     )
                 try:
