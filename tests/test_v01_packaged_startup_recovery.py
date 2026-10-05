@@ -31,6 +31,7 @@ class _PackagedRecoveryRuntime:
     def __init__(self) -> None:
         self.resume_started = Event()
         self.resume_calls = 0
+        self.resumed_task_ids: list[str] = []
 
     @staticmethod
     def initial_resume_token(*, task_id: str, thread_id: str) -> str:
@@ -43,6 +44,7 @@ class _PackagedRecoveryRuntime:
 
     async def resume(self, request):
         self.resume_calls += 1
+        self.resumed_task_ids.append(request.task_id)
         self.resume_started.set()
         return RuntimeResult(
             outcome=RuntimeOutcome.COMPLETED,
@@ -210,6 +212,39 @@ def test_startup_recovery_admission_rejection_demotes_to_manual_resume(
     assert admission_calls == [task_id]
     assert runtime.resume_calls == 0
     assert queue.get(task_id).state is TaskState.PAUSED
+    assert recovery["status"] == "manual"
+    assert recovery["auto_resume_count"] == 0
+    assert recovery["manual_resume_count"] == 1
+    assert recovery["resume_failed_count"] == 0
+    backend.close()
+
+def test_startup_recovery_admission_rejection_isolated_per_task(
+    tmp_path,
+) -> None:
+    runtime = _PackagedRecoveryRuntime()
+    database = tmp_path / "Ніка mixed recovery" / "nika core.db"
+    store, queue, rejected_id = _crash_left_running_task(database, runtime)
+    _store2, queue2, approved_id = _crash_left_running_task(database, runtime)
+    assert queue2.get(approved_id).state is TaskState.RUNNING
+
+    def admit_recovery(record) -> None:
+        if record.task_id == rejected_id:
+            raise PermissionError("test one-task authority denial")
+
+    backend = DesktopBackend(
+        queue=queue,
+        agents=AgentRegistry(store),
+        workspaces=WorkspaceRegistry(store),
+        audit=AuditLog(store),
+        runtime=runtime,
+        admit_recovered_task=admit_recovery,
+    )
+
+    recovery = backend.start_startup_recovery(startup_wait_seconds=2)
+
+    assert queue.get(rejected_id).state is TaskState.PAUSED
+    assert queue.get(approved_id).state is TaskState.COMPLETED
+    assert runtime.resumed_task_ids == [approved_id]
     assert recovery["status"] == "manual"
     assert recovery["auto_resume_count"] == 0
     assert recovery["manual_resume_count"] == 1
