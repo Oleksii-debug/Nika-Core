@@ -22,6 +22,7 @@ _MAX_PREHUMAN_EVIDENCE_BYTES = 1024 * 1024
 _MAX_RELEASE_JSON_DEPTH = 64
 _MAX_RELEASE_JSON_INTEGER_BITS = 4096
 _MAX_RELEASE_JSON_INTEGER_DECIMAL_CHARS = 1234
+_MAX_PRODUCT_NAME_CHARS = 128
 _MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
@@ -329,6 +330,16 @@ def _canonical_release_path(value: object) -> bool:
     )
 
 
+def _valid_product_name(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and len(value) <= _MAX_PRODUCT_NAME_CHARS
+        and value == value.strip()
+        and not any(ord(character) < 32 for character in value)
+    )
+
+
 def _valid_product_version(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -430,11 +441,7 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
     findings: list[str] = []
     if type(manifest.manifest_version) is not int or manifest.manifest_version != _MANIFEST_VERSION:
         findings.append("manifest:schema-version")
-    if (
-        not isinstance(manifest.product, str)
-        or not manifest.product
-        or manifest.product != manifest.product.strip()
-    ):
+    if not _valid_product_name(manifest.product):
         findings.append("manifest:product")
     if not _valid_product_version(manifest.version):
         findings.append("manifest:product-version")
@@ -873,6 +880,7 @@ def verify_release_archive(
     artifact_path: Path,
     *,
     source_sha: str,
+    expected_product: str | None = None,
     expected_product_version: str | None = None,
 ) -> tuple[str, ...]:
     """Verify the embedded manifest against the exact files in a Windows release ZIP.
@@ -883,6 +891,8 @@ def verify_release_archive(
     normalized_source_sha = source_sha.strip().casefold()
     if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
         return ("archive:source-sha-format",)
+    if expected_product is not None and not _valid_product_name(expected_product):
+        return ("archive:expected-product-format",)
     if expected_product_version is not None and not _valid_product_version(
         expected_product_version
     ):
@@ -955,6 +965,8 @@ def verify_release_archive(
             structure_findings = _manifest_structure_findings(manifest)
             if structure_findings:
                 return tuple(f"archive:{finding}" for finding in structure_findings)
+            if expected_product is not None and manifest.product != expected_product:
+                findings.append("archive:product")
             if manifest.source_sha != normalized_source_sha:
                 findings.append("archive:source-sha")
             if (
