@@ -52,7 +52,7 @@ from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
 _MAX_STORED_SELECTION_BYTES = 64 * 1024
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
 _ENV_CREDENTIAL_REF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")
@@ -90,6 +90,10 @@ _MIGRATIONS = {
             "CHECK(rollback_revision IS NULL OR rollback_revision > activated_revision))"
         ),
     ),
+    3: (
+        "ALTER TABLE v01_model_promotions ADD COLUMN activation_request_sha256 TEXT",
+        "ALTER TABLE v01_model_promotions ADD COLUMN activation_attestation_sha256 TEXT",
+    ),
 }
 
 
@@ -107,6 +111,8 @@ class ModelPromotionReceipt:
     base_descriptor_digest: str
     challenger_artifact_sha256: str
     challenger_descriptor_digest: str
+    activation_request_sha256: str | None
+    activation_attestation_sha256: str | None
     previous_selection_id: str
     activated_selection_id: str
     activated_revision: int
@@ -124,6 +130,20 @@ class ModelPromotionReceipt:
             (self.activated_selection_id, "activated_selection_id"),
         ):
             if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        activation_proof = (
+            self.activation_request_sha256,
+            self.activation_attestation_sha256,
+        )
+        if (activation_proof[0] is None) != (activation_proof[1] is None):
+            raise ValueError("activation attestation evidence must be complete")
+        for value, name in (
+            (self.activation_request_sha256, "activation_request_sha256"),
+            (self.activation_attestation_sha256, "activation_attestation_sha256"),
+        ):
+            if value is not None and (
+                type(value) is not str or _SELECTION_ID.fullmatch(value) is None
+            ):
                 raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
         if (
             type(self.activated_revision) is not int
@@ -396,6 +416,8 @@ class V01ModelSettings:
                 base_descriptor_digest=row["base_descriptor_digest"],
                 challenger_artifact_sha256=row["challenger_artifact_sha256"],
                 challenger_descriptor_digest=row["challenger_descriptor_digest"],
+                activation_request_sha256=row["activation_request_sha256"],
+                activation_attestation_sha256=row["activation_attestation_sha256"],
                 previous_selection_id=row["previous_selection_id"],
                 activated_selection_id=row["activated_selection_id"],
                 activated_revision=row["activated_revision"],
@@ -412,6 +434,30 @@ class V01ModelSettings:
             raise ModelSetupError(f"{field} має бути точним SHA-256.")
         return value
 
+    def promotion_receipt(
+        self,
+        decision_sha256: str,
+    ) -> ModelPromotionReceipt | None:
+        """Read validated durable promotion evidence without changing the route."""
+
+        decision_digest = self._require_promotion_digest(
+            decision_sha256,
+            field="SHA-256 рішення",
+        )
+        try:
+            with self._store.connection() as conn:
+                row = conn.execute(
+                    "SELECT * FROM v01_model_promotions WHERE decision_sha256 = ?",
+                    (decision_digest,),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise ModelSetupError(
+                "Не вдалося надійно прочитати запис просування моделі."
+            ) from exc
+        if row is None:
+            return None
+        return self._promotion_receipt(row)
+
     def activate_promoted_local_model(
         self,
         *,
@@ -426,6 +472,8 @@ class V01ModelSettings:
         base_descriptor_digest: str,
         challenger_artifact_sha256: str,
         challenger_descriptor_digest: str,
+        activation_request_sha256: str,
+        activation_attestation_sha256: str,
     ) -> ModelPromotionReceipt:
         """Atomically activate an attested local challenger for future tasks only.
 
@@ -456,6 +504,14 @@ class V01ModelSettings:
         challenger_descriptor = self._require_promotion_digest(
             challenger_descriptor_digest,
             field="SHA-256 дескриптора-кандидата",
+        )
+        activation_request_digest = self._require_promotion_digest(
+            activation_request_sha256,
+            field="SHA-256 запиту активаційної атестації",
+        )
+        activation_attestation_digest = self._require_promotion_digest(
+            activation_attestation_sha256,
+            field="SHA-256 активаційної атестації",
         )
         if (
             type(expected_revision) is not int
@@ -510,6 +566,25 @@ class V01ModelSettings:
                     ):
                         raise ModelSetupError(
                             "Повтор просування не збігається з початковою моделлю."
+                        )
+                    settings_row = conn.execute(
+                        "SELECT * FROM v01_model_settings WHERE singleton = 1"
+                    ).fetchone()
+                    current_revision = self._revision(settings_row)
+                    if settings_row is None:
+                        raise ModelSetupError(
+                            "Поточні налаштування моделі відсутні."
+                        )
+                    current_selection = ModelSelection.from_stored(
+                        settings_row["selection_json"]
+                    )
+                    current_id, _ = self._selection_id(current_selection)
+                    if (
+                        current_revision != receipt.activated_revision
+                        or current_id != receipt.activated_selection_id
+                    ):
+                        raise ModelSetupError(
+                            "Просування більше не володіє поточним маршрутом моделі."
                         )
                     return receipt
 
@@ -592,8 +667,13 @@ class V01ModelSettings:
                         "Налаштування моделі змінилися під час просування."
                     )
                 conn.execute(
-                    "INSERT INTO v01_model_promotions VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    "INSERT INTO v01_model_promotions ("
+                    "decision_sha256, binding_sha256, base_artifact_sha256, "
+                    "base_descriptor_digest, challenger_artifact_sha256, "
+                    "challenger_descriptor_digest, activation_request_sha256, "
+                    "activation_attestation_sha256, previous_selection_id, "
+                    "activated_selection_id, activated_revision, rollback_revision"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
                     (
                         decision_digest,
                         binding_digest,
@@ -601,6 +681,8 @@ class V01ModelSettings:
                         base_descriptor,
                         challenger_artifact_digest,
                         challenger_descriptor,
+                        activation_request_digest,
+                        activation_attestation_digest,
                         previous_id,
                         activated_id,
                         next_revision,
@@ -626,6 +708,8 @@ class V01ModelSettings:
                         "base_descriptor_digest": base_descriptor,
                         "challenger_artifact_sha256": challenger_artifact_digest,
                         "challenger_descriptor_digest": challenger_descriptor,
+                        "activation_request_sha256": activation_request_digest,
+                        "activation_attestation_sha256": activation_attestation_digest,
                         "rollback_selection_id": previous_id,
                     },
                 )
@@ -636,6 +720,8 @@ class V01ModelSettings:
                     base_descriptor_digest=base_descriptor,
                     challenger_artifact_sha256=challenger_artifact_digest,
                     challenger_descriptor_digest=challenger_descriptor,
+                    activation_request_sha256=activation_request_digest,
+                    activation_attestation_sha256=activation_attestation_digest,
                     previous_selection_id=previous_id,
                     activated_selection_id=activated_id,
                     activated_revision=next_revision,

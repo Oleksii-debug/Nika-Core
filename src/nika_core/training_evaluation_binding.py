@@ -30,6 +30,7 @@ from nika_core.training_runtime import (
     TrainingJobSpec,
     TrainingRunEvidence,
     TrainingRunState,
+    training_job_fingerprint,
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -76,6 +77,7 @@ class TrainingEvaluationBinding:
     challenger_sha256: str
     candidate_artifact_ref: str
     frozen_package_sha256: str
+    execution_plan_sha256: str
     evaluation_set_sha256: str
     base_descriptor_digest: str
     base_descriptor_registry_key: str
@@ -100,6 +102,7 @@ class TrainingEvaluationBinding:
             (self.base_sha256, "base_sha256"),
             (self.challenger_sha256, "challenger_sha256"),
             (self.frozen_package_sha256, "frozen_package_sha256"),
+            (self.execution_plan_sha256, "execution_plan_sha256"),
             (self.evaluation_set_sha256, "evaluation_set_sha256"),
             (self.base_descriptor_digest, "base_descriptor_digest"),
             (self.base_descriptor_registry_key, "base_descriptor_registry_key"),
@@ -134,6 +137,7 @@ class TrainingEvaluationBinding:
                 challenger_sha256=self.challenger_sha256,
                 candidate_artifact_ref=self.candidate_artifact_ref,
                 frozen_package_sha256=self.frozen_package_sha256,
+                execution_plan_sha256=self.execution_plan_sha256,
                 evaluation_set_sha256=self.evaluation_set_sha256,
                 base_descriptor_digest=self.base_descriptor_digest,
                 base_descriptor_registry_key=self.base_descriptor_registry_key,
@@ -147,7 +151,7 @@ class TrainingEvaluationBinding:
 
     def _binding_sha256_unchecked(self) -> str:
         payload = {
-            "schema": "nika-training-evaluation-binding-v2",
+            "schema": "nika-training-evaluation-binding-v3",
             "job_id": self.job_id,
             "base_candidate_id": self.base_candidate_id,
             "base_provider_id": self.base_provider_id,
@@ -159,6 +163,7 @@ class TrainingEvaluationBinding:
             "challenger_sha256": self.challenger_sha256,
             "candidate_artifact_ref": self.candidate_artifact_ref,
             "frozen_package_sha256": self.frozen_package_sha256,
+            "execution_plan_sha256": self.execution_plan_sha256,
             "evaluation_set_sha256": self.evaluation_set_sha256,
             "base_descriptor_digest": self.base_descriptor_digest,
             "base_descriptor_registry_key": self.base_descriptor_registry_key,
@@ -263,7 +268,7 @@ def _validate_completed_run(
     evidence: TrainingRunEvidence,
     *,
     spec: TrainingJobSpec,
-) -> str:
+) -> tuple[str, str]:
     if type(evidence) is not TrainingRunEvidence:
         raise TypeError("evidence must be an exact TrainingRunEvidence")
     try:
@@ -297,6 +302,18 @@ def _validate_completed_run(
         evidence.training_material_sha256,
         name="training run material SHA-256",
     )
+    observed_execution_plan_sha256 = _require_sha256(
+        evidence.execution_plan_sha256,
+        name="training run execution plan SHA-256",
+    )
+    observed_job_fingerprint = _require_sha256(
+        evidence.job_fingerprint,
+        name="training run job fingerprint",
+    )
+    expected_job_fingerprint = training_job_fingerprint(
+        spec,
+        execution_plan_sha256=observed_execution_plan_sha256,
+    )
     observed_candidate_ref = _require_identity_text(
         evidence.candidate_artifact_ref,
         name="training run candidate artifact ref",
@@ -310,12 +327,13 @@ def _validate_completed_run(
         or observed_base != spec.base_artifact
         or observed_package_sha256 != spec.frozen_package_sha256
         or observed_material_sha256 != spec.training_material_sha256
+        or observed_job_fingerprint != expected_job_fingerprint
         or observed_candidate_ref != spec.candidate_artifact_ref
     ):
         raise TrainingEvaluationBindingError(
             "training run evidence does not match the exact training job"
         )
-    return candidate_sha256
+    return candidate_sha256, observed_execution_plan_sha256
 
 
 def _validate_evaluation_set(
@@ -455,7 +473,7 @@ def bind_training_result_for_evaluation(
             "frozen package base artifact does not match training job"
         )
 
-    candidate_sha256 = _validate_completed_run(
+    candidate_sha256, execution_plan_sha256 = _validate_completed_run(
         evidence,
         spec=canonical_spec,
     )
@@ -579,6 +597,7 @@ def bind_training_result_for_evaluation(
         challenger_sha256=candidate_sha256,
         candidate_artifact_ref=canonical_spec.candidate_artifact_ref,
         frozen_package_sha256=canonical_spec.frozen_package_sha256,
+        execution_plan_sha256=execution_plan_sha256,
         evaluation_set_sha256=canonical_package.evaluation_set_sha256,
         base_descriptor_digest=canonical_base_descriptor.descriptor_digest,
         base_descriptor_registry_key=canonical_base_descriptor.registry_key,

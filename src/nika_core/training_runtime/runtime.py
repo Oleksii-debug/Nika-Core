@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from collections.abc import Callable
 
 from nika_core.kernel.checkpoint import Checkpoint, CheckpointService
@@ -21,6 +22,7 @@ from nika_core.training_runtime.contracts import (
 
 _CHECKPOINT_PREFIX = "training_runtime/v3/"
 _CHECKPOINT_SCHEMA_VERSION = 3
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _TERMINAL_STATES = {
     TrainingRunState.COMPLETED,
     TrainingRunState.CANCELLED,
@@ -33,7 +35,24 @@ class TrainingCheckpointError(RuntimeError):
     """Raised when durable training state cannot be trusted for safe resume."""
 
 
-def _job_fingerprint(spec: TrainingJobSpec) -> str:
+def _require_execution_plan_sha256(value: object) -> str:
+    if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+        raise ValueError(
+            "training execution plan must be an exact lowercase SHA-256 digest"
+        )
+    return value
+
+
+def training_job_fingerprint(
+    spec: TrainingJobSpec,
+    *,
+    execution_plan_sha256: str,
+) -> str:
+    """Bind one durable training job to the exact result-affecting trainer plan."""
+
+    if type(spec) is not TrainingJobSpec:
+        raise TypeError("spec must be an exact TrainingJobSpec")
+    plan_sha256 = _require_execution_plan_sha256(execution_plan_sha256)
     identity = {
         "job_id": spec.job_id,
         "task_id": spec.task_id,
@@ -43,12 +62,21 @@ def _job_fingerprint(spec: TrainingJobSpec) -> str:
         "base_sha256": spec.base_artifact.sha256,
         "frozen_package_sha256": spec.frozen_package_sha256,
         "training_material_sha256": spec.training_material_sha256,
+        "execution_plan_sha256": plan_sha256,
         "candidate_artifact_ref": spec.candidate_artifact_ref,
         "max_steps": spec.max_steps,
         "resource_scope": spec.resource_scope,
     }
     body = json.dumps(identity, sort_keys=True, separators=(",", ":"), allow_nan=False)
-    return hashlib.sha256(body.encode()).hexdigest()
+    return hashlib.sha256(b"nika-training-runtime-job-v4\x00" + body.encode()).hexdigest()
+
+
+def _worker_execution_plan_sha256(worker: TrainingWorkerPort) -> str:
+    try:
+        value = worker.execution_plan_sha256
+    except AttributeError as exc:
+        raise TypeError("training worker must expose execution_plan_sha256") from exc
+    return _require_execution_plan_sha256(value)
 
 
 def _stage(state: TrainingRunState) -> str:
@@ -115,7 +143,11 @@ class TrainingRuntime:
         control: Callable[[], TrainingControl] | None = None,
     ) -> TrainingRunEvidence:
         control = control or (lambda: TrainingControl.CONTINUE)
-        fingerprint = _job_fingerprint(spec)
+        execution_plan_sha256 = _worker_execution_plan_sha256(worker)
+        fingerprint = training_job_fingerprint(
+            spec,
+            execution_plan_sha256=execution_plan_sha256,
+        )
         checkpoint = self._checkpoints.latest(spec.task_id)
         state, next_step, resume_state, candidate_sha256, reason = self._restore(
             spec=spec,
@@ -135,6 +167,8 @@ class TrainingRuntime:
             )
             return self._evidence(
                 spec,
+                execution_plan_sha256=execution_plan_sha256,
+                job_fingerprint=fingerprint,
                 state=TrainingRunState.RECONCILE_REQUIRED,
                 next_step=next_step,
                 candidate_sha256=None,
@@ -145,6 +179,8 @@ class TrainingRuntime:
         if state in _TERMINAL_STATES:
             return self._evidence(
                 spec,
+                execution_plan_sha256=execution_plan_sha256,
+                job_fingerprint=fingerprint,
                 state=state,
                 next_step=next_step,
                 candidate_sha256=candidate_sha256,
@@ -165,6 +201,8 @@ class TrainingRuntime:
             )
             return self._evidence(
                 spec,
+                execution_plan_sha256=execution_plan_sha256,
+                job_fingerprint=fingerprint,
                 state=TrainingRunState.CANCELLED,
                 next_step=next_step,
                 candidate_sha256=candidate_sha256,
@@ -183,6 +221,8 @@ class TrainingRuntime:
             )
             return self._evidence(
                 spec,
+                execution_plan_sha256=execution_plan_sha256,
+                job_fingerprint=fingerprint,
                 state=TrainingRunState.PAUSED,
                 next_step=next_step,
                 candidate_sha256=candidate_sha256,
@@ -203,6 +243,8 @@ class TrainingRuntime:
                 base_artifact=spec.base_artifact,
                 frozen_package_sha256=spec.frozen_package_sha256,
                 training_material_sha256=spec.training_material_sha256,
+                execution_plan_sha256=execution_plan_sha256,
+                job_fingerprint=fingerprint,
                 candidate_artifact_ref=spec.candidate_artifact_ref,
                 candidate_sha256=candidate_sha256,
                 reason=decision.reason,
@@ -224,6 +266,8 @@ class TrainingRuntime:
                     )
                     return self._evidence(
                         spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
                         state=TrainingRunState.PAUSED,
                         next_step=step_index,
                         candidate_sha256=candidate_sha256,
@@ -242,6 +286,8 @@ class TrainingRuntime:
                     )
                     return self._evidence(
                         spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
                         state=TrainingRunState.CANCELLED,
                         next_step=step_index,
                         candidate_sha256=candidate_sha256,
@@ -270,6 +316,8 @@ class TrainingRuntime:
                     )
                     return self._evidence(
                         spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
                         state=TrainingRunState.FAILED,
                         next_step=step_index,
                         candidate_sha256=None,
@@ -290,11 +338,43 @@ class TrainingRuntime:
                     )
                     return self._evidence(
                         spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
                         state=TrainingRunState.FAILED,
                         next_step=step_index,
                         candidate_sha256=None,
                         checkpoint=saved,
                         reason="training_material_verification_failed",
+                    )
+                try:
+                    observed_execution_plan_sha256 = _worker_execution_plan_sha256(worker)
+                except (TypeError, ValueError):
+                    observed_execution_plan_sha256 = None
+                if (
+                    observed_execution_plan_sha256 is None
+                    or not hmac.compare_digest(
+                        observed_execution_plan_sha256,
+                        execution_plan_sha256,
+                    )
+                ):
+                    saved = self._save(
+                        spec,
+                        fingerprint=fingerprint,
+                        state=TrainingRunState.FAILED,
+                        next_step=step_index,
+                        resume_state=resume_state,
+                        candidate_sha256=None,
+                        reason="training_execution_plan_changed",
+                    )
+                    return self._evidence(
+                        spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
+                        state=TrainingRunState.FAILED,
+                        next_step=step_index,
+                        candidate_sha256=None,
+                        checkpoint=saved,
+                        reason="training_execution_plan_changed",
                     )
                 try:
                     step_result = worker.step(
@@ -321,6 +401,8 @@ class TrainingRuntime:
                     )
                     return self._evidence(
                         spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
                         state=failure_state,
                         next_step=step_index,
                         candidate_sha256=None,
@@ -348,6 +430,8 @@ class TrainingRuntime:
                     )
                     return self._evidence(
                         spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
                         state=TrainingRunState.RECONCILE_REQUIRED,
                         next_step=step_index,
                         candidate_sha256=None,
@@ -375,6 +459,8 @@ class TrainingRuntime:
                 if canonical_result.completed:
                     return self._evidence(
                         spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
                         state=TrainingRunState.COMPLETED,
                         next_step=next_step,
                         candidate_sha256=candidate_sha256,
@@ -392,6 +478,8 @@ class TrainingRuntime:
             )
             return self._evidence(
                 spec,
+                execution_plan_sha256=execution_plan_sha256,
+                job_fingerprint=fingerprint,
                 state=TrainingRunState.EXHAUSTED,
                 next_step=next_step,
                 candidate_sha256=candidate_sha256,
@@ -409,6 +497,8 @@ class TrainingRuntime:
     def _evidence(
         spec: TrainingJobSpec,
         *,
+        execution_plan_sha256: str,
+        job_fingerprint: str,
         state: TrainingRunState,
         next_step: int,
         candidate_sha256: str | None,
@@ -422,6 +512,8 @@ class TrainingRuntime:
             base_artifact=spec.base_artifact,
             frozen_package_sha256=spec.frozen_package_sha256,
             training_material_sha256=spec.training_material_sha256,
+            execution_plan_sha256=execution_plan_sha256,
+            job_fingerprint=job_fingerprint,
             candidate_artifact_ref=spec.candidate_artifact_ref,
             candidate_sha256=candidate_sha256,
             checkpoint_id=None if checkpoint is None else checkpoint.checkpoint_id,
