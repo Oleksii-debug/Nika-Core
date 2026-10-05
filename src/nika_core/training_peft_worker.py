@@ -1131,9 +1131,17 @@ def _train_one_step(
         return resume_state, None
 
     candidate = candidate_artifact_path(config.output_root, request.candidate_artifact_ref)
-    candidate.parent.mkdir(parents=True, exist_ok=True)
-    if candidate.exists():
-        _fail("candidate_publish_conflict")
+    try:
+        candidate.parent.mkdir(parents=True, exist_ok=True)
+        parent_stat = os.lstat(candidate.parent)
+    except OSError:
+        _fail("candidate_publish_failed")
+    if (
+        stat.S_ISLNK(parent_stat.st_mode)
+        or _is_reparse(parent_stat)
+        or not stat.S_ISDIR(parent_stat.st_mode)
+    ):
+        _fail("candidate_publish_failed")
     temporary = candidate.parent / f".{_CANDIDATE_FILE}.tmp"
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
@@ -1142,6 +1150,7 @@ def _train_one_step(
         consumed=consumed,
         adapter_config=adapter_config,
     )
+    temporary_sha256: str | None = None
     try:
         with safe_open(os.fspath(adapter_file), framework="pt", device="cpu") as source:
             tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
@@ -1153,7 +1162,10 @@ def _train_one_step(
             metadata={"nika_adapter_manifest": manifest_json},
         )
         _require_regular_unlinked(temporary, code="candidate_publish_failed")
-        os.replace(temporary, candidate)
+        temporary_sha256 = _sha256_file(temporary)
+        os.link(temporary, candidate)
+    except FileExistsError:
+        _fail("candidate_publish_conflict")
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
@@ -1165,6 +1177,8 @@ def _train_one_step(
         except OSError:
             pass
     candidate_sha256 = _sha256_file(candidate)
+    if temporary_sha256 is None or candidate_sha256 != temporary_sha256:
+        _fail("candidate_publish_digest_mismatch")
     return resume_state, candidate_sha256
 
 
