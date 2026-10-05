@@ -25,7 +25,6 @@ from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
     ModelGatewayError,
-    ModelMessage,
     ModelRequest,
     ModelResponse,
     ModelUsage,
