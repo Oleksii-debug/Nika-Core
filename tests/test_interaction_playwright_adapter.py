@@ -254,6 +254,27 @@ def test_download_broker_rejects_replaced_approved_root_before_save(
     assert list(moved_root.iterdir()) == []
 
 
+def test_download_broker_rejects_root_replacement_during_save_before_publish(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    original_root = broker.approved_root
+    moved_root = tmp_path / "downloads-moved"
+
+    class RootReplacingDownload(_FakeDownload):
+        def save_as(self, destination: str) -> None:
+            super().save_as(destination)
+            original_root.rename(moved_root)
+            original_root.mkdir()
+
+    with pytest.raises(UnsupportedInteractionError, match="root identity"):
+        broker.handle(RootReplacingDownload("evidence.txt", "private payload"))
+
+    assert list(original_root.iterdir()) == []
+    assert list(moved_root.iterdir()) == []
+    assert broker.saved == []
+
+
 def test_failed_download_removes_partial_staging_and_does_not_publish(
     tmp_path: Path,
 ) -> None:
