@@ -7,6 +7,8 @@ import pytest
 from nika_core.product_factory_credentials import (
     CredentialBroker,
     CredentialBrokerError,
+    CredentialLease,
+    CredentialState,
     IdentityRef,
     SecretRef,
 )
@@ -261,3 +263,65 @@ def test_malformed_lease_scope_carrier_rejected_before_handle(scopes: object) ->
         )
     assert store.issued == 0
     assert broker.snapshot() == initial
+
+
+@pytest.mark.parametrize("generation", [True, False, 0, -1, 1.5, "1"])
+def test_ambiguous_secret_generation_is_rejected(generation: object) -> None:
+    with pytest.raises(CredentialBrokerError, match="positive integer"):
+        SecretRef(
+            "secret-a",
+            "project-a",
+            "github",
+            "test automation",
+            frozenset({"repo:read"}),
+            frozenset({"github-api"}),
+            generation,  # type: ignore[arg-type]
+        )
+
+
+@pytest.mark.parametrize("state", ["REVOKED", "revoked ", None, 1])
+def test_invalid_secret_state_does_not_become_active(state: object) -> None:
+    with pytest.raises(CredentialBrokerError, match="credential state is invalid"):
+        SecretRef(
+            "secret-a",
+            "project-a",
+            "github",
+            "test automation",
+            frozenset({"repo:read"}),
+            frozenset({"github-api"}),
+            state=state,  # type: ignore[arg-type]
+        )
+
+
+def test_serialized_revoked_state_is_normalized_before_lease_admission() -> None:
+    broker = CredentialBroker(store := _Store())
+    secret = SecretRef(
+        "secret-a",
+        "project-a",
+        "github",
+        "test automation",
+        frozenset({"repo:read"}),
+        frozenset({"github-api"}),
+        state="revoked",  # type: ignore[arg-type]
+    )
+    assert secret.state is CredentialState.REVOKED
+    broker.register_secret(secret, now=_NOW)
+    with pytest.raises(CredentialBrokerError, match="credential is revoked"):
+        _issue(broker)
+    assert store.issued == 0
+
+
+@pytest.mark.parametrize("generation", [True, False, 0, -1, 1.5, "1"])
+def test_ambiguous_direct_lease_generation_is_rejected(generation: object) -> None:
+    with pytest.raises(CredentialBrokerError, match="lease generation must be"):
+        CredentialLease(
+            "lease-a",
+            "secret-a",
+            "project-a",
+            "github-api",
+            frozenset({"repo:read"}),
+            generation,  # type: ignore[arg-type]
+            "opaque-handle",
+            _NOW,
+            _NOW + timedelta(seconds=5),
+        )
