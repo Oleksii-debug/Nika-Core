@@ -461,3 +461,45 @@ def test_corrupt_created_at_blocks_put_before_mutation(tmp_path: Path) -> None:
         ).fetchone()
         assert row["value_json"] == '{"safe":true}'
         assert row["created_at"] == "2038-01-01T00:00:00"
+
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "bad\x00key",
+        "bad\nkey",
+        "bad\u200bkey",
+        "bad\u2028key",
+    ],
+)
+def test_ambiguous_identity_characters_fail_before_memory_effect(
+    tmp_path: Path, invalid: str
+) -> None:
+    store, memory = _memory(tmp_path)
+    with pytest.raises(ValueError, match="control or invisible"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key=invalid,
+            value={"unsafe": True},
+        )
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 0
+
+
+def test_normal_unicode_memory_identity_remains_supported(tmp_path: Path) -> None:
+    _store, memory = _memory(tmp_path)
+    record = memory.put(
+        scope=MemoryScope.TASK,
+        owner_id="користувач один",
+        namespace="нотатки шахи",
+        key="позиція № 1",
+        value={"мова": "українська"},
+    )
+    assert (record.owner_id, record.namespace, record.key) == (
+        "користувач один",
+        "нотатки шахи",
+        "позиція № 1",
+    )
