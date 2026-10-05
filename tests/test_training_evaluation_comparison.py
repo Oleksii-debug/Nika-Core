@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
 import pytest
 
+from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ExperimentEngine,
@@ -54,7 +56,11 @@ from nika_core.training_model_activation import (
     activate_attested_training_promotion,
     rollback_attested_training_promotion,
 )
-from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
+from nika_core.v01_model_settings import (
+    ModelSetupError,
+    V01BoundModelRuntimeFactory,
+    V01ModelSettings,
+)
 
 
 def _sha(value: bytes) -> str:
@@ -1062,6 +1068,125 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
 
     assert settings.snapshot()["model"] == "owner-selected-model"
     assert settings.snapshot()["revision"] == 3
+
+
+@pytest.mark.asyncio
+async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    training = result.challenger_benchmark.binding.revalidated()
+    await activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_ChallengerPort("activation-ok"),
+    )
+
+    promoted_payload = settings.prepare_task_payload({"command": "promoted task"})
+    promoted_pin = promoted_payload["v01_model_artifact_pin"]
+    assert promoted_pin["role"] == "challenger"
+    assert promoted_pin["route_revision"] == 2
+    assert promoted_pin["artifact_sha256"] == training.challenger_sha256
+    assert promoted_pin["descriptor_digest"] == training.descriptor_digest
+    assert "challenger-model" not in repr(promoted_pin)
+
+    promoted_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=promoted_payload,
+    )
+    assert settings.for_task(promoted_task.task_id).model == "challenger-model"
+    frozen_pin = settings.artifact_pin_for_task(promoted_task.task_id)
+    assert frozen_pin is not None
+    assert frozen_pin.artifact_sha256 == training.challenger_sha256
+
+    tampered = dict(promoted_payload)
+    tampered_pin = dict(promoted_pin)
+    tampered_pin["artifact_sha256"] = _sha(b"substituted-task-artifact")
+    tampered["v01_model_artifact_pin"] = tampered_pin
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (
+                json.dumps(tampered, ensure_ascii=False, sort_keys=True),
+                promoted_task.task_id,
+            ),
+        )
+    with pytest.raises(ModelSetupError, match="Артефакт"):
+        settings.for_task(promoted_task.task_id)
+
+    rollback_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=2,
+    )
+    rollback_payload = settings.prepare_task_payload({"command": "rollback task"})
+    rollback_pin = rollback_payload["v01_model_artifact_pin"]
+    assert rollback_pin["role"] == "rollback"
+    assert rollback_pin["route_revision"] == 3
+    assert rollback_pin["artifact_sha256"] == training.base_sha256
+    assert rollback_pin["descriptor_digest"] == training.base_descriptor_digest
+
+    rollback_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=rollback_payload,
+    )
+    assert settings.for_task(rollback_task.task_id).model == "base-model"
+    restored_pin = settings.artifact_pin_for_task(rollback_task.task_id)
+    assert restored_pin is not None
+    assert restored_pin.artifact_sha256 == training.base_sha256
+
+
+def test_caller_cannot_inject_promoted_artifact_pin(tmp_path) -> None:
+    _, settings = _configured_model_settings(tmp_path)
+
+    with pytest.raises(ModelSetupError, match="лише Nika"):
+        settings.prepare_task_payload(
+            {
+                "command": "forged",
+                "v01_model_artifact_pin": {
+                    "schema": "nika.v01.model-artifact-pin.v1",
+                },
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    await activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+        effect_port=_ChallengerPort("activation-ok"),
+    )
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload(
+            {"command": "use one frozen model binding"}
+        ),
+    )
+
+    def unexpected_legacy_read(*_args, **_kwargs):
+        raise AssertionError("runtime factory split the task route and artifact-pin read")
+
+    monkeypatch.setattr(settings, "for_task", unexpected_legacy_read)
+    monkeypatch.setattr(settings, "artifact_pin_for_task", unexpected_legacy_read)
+    monkeypatch.setattr(TaskQueue, "get", unexpected_legacy_read)
+
+    factory = V01BoundModelRuntimeFactory(
+        store=store,
+        definitions=AgentDefinitionRepository(store),
+        settings=settings,
+    )
+
+    assert factory.for_task(task.task_id) is not None
 
 
 def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path) -> None:
