@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -147,7 +149,7 @@ def test_formal_handoff_downgrade_cannot_hide_missing_seal(tmp_path) -> None:
             "AND entity_type='product_project' AND entity_id='p1'"
         )
 
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     with pytest.raises(ProductProjectError, match="integrity seal is missing"):
         decisions.record(
             "p1",
@@ -244,7 +246,7 @@ def test_legacy_direct_handoff_remains_compatible_without_formal_authority(tmp_p
         rationale="Preserve legacy compatibility",
         decided_by_ref="user://owner",
     )
-    stored = ProductDecisionRepository(store).record(
+    stored = AuthorizingProductDecisionRepository(store).record(
         "p-legacy",
         decision,
         expected_row_version=0,
