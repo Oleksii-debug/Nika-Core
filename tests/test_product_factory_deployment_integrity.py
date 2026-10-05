@@ -468,3 +468,87 @@ def test_restore_detaches_caller_owned_snapshot_graph() -> None:
     fresh = restored.snapshot()
     assert fresh.records[0].intent.release.version == "release-1"
 
+
+@dataclass
+class _MutatingOutboundDeployProvider(FakeProvider):
+    health_seen_version: str | None = None
+
+    def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
+        object.__setattr__(intent.release, "version", "provider-mutated")
+        return super().deploy(intent)
+
+    def health(self, intent: DeploymentIntent) -> HealthEvidence:
+        self.health_seen_version = intent.release.version
+        return super().health(intent)
+
+
+@dataclass
+class _MutatingOutboundInspectProvider(FakeProvider):
+    def inspect(self, intent: DeploymentIntent) -> ProviderInspection:
+        object.__setattr__(intent.release, "version", "provider-mutated")
+        return ProviderInspection(
+            intent.release.source_sha,
+            True,
+            ("inspect:mutated-input",),
+            release=intent.release,
+        )
+
+
+@dataclass
+class _MutatingRollbackTargetProvider(FakeProvider):
+    def rollback_exact(
+        self,
+        intent: DeploymentIntent,
+        previous_release: ReleaseRef | None,
+    ) -> RollbackEvidence:
+        assert previous_release is not None
+        object.__setattr__(previous_release, "version", "provider-mutated")
+        return super().rollback_exact(intent, previous_release)
+
+
+def test_provider_deploy_mutation_cannot_drift_internal_intent() -> None:
+    provider = _MutatingOutboundDeployProvider()
+    fabric = DeploymentFabric(provider)
+
+    record = fabric.deploy(_intent("project-a", "provider-mutates-deploy", 1))
+
+    assert record.state is DeploymentState.HEALTHY
+    assert provider.health_seen_version == "release-1"
+    assert record.intent.release.version == "release-1"
+    assert fabric.snapshot().records[0].intent.release.version == "release-1"
+
+
+def test_provider_inspection_mutation_cannot_rebind_uncertain_intent() -> None:
+    provider = _MutatingOutboundInspectProvider(
+        uncertain={"provider-mutates-inspection"},
+    )
+    fabric = DeploymentFabric(provider)
+    intent = _intent("project-a", "provider-mutates-inspection", 1)
+
+    first = fabric.deploy(intent)
+    assert first.state is DeploymentState.UNCERTAIN
+
+    with pytest.raises(DeploymentFabricError, match="different exact release"):
+        fabric.reconcile(intent.intent_id)
+
+    stored = fabric.snapshot().records[0]
+    assert stored.state is DeploymentState.UNCERTAIN
+    assert stored.intent.release.version == "release-1"
+
+
+def test_provider_rollback_cannot_mutate_internal_previous_release() -> None:
+    provider = _MutatingRollbackTargetProvider(unhealthy={_sha(2)})
+    fabric = DeploymentFabric(provider)
+
+    first = fabric.deploy(_intent("project-a", "provider-target-v1", 1))
+    failed = fabric.deploy(_intent("project-a", "provider-target-v2", 2))
+
+    assert first.state is DeploymentState.HEALTHY
+    assert failed.state is DeploymentState.UNCERTAIN
+    stored_first = next(
+        record
+        for record in fabric.snapshot().records
+        if record.intent.intent_id == "provider-target-v1"
+    )
+    assert stored_first.intent.release.version == "release-1"
+
