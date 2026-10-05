@@ -241,11 +241,16 @@ def test_startup_recovery_admission_rejection_isolated_per_task(
         admit_recovered_task=admit_recovery,
     )
 
-    recovery = backend.start_startup_recovery(startup_wait_seconds=2)
+    backend.start_startup_recovery(startup_wait_seconds=2)
 
     assert queue.get(rejected_id).state is TaskState.PAUSED
     assert queue.get(approved_id).state is TaskState.COMPLETED
     assert runtime.resumed_task_ids == [approved_id]
+    for _ in range(100):
+        recovery = backend.startup_recovery_snapshot()
+        if recovery["status"] == "manual":
+            break
+        Event().wait(0.01)
     assert recovery["status"] == "manual"
     assert recovery["auto_resume_count"] == 0
     assert recovery["manual_resume_count"] == 1
