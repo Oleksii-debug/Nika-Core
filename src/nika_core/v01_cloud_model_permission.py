@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from urllib.parse import urlsplit
+from typing import Protocol
 from uuid import uuid4
 
 from nika_core.data.sqlite import SQLiteStore
@@ -49,6 +50,14 @@ class CloudModelGrantRequest:
 
 
 CloudModelPermissionConfirm = Callable[[CloudModelGrantRequest], bool]
+
+
+class _SQLExecutor(Protocol):
+    def execute(
+        self,
+        sql: str,
+        parameters: tuple[object, ...] = (),
+    ) -> sqlite3.Cursor: ...
 
 
 class V01CloudModelPermissionService:
@@ -513,7 +522,7 @@ class V01CloudModelPermissionService:
         updated_at: datetime,
         expected_previous_id: str | None,
         expected_record: TaskRecord,
-        connection: sqlite3.Connection | None = None,
+        connection: _SQLExecutor | None = None,
     ) -> None:
         if connection is None:
             with self._store.connection() as conn:
