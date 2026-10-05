@@ -18,6 +18,7 @@ from nika_core.trading_research.contracts import (
 from nika_core.trading_research.identity import instrument_identity
 from nika_core.trading_research.orders import (
     ExecutionPolicy,
+    OrderAuthority,
     OrderIntent,
     OrderType,
     RiskApprovedOrder,
@@ -37,6 +38,23 @@ _VENUE_A = Venue("SIM-A", "UTC")
 _VENUE_B = Venue("SIM-B", "Europe/Bratislava")
 _INSTRUMENT_A = Instrument("SAME", _VENUE_A, "USD")
 _INSTRUMENT_B = Instrument("SAME", _VENUE_B, "USD")
+
+
+def _authority(
+    order_id: str = "shared-order",
+    *,
+    workspace_id: str = "workspace",
+    run_id: str = "run",
+    submitted_slice: int = 0,
+    submitted_at: datetime = _NOW,
+) -> OrderAuthority:
+    return OrderAuthority(
+        workspace_id,
+        run_id,
+        order_id,
+        submitted_at,
+        submitted_slice,
+    )
 
 
 def _quote(
@@ -79,6 +97,7 @@ def _approved(
     return RiskApprovedOrder(
         "shared-approval",
         intent,
+        _authority(),
         _NOW,
         0,
         ExecutionPolicy("identity") if policy is None else policy,
@@ -90,6 +109,7 @@ def _fill(instrument: Instrument, fill_id: str) -> SimulatedFill:
         fill_id=fill_id,
         approval_id="approval",
         intent_id="intent",
+        authority=_authority(fill_id),
         instrument=instrument,
         side=Side.BUY,
         quantity=Decimal(1),
@@ -198,6 +218,7 @@ def test_risk_position_limit_does_not_merge_equal_ids_from_other_venue() -> None
 
     approved = RiskEngine(limits).approve(
         intent,
+        authority=_authority("venue-b"),
         snapshot=snapshot,
         mark_price=Decimal(100),
         pending_signed_quantity=Decimal(0),
@@ -243,6 +264,7 @@ def test_risk_generated_approval_id_binds_full_instrument_identity() -> None:
                 _NOW,
                 0,
             ),
+            authority=_authority("same-order"),
             snapshot=snapshot,
             mark_price=Decimal(100),
             pending_signed_quantity=Decimal(0),
@@ -277,6 +299,99 @@ def test_replay_book_state_does_not_alias_shared_approval_id_across_venues() -> 
             instrument_identity(_INSTRUMENT_B): Decimal(100),
         }
     ).positions) == 2
+
+
+
+def test_execution_uses_host_submission_slice_not_strategy_proposal_slice() -> None:
+    intent = OrderIntent(
+        "strategy-controlled-id",
+        _INSTRUMENT_A,
+        Side.BUY,
+        OrderType.MARKET,
+        Decimal(1),
+        _NOW,
+        99,
+    )
+    order = RiskApprovedOrder(
+        "host-approval",
+        intent,
+        _authority("host-order", submitted_slice=0),
+        _NOW,
+        0,
+        ExecutionPolicy("host-authority"),
+    )
+
+    update = SimulationExecutionEngine().execute(
+        order,
+        TimeSlice(1, _NOW, (_quote(_INSTRUMENT_A),)),
+    )
+
+    assert update.fill is not None
+    assert update.fill.authority.order_id == "host-order"
+
+
+def test_pending_risk_from_other_run_fails_closed() -> None:
+    snapshot = AccountSnapshot(
+        cash=Decimal(1000),
+        fees=Decimal(0),
+        realized_pnl=Decimal(0),
+        unrealized_pnl=Decimal(0),
+        equity=Decimal(1000),
+        gross_exposure=Decimal(0),
+        net_exposure=Decimal(0),
+        positions=(),
+    )
+    limits = RiskLimits(
+        max_abs_position=Decimal(10),
+        max_gross_exposure=Decimal(1000),
+        max_net_exposure=Decimal(1000),
+        max_session_loss=Decimal(1000),
+        max_drawdown=Decimal(1000),
+        max_leverage=Decimal(10),
+    )
+    engine = RiskEngine(limits)
+    pending_intent = OrderIntent(
+        "pending",
+        _INSTRUMENT_A,
+        Side.BUY,
+        OrderType.MARKET,
+        Decimal(1),
+        _NOW,
+        0,
+    )
+    pending = RiskApprovedOrder(
+        "pending-approval",
+        pending_intent,
+        _authority("pending", run_id="run-a"),
+        _NOW,
+        0,
+        ExecutionPolicy("pending"),
+    )
+    candidate = OrderIntent(
+        "candidate",
+        _INSTRUMENT_A,
+        Side.BUY,
+        OrderType.MARKET,
+        Decimal(1),
+        _NOW,
+        0,
+    )
+
+    from nika_core.trading_research.risk import PendingRiskOrder
+
+    with pytest.raises(TradingResearchError, match="another workspace/run"):
+        engine.approve(
+            candidate,
+            authority=_authority("candidate", run_id="run-b"),
+            snapshot=snapshot,
+            mark_price=Decimal(100),
+            pending_signed_quantity=Decimal(0),
+            approved_at=_NOW,
+            approved_slice=0,
+            policy=ExecutionPolicy("candidate"),
+            risk_state=RiskState(Decimal(1000), Decimal(1000)),
+            pending_orders=(PendingRiskOrder(pending, Decimal(100)),),
+        )
 
 
 def test_persistence_records_complete_instrument_identity(tmp_path) -> None:
