@@ -342,16 +342,6 @@ def _release_content_requires_secret_scan(relative_path: str) -> bool:
     )
 
 
-def _release_file_contains_secret_assignment(relative_path: str, path: Path) -> bool:
-    if not _release_content_requires_secret_scan(relative_path):
-        return False
-    try:
-        with path.open("rb") as handle:
-            return _stream_contains_secret_assignment(handle)
-    except OSError:
-        return True
-
-
 def _archive_member_contains_secret_assignment(
     archive: zipfile.ZipFile,
     member: zipfile.ZipInfo,
