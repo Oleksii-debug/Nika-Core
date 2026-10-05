@@ -144,7 +144,6 @@ class WindowsUIABackend(Protocol):
 class _TrackedElement:
     generation: int
     wrapper: object
-    present: bool
 
 
 class PywinautoUIABackend:
@@ -155,6 +154,7 @@ class PywinautoUIABackend:
             int,
             dict[tuple[int, ...], list[_TrackedElement]],
         ] = {}
+        self._next_element_generation = 1
         self._last_duplicate_runtime_ids: tuple[tuple[int, ...], ...] = ()
         self._last_unaddressable_count = 0
 
@@ -384,13 +384,14 @@ class PywinautoUIABackend:
         hwnd: int,
         pairs: tuple[tuple[object, UIAControlRecord], ...],
     ) -> tuple[tuple[object, UIAControlRecord], ...]:
-        """Bind each live element to a stable generation within its RuntimeId."""
+        """Bind live elements without retaining stale provider wrappers indefinitely."""
 
-        tracked_by_runtime = self._tracked.setdefault(hwnd, {})
-        for tracked_group in tracked_by_runtime.values():
-            for tracked in tracked_group:
-                tracked.present = False
-
+        previous_by_runtime = self._tracked.get(hwnd, {})
+        next_by_runtime: dict[
+            tuple[int, ...],
+            list[_TrackedElement],
+        ] = {}
+        next_generation = self._next_element_generation
         output: list[tuple[object, UIAControlRecord]] = []
         duplicate_runtime_ids: set[tuple[int, ...]] = set()
         current_count: dict[tuple[int, ...], int] = {}
@@ -402,46 +403,50 @@ class PywinautoUIABackend:
                 continue
 
             current_count[runtime_id] = current_count.get(runtime_id, 0) + 1
-            tracked_group = tracked_by_runtime.setdefault(runtime_id, [])
+            previous_group = previous_by_runtime.get(runtime_id, ())
             true_matches: list[_TrackedElement] = []
             comparison_failed = False
-            for tracked in tracked_group:
+            for tracked in previous_group:
                 same = self._same_element(tracked.wrapper, wrapper)
                 if same is True:
                     true_matches.append(tracked)
                 elif same is None:
                     comparison_failed = True
 
+            current_group = next_by_runtime.setdefault(runtime_id, [])
+            for tracked in current_group:
+                same = self._same_element(tracked.wrapper, wrapper)
+                if same is True:
+                    raise AmbiguousTargetError(
+                        "same AutomationElement appeared twice after dedup "
+                        f"for {runtime_id!r}"
+                    )
+                if same is None:
+                    raise AmbiguousTargetError(
+                        "cannot distinguish simultaneous duplicate RuntimeId "
+                        f"{runtime_id!r}"
+                    )
+
             if len(true_matches) > 1:
                 raise AmbiguousTargetError(
                     f"AutomationElement matched multiple generations for {runtime_id!r}"
                 )
             if len(true_matches) == 1:
-                tracked = true_matches[0]
-                if tracked.present:
-                    raise AmbiguousTargetError(
-                        f"same AutomationElement appeared twice after dedup for {runtime_id!r}"
-                    )
-                generation = tracked.generation
-                tracked.wrapper = wrapper
-                tracked.present = True
+                generation = true_matches[0].generation
             else:
                 if comparison_failed:
                     raise AmbiguousTargetError(
                         f"cannot establish generation for RuntimeId {runtime_id!r}"
                     )
-                generation = 1 + max(
-                    (tracked.generation for tracked in tracked_group),
-                    default=0,
-                )
-                tracked_group.append(
-                    _TrackedElement(
-                        generation=generation,
-                        wrapper=wrapper,
-                        present=True,
-                    )
-                )
+                generation = next_generation
+                next_generation += 1
 
+            current_group.append(
+                _TrackedElement(
+                    generation=generation,
+                    wrapper=wrapper,
+                )
+            )
             output.append(
                 (
                     wrapper,
@@ -452,6 +457,12 @@ class PywinautoUIABackend:
         for runtime_id, count in current_count.items():
             if count > 1:
                 duplicate_runtime_ids.add(runtime_id)
+
+        # Publish only a fully validated observation. Historical COM wrappers are
+        # dropped here; the backend-wide monotonic generation counter prevents a
+        # RuntimeId that disappears and later returns from aliasing a stale node.
+        self._tracked[hwnd] = next_by_runtime
+        self._next_element_generation = next_generation
         self._last_duplicate_runtime_ids = tuple(sorted(duplicate_runtime_ids))
         return tuple(output)
 

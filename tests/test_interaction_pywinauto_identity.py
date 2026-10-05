@@ -257,6 +257,66 @@ def test_runtime_id_reuse_after_replacement_gets_new_generation() -> None:
     assert second[0][1].element_generation == 2
 
 
+def test_absent_runtime_id_drops_stale_wrapper_without_reusing_generation() -> None:
+    backend = PywinautoUIABackend()
+    old = FakeWrapper(FakeElementInfo((9, 9), "old"))
+    first = backend._assign_generations(100, ((old, _record((9, 9))),))
+    assert first[0][1].element_generation == 1
+
+    assert backend._assign_generations(100, ()) == ()
+    old.element_info.compare_raises = True
+    replacement = FakeWrapper(FakeElementInfo((9, 9), "replacement"))
+    second = backend._assign_generations(100, ((replacement, _record((9, 9))),))
+
+    assert second[0][1].element_generation == 2
+    assert len(backend._tracked[100][(9, 9)]) == 1
+    assert backend._tracked[100][(9, 9)][0].wrapper is replacement
+
+
+def test_generation_tracking_is_bounded_by_current_live_elements() -> None:
+    backend = PywinautoUIABackend()
+
+    for expected_generation in range(1, 65):
+        runtime_id = (expected_generation,)
+        wrapper = FakeWrapper(
+            FakeElementInfo(runtime_id, f"element-{expected_generation}")
+        )
+        observed = backend._assign_generations(
+            100,
+            ((wrapper, _record(runtime_id)),),
+        )
+        assert observed[0][1].element_generation == expected_generation
+        assert sum(len(group) for group in backend._tracked[100].values()) == 1
+
+    assert backend._next_element_generation == 65
+
+
+def test_failed_generation_observation_does_not_commit_partial_tracking() -> None:
+    backend = PywinautoUIABackend()
+    original = FakeWrapper(FakeElementInfo((5,), "original"))
+    first = backend._assign_generations(100, ((original, _record((5,))),))
+    assert first[0][1].element_generation == 1
+
+    duplicate_a = FakeWrapper(FakeElementInfo((8,), "duplicate"))
+    duplicate_b = FakeWrapper(FakeElementInfo((8,), "duplicate"))
+    with pytest.raises(AmbiguousTargetError, match="appeared twice"):
+        backend._assign_generations(
+            100,
+            (
+                (duplicate_a, _record((8,))),
+                (duplicate_b, _record((8,))),
+            ),
+        )
+
+    original_again = FakeWrapper(FakeElementInfo((5,), "original"))
+    repeated = backend._assign_generations(
+        100,
+        ((original_again, _record((5,))),),
+    )
+    assert repeated[0][1].element_generation == 1
+    assert backend._next_element_generation == 2
+
+
 def test_pywinauto_backend_omits_unaddressable_elements_without_guessing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
