@@ -764,3 +764,66 @@ def test_final_candidate_uses_unique_reserved_temporary(
         for path in candidate.parent.iterdir()
         if path.name.endswith(".tmp")
     ) == [legacy_temporary.name]
+
+def test_final_candidate_cleanup_failure_rolls_back_published_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_unlink = peft.os.unlink
+
+    def _unlink(path: object, *args: object, **kwargs: object) -> None:
+        value = Path(path)
+        if (
+            value.parent == candidate.parent
+            and value.name.startswith(".adapter_model.safetensors.")
+            and value.name.endswith(".tmp")
+        ):
+            raise PermissionError("simulated temporary cleanup failure")
+        real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "unlink", _unlink)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_cleanup_failed"):
+        peft._train_one_step(request, config, consumed)
+
+    assert not candidate.exists()
+
+
+def test_final_candidate_rejects_extra_hardlink_alias(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    alias = candidate.parent / "external-alias.safetensors"
+    real_link = peft.os.link
+
+    def _link(source: object, target: object, *args: object, **kwargs: object) -> None:
+        real_link(source, target, *args, **kwargs)
+        if Path(target) == candidate:
+            real_link(source, alias)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft.os, "link", _link)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_digest_mismatch"):
+        peft._train_one_step(request, config, consumed)
+
+    assert not candidate.exists()
+    assert alias.exists()
+
