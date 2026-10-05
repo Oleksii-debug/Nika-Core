@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 import tempfile
@@ -124,6 +125,13 @@ class ReleaseManifest:
     manifest_version: int = _MANIFEST_VERSION
 
 
+@dataclass(frozen=True, slots=True)
+class _ReleaseFileSnapshot:
+    size: int
+    sha256: str
+    contains_secret_assignment: bool
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -204,6 +212,93 @@ def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
     if normalized.startswith(b"%") and normalized.endswith(b"%") and len(normalized) > 2:
         return True
     return normalized.startswith((b"env:", b"keyring:", b"credential-ref:"))
+
+
+def _stream_release_file_snapshot(
+    handle: Any,
+    *,
+    scan_secrets: bool,
+) -> _ReleaseFileSnapshot:
+    digest = hashlib.sha256()
+    size = 0
+    overlap = b""
+    first_window = True
+    contains_secret_assignment = False
+
+    while True:
+        chunk = handle.read(_SECRET_SCAN_CHUNK_BYTES)
+        if not chunk:
+            break
+        size += len(chunk)
+        digest.update(chunk)
+        if not scan_secrets or contains_secret_assignment:
+            continue
+
+        raw_window = overlap + chunk
+        window = b"\n" + raw_window if first_window else raw_window
+        first_window = False
+        for match in _SECRET_ASSIGNMENT_RE.finditer(window):
+            if not _secret_assignment_value_is_placeholder(match.group("value")):
+                contains_secret_assignment = True
+                break
+        overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
+
+    return _ReleaseFileSnapshot(
+        size=size,
+        sha256=digest.hexdigest(),
+        contains_secret_assignment=contains_secret_assignment,
+    )
+
+
+def _release_file_snapshot_is_stable(
+    before: os.stat_result,
+    after: os.stat_result,
+    current: os.stat_result,
+    observed_size: int,
+) -> bool:
+    if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(after.st_mode):
+        return False
+    if observed_size != before.st_size or observed_size != after.st_size:
+        return False
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        return False
+    if not os.path.samestat(after, current):
+        return False
+    return (
+        current.st_size == after.st_size
+        and current.st_mtime_ns == after.st_mtime_ns
+        and current.st_ctime_ns == after.st_ctime_ns
+    )
+
+
+def _stable_release_file_snapshot(
+    path: Path,
+    *,
+    scan_secrets: bool,
+) -> _ReleaseFileSnapshot | None:
+    try:
+        with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            snapshot = _stream_release_file_snapshot(handle, scan_secrets=scan_secrets)
+            after = os.fstat(handle.fileno())
+        current = path.stat()
+    except OSError:
+        return None
+    if not _release_file_snapshot_is_stable(before, after, current, snapshot.size):
+        return None
+    return snapshot
 
 
 def _stream_contains_secret_assignment(handle: Any) -> bool:
@@ -307,15 +402,22 @@ def build_release_manifest(
     source_sha: str,
 ) -> ReleaseManifest:
     root = bundle_dir.resolve(strict=True)
-    entries = tuple(
-        ReleaseFile(
-            path=path.relative_to(root).as_posix(),
-            size=path.stat().st_size,
-            sha256=_sha256(path),
+    entries_list: list[ReleaseFile] = []
+    for path in _safe_files(root):
+        if path.name == _RELEASE_MANIFEST_NAME:
+            continue
+        relative_path = path.relative_to(root).as_posix()
+        snapshot = _stable_release_file_snapshot(path, scan_secrets=False)
+        if snapshot is None:
+            raise ValueError(f"release file changed while building manifest: {relative_path}")
+        entries_list.append(
+            ReleaseFile(
+                path=relative_path,
+                size=snapshot.size,
+                sha256=snapshot.sha256,
+            )
         )
-        for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
-    )
+    entries = tuple(entries_list)
     if not entries:
         raise ValueError("release bundle is empty")
     manifest = ReleaseManifest(
@@ -384,13 +486,20 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
     for relative_path in sorted(expected.keys() & actual_paths.keys()):
         entry = expected[relative_path]
         path = actual_paths[relative_path]
-        if path.stat().st_size != entry.size:
+        scan_secrets = (
+            PurePosixPath(relative_path).suffix.casefold() in _SECRET_CONTENT_SUFFIXES
+        )
+        snapshot = _stable_release_file_snapshot(path, scan_secrets=scan_secrets)
+        if snapshot is None:
+            findings.append(f"unstable:{relative_path}")
+            continue
+        if snapshot.size != entry.size:
             findings.append(f"size:{relative_path}")
             continue
-        if _sha256(path) != entry.sha256:
+        if snapshot.sha256 != entry.sha256:
             findings.append(f"sha256:{relative_path}")
             continue
-        if _release_file_contains_secret_assignment(relative_path, path):
+        if snapshot.contains_secret_assignment:
             findings.append(f"secret-content:{relative_path}")
     return tuple(findings)
 
