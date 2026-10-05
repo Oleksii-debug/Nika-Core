@@ -228,6 +228,8 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
     first, second = report.case_results
     assert first.evaluation_weight == 1.0
     assert second.evaluation_weight == 3.0
+    assert first.evaluation_pass_score == 1.0
+    assert second.evaluation_pass_score == 1.0
     assert first.response_sha256 == hashlib.sha256(
         "очікувана відповідь".encode()
     ).hexdigest()
@@ -240,6 +242,10 @@ def test_benchmark_records_quality_failures_resources_without_raw_text() -> None
     assert [item["evaluation_weight"] for item in machine_payload["cases"]] == [
         1.0,
         3.0,
+    ]
+    assert [item["evaluation_pass_score"] for item in machine_payload["cases"]] == [
+        1.0,
+        1.0,
     ]
     substitutions = {
         "weighted_quality_score": 0.5,
@@ -763,6 +769,37 @@ def test_case_result_rejects_impossible_completion_evidence() -> None:
             accelerator_before=None,
             accelerator_after=None,
         )
+
+
+def test_case_result_rejects_threshold_and_token_substitution() -> None:
+    result = CaseBenchmarkResult(
+        candidate_id="candidate",
+        case_id="case",
+        score=0.5,
+        passed=False,
+        completion_succeeded=True,
+        latency_ms=1.0,
+        response_sha256="a" * 64,
+        error_code=None,
+        input_tokens=2,
+        output_tokens=1,
+        total_tokens=3,
+        resource_before=None,
+        resource_after=None,
+        accelerator_before=None,
+        accelerator_after=None,
+        evaluation_weight=1.0,
+        evaluation_pass_score=0.75,
+    )
+
+    with pytest.raises(ValueError, match="evaluation threshold"):
+        replace(result, passed=True)
+    with pytest.raises(ValueError, match="evaluation threshold"):
+        replace(result, evaluation_pass_score=0.25)
+    with pytest.raises(ValueError, match="total_tokens"):
+        replace(result, total_tokens=2)
+    with pytest.raises(TypeError, match="evaluation_pass_score must be numeric"):
+        replace(result, evaluation_pass_score=_HostileFloat(0.75))
 
 
 class _ResourceAlias(ResourceSnapshot):
