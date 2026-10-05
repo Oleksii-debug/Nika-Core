@@ -84,35 +84,59 @@ async function main() {
   assert.equal(requests[1].request_id, "req-2");
   console.log("PASS: command unlocks after acknowledged completion");
 
+  bridge = async () => ({status: "accepted", message: "Завдання прийнято.", focus_id: "tasks-heading"});
+  stateRead = async () => true;
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, 3);
+  assert.equal(requests[2].request_id, "req-3");
+  assert(messages.some(([message]) => message === "Завдання прийнято."));
+  assert.equal(stateReads, 3, "accepted task must reconcile current state");
+  console.log("PASS: accepted task acknowledgement is trusted and reconciled");
+
   let releaseSource;
   bridge = () => new Promise((resolve) => {releaseSource = resolve;});
   const sourceSave = ui.dispatch("team.sources.configure", trigger);
   await Promise.resolve();
   await ui.dispatch("team.sources.configure", trigger);
-  assert.equal(requests.length, 3);
-  assert.equal(requests[2].payload.revision, 5);
-  assert.equal(requests[2].payload.source_a, "а.txt");
-  assert.equal(ui.getSourceDirty(), true);
-  releaseSource({status: "completed", message: "Збережено."});
-  await sourceSave;
-  assert.equal(ui.getSourceDirty(), false);
-  console.log("PASS: settings single-flight retains revision and dirty state until ACK");
-
-  bridge = async () => {throw Error("SECRET_CONNECTION_DETAIL");};
-  await ui.dispatch("task.create", trigger);
   assert.equal(requests.length, 4);
-  assert.equal(stateReads, 3, "no state replay or blind retry on uncertain dispatch");
-  assert(messages.at(-1)[0].includes("Немає підтвердження"));
-  assert(!JSON.stringify(messages).includes("SECRET_CONNECTION_DETAIL"));
-  assert(focusCount > 0, "keyboard focus restored on uncertain command");
-  console.log("PASS: transport failure redacted; no blind retry");
+  assert.equal(requests[3].payload.revision, 5);
+  assert.equal(requests[3].payload.source_a, "а.txt");
+  assert.equal(ui.getSourceDirty(), true);
+  releaseSource({status: "accepted", message: "Зміну прийнято."});
+  await sourceSave;
+  assert.equal(ui.getSourceDirty(), true, "accepted is not a completed source write");
+  console.log("PASS: accepted source acknowledgement keeps the dirty revision");
 
+  bridge = async () => ({status: "completed", message: "Збережено."});
+  await ui.dispatch("team.sources.configure", trigger);
+  assert.equal(requests.length, 5);
+  assert.equal(ui.getSourceDirty(), false);
+  console.log("PASS: completed source acknowledgement clears the dirty revision");
+
+  let finishStateReconcile;
+  stateRead = () => new Promise((resolve) => {finishStateReconcile = resolve;});
+  bridge = async () => {throw Error("SECRET_CONNECTION_DETAIL");};
+  const uncertainDispatch = ui.dispatch("task.create", trigger);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(requests.length, 6);
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(requests.length, 6, "retry must stay blocked while reconciliation is pending");
+  assert(messages.at(-1)[0].includes("Попередню команду"));
+  finishStateReconcile(true);
+  await uncertainDispatch;
+  assert(messages.at(-1)[0].includes("Стан перечитано"));
+  assert(!JSON.stringify(messages).includes("SECRET_CONNECTION_DETAIL"));
+  assert(focusCount > 0, "keyboard focus restored after uncertain reconciliation");
+  console.log("PASS: transport-uncertain task remains locked until successful state reconciliation");
+
+  stateRead = async () => true;
   bridge = async () => ({status: "unexpected", message: "false success"});
   await ui.dispatch("task.create", trigger);
-  assert.equal(requests.length, 5, "lock cleared after transport failure");
-  assert(messages.at(-1)[0].includes("непідтверджений"));
-  assert(!logs.includes("false success"), "malformed acknowledgement is not trusted");
-  console.log("PASS: malformed acknowledgement fails closed");
+  assert.equal(requests.length, 7, "malformed acknowledgement must not blind-retry");
+  assert(messages.at(-1)[0].includes("Стан перечитано"));
+  assert(!logs.includes("false success"), "malformed acknowledgement message is not trusted");
+  console.log("PASS: malformed acknowledgement reconciles current state before retry");
 
   bridge = async () => ({status: "completed", message: "Записано."});
   stateRead = async () => false;
@@ -138,22 +162,47 @@ async function main() {
   assert.equal(focusIds.at(-1), "keymap-save");
   console.log("PASS: keymap mutations single-flight and focus after ACK");
 
-  await ui.mutateKeymap(
+  let finishKeymapReconcile;
+  keymapReady = new Promise((resolve) => {finishKeymapReconcile = resolve;});
+  const uncertainKeymap = ui.mutateKeymap(
     async () => {throw Error("PRIVATE_KEYMAP_TRANSPORT");}, null, keymapInput,
   );
-  assert(messages.at(-1)[0].includes("Немає підтвердження зміни клавіш"));
+  await Promise.resolve();
+  await Promise.resolve();
+  let duplicateKeymapCalled = false;
+  await ui.mutateKeymap(async () => {
+    duplicateKeymapCalled = true;
+    return {ok: true, message: "duplicate"};
+  }, null, keymapInput);
+  assert.equal(duplicateKeymapCalled, false);
+  assert(messages.at(-1)[0].includes("Зміна карти клавіш ще виконується"));
+  finishKeymapReconcile(true);
+  await uncertainKeymap;
+  assert.equal(keymapReads, 2);
+  assert(logs.some((message) => message.includes("Немає підтвердження зміни клавіш")));
   assert(!JSON.stringify(messages).includes("PRIVATE_KEYMAP_TRANSPORT"));
-  assert.equal(keymapReads, 1);
+  assert(messages.at(-1)[0].includes("Карту клавіш перечитано"));
+  console.log("PASS: uncertain keymap mutation remains locked until exact map reread");
+
+  keymapReady = true;
   await ui.mutateKeymap(async () => ({ok: "true", message: "bad"}), null, keymapInput);
-  assert(messages.at(-1)[0].includes("непідтверджену зміну"));
-  console.log("PASS: keymap failures and malformed ACKs fail closed without retry");
+  assert.equal(keymapReads, 3);
+  assert(logs.some((message) => message.includes("непідтверджену зміну")));
+  assert(messages.at(-1)[0].includes("Карту клавіш перечитано"));
+  console.log("PASS: malformed keymap acknowledgement reconciles before retry");
 
   keymapReady = false;
   await ui.mutateKeymap(async () => ({ok: true, message: "Прийнято."}), "keymap-save");
   assert.equal(ui.getActionsReady(), false, "unknown refreshed bindings cannot remain hotkey-ready");
-  assert(messages.at(-1)[0].includes("Зміну підтверджено"));
+  assert(messages.at(-1)[0].includes("Повтор змін заблоковано"));
   assert(logs.includes("Прийнято."));
-  console.log("PASS: confirmed keymap write with failed refresh disables stale hotkeys");
+  let postFailureMutationCalled = false;
+  await ui.mutateKeymap(async () => {
+    postFailureMutationCalled = true;
+    return {ok: true, message: "should not run"};
+  }, null, keymapInput);
+  assert.equal(postFailureMutationCalled, false);
+  console.log("PASS: confirmed keymap write with failed reread disables hotkeys and retains lock");
 
   const logFunctionsStart = source.indexOf("  function announce(message, assertive = false) {");
   const logFunctionsEnd = source.indexOf("  function requestId() {", logFunctionsStart);

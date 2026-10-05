@@ -602,6 +602,30 @@
       return;
     }
     inFlightActions.add(lockKey);
+    let keepLocked = false;
+    const reconcileUncertain = async (message) => {
+      announce(message, true);
+      appendLog(message);
+      let stateReady = false;
+      try {
+        stateReady = await refreshState();
+      } catch {
+        reportStateUnavailable();
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (stateReady) {
+        const reconciled = "Стан перечитано після непідтвердженої дії. Перевірте результат перед повтором.";
+        announce(reconciled, true);
+        appendLog(reconciled);
+      } else {
+        keepLocked = true;
+        announce(
+          "Немає безпечного підтвердження поточного стану. Повтор цієї дії заблоковано до перезапуску вікна.",
+          true,
+        );
+      }
+      trigger?.focus?.();
+    };
     try {
       const payload = {};
       if (actionId === "task.create") payload.command = commandInput.value.trim();
@@ -616,23 +640,26 @@
         });
       } catch {
         // The durable effect may have committed before the bridge disconnected. Never retry blindly.
-        const uncertain = "Немає підтвердження виконання дії. Перечитайте стан перед повтором.";
-        announce(uncertain, true);
-        appendLog(uncertain);
-        trigger?.focus?.();
+        await reconcileUncertain(
+          "Немає підтвердження виконання дії. Стан буде перечитано перед можливим повтором.",
+        );
         return;
       }
-      if (!result || !["completed", "failed", "rejected"].includes(result.status)) {
-        const uncertain = "Міст повернув непідтверджений результат. Перечитайте стан перед повтором.";
-        announce(uncertain, true);
-        appendLog(uncertain);
-        trigger?.focus?.();
+      if (!result || !["accepted", "completed", "failed", "rejected"].includes(result.status)) {
+        await reconcileUncertain(
+          "Міст повернув непідтверджений результат. Стан буде перечитано перед можливим повтором.",
+        );
         return;
       }
-      const failed = result.status !== "completed";
+      const failed = ["failed", "rejected"].includes(result.status);
       const message = typeof result.message === "string" && result.message
-        ? result.message : (failed ? "Дію відхилено." : "Виконано.");
-      if (actionId === "team.sources.configure" && !failed) sourceDirty = false;
+        ? result.message
+        : (failed
+          ? "Дію відхилено."
+          : (result.status === "accepted" ? "Дію прийнято до виконання." : "Виконано."));
+      if (actionId === "team.sources.configure" && result.status === "completed") {
+        sourceDirty = false;
+      }
       announce(message, failed);
       appendLog(message);
       let stateReady = false;
@@ -646,7 +673,9 @@
         announce(
           failed
             ? "Не вдалося оновити стан після відхиленої дії. Причина є в журналі."
-            : "Дію підтверджено, але оновлений стан недоступний. Перечитайте стан.",
+            : (result.status === "accepted"
+              ? "Дію прийнято, але оновлений стан недоступний. Не повторюйте її без перевірки."
+              : "Дію підтверджено, але оновлений стан недоступний. Перечитайте стан."),
           true,
         );
       }
@@ -655,7 +684,7 @@
       if (focusId) focusElementById(focusId);
       else trigger?.focus?.();
     } finally {
-      inFlightActions.delete(lockKey);
+      if (!keepLocked) inFlightActions.delete(lockKey);
     }
   }
 
@@ -665,22 +694,44 @@
       return;
     }
     keymapMutationPending = true;
+    let keepPending = false;
+    const reconcileUncertainKeymap = async (message) => {
+      announce(message, true);
+      appendLog(message);
+      let keymapReady = false;
+      try {
+        keymapReady = await refreshKeymap();
+      } catch {
+        keymapReady = false;
+      }
+      if (keymapReady) {
+        const reconciled = "Карту клавіш перечитано після непідтвердженої зміни. Перевірте її перед повтором.";
+        announce(reconciled, true);
+        appendLog(reconciled);
+      } else {
+        actionsReady = false;
+        keepPending = true;
+        announce(
+          "Немає безпечного підтвердження карти клавіш. Повтор змін заблоковано до перезапуску вікна.",
+          true,
+        );
+      }
+      failureTarget?.focus?.();
+    };
     try {
       let response;
       try {
         response = await operation();
       } catch {
-        const uncertain = "Немає підтвердження зміни клавіш. Перечитайте карту перед повтором.";
-        announce(uncertain, true);
-        appendLog(uncertain);
-        failureTarget?.focus?.();
+        await reconcileUncertainKeymap(
+          "Немає підтвердження зміни клавіш. Карта буде перечитана перед можливим повтором.",
+        );
         return;
       }
       if (!response || typeof response.ok !== "boolean") {
-        const uncertain = "Міст повернув непідтверджену зміну клавіш. Перечитайте карту.";
-        announce(uncertain, true);
-        appendLog(uncertain);
-        failureTarget?.focus?.();
+        await reconcileUncertainKeymap(
+          "Міст повернув непідтверджену зміну клавіш. Карта буде перечитана перед можливим повтором.",
+        );
         return;
       }
       const message = typeof response.message === "string" && response.message
@@ -695,12 +746,17 @@
         if (!await refreshKeymap()) throw new Error("keymap unavailable");
       } catch {
         actionsReady = false;
-        announce("Зміну підтверджено, але карту клавіш не вдалося перечитати.", true);
+        keepPending = true;
+        announce(
+          "Зміну підтверджено, але карту клавіш не вдалося перечитати. Повтор змін заблоковано до перезапуску вікна.",
+          true,
+        );
+        failureTarget?.focus?.();
         return;
       }
       if (focusId) focusElementById(focusId);
     } finally {
-      keymapMutationPending = false;
+      if (!keepPending) keymapMutationPending = false;
     }
   }
 
