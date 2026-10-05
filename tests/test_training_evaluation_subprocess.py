@@ -33,6 +33,9 @@ def _sha(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+_HELD_OUT_SHA256 = _sha(b"held-out")
+
+
 def _script(tmp_path: Path, body: str, *, name: str = "evaluator.py") -> Path:
     path = tmp_path / name
     path.write_text(body, encoding="utf-8")
@@ -70,14 +73,17 @@ def _binding(descriptor: ModelArtifactDescriptor) -> TrainingEvaluationBinding:
         challenger_sha256=descriptor.sha256,
         candidate_artifact_ref="models/candidate/job-1",
         frozen_package_sha256=_sha(b"package"),
-        evaluation_set_sha256=_sha(b"held-out"),
+        evaluation_set_sha256=_HELD_OUT_SHA256,
         descriptor_digest=descriptor.descriptor_digest,
         descriptor_registry_key=descriptor.registry_key,
         challenger_size_bytes=descriptor.size_bytes,
     )
 
 
-def _request() -> ModelRequest:
+def _request(
+    *,
+    evaluation_set_sha256: str = _HELD_OUT_SHA256,
+) -> ModelRequest:
     return ModelRequest(
         request_id="benchmark-request-1",
         messages=(ModelMessage(role="user", content="question"),),
@@ -85,7 +91,10 @@ def _request() -> ModelRequest:
         provider_id="ollama",
         provider_kind=ProviderKind.LOCAL,
         privacy=PrivacyClass.PRIVATE,
-        metadata={"model_candidate_id": "models/candidate/job-1"},
+        metadata={
+            "model_candidate_id": "models/candidate/job-1",
+            "evaluation_set_sha256": evaluation_set_sha256,
+        },
     )
 
 
@@ -237,6 +246,28 @@ async def test_parent_environment_is_not_inherited_by_evaluator(
     result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
 
     assert result.response.text == "secret-seen:false"
+
+
+@pytest.mark.asyncio
+async def test_wrong_evaluation_set_is_rejected_before_evaluator_effect(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "started.txt"
+    script = _success_script(
+        tmp_path,
+        extra_prefix=f'Path({str(marker)!r}).write_text("started", encoding="utf-8")',
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(
+            _request(evaluation_set_sha256=_sha(b"different-held-out")),
+            binding=_binding(descriptor),
+        )
+
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert not marker.exists()
 
 
 @pytest.mark.asyncio
