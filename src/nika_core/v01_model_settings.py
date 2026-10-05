@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import math
 import re
 import sqlite3
@@ -37,6 +36,7 @@ from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
 from nika_core.ui.bridge_models import UIResult
+from nika_core.v01_settings_json import load_persisted_json_object
 
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
@@ -67,26 +67,6 @@ _MIGRATIONS = {
 
 class ModelSetupError(ValueError):
     """Fixed user-safe model configuration failure without provider diagnostics."""
-
-
-def _unique_selection_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("duplicate persisted model selection key")
-        result[key] = value
-    return result
-
-
-def _finite_selection_float(raw: str) -> float:
-    value = float(raw)
-    if not math.isfinite(value):
-        raise ValueError("nonfinite persisted model selection number")
-    return value
-
-
-def _reject_selection_constant(_raw: str) -> None:
-    raise ValueError("nonfinite persisted model selection constant")
 
 
 class ModelSelection(BaseModel):
@@ -254,19 +234,9 @@ class ModelSelection(BaseModel):
         try:
             if type(value) is not str:
                 raise TypeError("stored model selection must be text")
-            # Validate UTF-8 before hashing: SQLite TEXT can contain corrupt Unicode.
-            if len(value) > _MAX_STORED_SELECTION_BYTES:
-                raise ValueError("oversized stored model selection")
-            if len(value.encode("utf-8")) > _MAX_STORED_SELECTION_BYTES:
-                raise ValueError("oversized stored model selection")
-            decoded = json.loads(
-                value,
-                object_pairs_hook=_unique_selection_keys,
-                parse_float=_finite_selection_float,
-                parse_constant=_reject_selection_constant,
+            decoded = load_persisted_json_object(
+                value, max_bytes=_MAX_STORED_SELECTION_BYTES
             )
-            if type(decoded) is not dict:
-                raise ValueError("stored model selection must be an object")
             return cls.model_validate(decoded)
         except (TypeError, ValueError, ValidationError, RecursionError) as exc:
             raise ModelSetupError(
