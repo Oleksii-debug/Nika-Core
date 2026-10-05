@@ -185,8 +185,15 @@ class V01CloudModelPermissionService:
         now: datetime | None = None,
     ) -> None:
         request = self._grant_request(record, selection)
+        confirmation_request = CloudModelGrantRequest(
+            task_id=request.task_id,
+            provider_id=request.provider_id,
+            model=request.model,
+            network_host=request.network_host,
+            private_data_allowed=request.private_data_allowed,
+        )
         try:
-            approved = self._confirm(request)
+            approved = self._confirm(confirmation_request)
         except Exception:  # noqa: BLE001 - trusted host confirmation boundary
             raise CloudModelPermissionDenied(
                 "Не вдалося отримати підтвердження для зовнішньої моделі; завдання не запущено."
