@@ -67,6 +67,12 @@ class TargetCursor(BaseModel):
     def validate_terminal_evidence(self) -> TargetCursor:
         if self.attempts < 0:
             raise ValueError("attempts must not be negative")
+        try:
+            _json_copy(self.payload)
+        except BatchCursorStateError as exc:
+            raise ValueError(
+                "target payload must satisfy bounded JSON admission"
+            ) from exc
         if self.attempt_state is AttemptState.CONFIRMED:
             if self.confirmed_result is None or self.uncertain_result is not None:
                 raise ValueError("confirmed target requires only confirmed_result")
@@ -82,9 +88,11 @@ class TargetCursor(BaseModel):
             if evidence is None:
                 continue
             try:
-                _canonical_json(evidence)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{name} must be canonical finite JSON") from exc
+                _json_copy(evidence)
+            except BatchCursorStateError as exc:
+                raise ValueError(
+                    f"{name} must satisfy bounded JSON admission"
+                ) from exc
         return self
 
 
