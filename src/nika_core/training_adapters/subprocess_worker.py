@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
 import os
@@ -9,7 +10,19 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import NoReturn
 
-from nika_core.training_runtime import TrainingJobSpec, TrainingStepResult
+from nika_core.artifacts import (
+    ArtifactLocationKind,
+    ArtifactRegistry,
+    ArtifactRegistryError,
+    ArtifactVerificationState,
+)
+from nika_core.training_materials import ResolvedTrainingPackage
+from nika_core.training_runtime import (
+    TrainingJobSpec,
+    TrainingStepResult,
+    TrainingWorkerError,
+    TrainingWorkerFailureEffect,
+)
 
 _PROTOCOL_VERSION = 1
 _RESUME_ENVELOPE_KEY = "_nika_subprocess"
@@ -28,8 +41,21 @@ _READ_CHUNK_BYTES = 64 * 1024
 _HEX_DIGITS = frozenset("0123456789abcdef")
 
 
-class TrainingSubprocessError(RuntimeError):
-    """Safe public failure from the external training-process boundary."""
+class TrainingSubprocessError(TrainingWorkerError):
+    """Safe typed failure from the external training-process boundary."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "subprocess_error",
+        effect: TrainingWorkerFailureEffect = TrainingWorkerFailureEffect.NO_EFFECT,
+    ) -> None:
+        super().__init__(code, effect=effect)
+        self.public_message = message
+
+    def __str__(self) -> str:
+        return self.public_message
 
 
 def _canonical_json_bytes(value: object, *, max_bytes: int, label: str) -> bytes:
@@ -171,12 +197,14 @@ def _job_identity(spec: TrainingJobSpec) -> dict[str, object]:
             "sha256": spec.base_artifact.sha256,
         },
         "candidate_artifact_ref": spec.candidate_artifact_ref,
+        "frozen_package_sha256": spec.frozen_package_sha256,
         "job_id": spec.job_id,
         "max_steps": spec.max_steps,
         "owner_id": spec.owner_id,
         "project_id": spec.project_id,
         "resource_scope": spec.resource_scope,
         "task_id": spec.task_id,
+        "training_material_sha256": spec.training_material_sha256,
     }
 
 
@@ -189,11 +217,34 @@ def _job_fingerprint(spec: TrainingJobSpec) -> str:
     return hashlib.sha256(b"nika-training-job-v1\x00" + identity).hexdigest()
 
 
-def _step_id(job_fingerprint: str, trainer_sha256: str, step_index: int) -> str:
+def _step_id(
+    job_fingerprint: str,
+    trainer_artifact_id: str,
+    trainer_sha256: str,
+    step_index: int,
+) -> str:
     material = (
-        f"nika-training-step-v1\x00{job_fingerprint}\x00{trainer_sha256}\x00{step_index}"
+        f"nika-training-step-v2\x00{job_fingerprint}\x00{trainer_artifact_id}"
+        f"\x00{trainer_sha256}\x00{step_index}"
     ).encode()
     return hashlib.sha256(material).hexdigest()
+
+
+def _training_material_payload(
+    package: ResolvedTrainingPackage,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "artifact_sha256": material.evidence.artifact_sha256,
+            "byte_count": material.evidence.byte_count,
+            "license_evidence_sha256": material.evidence.license_evidence_sha256,
+            "path": str(material.path),
+            "provenance_sha256": material.evidence.provenance_sha256,
+            "record_count": material.evidence.record_count,
+            "split": material.evidence.split.value,
+        }
+        for material in package.materials
+    ]
 
 
 class SubprocessTrainingWorker:
@@ -209,14 +260,39 @@ class SubprocessTrainingWorker:
         self,
         command: Sequence[str],
         *,
-        trainer_sha256: str,
+        artifact_registry: ArtifactRegistry,
+        trainer_artifact_id: str,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         environment: Mapping[str, str] | None = None,
         max_request_bytes: int = _DEFAULT_MAX_REQUEST_BYTES,
         max_response_bytes: int = _DEFAULT_MAX_RESPONSE_BYTES,
     ) -> None:
         self._command = _validate_command(command)
-        self._trainer_sha256 = _validate_sha256(trainer_sha256, name="trainer_sha256")
+        if type(artifact_registry) is not ArtifactRegistry:
+            raise TypeError("artifact_registry must be the canonical ArtifactRegistry")
+        if type(trainer_artifact_id) is not str or not trainer_artifact_id:
+            raise ValueError("trainer_artifact_id must be a non-empty string")
+        self._artifact_registry = artifact_registry
+        try:
+            record = artifact_registry.get(trainer_artifact_id)
+        except ArtifactRegistryError as exc:
+            raise TrainingSubprocessError(
+                "trainer artifact is not available in the canonical registry",
+                code="trainer_artifact_unavailable",
+            ) from exc
+        if record.location_kind is not ArtifactLocationKind.LOCAL_FILE:
+            raise TrainingSubprocessError(
+                "trainer artifact must be a registered local file",
+                code="trainer_artifact_not_local",
+            )
+        if record.locator not in self._command:
+            raise TrainingSubprocessError(
+                "registered trainer artifact path is not present in the configured command",
+                code="trainer_artifact_command_mismatch",
+            )
+        self._trainer_artifact_id = record.artifact_id
+        self._trainer_sha256 = record.sha256
+        self._trainer_locator = record.locator
         self._timeout_seconds = _validate_timeout(timeout_seconds)
         self._environment = _validate_environment(environment)
         self._max_request_bytes = _validate_positive_byte_limit(
@@ -226,25 +302,91 @@ class SubprocessTrainingWorker:
             max_response_bytes, name="max_response_bytes"
         )
 
+    def _verify_trainer_artifact(self) -> None:
+        try:
+            record = self._artifact_registry.get(self._trainer_artifact_id)
+            verification = self._artifact_registry.verify(self._trainer_artifact_id)
+        except ArtifactRegistryError as exc:
+            raise TrainingSubprocessError(
+                "trainer artifact verification could not be completed",
+                code="trainer_artifact_verification_failed",
+            ) from exc
+        if (
+            record.location_kind is not ArtifactLocationKind.LOCAL_FILE
+            or record.locator != self._trainer_locator
+            or not hmac.compare_digest(record.sha256, self._trainer_sha256)
+        ):
+            raise TrainingSubprocessError(
+                "trainer artifact registry identity changed",
+                code="trainer_artifact_identity_changed",
+            )
+        if verification.state is not ArtifactVerificationState.VERIFIED:
+            raise TrainingSubprocessError(
+                "trainer artifact failed physical verification",
+                code="trainer_artifact_verification_failed",
+            )
+
     def step(
         self,
         *,
         spec: TrainingJobSpec,
         step_index: int,
         resume_state: dict[str, object],
+        training_materials: ResolvedTrainingPackage,
     ) -> TrainingStepResult:
         if type(step_index) is not int or step_index < 0 or step_index >= spec.max_steps:
-            raise TrainingSubprocessError("step_index is outside the training job bounds")
+            raise TrainingSubprocessError(
+                "step_index is outside the training job bounds",
+                code="invalid_step_index",
+            )
         if type(resume_state) is not dict:
-            raise TrainingSubprocessError("resume_state must be a JSON object")
+            raise TrainingSubprocessError(
+                "resume_state must be a JSON object",
+                code="invalid_resume_state",
+            )
+        if type(training_materials) is not ResolvedTrainingPackage:
+            raise TrainingSubprocessError(
+                "training_materials must be the exact canonical ResolvedTrainingPackage",
+                code="invalid_training_materials",
+            )
+        if not hmac.compare_digest(
+            training_materials.training_material_sha256,
+            spec.training_material_sha256,
+        ):
+            raise TrainingSubprocessError(
+                "training material identity does not match the training job",
+                code="training_material_identity_mismatch",
+            )
+        if not hmac.compare_digest(
+            training_materials.evidence.package_manifest_sha256,
+            spec.frozen_package_sha256,
+        ):
+            raise TrainingSubprocessError(
+                "frozen package identity does not match resolved training materials",
+                code="frozen_package_identity_mismatch",
+            )
+        if not hmac.compare_digest(
+            training_materials.evidence.base_artifact_sha256,
+            spec.base_artifact.sha256,
+        ):
+            raise TrainingSubprocessError(
+                "base model identity does not match resolved training materials",
+                code="base_artifact_identity_mismatch",
+            )
 
+        self._verify_trainer_artifact()
         job_fingerprint = _job_fingerprint(spec)
         trainer_state, previous_step_id = self._unwrap_resume_state(
             resume_state=resume_state,
             job_fingerprint=job_fingerprint,
             step_index=step_index,
         )
-        current_step_id = _step_id(job_fingerprint, self._trainer_sha256, step_index)
+        current_step_id = _step_id(
+            job_fingerprint,
+            self._trainer_artifact_id,
+            self._trainer_sha256,
+            step_index,
+        )
         request = {
             "job": _job_identity(spec),
             "job_fingerprint": job_fingerprint,
@@ -253,7 +395,9 @@ class SubprocessTrainingWorker:
             "resume_state": trainer_state,
             "step_id": current_step_id,
             "step_index": step_index,
+            "trainer_artifact_id": self._trainer_artifact_id,
             "trainer_sha256": self._trainer_sha256,
+            "training_materials": _training_material_payload(training_materials),
         }
         request_bytes = _canonical_json_bytes(
             request,
@@ -262,7 +406,14 @@ class SubprocessTrainingWorker:
         )
 
         stdout = self._execute(request_bytes + b"\n")
-        response = self._parse_response(stdout, expected_step_id=current_step_id)
+        try:
+            response = self._parse_response(stdout, expected_step_id=current_step_id)
+        except TrainingSubprocessError as exc:
+            raise TrainingSubprocessError(
+                str(exc),
+                code="invalid_subprocess_response",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            ) from exc
         completed = response["completed"]
         candidate_sha256 = response["candidate_sha256"]
         trainer_resume_state = response["resume_state"]
@@ -275,6 +426,7 @@ class SubprocessTrainingWorker:
                 "job_fingerprint": job_fingerprint,
                 "last_step_id": current_step_id,
                 "protocol_version": _PROTOCOL_VERSION,
+                "trainer_artifact_id": self._trainer_artifact_id,
                 "trainer_sha256": self._trainer_sha256,
                 "trainer_state": trainer_resume_state,
             }
@@ -316,6 +468,7 @@ class SubprocessTrainingWorker:
             "job_fingerprint",
             "last_step_id",
             "protocol_version",
+            "trainer_artifact_id",
             "trainer_sha256",
             "trainer_state",
         }
@@ -327,13 +480,22 @@ class SubprocessTrainingWorker:
             raise TrainingSubprocessError("training resume state uses an unsupported protocol")
         if envelope["job_fingerprint"] != job_fingerprint:
             raise TrainingSubprocessError("training resume state does not match the current job")
+        if envelope["trainer_artifact_id"] != self._trainer_artifact_id:
+            raise TrainingSubprocessError(
+                "training resume state does not match the trainer registry artifact",
+                code="trainer_artifact_resume_mismatch",
+            )
         if envelope["trainer_sha256"] != self._trainer_sha256:
             raise TrainingSubprocessError(
-                "training resume state does not match the trainer artifact"
+                "training resume state does not match the trainer artifact",
+                code="trainer_digest_resume_mismatch",
             )
 
         expected_previous_step_id = _step_id(
-            job_fingerprint, self._trainer_sha256, step_index - 1
+            job_fingerprint,
+            self._trainer_artifact_id,
+            self._trainer_sha256,
+            step_index - 1,
         )
         if envelope["last_step_id"] != expected_previous_step_id:
             raise TrainingSubprocessError("training resume state does not match the previous step")
@@ -377,7 +539,10 @@ class SubprocessTrainingWorker:
 
         if process.stdin is None or process.stdout is None:
             self._kill_process(process)
-            raise TrainingSubprocessError("training subprocess streams are unavailable")
+            raise TrainingSubprocessError(
+                "training subprocess streams are unavailable",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
 
         stdin = process.stdin
         stdout = process.stdout
@@ -444,20 +609,36 @@ class SubprocessTrainingWorker:
         self._close_pipe(stdout)
 
         if timed_out is not None:
-            raise TrainingSubprocessError("training subprocess timed out") from timed_out
+            raise TrainingSubprocessError(
+                "training subprocess timed out",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            ) from timed_out
         if reader.is_alive() or writer.is_alive():
             self._kill_process(process)
-            raise TrainingSubprocessError("training subprocess streams did not close")
+            raise TrainingSubprocessError(
+                "training subprocess streams did not close",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
         if overflow.is_set():
-            raise TrainingSubprocessError("training subprocess response exceeds the byte limit")
+            raise TrainingSubprocessError(
+                "training subprocess response exceeds the byte limit",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
         if read_failed.is_set():
-            raise TrainingSubprocessError("training subprocess response could not be read")
+            raise TrainingSubprocessError(
+                "training subprocess response could not be read",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
         if returncode != 0:
             raise TrainingSubprocessError(
-                f"training subprocess exited unsuccessfully ({returncode})"
+                f"training subprocess exited unsuccessfully ({returncode})",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
         if write_failed.is_set():
-            raise TrainingSubprocessError("training subprocess did not accept the request")
+            raise TrainingSubprocessError(
+                "training subprocess did not accept the request",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
         return bytes(captured)
 
     def _parse_response(
