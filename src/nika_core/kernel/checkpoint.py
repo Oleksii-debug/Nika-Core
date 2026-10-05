@@ -28,16 +28,52 @@ class Checkpoint:
     checksum_sha256: str
 
 
-def _utf8_size(value: str) -> int:
-    try:
-        return len(value.encode("utf-8"))
-    except UnicodeEncodeError as exc:
-        raise ValueError("Checkpoint payload text must be valid UTF-8") from exc
+def _json_string_utf8_size(value: str) -> int:
+    size = 2
+    for char in value:
+        codepoint = ord(char)
+        if char in {'"', "\\"} or char in {"\b", "\f", "\n", "\r", "\t"}:
+            size += 2
+        elif codepoint < 0x20:
+            size += 6
+        else:
+            try:
+                size += len(char.encode("utf-8"))
+            except UnicodeEncodeError as exc:
+                raise ValueError("Checkpoint payload text must be valid UTF-8") from exc
+        if size > _JSON_MAX_BYTES:
+            raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
+    return size
+
+
+def _checked_json_bytes(total: int, amount: int) -> int:
+    total += amount
+    if total > _JSON_MAX_BYTES:
+        raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
+    return total
+
+
+def _json_key_utf8_size(key: object) -> int:
+    if type(key) is str:
+        return _json_string_utf8_size(key)
+    if type(key) is bool:
+        return 6 if key else 7
+    if key is None:
+        return 6
+    if type(key) is int:
+        if key.bit_length() > _JSON_MAX_INTEGER_BITS:
+            raise ValueError("Checkpoint payload integer key exceeds the bit limit")
+        return len(str(key)) + 2
+    if type(key) is float:
+        if not math.isfinite(key):
+            raise ValueError("Checkpoint payload must contain finite key values")
+        return len(repr(key)) + 2
+    return 0
 
 
 def _validate_payload_resources(payload: object) -> None:
     nodes = 0
-    raw_utf8_bytes = 0
+    json_bytes = 0
     stack: list[tuple[object, int]] = [(payload, 1)]
 
     while stack:
@@ -48,42 +84,41 @@ def _validate_payload_resources(payload: object) -> None:
         if depth > _JSON_MAX_DEPTH:
             raise ValueError("Checkpoint payload exceeds the JSON depth limit")
 
-        if value is None or type(value) is bool:
+        if value is None:
+            json_bytes = _checked_json_bytes(json_bytes, 4)
+            continue
+        if type(value) is bool:
+            json_bytes = _checked_json_bytes(json_bytes, 4 if value else 5)
             continue
         if type(value) is int:
             if value.bit_length() > _JSON_MAX_INTEGER_BITS:
                 raise ValueError("Checkpoint payload integer exceeds the bit limit")
+            json_bytes = _checked_json_bytes(json_bytes, len(str(value)))
             continue
         if type(value) is float:
             if not math.isfinite(value):
                 raise ValueError("Checkpoint payload must contain finite numbers")
+            json_bytes = _checked_json_bytes(json_bytes, len(repr(value)))
             continue
         if type(value) is str:
-            raw_utf8_bytes += _utf8_size(value)
-            if raw_utf8_bytes > _JSON_MAX_BYTES:
-                raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
+            json_bytes = _checked_json_bytes(json_bytes, _json_string_utf8_size(value))
             continue
         if isinstance(value, dict):
             if len(value) > _JSON_MAX_NODES - nodes:
                 raise ValueError("Checkpoint payload exceeds the JSON node limit")
+            punctuation = 2 + len(value) + max(0, len(value) - 1)
+            json_bytes = _checked_json_bytes(json_bytes, punctuation)
             for key, item in value.items():
-                if type(key) is str:
-                    raw_utf8_bytes += _utf8_size(key)
-                    if raw_utf8_bytes > _JSON_MAX_BYTES:
-                        raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
-                elif type(key) is int:
-                    if key.bit_length() > _JSON_MAX_INTEGER_BITS:
-                        raise ValueError("Checkpoint payload integer key exceeds the bit limit")
-                elif type(key) is float and not math.isfinite(key):
-                    raise ValueError("Checkpoint payload must contain finite key values")
+                json_bytes = _checked_json_bytes(json_bytes, _json_key_utf8_size(key))
                 stack.append((item, depth + 1))
             continue
         if isinstance(value, (list, tuple)):
             if len(value) > _JSON_MAX_NODES - nodes:
                 raise ValueError("Checkpoint payload exceeds the JSON node limit")
+            punctuation = 2 + max(0, len(value) - 1)
+            json_bytes = _checked_json_bytes(json_bytes, punctuation)
             for item in value:
                 stack.append((item, depth + 1))
-
 
 def _canonical_json(payload: dict[str, object]) -> str:
     _validate_payload_resources(payload)
