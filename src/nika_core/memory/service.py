@@ -104,6 +104,9 @@ class MemoryService:
         now: datetime | None = None,
     ) -> MemoryRecord | None:
         scope = _require_scope(scope)
+        owner_id = _required("owner_id", owner_id)
+        namespace = _required("namespace", namespace)
+        key = _required("key", key)
         current = _as_utc(now) if now else datetime.now(UTC)
         with self._store.connection() as conn:
             row = conn.execute(
@@ -132,6 +135,8 @@ class MemoryService:
         now: datetime | None = None,
     ) -> tuple[MemoryRecord, ...]:
         scope = _require_scope(scope)
+        owner_id = _required("owner_id", owner_id)
+        namespace = _required("namespace", namespace)
         current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
             # Compare actual instants, not offset-sensitive ISO strings. Older
@@ -157,6 +162,9 @@ class MemoryService:
 
     def delete(self, *, scope: MemoryScope, owner_id: str, namespace: str, key: str) -> bool:
         scope = _require_scope(scope)
+        owner_id = _required("owner_id", owner_id)
+        namespace = _required("namespace", namespace)
+        key = _required("key", key)
         with self._store.connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
@@ -221,8 +229,31 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _parse_optional(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value else None
+def _parse_optional(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    return _parse_stored_datetime("expiry", value)
+
+
+def _parse_stored_datetime(name: str, value: Any) -> datetime:
+    if type(value) is not str:
+        raise ValueError(f"stored memory {name} must be text")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid stored memory {name}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"stored memory {name} must be timezone-aware")
+    return parsed
+
+
+def _stored_required(name: str, value: Any) -> str:
+    if type(value) is not str:
+        raise ValueError(f"stored memory {name} must be text")
+    normalized = _required(name, value)
+    if normalized != value:
+        raise ValueError(f"stored memory {name} is not canonical")
+    return normalized
 
 
 def _reject_memory_constant(value: str) -> None:
@@ -262,7 +293,16 @@ def _validate_scalar_unicode(value: Any) -> None:
 
 
 def _record_from_row(row: Any) -> MemoryRecord:
-    scope = MemoryScope(row["scope"])
+    stored_scope = row["scope"]
+    if type(stored_scope) is not str:
+        raise ValueError("stored memory scope must be text")
+    try:
+        scope = MemoryScope(stored_scope)
+    except ValueError as exc:
+        raise ValueError("invalid stored memory scope") from exc
+    owner_id = _stored_required("owner_id", row["owner_id"])
+    namespace = _stored_required("namespace", row["namespace"])
+    key = _stored_required("key", row["memory_key"])
     approval = row["user_approved"]
     if type(approval) is not int or approval not in (0, 1):
         raise ValueError("invalid stored memory approval flag")
@@ -278,12 +318,12 @@ def _record_from_row(row: Any) -> MemoryRecord:
     _validate_scalar_unicode(value)
     return MemoryRecord(
         scope=scope,
-        owner_id=row["owner_id"],
-        namespace=row["namespace"],
-        key=row["memory_key"],
+        owner_id=owner_id,
+        namespace=namespace,
+        key=key,
         value=value,
         user_approved=bool(approval),
         expires_at=_parse_optional(row["expires_at"]),
-        created_at=datetime.fromisoformat(row["created_at"]),
-        updated_at=datetime.fromisoformat(row["updated_at"]),
+        created_at=_parse_stored_datetime("created_at", row["created_at"]),
+        updated_at=_parse_stored_datetime("updated_at", row["updated_at"]),
     )
