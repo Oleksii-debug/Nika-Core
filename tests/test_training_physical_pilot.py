@@ -316,7 +316,7 @@ def test_build_report_rejects_runtime_candidate_digest_mismatch(tmp_path: Path) 
 
     with pytest.raises(PhysicalTrainingPilotError, match="runtime evidence"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -337,7 +337,7 @@ def test_build_report_rejects_descriptor_digest_mismatch(tmp_path: Path) -> None
 
     with pytest.raises(PhysicalTrainingPilotError, match="verification failed"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -360,7 +360,7 @@ def test_build_report_rejects_restart_probe_without_durable_reopen(
 
     with pytest.raises(PhysicalTrainingPilotError, match="reopen"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -383,7 +383,7 @@ def test_build_report_requires_effect_free_restart_probe_reason(
 
     with pytest.raises(PhysicalTrainingPilotError, match="before admission"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -404,7 +404,7 @@ def test_build_report_rejects_restart_identity_drift(tmp_path: Path) -> None:
 
     with pytest.raises(PhysicalTrainingPilotError, match="job_fingerprint"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -437,7 +437,7 @@ def test_build_report_rejects_boolean_step_carrier(tmp_path: Path) -> None:
 
     with pytest.raises(PhysicalTrainingPilotError, match="step boundary"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=paused,
             restart_probe=_restart_probe(),
             completed=_completed_for(payload),
@@ -454,7 +454,7 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
 
     with pytest.raises(PhysicalTrainingPilotError, match="checkpoint"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -486,7 +486,7 @@ def test_build_report_rejects_candidate_manifest_identity_drift(
 
     with pytest.raises(PhysicalTrainingPilotError, match="job fingerprint"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -515,7 +515,7 @@ def test_build_report_rejects_candidate_manifest_reader_failure(
 
     with pytest.raises(PhysicalTrainingPilotError, match="manifest verification failed"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -637,7 +637,7 @@ def test_build_report_rejects_non_windows_builder(
 
     with pytest.raises(PhysicalTrainingPilotError, match="built on Windows"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -664,7 +664,7 @@ def test_build_report_requires_explicit_pause_reason(tmp_path: Path) -> None:
 
     with pytest.raises(PhysicalTrainingPilotError, match="explicit pause control"):
         build_physical_training_pilot_report(
-        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
+            trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=paused,
             restart_probe=_restart_probe(),
             completed=_completed_for(payload),
