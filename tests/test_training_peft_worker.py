@@ -567,6 +567,68 @@ def test_final_candidate_is_never_overwritten(
     assert candidate.read_bytes() == b"existing"
 
 
+def test_concurrent_candidate_publish_never_overwrites_winner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_publish = peft._publish_regular_file_no_replace
+
+    def racing_publish(source: Path, target: Path) -> None:
+        target.write_bytes(b"concurrent-winner")
+        real_publish(source, target)
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft, "_publish_regular_file_no_replace", racing_publish)
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_publish_conflict"):
+        peft._train_one_step(request, config, consumed)
+
+    assert candidate.read_bytes() == b"concurrent-winner"
+
+
+def test_checkpoint_mutation_blocks_final_candidate_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    real_snapshot = peft._adapter_config_snapshot
+
+    def mutate_after_snapshot(
+        path: Path,
+        parsed: peft.ParsedRequest,
+        trainer_config: peft.TrainerConfig,
+    ) -> dict[str, object]:
+        snapshot = real_snapshot(path, parsed, trainer_config)
+        (path / "adapter_model.safetensors").write_bytes(b"post-marker-tamper")
+        return snapshot
+
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    monkeypatch.setattr(peft, "_adapter_config_snapshot", mutate_after_snapshot)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="checkpoint_payload_changed_before_publish",
+    ):
+        peft._train_one_step(request, config, consumed)
+
+    assert not candidate.exists()
+
+
 def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
