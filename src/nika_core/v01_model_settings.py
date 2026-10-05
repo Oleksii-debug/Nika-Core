@@ -46,9 +46,11 @@ from nika_core.security.model_cloud_authority import (
     StandingPermissionExecutionAuthority,
 )
 from nika_core.ui.bridge_models import UIResult
+from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json_object
 
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
+_MAX_STORED_SELECTION_BYTES = 64 * 1024
 _SCHEMA_VERSION = 1
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
@@ -236,8 +238,13 @@ class ModelSelection(BaseModel):
     @classmethod
     def from_stored(cls, value: str) -> ModelSelection:
         try:
-            return cls.model_validate_json(value)
-        except (TypeError, ValueError, ValidationError) as exc:
+            if type(value) is not str:
+                raise TypeError("stored model selection must be text")
+            decoded = load_persisted_json_object(
+                value, max_bytes=_MAX_STORED_SELECTION_BYTES
+            )
+            return cls.model_validate(decoded)
+        except (TypeError, ValueError, ValidationError, RecursionError) as exc:
             raise ModelSetupError(
                 "Збережені налаштування моделі пошкоджені або несумісні."
             ) from exc
@@ -304,7 +311,13 @@ class V01ModelSettings:
         if row is None or not isinstance(row["selection_json"], str):
             raise ModelSetupError("Збережену модель завдання не знайдено.")
         body = row["selection_json"]
-        if hashlib.sha256(body.encode("utf-8")).hexdigest() != selection_id:
+        try:
+            raw = bounded_stored_utf8(body, max_bytes=_MAX_STORED_SELECTION_BYTES)
+        except (TypeError, ValueError) as exc:
+            raise ModelSetupError(
+                "Збережену модель завдання не вдалося перевірити."
+            ) from exc
+        if hashlib.sha256(raw).hexdigest() != selection_id:
             raise ModelSetupError("Збережену модель завдання не вдалося перевірити.")
         return ModelSelection.from_stored(body)
 
