@@ -10,6 +10,7 @@ from nika_core.experiments import (
     ExperimentRepository,
     ExperimentSnapshot,
     ExperimentStatus,
+    InMemoryExperimentRepository,
     MetricObservation,
     PromotionPolicy,
 )
@@ -138,31 +139,76 @@ def _validate_definition(snapshot: ExperimentSnapshot, definition: ExperimentDef
         raise ValueError("existing experiment definition does not match attested comparison")
 
 
+def _run_canonical_terminal(
+    *,
+    definition: ExperimentDefinition,
+    observations: tuple[MetricObservation, ...],
+) -> ExperimentSnapshot:
+    repository = InMemoryExperimentRepository()
+    engine = ExperimentEngine(repository)
+    engine.create(definition)
+    engine.start(definition.experiment_id)
+    for observation in observations:
+        engine.record(definition.experiment_id, observation)
+    return engine.complete(definition.experiment_id)
+
+
+def _validate_recoverable_snapshot(snapshot: ExperimentSnapshot) -> None:
+    if snapshot.status is ExperimentStatus.DRAFT:
+        if (
+            snapshot.observations != ()
+            or snapshot.selected_candidate_id is not None
+            or snapshot.previous_champion_id is not None
+        ):
+            raise ValueError("draft experiment contains durable comparison evidence")
+    elif snapshot.status is ExperimentStatus.RUNNING:
+        if (
+            snapshot.selected_candidate_id is not None
+            or snapshot.previous_champion_id is not None
+        ):
+            raise ValueError("running experiment contains terminal decision fields")
+
+
+def _validate_persisted_observations(
+    snapshot: ExperimentSnapshot,
+    *,
+    expected: dict[tuple[str, str, str], MetricObservation],
+) -> dict[tuple[str, str, str], MetricObservation]:
+    if type(snapshot.observations) is not tuple:
+        raise TypeError("persisted comparison observations must use a canonical tuple")
+    observed = _observation_map(snapshot.observations)
+    for key, persisted in observed.items():
+        wanted = expected.get(key)
+        if wanted is None:
+            raise ValueError("persisted experiment contains evidence outside attested benchmark")
+        if float(persisted.value) != float(wanted.value):
+            raise ValueError("persisted experiment evidence conflicts with attested benchmark")
+    return observed
+
+
 def _validate_terminal_snapshot(
     snapshot: ExperimentSnapshot,
     *,
     definition: ExperimentDefinition,
     expected_observations: tuple[MetricObservation, ...],
+    expected_terminal: ExperimentSnapshot,
 ) -> ExperimentSnapshot:
     _validate_definition(snapshot, definition)
+    _validate_definition(expected_terminal, definition)
     if snapshot.status not in {ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED}:
         raise ValueError("attested comparison did not reach a terminal experiment state")
     expected = _observation_map(expected_observations)
-    observed = _observation_map(snapshot.observations)
+    observed = _validate_persisted_observations(snapshot, expected=expected)
     if set(observed) != set(expected):
         raise ValueError("terminal experiment observation coverage is inconsistent")
-    for key, item in expected.items():
-        if float(observed[key].value) != float(item.value):
-            raise ValueError("terminal experiment observation value is inconsistent")
-    champion_id = definition.champion.candidate_id
-    challenger_id = definition.challengers[0].candidate_id
-    if snapshot.previous_champion_id != champion_id:
-        raise ValueError("terminal experiment previous-champion evidence is inconsistent")
-    if snapshot.status is ExperimentStatus.PROMOTED:
-        if snapshot.selected_candidate_id != challenger_id:
-            raise ValueError("promoted experiment selected-candidate evidence is inconsistent")
-    elif snapshot.selected_candidate_id != champion_id:
-        raise ValueError("completed experiment selected-candidate evidence is inconsistent")
+    if (
+        snapshot.status is not expected_terminal.status
+        or snapshot.selected_candidate_id != expected_terminal.selected_candidate_id
+        or snapshot.previous_champion_id != expected_terminal.previous_champion_id
+    ):
+        raise ValueError(
+            "terminal experiment conflicts with canonical Experiment Engine decision"
+        )
     return snapshot
 
 
@@ -193,12 +239,14 @@ def _ensure_created_and_running(
         else:
             snapshot = repository.get(experiment_id)
     _validate_definition(snapshot, definition)
+    _validate_recoverable_snapshot(snapshot)
     if snapshot.status is ExperimentStatus.DRAFT:
         try:
             snapshot = engine.start(experiment_id)
         except ValueError:
             snapshot = repository.get(experiment_id)
             _validate_definition(snapshot, definition)
+        _validate_recoverable_snapshot(snapshot)
     return snapshot
 
 
@@ -211,26 +259,40 @@ def _record_expected_observations(
 ) -> ExperimentSnapshot:
     experiment_id = definition.experiment_id
     expected = _observation_map(observations)
-    for key, item in expected.items():
+    initial = repository.get(experiment_id)
+    _validate_definition(initial, definition)
+    _validate_recoverable_snapshot(initial)
+    if initial.status is ExperimentStatus.RUNNING:
+        _validate_persisted_observations(initial, expected=expected)
+    for item in observations:
+        key = _observation_key(item)
         snapshot = repository.get(experiment_id)
         _validate_definition(snapshot, definition)
+        _validate_recoverable_snapshot(snapshot)
         if snapshot.status in {ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED}:
             return snapshot
         if snapshot.status is not ExperimentStatus.RUNNING:
             raise ValueError("experiment is not running while comparison evidence is incomplete")
-        existing = _observation_map(snapshot.observations)
+        existing = _validate_persisted_observations(snapshot, expected=expected)
         if key in existing:
-            if float(existing[key].value) != float(item.value):
-                raise ValueError("persisted experiment evidence conflicts with attested benchmark")
             continue
         try:
             engine.record(experiment_id, item)
         except ValueError:
             current = repository.get(experiment_id)
             _validate_definition(current, definition)
-            persisted = _observation_map(current.observations).get(key)
-            if persisted is None or float(persisted.value) != float(item.value):
+            _validate_recoverable_snapshot(current)
+            if current.status in {ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED}:
+                return current
+            if current.status is not ExperimentStatus.RUNNING:
                 raise
+            persisted = _validate_persisted_observations(
+                current,
+                expected=expected,
+            ).get(key)
+            if persisted is not None:
+                continue
+            raise
     return repository.get(experiment_id)
 
 
@@ -240,6 +302,7 @@ def _finish_experiment(
     repository: ExperimentRepository,
     definition: ExperimentDefinition,
     expected_observations: tuple[MetricObservation, ...],
+    expected_terminal: ExperimentSnapshot,
 ) -> ExperimentSnapshot:
     experiment_id = definition.experiment_id
     snapshot = repository.get(experiment_id)
@@ -249,6 +312,7 @@ def _finish_experiment(
             snapshot,
             definition=definition,
             expected_observations=expected_observations,
+            expected_terminal=expected_terminal,
         )
     if snapshot.status is ExperimentStatus.ROLLED_BACK:
         raise ValueError("rolled-back experiment cannot be reused as fresh comparison evidence")
@@ -262,6 +326,7 @@ def _finish_experiment(
         snapshot,
         definition=definition,
         expected_observations=expected_observations,
+        expected_terminal=expected_terminal,
     )
 
 
@@ -350,11 +415,16 @@ class AttestedTrainingComparisonResult:
             != challenger.report.candidate.candidate_id
         ):
             raise ValueError("experiment candidate authority changed")
-        if self.experiment_snapshot.status not in {
-            ExperimentStatus.COMPLETED,
-            ExperimentStatus.PROMOTED,
-        }:
-            raise ValueError("comparison result requires a terminal experiment snapshot")
+        expected_terminal = _run_canonical_terminal(
+            definition=self.experiment_snapshot.definition,
+            observations=self.experiment_snapshot.observations,
+        )
+        _validate_terminal_snapshot(
+            self.experiment_snapshot,
+            definition=self.experiment_snapshot.definition,
+            expected_observations=self.experiment_snapshot.observations,
+            expected_terminal=expected_terminal,
+        )
 
     def revalidated(self) -> AttestedTrainingComparisonResult:
         if type(self) is not AttestedTrainingComparisonResult:
@@ -548,6 +618,10 @@ def run_attested_old_vs_new_comparison(
         ),
     )
     _observation_map(observations)
+    expected_terminal = _run_canonical_terminal(
+        definition=definition,
+        observations=observations,
+    )
     engine = ExperimentEngine(repository)
     snapshot = _ensure_created_and_running(
         engine=engine,
@@ -569,12 +643,14 @@ def run_attested_old_vs_new_comparison(
             repository=repository,
             definition=definition,
             expected_observations=observations,
+            expected_terminal=expected_terminal,
         )
     else:
         snapshot = _validate_terminal_snapshot(
             snapshot,
             definition=definition,
             expected_observations=observations,
+            expected_terminal=expected_terminal,
         )
     return _build_result(
         experiment_snapshot=snapshot,

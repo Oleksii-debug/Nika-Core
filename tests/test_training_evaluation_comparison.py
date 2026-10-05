@@ -56,7 +56,6 @@ from nika_core.training_model_activation import (
 )
 from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 
-
 def _sha(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -68,7 +67,6 @@ _CHAMPION_ATTESTOR_ID = "test-shared-attestor"
 _CHAMPION_ATTESTOR_SHA256 = _sha(b"shared-attestor")
 _CHALLENGER_ATTESTOR_ID = _CHAMPION_ATTESTOR_ID
 _CHALLENGER_ATTESTOR_SHA256 = _CHAMPION_ATTESTOR_SHA256
-
 
 def _evaluation_set() -> EvaluationSet:
     return EvaluationSet(
@@ -91,7 +89,6 @@ def _evaluation_set() -> EvaluationSet:
             ),
         ),
     )
-
 
 def _training_binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBinding:
     descriptor = _champion_descriptor()
@@ -116,7 +113,6 @@ def _training_binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBindin
         challenger_size_bytes=len(b"challenger"),
     )
 
-
 def _champion() -> ModelCandidate:
     return ModelCandidate(
         candidate_id="models/base",
@@ -131,7 +127,6 @@ def _champion() -> ModelCandidate:
         model_sha256=_BASE_SHA256,
     )
 
-
 def _challenger() -> ModelCandidate:
     return ModelCandidate(
         candidate_id="models/challenger",
@@ -145,7 +140,6 @@ def _challenger() -> ModelCandidate:
         model_license_ref="license:challenger",
         model_sha256=_CHALLENGER_SHA256,
     )
-
 
 def _champion_descriptor() -> ModelArtifactDescriptor:
     return ModelArtifactDescriptor(
@@ -223,7 +217,6 @@ class _ChallengerPort:
             ),
         )
 
-
 async def _attested_results(tmp_path):
     evaluation = _evaluation_set()
     training_binding = _training_binding(evaluation)
@@ -258,7 +251,6 @@ async def _attested_results(tmp_path):
     )
     return evaluation, champion_result, challenger_result
 
-
 def _config() -> BenchmarkExecutionConfig:
     return BenchmarkExecutionConfig(
         timeout_seconds=5,
@@ -266,14 +258,12 @@ def _config() -> BenchmarkExecutionConfig:
         scorer_id="exact-match-nfc-v1",
     )
 
-
 def _policy() -> PromotionPolicy:
     return PromotionPolicy(
         primary_metric=QUALITY_METRIC,
         minimum_improvement=0.5,
         minimum_replays=2,
     )
-
 
 @pytest.mark.asyncio
 async def test_attested_old_vs_new_comparison_promotes_only_from_both_attested_runs(
@@ -303,7 +293,6 @@ async def test_attested_old_vs_new_comparison_promotes_only_from_both_attested_r
     assert payload["attestor_sha256"] == _CHAMPION_ATTESTOR_SHA256
     assert len(result.evidence_sha256) == 64
 
-
 @pytest.mark.asyncio
 async def test_comparison_is_idempotent_after_terminal_persistence(tmp_path) -> None:
     evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
@@ -325,6 +314,38 @@ async def test_comparison_is_idempotent_after_terminal_persistence(tmp_path) -> 
     assert first.evidence_sha256 == second.evidence_sha256
     assert len(second.experiment_snapshot.observations) == 4
 
+@pytest.mark.asyncio
+async def test_comparison_rejects_terminal_outcome_that_disagrees_with_engine(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    repository = InMemoryExperimentRepository()
+    kwargs = dict(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new",
+        repository=repository,
+    )
+    result = run_attested_old_vs_new_comparison(**kwargs)
+    assert result.experiment_snapshot.status is ExperimentStatus.PROMOTED
+    forged = replace(
+        result.experiment_snapshot,
+        status=ExperimentStatus.COMPLETED,
+        selected_candidate_id="models/base",
+    )
+    repository.save(forged)
+
+    with pytest.raises(
+        ValueError,
+        match="canonical Experiment Engine decision",
+    ):
+        run_attested_old_vs_new_comparison(**kwargs)
+
+    assert repository.get("training-job-1-old-vs-new") == forged
 
 @pytest.mark.asyncio
 async def test_comparison_resumes_partial_experiment_without_duplicate_observations(
@@ -374,7 +395,6 @@ async def test_comparison_resumes_partial_experiment_without_duplicate_observati
     assert result.experiment_snapshot.status is ExperimentStatus.PROMOTED
     assert len(result.experiment_snapshot.observations) == 4
 
-
 @pytest.mark.asyncio
 async def test_comparison_rejects_conflicting_persisted_observation(tmp_path) -> None:
     evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
@@ -390,12 +410,22 @@ async def test_comparison_rejects_conflicting_persisted_observation(tmp_path) ->
         policy=policy,
         permission_fingerprint="perm:test",
     )
-    expected = benchmark_observations(
-        champion_result.report,
-        definition=definition,
-        evaluation_set=evaluation,
-    )[0]
-    conflicting = replace(expected, value=0.25)
+    observations = (
+        *benchmark_observations(
+            champion_result.report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ),
+        *benchmark_observations(
+            challenger_result.report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ),
+    )
+    conflicting = replace(
+        observations[-1],
+        value=float(observations[-1].value) + 0.25,
+    )
     engine = ExperimentEngine(repository)
     engine.create(definition)
     engine.start(definition.experiment_id)
@@ -413,6 +443,9 @@ async def test_comparison_rejects_conflicting_persisted_observation(tmp_path) ->
             repository=repository,
         )
 
+    persisted = repository.get(definition.experiment_id)
+    assert persisted.status is ExperimentStatus.RUNNING
+    assert persisted.observations == (conflicting,)
 
 @pytest.mark.asyncio
 async def test_comparison_rejects_different_attestor_before_persistence(
@@ -453,6 +486,36 @@ async def test_comparison_rejects_different_attestor_before_persistence(
     with pytest.raises(KeyError):
         repository.get("training-job-1-old-vs-new")
 
+@pytest.mark.asyncio
+async def test_comparison_result_rejects_terminal_outcome_mutation(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new",
+        repository=InMemoryExperimentRepository(),
+    )
+    assert result.experiment_snapshot.status is ExperimentStatus.PROMOTED
+    object.__setattr__(
+        result.experiment_snapshot,
+        "status",
+        ExperimentStatus.COMPLETED,
+    )
+    object.__setattr__(
+        result.experiment_snapshot,
+        "selected_candidate_id",
+        "models/base",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="canonical Experiment Engine decision",
+    ):
+        result.evidence_payload()
 
 @pytest.mark.asyncio
 async def test_comparison_result_rejects_attestor_authority_substitution(
@@ -491,7 +554,6 @@ async def test_comparison_result_rejects_attestor_authority_substitution(
     with pytest.raises(ValueError, match="one attestor authority"):
         result.evidence_payload()
 
-
 @pytest.mark.asyncio
 async def test_comparison_rejects_cross_execution_config_evidence_before_persistence(
     tmp_path,
@@ -519,7 +581,6 @@ async def test_comparison_rejects_cross_execution_config_evidence_before_persist
     with pytest.raises(KeyError):
         repository.get("training-job-1-old-vs-new")
 
-
 @pytest.mark.asyncio
 async def test_comparison_rejects_altered_held_out_set_before_persistence(tmp_path) -> None:
     evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
@@ -541,6 +602,43 @@ async def test_comparison_rejects_altered_held_out_set_before_persistence(tmp_pa
     with pytest.raises(KeyError):
         repository.get("training-job-1-old-vs-new")
 
+@pytest.mark.asyncio
+async def test_comparison_rejects_running_terminal_fields_before_writes(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    repository = InMemoryExperimentRepository()
+    config = _config()
+    policy = _policy()
+    definition = build_experiment_definition(
+        experiment_id="training-job-1-old-vs-new",
+        champion=champion_result.report.candidate,
+        challengers=(challenger_result.report.candidate,),
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint="perm:test",
+    )
+    engine = ExperimentEngine(repository)
+    engine.create(definition)
+    running = engine.start(definition.experiment_id)
+    forged = replace(
+        running,
+        selected_candidate_id=challenger_result.report.candidate.candidate_id,
+    )
+    repository.save(forged)
+
+    with pytest.raises(ValueError, match="terminal decision fields"):
+        run_attested_old_vs_new_comparison(
+            champion_result=champion_result,
+            challenger_result=challenger_result,
+            evaluation_set=evaluation,
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="perm:test",
+            experiment_id=definition.experiment_id,
+            repository=repository,
+        )
+
+    assert repository.get(definition.experiment_id) == forged
 
 @pytest.mark.asyncio
 async def test_comparison_resumes_partial_evidence_after_sqlite_restart(tmp_path) -> None:
@@ -620,7 +718,6 @@ async def test_comparison_revalidation_rejects_mutated_champion_training_authori
     with pytest.raises(ValueError, match="challenger training authority"):
         result.evidence_payload()
 
-
 @pytest.mark.asyncio
 async def test_comparison_hash_properties_are_derived_from_nested_authorities(
     tmp_path,
@@ -644,9 +741,6 @@ async def test_comparison_hash_properties_are_derived_from_nested_authorities(
     with pytest.raises(AttributeError):
         object.__setattr__(result, "training_binding_sha256", "0" * 64)
 
-
-
-
 def _configured_model_settings(tmp_path, *, model: str = "base-model"):
     store = SQLiteStore(tmp_path / "activation-settings.db")
     store.initialize()
@@ -665,7 +759,6 @@ def _configured_model_settings(tmp_path, *, model: str = "base-model"):
     assert configured.status == "completed"
     return store, settings
 
-
 async def _promoted_comparison(tmp_path):
     evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
     return run_attested_old_vs_new_comparison(
@@ -678,7 +771,6 @@ async def _promoted_comparison(tmp_path):
         experiment_id="training-job-1-activation",
         repository=InMemoryExperimentRepository(),
     )
-
 
 @pytest.mark.asyncio
 async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
@@ -781,7 +873,6 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     assert "base-model" not in repr(audit_payloads)
     assert "challenger-model" not in repr(audit_payloads)
 
-
 @pytest.mark.asyncio
 async def test_non_promoted_attested_comparison_cannot_activate_model(tmp_path) -> None:
     evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
@@ -814,7 +905,6 @@ async def test_non_promoted_attested_comparison_cannot_activate_model(tmp_path) 
     assert settings.snapshot()["model"] == "base-model"
     assert settings.snapshot()["revision"] == 1
 
-
 @pytest.mark.asyncio
 async def test_activation_rejects_stale_current_champion_without_mutation(tmp_path) -> None:
     result = await _promoted_comparison(tmp_path)
@@ -832,7 +922,6 @@ async def test_activation_rejects_stale_current_champion_without_mutation(tmp_pa
 
     assert settings.snapshot()["model"] == "manual-current-model"
     assert settings.snapshot()["revision"] == 1
-
 
 @pytest.mark.asyncio
 async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
@@ -869,7 +958,6 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
     assert settings.snapshot()["model"] == "owner-selected-model"
     assert settings.snapshot()["revision"] == 3
 
-
 def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path) -> None:
     _, settings = _configured_model_settings(tmp_path)
     decision_sha256 = _sha(b"decision")
@@ -893,8 +981,6 @@ def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path
     assert settings.snapshot()["model"] == "base-model"
     assert settings.snapshot()["revision"] == 1
 
-
-
 def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
     store, settings = _configured_model_settings(tmp_path)
     before = settings.snapshot()
@@ -915,7 +1001,6 @@ def test_v1_settings_database_migrates_without_losing_route(tmp_path) -> None:
             "SELECT COUNT(*) FROM sqlite_master "
             "WHERE type = 'table' AND name = 'v01_model_promotions'"
         ).fetchone()[0] == 1
-
 
 @pytest.mark.asyncio
 async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
@@ -947,8 +1032,6 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
-
-
 
 def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "foundry-promotion.db")
