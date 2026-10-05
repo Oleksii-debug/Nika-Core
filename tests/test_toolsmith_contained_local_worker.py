@@ -386,8 +386,10 @@ def test_worker_configuration_mappings_are_detached_and_read_only(
     repository, _base_sha = _repository(tmp_path)
     repositories = {"repo-1": repository}
     environment = {"SYSTEMROOT": "trusted-root"}
+    jobs = tmp_path / "jobs"
+    jobs.mkdir()
     worker = ContainedLocalCodingWorker(
-        workspace_parent=(tmp_path / "jobs"),
+        workspace_parent=jobs,
         repositories=repositories,
         planner=_MustNotPlan(),
         source_environment=environment,
