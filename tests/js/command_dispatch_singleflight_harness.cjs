@@ -14,13 +14,17 @@ assert(dispatchStart >= 0 && dispatchEnd > dispatchStart);
 const factory = new Function("context", `
   const {
     globalThis, announce, appendLog, requestId, commandInput, sourceInputs, refreshState,
-    reportStateUnavailable, document, focusElementById, dispatchAutostart,
+    reportStateUnavailable, document, focusElementById, dispatchAutostart, refreshKeymap,
   } = context;
   let sourceRevision = 5;
   let sourceDirty = true;
+  let actionsReady = true;
   ${source.slice(declarationStart, declarationEnd)}
   ${source.slice(dispatchStart, dispatchEnd)}
-  return {dispatch, getSourceDirty: () => sourceDirty};
+  return {
+    dispatch, mutateKeymap, getSourceDirty: () => sourceDirty,
+    getActionsReady: () => actionsReady,
+  };
 `);
 
 async function main() {
@@ -29,6 +33,8 @@ async function main() {
   let stateRead = async () => true;
   let stateReads = 0;
   let focusCount = 0;
+  let keymapReads = 0;
+  let keymapReady = true;
   const requests = [];
   const messages = [];
   const logs = [];
@@ -48,6 +54,7 @@ async function main() {
     commandInput: {value: "  Створити завдання  "},
     sourceInputs: {root: {value: "C:\\\\Українська папка"}, source_a: {value: "а.txt"}, source_b: {value: "б.txt"}},
     refreshState: async () => {stateReads += 1; return stateRead();},
+    refreshKeymap: async () => {keymapReads += 1; return keymapReady;},
     reportStateUnavailable: () => messages.push(["Стан недоступний", true]),
     document: {documentElement: {dataset: {nikaReady: "true"}}},
     focusElementById: (id) => {focusIds.push(id); return true;},
@@ -112,5 +119,36 @@ async function main() {
   assert(messages.at(-1)[0].includes("Дію підтверджено"));
   assert(logs.includes("Записано."));
   console.log("PASS: confirmed effect distinguished from stale projection");
+  let finishKeymap;
+  const keymapInput = {focus: () => {focusCount += 1;}};
+  const saveKeymap = ui.mutateKeymap(
+    () => new Promise((resolve) => {finishKeymap = resolve;}),
+    "keymap-save",
+    keymapInput,
+  );
+  await ui.mutateKeymap(() => {throw Error("duplicate mutation");}, null, keymapInput);
+  assert.equal(keymapReads, 0, "keymap must not refresh before its first ACK");
+  finishKeymap({ok: true, message: "Клавіші збережено."});
+  await saveKeymap;
+  assert.equal(keymapReads, 1);
+  assert.equal(focusIds.at(-1), "keymap-save");
+  console.log("PASS: keymap mutations single-flight and focus after ACK");
+
+  await ui.mutateKeymap(
+    async () => {throw Error("PRIVATE_KEYMAP_TRANSPORT");}, null, keymapInput,
+  );
+  assert(messages.at(-1)[0].includes("Немає підтвердження зміни клавіш"));
+  assert(!JSON.stringify(messages).includes("PRIVATE_KEYMAP_TRANSPORT"));
+  assert.equal(keymapReads, 1);
+  await ui.mutateKeymap(async () => ({ok: "true", message: "bad"}), null, keymapInput);
+  assert(messages.at(-1)[0].includes("непідтверджену зміну"));
+  console.log("PASS: keymap failures and malformed ACKs fail closed without retry");
+
+  keymapReady = false;
+  await ui.mutateKeymap(async () => ({ok: true, message: "Прийнято."}), "keymap-save");
+  assert.equal(ui.getActionsReady(), false, "unknown refreshed bindings cannot remain hotkey-ready");
+  assert(messages.at(-1)[0].includes("Зміну підтверджено"));
+  assert(logs.includes("Прийнято."));
+  console.log("PASS: confirmed keymap write with failed refresh disables stale hotkeys");
 }
 main().catch((error) => {console.error(error); process.exitCode = 1;});
