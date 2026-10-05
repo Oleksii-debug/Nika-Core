@@ -50,7 +50,11 @@ class ActionDefinition:
     def __post_init__(self) -> None:
         if type(self.action_id) is not str:
             raise TypeError("action_id must be text")
-        if type(self.label) is not str or type(self.category) is not str or type(self.scope) is not str:
+        if (
+            type(self.label) is not str
+            or type(self.category) is not str
+            or type(self.scope) is not str
+        ):
             raise TypeError("action metadata must be text")
         if self.default_binding is not None and type(self.default_binding) is not str:
             raise TypeError("default binding must be text or null")
