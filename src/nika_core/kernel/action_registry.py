@@ -122,7 +122,10 @@ class ActionRegistry:
         return _snapshot_action_definition(action)
 
     def all(self) -> tuple[ActionDefinition, ...]:
-        return tuple(_snapshot_action_definition(self._actions[key]) for key in sorted(self._actions))
+        return tuple(
+            _snapshot_action_definition(self._actions[key])
+            for key in sorted(self._actions)
+        )
 
     def find_by_binding(self, binding: str, scope: str) -> ActionDefinition | None:
         wanted = _binding_key(binding)
