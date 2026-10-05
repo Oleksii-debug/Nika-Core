@@ -2745,3 +2745,208 @@ def test_dispatch_worker_scope_mutation_is_confined_to_effect_copy(tmp_path) -> 
     restored_request = _record(restored, original.component_id).request
     assert restored_request.allowed_paths == original_paths
     assert restored_request.permission_ceiling == original_permissions
+
+def _rebind_worker_operation_to_foreign_authority(store, operation_key: str) -> None:
+    with store.connection() as connection:
+        connection.execute(
+            "UPDATE idempotency_records "
+            "SET task_id = ?, operation_type = ?, input_fingerprint = ?, "
+            "status = ?, result_json = NULL "
+            "WHERE operation_key = ?",
+            (
+                "foreign-task",
+                "foreign.effect",
+                "f" * 64,
+                IdempotencyStatus.PENDING.value,
+                operation_key,
+            ),
+        )
+
+
+def _assert_foreign_operation_remains_pending(store, operation_key: str) -> None:
+    operation = IdempotencyLedger(store).require(operation_key)
+    assert operation.task_id == "foreign-task"
+    assert operation.operation_type == "foreign.effect"
+    assert operation.input_fingerprint == "f" * 64
+    assert operation.status is IdempotencyStatus.PENDING
+    assert operation.result is None
+
+
+def _recovery_claim_count(store, operation_key: str) -> int:
+    with store.connection() as connection:
+        return connection.execute(
+            "SELECT COUNT(*) FROM product_factory_recovery_claims "
+            "WHERE operation_key = ?",
+            (operation_key,),
+        ).fetchone()[0]
+
+
+def test_dispatch_result_finalization_refuses_rebound_operation(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+
+    class RebindingResultWorker(FakeProgramWorker):
+        async def dispatch(self, effect_request):
+            self.dispatch_calls.append(effect_request)
+            _rebind_worker_operation_to_foreign_authority(store, operation_key)
+            return _envelope(effect_request, 801)
+
+    worker = RebindingResultWorker()
+    host = ProductFactoryProgramHost(store, worker)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is None
+    _assert_foreign_operation_remains_pending(store, operation_key)
+    checkpoint = ProductFactoryCheckpointHost(store).latest(
+        host_task_id=task_id,
+        project_id="project-1",
+    )
+    assert checkpoint is not None
+    durable = next(
+        item
+        for item in checkpoint.checkpoint.coordinator.records
+        if item.request.component_id == request.component_id
+    )
+    assert durable.state is WorkState.RUNNING
+    assert durable.result is None
+
+
+def test_dispatch_failure_marker_refuses_rebound_operation(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+
+    class RebindingFailureWorker(FakeProgramWorker):
+        async def dispatch(self, effect_request):
+            self.dispatch_calls.append(effect_request)
+            _rebind_worker_operation_to_foreign_authority(store, operation_key)
+            raise RuntimeError("forced rebound dispatch failure")
+
+    worker = RebindingFailureWorker()
+    host = ProductFactoryProgramHost(store, worker)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert outcomes[0].operation_status is None
+    assert "uncertainty marker failed" in outcomes[0].detail
+    _assert_foreign_operation_remains_pending(store, operation_key)
+
+
+def test_recovery_inspect_failure_keeps_claim_when_operation_rebinds(
+    tmp_path: Path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    seed_worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+    seed_worker.fail_dispatch.add(request.component_id)
+    host = ProductFactoryProgramHost(store, seed_worker)
+
+    initial = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert initial[0].operation_status is IdempotencyStatus.UNCERTAIN
+
+    class RebindingInspectWorker(FakeProgramWorker):
+        async def inspect(self, work_id):
+            self.inspect_calls.append(work_id)
+            _rebind_worker_operation_to_foreign_authority(store, operation_key)
+            raise RuntimeError("forced rebound inspect failure")
+
+    worker = RebindingInspectWorker()
+    host.worker = worker
+    recovered = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+
+    assert recovered[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert recovered[0].operation_status is None
+    assert "uncertainty marker failed" in recovered[0].detail
+    _assert_foreign_operation_remains_pending(store, operation_key)
+    assert _recovery_claim_count(store, operation_key) == 1
+
+
+def test_recovery_result_finalization_keeps_claim_when_operation_rebinds(
+    tmp_path: Path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    seed_worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+    seed_worker.fail_dispatch.add(request.component_id)
+    host = ProductFactoryProgramHost(store, seed_worker)
+
+    initial = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert initial[0].operation_status is IdempotencyStatus.UNCERTAIN
+
+    class RebindingRecoveryWorker(FakeProgramWorker):
+        async def inspect(self, work_id):
+            self.inspect_calls.append(work_id)
+            return RecoveryState("interrupted", "resume")
+
+        async def recover(self, effect_request, state):
+            self.recover_calls.append((effect_request, state))
+            _rebind_worker_operation_to_foreign_authority(store, operation_key)
+            return _envelope(effect_request, 802)
+
+    worker = RebindingRecoveryWorker()
+    host.worker = worker
+    recovered = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+
+    assert recovered[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert recovered[0].operation_status is None
+    _assert_foreign_operation_remains_pending(store, operation_key)
+    assert _recovery_claim_count(store, operation_key) == 1
+    checkpoint = ProductFactoryCheckpointHost(store).latest(
+        host_task_id=task_id,
+        project_id="project-1",
+    )
+    assert checkpoint is not None
+    durable = next(
+        item
+        for item in checkpoint.checkpoint.coordinator.records
+        if item.request.component_id == request.component_id
+    )
+    assert durable.state is WorkState.RUNNING
+    assert durable.result is None
+
