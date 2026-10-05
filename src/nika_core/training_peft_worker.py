@@ -620,6 +620,22 @@ def _training_runtime_versions_from_trainer_artifact(
     )
 
 
+def build_training_runtime_metadata(versions: dict[str, str]) -> dict[str, str]:
+    """Build exact Artifact Registry metadata for one declared PEFT runtime.
+
+    The caller supplies the authority. This helper validates the complete canonical
+    distribution set and deliberately does not inspect the parent interpreter.
+    """
+    if type(versions) is not dict:
+        raise TypeError("training runtime versions must be an exact dict")
+    canonical = _normalize_training_runtime_versions(versions)
+    return {
+        _TRAINING_RUNTIME_METADATA_KEYS[distribution]: canonical[distribution]
+        for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
+    }
+
+
+
 def _installed_training_runtime_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
     for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS:

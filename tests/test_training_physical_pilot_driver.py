@@ -1,0 +1,323 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
+
+import nika_core.training_physical_pilot_driver as driver
+
+
+def _payload(tmp_path: Path) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "workspace_id": "pilot-workspace",
+        "project_id": "pilot-project",
+        "owner_id": "pilot-owner",
+        "job_id": "pilot-job",
+        "blob_store_root": str(tmp_path / "blobs"),
+        "frozen_package_path": str(tmp_path / "package.json"),
+        "frozen_package_sha256": "1" * 64,
+        "trainer_executable": str(tmp_path / "nika-peft-trainer.exe"),
+        "base_artifact_ref": "models/base",
+        "base_gguf_path": str(tmp_path / "base.gguf"),
+        "model_dir": str(tmp_path / "model"),
+        "output_root": str(tmp_path / "pilot-output"),
+        "candidate_artifact_ref": "models/pilot-candidate",
+        "candidate_descriptor": {
+            "model_id": "nika-pilot-adapter",
+            "source_reference": "https://example.com/models/base",
+            "license_reference": "https://example.com/licenses/model",
+        },
+        "runtime_versions": {
+            "torch": "2.14.1",
+            "transformers": "5.18.2",
+            "peft": "0.21.2",
+            "accelerate": "1.15.0",
+            "gguf": "0.19.0",
+            "safetensors": "0.8.1",
+        },
+        "resource_budget": {
+            "max_cpu_percent": 95,
+            "max_memory_percent": 90,
+        },
+        "trainer_parameters": {
+            "max_sequence_length": 256,
+            "learning_rate": 0.0002,
+            "lora_r": 8,
+            "lora_alpha": 16,
+            "lora_dropout": 0.05,
+            "lora_target_modules": ["q_proj", "v_proj"],
+            "torch_num_threads": 2,
+            "seed": 1729,
+        },
+    }
+
+
+def _write_minimal_pe(path: Path) -> None:
+    payload = bytearray(132)
+    payload[:2] = b"MZ"
+    payload[60:64] = (128).to_bytes(4, "little")
+    payload[128:132] = b"PE\0\0"
+    path.write_bytes(payload)
+
+
+def _config(tmp_path: Path) -> driver.PhysicalPilotConfig:
+    raw = json.dumps(_payload(tmp_path), ensure_ascii=False, sort_keys=True)
+    return driver.PhysicalPilotConfig.from_json(raw)
+
+
+def test_material_totals_reject_worker_record_overflow() -> None:
+    materials = SimpleNamespace(
+        evidence=SimpleNamespace(
+            materials=(
+                SimpleNamespace(
+                    split=driver.LearningDataSplit.TRAINING,
+                    record_count=driver._TRAINER_MAX_RECORDS,
+                    byte_count=1,
+                ),
+                SimpleNamespace(
+                    split=driver.LearningDataSplit.VALIDATION,
+                    record_count=1,
+                    byte_count=1,
+                ),
+            )
+        )
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="canonical PEFT record limit",
+    ):
+        driver._material_totals(materials)
+
+
+def test_bounded_reader_rejects_oversized_file(tmp_path: Path) -> None:
+    path = tmp_path / "bounded.bin"
+    path.write_bytes(b"x" * 9)
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="size is invalid"):
+        driver._read_bounded_file(path, max_bytes=8, name="test input")
+
+
+def test_bounded_reader_accepts_exact_limit(tmp_path: Path) -> None:
+    path = tmp_path / "bounded.bin"
+    path.write_bytes(b"x" * 8)
+
+    assert driver._read_bounded_file(path, max_bytes=8, name="test input") == b"x" * 8
+
+
+def test_config_file_rejects_oversized_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "physical-pilot.json"
+    path.write_bytes(b"x" * (driver._CONFIG_MAX_BYTES + 1))
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="config size is invalid"):
+        driver._read_config(path)
+
+
+def test_config_parses_exact_runtime_and_resource_authority(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+
+    assert dict(config.runtime_versions) == _payload(tmp_path)["runtime_versions"]
+    assert config.resource_budget.max_cpu_percent == 95.0
+    assert config.resource_budget.max_memory_percent == 90.0
+    assert config.trainer_parameters.lora_target_modules == ("q_proj", "v_proj")
+    assert config.output_root == tmp_path / "pilot-output"
+
+
+def test_config_rejects_unknown_top_level_field(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    payload["unexpected"] = True
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="fields are invalid"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_rejects_identifier_beyond_runtime_bound(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    payload["job_id"] = "j" * 513
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="incompatible with TrainingJobSpec",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("base_artifact_ref", "C:\\private\\base.gguf"),
+        ("base_artifact_ref", "/private/base.gguf"),
+        ("candidate_artifact_ref", "\\private\\candidate"),
+        ("candidate_artifact_ref", "file:///C:/private/candidate"),
+    ),
+)
+def test_config_rejects_private_local_artifact_reference(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    payload = _payload(tmp_path)
+    payload[field] = value
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="public logical artifact reference",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_rejects_candidate_equal_to_base(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    payload["candidate_artifact_ref"] = payload["base_artifact_ref"]
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="incompatible with TrainingJobSpec",
+    ):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_rejects_missing_runtime_distribution(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    runtime_versions = payload["runtime_versions"]
+    assert isinstance(runtime_versions, dict)
+    del runtime_versions["gguf"]
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="exactly"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_rejects_duplicate_target_module(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    trainer_parameters = payload["trainer_parameters"]
+    assert isinstance(trainer_parameters, dict)
+    trainer_parameters["lora_target_modules"] = ["q_proj", "q_proj"]
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="duplicates"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "target",
+    ("q proj", "модуль", "q,proj", "q\\proj"),
+)
+def test_config_rejects_worker_incompatible_target_module(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    payload = _payload(tmp_path)
+    trainer_parameters = payload["trainer_parameters"]
+    assert isinstance(trainer_parameters, dict)
+    trainer_parameters["lora_target_modules"] = [target]
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="trainer token grammar"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+def test_config_rejects_nonpublic_candidate_reference(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    descriptor = payload["candidate_descriptor"]
+    assert isinstance(descriptor, dict)
+    descriptor["source_reference"] = "https://example.com/model?private=1"
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="provenance is invalid"):
+        driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        b"MZ",
+        b"not-a-pe",
+        b"MZ" + b"\0" * 58 + (17_000_000).to_bytes(4, "little"),
+    ),
+)
+def test_invalid_trainer_pe_fails_before_durable_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    payload: bytes,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+    config.blob_store_root.mkdir()
+    config.frozen_package_path.write_text("{}", encoding="utf-8")
+    config.trainer_executable.write_bytes(payload)
+    config.base_gguf_path.write_bytes(b"GGUF")
+    config.model_dir.mkdir()
+    (config.model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="Windows PE"):
+        driver.run_physical_pilot_from_config(config)
+
+    assert not config.output_root.exists()
+
+
+def test_non_windows_gate_precedes_filesystem_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(driver, "_is_windows", lambda: False)
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="must execute on Windows"):
+        driver.run_physical_pilot_from_config(config)
+
+    assert not config.output_root.exists()
+
+
+def test_invalid_model_directory_fails_before_durable_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+    config.blob_store_root.mkdir()
+    config.frozen_package_path.write_text("{}", encoding="utf-8")
+    _write_minimal_pe(config.trainer_executable)
+    config.base_gguf_path.write_bytes(b"GGUF")
+    config.model_dir.mkdir()
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="model_dir is not a canonical local model directory",
+    ):
+        driver.run_physical_pilot_from_config(config)
+
+    assert not config.output_root.exists()
+
+
+@pytest.mark.parametrize("authority", ("model", "blobs"))
+def test_output_root_cannot_mutate_input_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    authority: str,
+) -> None:
+    payload = _payload(tmp_path)
+    payload["output_root"] = str(tmp_path / authority / "pilot-output")
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(payload))
+    monkeypatch.setattr(driver, "_is_windows", lambda: True)
+    config.blob_store_root.mkdir()
+    config.frozen_package_path.write_text("{}", encoding="utf-8")
+    _write_minimal_pe(config.trainer_executable)
+    config.base_gguf_path.write_bytes(b"GGUF")
+    config.model_dir.mkdir()
+    (config.model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="inside an input authority directory",
+    ):
+        driver.run_physical_pilot_from_config(config)
+
+    assert not config.output_root.exists()
+
+
+def test_duplicate_json_field_is_rejected(tmp_path: Path) -> None:
+    payload = json.dumps(_payload(tmp_path))
+    duplicate = payload[:-1] + ',"job_id":"other"}'
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="invalid JSON"):
+        driver.PhysicalPilotConfig.from_json(duplicate)

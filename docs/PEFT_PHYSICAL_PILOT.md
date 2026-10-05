@@ -90,6 +90,91 @@ in the destination directory, atomically links it into place without replacing a
 report, re-verifies the exact canonical bytes, and removes temporary state on failure. A report
 can be shared as evidence after reviewing it for the intended run.
 
+## Repository-native Windows driver
+
+The installed `nika-peft-physical-pilot` command composes the canonical authorities described
+above. It is a Windows-only execution driver, not a second trainer, checkpoint format, candidate
+manifest parser, report schema, or report publisher.
+
+The local UTF-8 JSON manifest is bounded to 64 KiB. Before creating durable pilot state the
+driver requires canonical non-linked input paths, a bounded frozen-package manifest, a valid
+Windows PE trainer executable, a canonical local model-directory manifest, a fresh output
+directory disjoint from the blob/model input authorities, PEFT-compatible LoRA target tokens,
+canonical TrainingJobSpec identities, public logical artifact references, and a material record
+count within the canonical PEFT one-million-record limit. Runtime versions for torch,
+Transformers, PEFT, Accelerate, GGUF and safetensors are supplied explicitly and are registered
+as trainer deployment metadata; the child independently verifies those exact installed versions
+before training effects.
+
+The driver registers the exact trainer executable, resolves the frozen training/validation bytes,
+derives the two-step pilot scale authorization, applies one-concurrent ResourceManager admission,
+and constructs fresh runtime/worker objects for the restart proof. After COMPLETED evidence exists,
+its descriptor factory supplies only the public model provenance plus completed candidate digest
+and byte size. Final candidate-byte verification, Windows stability locking, strict PEFT candidate
+manifest evidence, runtime-vs-trainer job identity, and trainer deployment provenance remain owned
+exclusively by `run_physical_training_pilot`. Report persistence is delegated exclusively to
+`write_physical_training_pilot_report`.
+
+Example manifest shape (replace every path, digest, public provenance reference, and exact
+installed runtime version with values for the intended run):
+
+```json
+{
+  "schema_version": 1,
+  "workspace_id": "pilot-workspace",
+  "project_id": "pilot-project",
+  "owner_id": "pilot-owner",
+  "job_id": "pilot-job-001",
+  "blob_store_root": "C:\\NikaData\\blobs",
+  "frozen_package_path": "C:\\NikaData\\pilot-package.json",
+  "frozen_package_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "trainer_executable": "C:\\NikaVenv\\Scripts\\nika-peft-trainer.exe",
+  "base_artifact_ref": "models/base",
+  "base_gguf_path": "C:\\NikaModels\\base.gguf",
+  "model_dir": "C:\\NikaModels\\transformers-base",
+  "output_root": "C:\\NikaRuns\\pilot-001",
+  "candidate_artifact_ref": "models/pilot-candidate-001",
+  "candidate_descriptor": {
+    "model_id": "nika-pilot-adapter",
+    "source_reference": "https://example.invalid/model-provenance",
+    "license_reference": "https://example.invalid/model-license"
+  },
+  "runtime_versions": {
+    "torch": "EXACT_INSTALLED_VERSION",
+    "transformers": "EXACT_INSTALLED_VERSION",
+    "peft": "EXACT_INSTALLED_VERSION",
+    "accelerate": "EXACT_INSTALLED_VERSION",
+    "gguf": "EXACT_INSTALLED_VERSION",
+    "safetensors": "EXACT_INSTALLED_VERSION"
+  },
+  "resource_budget": {
+    "max_cpu_percent": 95,
+    "max_memory_percent": 90
+  },
+  "trainer_parameters": {
+    "max_sequence_length": 256,
+    "learning_rate": 0.0002,
+    "lora_r": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.05,
+    "lora_target_modules": ["q_proj", "v_proj"],
+    "torch_num_threads": 2,
+    "seed": 1729
+  }
+}
+```
+
+Run from the installed environment that owns the registered trainer executable:
+
+```powershell
+nika-peft-physical-pilot "C:\\NikaData\\physical-pilot.json"
+```
+
+A successful invocation prints the canonical path-free schema-v4 report and publishes
+`physical-pilot-report.json` through the canonical atomic/no-clobber writer. Generated run
+evidence remains outside Git. The command never auto-discovers runtime versions and never stores
+API keys, tokens, cookies, browser profiles, or other credentials.
+
 ## Example control flow
 
 The application or acceptance driver should perform the equivalent of:
