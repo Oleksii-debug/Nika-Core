@@ -320,11 +320,11 @@ def test_stale_cancel_callback_does_not_remove_newer_cancel_generation(
     tmp_path: Path,
 ) -> None:
     runtime = DurableBlockingRuntime()
-    backend, _queue, _audit = _build_backend(tmp_path, runtime)
+    backend, _queue, audit = _build_backend(tmp_path, runtime)
     task_id = "same-durable-task"
     stale_cancel: Future[bool] = Future()
     newer_cancel: Future[bool] = Future()
-    stale_cancel.set_result(True)
+    stale_cancel.set_exception(RuntimeError("stale cancel failure"))
 
     with backend._active_lock:
         backend._cancel_futures[task_id] = newer_cancel
@@ -333,6 +333,10 @@ def test_stale_cancel_callback_does_not_remove_newer_cancel_generation(
 
     with backend._active_lock:
         assert backend._cancel_futures.get(task_id) is newer_cancel
+    assert not any(
+        item.event_type == "desktop.runtime_cancel_failed"
+        for item in audit.list_for(entity_type="task", entity_id=task_id)
+    )
 
     newer_cancel.set_result(True)
     backend._cancel_done(task_id, newer_cancel)
@@ -345,11 +349,11 @@ def test_stale_pause_callback_does_not_remove_newer_pause_generation(
     tmp_path: Path,
 ) -> None:
     runtime = DurableBlockingRuntime()
-    backend, _queue, _audit = _build_backend(tmp_path, runtime)
+    backend, _queue, audit = _build_backend(tmp_path, runtime)
     task_id = "same-durable-task"
     stale_pause: Future[bool] = Future()
     newer_pause: Future[bool] = Future()
-    stale_pause.set_result(True)
+    stale_pause.set_exception(RuntimeError("stale pause failure"))
 
     with backend._active_lock:
         backend._pause_futures[task_id] = newer_pause
@@ -358,6 +362,10 @@ def test_stale_pause_callback_does_not_remove_newer_pause_generation(
 
     with backend._active_lock:
         assert backend._pause_futures.get(task_id) is newer_pause
+    assert not any(
+        item.event_type == "desktop.runtime_pause_failed"
+        for item in audit.list_for(entity_type="task", entity_id=task_id)
+    )
 
     newer_pause.set_result(True)
     backend._pause_done(task_id, newer_pause)
