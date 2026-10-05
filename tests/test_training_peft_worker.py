@@ -1443,6 +1443,40 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
     assert manifest["training_runtime_versions"] == _RUNTIME_VERSIONS
 
 
+def test_candidate_manifest_v2_binds_foundation_and_v1_remains_readable(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    current = json.loads(
+        peft._candidate_manifest_json(
+            request=request,
+            config=config,
+            consumed=consumed,
+            adapter_config=adapter_config,
+        )
+    )
+
+    assert current["schema"] == "nika-peft-candidate-v2"
+    assert current["foundation_model_sha256"] == config.base_gguf_sha256
+    assert peft._validate_candidate_manifest_payload(current) == current
+
+    legacy = dict(current)
+    legacy.pop("foundation_model_sha256")
+    legacy["schema"] = "nika-peft-candidate-v1"
+    assert peft._validate_candidate_manifest_payload(legacy) == legacy
+
+
 def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

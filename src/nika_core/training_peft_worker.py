@@ -2130,6 +2130,7 @@ def _candidate_manifest_json(
         "base_artifact_sha256": request.base_artifact_sha256,
         "candidate_artifact_ref": request.candidate_artifact_ref,
         "consumed_materials_sha256": consumed.attestation_sha256,
+        "foundation_model_sha256": config.base_gguf_sha256,
         "job_fingerprint": request.job_fingerprint,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
         "trainer_artifact_id": request.trainer_artifact_id,
@@ -2139,7 +2140,7 @@ def _candidate_manifest_json(
             dict(config.training_runtime_versions)
         ),
         "training_runtime_versions": dict(config.training_runtime_versions),
-        "schema": "nika-peft-candidate-v1",
+        "schema": "nika-peft-candidate-v2",
         "step_number": request.step_index + 1,
         "trainer_parameters": {
             "learning_rate": config.learning_rate,
@@ -2177,7 +2178,12 @@ def _validate_candidate_manifest_payload(
         "step_number",
         "trainer_parameters",
     }
-    if set(value) != expected or value.get("schema") != "nika-peft-candidate-v1":
+    schema = value.get("schema")
+    if schema == "nika-peft-candidate-v2":
+        expected = expected | {"foundation_model_sha256"}
+    elif schema != "nika-peft-candidate-v1":
+        _fail("candidate_manifest_invalid")
+    if set(value) != expected:
         _fail("candidate_manifest_invalid")
 
     base_ref = value["base_artifact_ref"]
@@ -2202,7 +2208,7 @@ def _validate_candidate_manifest_payload(
         or _looks_like_private_local_path(candidate_ref)
     ):
         _fail("candidate_manifest_invalid")
-    for field in (
+    digest_fields = [
         "base_artifact_sha256",
         "consumed_materials_sha256",
         "job_fingerprint",
@@ -2211,7 +2217,10 @@ def _validate_candidate_manifest_payload(
         "trainer_implementation_sha256",
         "trainer_sha256",
         "training_runtime_manifest_sha256",
-    ):
+    ]
+    if schema == "nika-peft-candidate-v2":
+        digest_fields.append("foundation_model_sha256")
+    for field in digest_fields:
         if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
             _fail("candidate_manifest_invalid")
 
