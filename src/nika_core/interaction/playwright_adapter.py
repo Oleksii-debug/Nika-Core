@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -38,6 +40,50 @@ _FORM_ROLES: Final = frozenset(
 )
 _NON_CONTROL_SNAPSHOT_ROLES: Final = frozenset({"text"})
 _MAX_ACTION_DOWNLOADS: Final = 100
+_WINDOWS_FORBIDDEN_FILENAME_CHARS: Final = frozenset('<>:"/\\|?*')
+_WINDOWS_RESERVED_FILENAMES: Final = frozenset(
+    {
+        "con",
+        "prn",
+        "aux",
+        "nul",
+        "conin$",
+        "conout$",
+        *(f"com{number}" for number in range(1, 10)),
+        *(f"lpt{number}" for number in range(1, 10)),
+    }
+)
+
+
+def _safe_download_filename(value: object) -> str:
+    if type(value) is not str:
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    # Browser suggestions are basenames, but normalize both separator families
+    # explicitly so safety does not depend on the host running the test.
+    filename = value.replace("\\", "/").rsplit("/", 1)[-1]
+    if not filename or filename in {".", ".."}:
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    if filename.endswith((" ", ".")):
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    if any(
+        ord(char) < 32
+        or ord(char) == 127
+        or char in _WINDOWS_FORBIDDEN_FILENAME_CHARS
+        for char in filename
+    ):
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    try:
+        utf16_units = len(filename.encode("utf-16-le")) // 2
+    except UnicodeEncodeError:
+        raise UnsupportedInteractionError(
+            "download did not provide a safe filename"
+        ) from None
+    if utf16_units > 255:
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    device_stem = filename.split(".", 1)[0].casefold()
+    if device_stem in _WINDOWS_RESERVED_FILENAMES:
+        raise UnsupportedInteractionError("download did not provide a safe filename")
+    return filename
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +149,10 @@ class _DownloadRecord:
     failed: bool = False
 
 
+class _DownloadDestinationExistsError(UnsupportedInteractionError):
+    """Known safe, actionable destination collision; never contains a filename."""
+
+
 @dataclass(slots=True)
 class DownloadBroker:
     """Persist browser downloads only beneath an explicitly approved artifact root."""
@@ -144,6 +194,11 @@ class DownloadBroker:
             if not record.saved:
                 try:
                     self.handle(record.download)
+                except _DownloadDestinationExistsError as exc:
+                    record.failed = True
+                    raise UnsupportedInteractionError(
+                        "download destination already exists"
+                    ) from exc
                 except Exception as exc:
                     record.failed = True
                     raise UnsupportedInteractionError("download could not be saved") from exc
@@ -152,14 +207,33 @@ class DownloadBroker:
         return completed
 
     def handle(self, download: Any) -> None:
-        filename = Path(str(download.suggested_filename)).name
-        if not filename or filename in {".", ".."}:
-            raise UnsupportedInteractionError("download did not provide a safe filename")
-        destination = (self.approved_root / filename).resolve()
+        filename = _safe_download_filename(download.suggested_filename)
+        raw_destination = self.approved_root / filename
+        # A pre-existing file (including a link) is never an implicit overwrite grant.
+        if raw_destination.is_symlink() or raw_destination.exists():
+            raise _DownloadDestinationExistsError("download destination already exists")
+        destination = raw_destination.resolve()
         if destination.parent != self.approved_root:
             raise UnsupportedInteractionError("download path escaped approved root")
-        download.save_as(str(destination))
-        self.saved.append(destination)
+
+        # A complete download is published with a no-clobber filesystem operation.
+        # The staging file lives on the same filesystem for os.link on Windows/Unix.
+        fd, staging_name = tempfile.mkstemp(
+            prefix=".nika-download-", suffix=".part", dir=self.approved_root
+        )
+        os.close(fd)
+        staging = Path(staging_name)
+        try:
+            download.save_as(str(staging))
+            try:
+                os.link(staging, destination)
+            except FileExistsError as exc:
+                raise _DownloadDestinationExistsError(
+                    "download destination already exists"
+                ) from exc
+            self.saved.append(destination)
+        finally:
+            staging.unlink(missing_ok=True)
 
 
 @dataclass(slots=True)
