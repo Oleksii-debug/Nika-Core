@@ -2193,7 +2193,13 @@ def test_fenced_host_reservation_collision_does_not_cancel_sibling(
         "wrong_carrier",
         "nontext_phase",
         "blank_phase",
+        "padded_phase",
+        "control_phase",
+        "oversize_phase",
         "nontext_token",
+        "padded_token",
+        "control_token",
+        "oversize_token",
         "missing_phase",
         "missing_token",
     ),
@@ -2223,7 +2229,19 @@ def test_fenced_recovery_rejects_malformed_state_and_releases_claim_for_retry(
         phase = 1 if malformed == "nontext_phase" else "interrupted"
         if malformed == "blank_phase":
             phase = " "
+        elif malformed == "padded_phase":
+            phase = " interrupted"
+        elif malformed == "control_phase":
+            phase = "interrupted\nresume"
+        elif malformed == "oversize_phase":
+            phase = "p" * 4097
         token = b"invalid" if malformed == "nontext_token" else "resume"
+        if malformed == "padded_token":
+            token = " resume"
+        elif malformed == "control_token":
+            token = "resume\tunsafe"
+        elif malformed == "oversize_token":
+            token = "t" * 4097
         if malformed != "missing_phase":
             object.__setattr__(untrusted, "phase", phase)
         if malformed != "missing_token":
