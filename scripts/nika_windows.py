@@ -289,7 +289,7 @@ def build_windows_session(
                     request_id="desktop-handler",
                     status="rejected",
                     message=str(exc),
-                    focus_id="model-route-kind",
+                    focus_id="tasks-heading",
                 )
 
         product_router = PackagedProductCommandRouter(
