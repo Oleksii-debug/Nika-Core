@@ -379,14 +379,54 @@ def _job_identity(
     }
 
 
-def _job_fingerprint(spec: TrainingJobSpec, *, command_sha256: str) -> str:
+def _execution_plan_sha256(
+    *,
+    command_sha256: str,
+    command_records: Mapping[int, ArtifactRecord],
+    timeout_seconds: float,
+    max_request_bytes: int,
+    max_response_bytes: int,
+) -> str:
+    payload = {
+        "command_sha256": command_sha256,
+        "command_artifacts": [
+            {
+                "argument_index": index,
+                "artifact_id": record.artifact_id,
+                "sha256": record.sha256,
+            }
+            for index, record in sorted(command_records.items())
+        ],
+        "max_request_bytes": max_request_bytes,
+        "max_response_bytes": max_response_bytes,
+        "protocol_version": _PROTOCOL_VERSION,
+        "timeout_seconds": timeout_seconds,
+    }
+    encoded = _canonical_json_bytes(
+        payload,
+        max_bytes=_DEFAULT_MAX_REQUEST_BYTES,
+        label="training_execution_plan",
+        effect=TrainingWorkerFailureEffect.NO_EFFECT,
+    )
+    return hashlib.sha256(b"nika-training-execution-plan-v1\x00" + encoded).hexdigest()
+
+
+def _job_fingerprint(
+    spec: TrainingJobSpec,
+    *,
+    command_sha256: str,
+    execution_plan_sha256: str,
+) -> str:
     identity = _canonical_json_bytes(
-        _job_identity(spec, command_sha256=command_sha256),
+        {
+            "execution_plan_sha256": execution_plan_sha256,
+            "job": _job_identity(spec, command_sha256=command_sha256),
+        },
         max_bytes=_DEFAULT_MAX_REQUEST_BYTES,
         label="training_job_identity",
         effect=TrainingWorkerFailureEffect.NO_EFFECT,
     )
-    return hashlib.sha256(b"nika-training-job-v2\x00" + identity).hexdigest()
+    return hashlib.sha256(b"nika-training-job-v3\x00" + identity).hexdigest()
 
 
 def _step_id(job_fingerprint: str, trainer_sha256: str, step_index: int) -> str:
@@ -520,6 +560,17 @@ class SubprocessTrainingWorker:
         self._max_response_bytes = _validate_positive_byte_limit(
             max_response_bytes, name="max_response_bytes"
         )
+        self._execution_plan_sha256 = _execution_plan_sha256(
+            command_sha256=self._command_sha256,
+            command_records=self._get_command_records(),
+            timeout_seconds=self._timeout_seconds,
+            max_request_bytes=self._max_request_bytes,
+            max_response_bytes=self._max_response_bytes,
+        )
+
+    @property
+    def execution_plan_sha256(self) -> str:
+        return self._execution_plan_sha256
 
     def step(
         self,
@@ -550,11 +601,27 @@ class SubprocessTrainingWorker:
             )
 
         command_records = self._get_command_records()
+        live_execution_plan_sha256 = _execution_plan_sha256(
+            command_sha256=self._command_sha256,
+            command_records=command_records,
+            timeout_seconds=self._timeout_seconds,
+            max_request_bytes=self._max_request_bytes,
+            max_response_bytes=self._max_response_bytes,
+        )
+        if not hmac.compare_digest(
+            live_execution_plan_sha256,
+            self._execution_plan_sha256,
+        ):
+            raise _error(
+                "training_execution_plan_changed",
+                effect=TrainingWorkerFailureEffect.NO_EFFECT,
+            )
         trainer_record = command_records[0]
         trainer_sha256 = trainer_record.sha256
         job_fingerprint = _job_fingerprint(
             canonical_spec,
             command_sha256=self._command_sha256,
+            execution_plan_sha256=self._execution_plan_sha256,
         )
         trainer_state, previous_step_id = self._unwrap_resume_state(
             resume_state=resume_state,
