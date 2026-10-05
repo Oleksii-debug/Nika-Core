@@ -387,6 +387,46 @@ def test_save_rejects_integer_above_bit_boundary(tmp_path: Path) -> None:
     assert count == 1
 
 
+def test_save_rejects_behavioral_container_subclasses_before_hooks(
+    tmp_path: Path,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+
+    class HostileList(list[object]):
+        def __len__(self) -> int:
+            raise AssertionError("hostile list len hook executed")
+
+        def __iter__(self):
+            raise AssertionError("hostile list iteration hook executed")
+
+    class HostileDict(dict[str, object]):
+        def __len__(self) -> int:
+            raise AssertionError("hostile dict len hook executed")
+
+        def items(self):
+            raise AssertionError("hostile dict items hook executed")
+
+    with pytest.raises(ValueError, match="containers must be built-in"):
+        checkpoints.save(
+            task_id=task_id,
+            stage="hostile-list",
+            payload={"items": HostileList([1, 2, 3])},
+        )
+    with pytest.raises(ValueError, match="containers must be built-in"):
+        checkpoints.save(
+            task_id=task_id,
+            stage="hostile-dict",
+            payload=HostileDict({"value": 1}),
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
 def test_save_rejects_invalid_utf8_text_before_persistence(tmp_path: Path) -> None:
     store, task_id, checkpoints = _build_service(tmp_path)
 
