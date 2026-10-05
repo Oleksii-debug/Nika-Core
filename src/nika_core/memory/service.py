@@ -121,15 +121,16 @@ class MemoryService:
             ).fetchone()
             if row is None:
                 return None
-            expires_at = _parse_optional(row["expires_at"])
-            if expires_at is not None and expires_at <= current:
+            record = _record_from_row(row)
+            expires_at = record.expires_at
+            if expires_at is not None and _as_utc(expires_at) <= current:
                 conn.execute(
                     "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
                     "AND namespace = ? AND memory_key = ?",
                     (scope.value, owner_id, namespace, key),
                 )
                 return None
-        return _record_from_row(row)
+        return record
 
     def list_namespace(
         self,
@@ -153,15 +154,16 @@ class MemoryService:
             ).fetchall()
             records: list[MemoryRecord] = []
             for row in rows:
-                expiry = _parse_optional(row["expires_at"])
+                record = _record_from_row(row)
+                expiry = record.expires_at
                 if expiry is not None and _as_utc(expiry) <= current:
                     conn.execute(
                         "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
                         "AND namespace = ? AND memory_key = ?",
-                        (scope.value, owner_id, namespace, row["memory_key"]),
+                        (scope.value, owner_id, namespace, record.key),
                     )
                 else:
-                    records.append(_record_from_row(row))
+                    records.append(record)
             # Failure to parse a later row rolls back all scoped deletions.
             return tuple(records)
 
