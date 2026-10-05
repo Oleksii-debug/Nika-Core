@@ -1439,11 +1439,6 @@ class V01BoundModelRuntimeFactory:
                     default_model=model,
                     base_url=base_url,
                     think=False,
-                    expected_model_digest=(
-                        artifact_pin.artifact_sha256
-                        if artifact_pin is not None
-                        else None
-                    ),
                     client_factory=self._client_factory,
                 ),
                 default=True,
