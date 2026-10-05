@@ -81,6 +81,8 @@ def _json_key_utf8_size(key: object) -> int:
         if not math.isfinite(key):
             raise ValueError("Checkpoint payload must contain finite key values")
         return len(repr(key)) + 2
+    if isinstance(key, (str, int, float)):
+        raise ValueError("Checkpoint payload key scalars must be built-in types")
     return 0
 
 
@@ -116,6 +118,8 @@ def _validate_payload_resources(payload: object) -> None:
         if type(value) is str:
             json_bytes = _checked_json_bytes(json_bytes, _json_string_utf8_size(value))
             continue
+        if isinstance(value, (str, int, float)):
+            raise ValueError("Checkpoint payload scalar values must be built-in types")
         if isinstance(value, dict):
             if type(value) is not dict:
                 raise ValueError("Checkpoint payload containers must be built-in types")
