@@ -312,12 +312,14 @@ def _ensure_running_experiment(
         else:
             snapshot = repository.get(experiment_id)
     _validate_existing_definition(snapshot, definition)
+    _validate_recoverable_snapshot(snapshot)
     if snapshot.status is ExperimentStatus.DRAFT:
         try:
             snapshot = engine.start(experiment_id)
         except ValueError:
             snapshot = repository.get(experiment_id)
             _validate_existing_definition(snapshot, definition)
+        _validate_recoverable_snapshot(snapshot)
     return snapshot
 
 
@@ -340,6 +342,48 @@ def _validate_persisted_observations(
     return observed
 
 
+def _validate_recoverable_snapshot(snapshot: ExperimentSnapshot) -> None:
+    if snapshot.status is ExperimentStatus.DRAFT:
+        if (
+            snapshot.observations != ()
+            or snapshot.selected_candidate_id is not None
+            or snapshot.previous_champion_id is not None
+        ):
+            raise AttestedOldVsNewDecisionError(
+                "draft experiment contains durable evidence"
+            )
+    elif snapshot.status is ExperimentStatus.RUNNING:
+        if (
+            snapshot.selected_candidate_id is not None
+            or snapshot.previous_champion_id is not None
+        ):
+            raise AttestedOldVsNewDecisionError(
+                "running experiment contains terminal decision fields"
+            )
+
+
+def _validate_persisted_observation_prefix(
+    snapshot: ExperimentSnapshot,
+    *,
+    observations: tuple[MetricObservation, ...],
+    expected: dict[tuple[str, str, str], MetricObservation],
+) -> dict[tuple[str, str, str], MetricObservation]:
+    if type(snapshot.observations) is not tuple:
+        raise TypeError("persisted experiment observations must use a canonical tuple")
+    observed = _validate_persisted_observations(snapshot, expected=expected)
+    if len(snapshot.observations) > len(observations):
+        raise AttestedOldVsNewDecisionError(
+            "persisted experiment contains evidence outside canonical append order"
+        )
+    for index, persisted in enumerate(snapshot.observations):
+        wanted = observations[index]
+        if _observation_key(persisted) != _observation_key(wanted):
+            raise AttestedOldVsNewDecisionError(
+                "persisted experiment observations are not a canonical append-only prefix"
+            )
+    return observed
+
+
 def _record_missing_observations(
     *,
     engine: ExperimentEngine,
@@ -351,11 +395,18 @@ def _record_missing_observations(
     expected = _observation_map(observations)
     initial = repository.get(experiment_id)
     _validate_existing_definition(initial, definition)
+    _validate_recoverable_snapshot(initial)
     if initial.status is ExperimentStatus.RUNNING:
-        _validate_persisted_observations(initial, expected=expected)
-    for key, item in expected.items():
+        _validate_persisted_observation_prefix(
+            initial,
+            observations=observations,
+            expected=expected,
+        )
+    for item in observations:
+        key = _observation_key(item)
         snapshot = repository.get(experiment_id)
         _validate_existing_definition(snapshot, definition)
+        _validate_recoverable_snapshot(snapshot)
         if snapshot.status in {ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED}:
             return snapshot
         if snapshot.status is ExperimentStatus.ROLLED_BACK:
@@ -366,8 +417,9 @@ def _record_missing_observations(
             raise AttestedOldVsNewDecisionError(
                 "persisted experiment is not running while evidence is incomplete"
             )
-        observed = _validate_persisted_observations(
+        observed = _validate_persisted_observation_prefix(
             snapshot,
+            observations=observations,
             expected=expected,
         )
         persisted = observed.get(key)
@@ -378,18 +430,22 @@ def _record_missing_observations(
         except ValueError:
             current = repository.get(experiment_id)
             _validate_existing_definition(current, definition)
-            observed = _validate_persisted_observations(
-                current,
-                expected=expected,
-            )
-            persisted = observed.get(key)
-            if persisted is not None:
-                continue
+            _validate_recoverable_snapshot(current)
             if current.status in {
                 ExperimentStatus.COMPLETED,
                 ExperimentStatus.PROMOTED,
             }:
                 return current
+            if current.status is not ExperimentStatus.RUNNING:
+                raise
+            observed = _validate_persisted_observation_prefix(
+                current,
+                observations=observations,
+                expected=expected,
+            )
+            persisted = observed.get(key)
+            if persisted is not None:
+                continue
             raise
     return repository.get(experiment_id)
 
