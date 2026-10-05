@@ -207,7 +207,7 @@ class BusinessFactory:
         approval_authority: BusinessAuthorizationAuthorityPort | None = None,
     ) -> None:
         _validate_snapshot(snapshot)
-        self._snapshot = snapshot
+        self._snapshot = load_business_snapshot(dump_business_snapshot(snapshot))
         self._approval_authority = approval_authority
 
     @classmethod
@@ -241,7 +241,7 @@ class BusinessFactory:
         return cls(snapshot, approval_authority=approval_authority)
 
     def snapshot(self) -> BusinessFactorySnapshot:
-        return self._snapshot
+        return load_business_snapshot(dump_business_snapshot(self._snapshot))
 
     def identify_opportunity(
         self,
@@ -267,7 +267,7 @@ class BusinessFactory:
             opportunity_id,
             self._snapshot.objective.research_package.package_id,
         )
-        return opportunity
+        return replace(opportunity)
 
     def create_lead(
         self,
@@ -287,7 +287,7 @@ class BusinessFactory:
         lead = BusinessLead(lead_id, opportunity.opportunity_id, channel_id, counterparty_ref)
         self._snapshot = replace(self._snapshot, lead=lead)
         self._record("lead.created", lead_id, channel_id)
-        return lead
+        return replace(lead)
 
     def qualify_lead(self, *, qualification_ref: str) -> BusinessLead:
         lead = self._require_lead()
@@ -297,7 +297,7 @@ class BusinessFactory:
         lead = replace(lead, qualification_ref=qualification_ref)
         self._snapshot = replace(self._snapshot, lead=lead)
         self._record("lead.qualified", lead.lead_id, qualification_ref)
-        return lead
+        return replace(lead)
 
     def draft_proposal(
         self,
@@ -315,7 +315,7 @@ class BusinessFactory:
         proposal = BusinessProposal(proposal_id, lead.lead_id, scope_summary)
         self._snapshot = replace(self._snapshot, proposal=proposal)
         self._record("proposal.drafted", proposal_id, lead.qualification_ref or "qualification")
-        return proposal
+        return replace(proposal)
 
     def approve_proposal(self, *, approval_ref: str) -> BusinessProposal:
         proposal = self._require_proposal()
@@ -335,7 +335,7 @@ class BusinessFactory:
         )
         self._snapshot = replace(self._snapshot, proposal=proposal)
         self._record("proposal.approved", proposal.proposal_id, approval_ref)
-        return proposal
+        return replace(proposal)
 
     def reject_proposal(self, *, rejection_ref: str) -> BusinessProposal:
         proposal = self._require_proposal()
@@ -345,7 +345,7 @@ class BusinessFactory:
         proposal = replace(proposal, state=ProposalState.REJECTED, approval_ref=rejection_ref)
         self._snapshot = replace(self._snapshot, proposal=proposal)
         self._record("proposal.rejected", proposal.proposal_id, rejection_ref)
-        return proposal
+        return replace(proposal)
 
     def create_work_order(
         self,
@@ -393,7 +393,7 @@ class BusinessFactory:
         )
         self._snapshot = replace(self._snapshot, work_order=order)
         self._record("work_order.authorized", work_order_id, authorization_ref)
-        return order
+        return replace(order)
 
     def handoff_to_product_factory(
         self,
@@ -448,7 +448,7 @@ class BusinessFactory:
                 raise BusinessFactoryError(
                     "work order is already linked to a different ProductProject"
                 )
-            return order
+            return replace(order)
 
         linked = replace(order, product_project_id=project.project_id)
         self._snapshot = replace(self._snapshot, work_order=linked)
@@ -458,7 +458,7 @@ class BusinessFactory:
             project.project_id,
             f"request-sha256:{request_digest}",
         )
-        return linked
+        return replace(linked)
 
     def _require_authorization(
         self,
@@ -511,14 +511,37 @@ class BusinessFactory:
 
 def dump_business_snapshot(snapshot: BusinessFactorySnapshot) -> str:
     _validate_snapshot(snapshot)
-    return json.dumps(asdict(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        asdict(snapshot),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise BusinessFactoryError(f"duplicate business snapshot field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite_json(value: str) -> None:
+    raise BusinessFactoryError(f"business snapshot contains non-finite JSON constant: {value}")
 
 
 def load_business_snapshot(payload: str) -> BusinessFactorySnapshot:
     if not isinstance(payload, str) or not payload.strip():
         raise BusinessFactoryError("business snapshot must be non-empty JSON text")
     try:
-        raw = json.loads(payload)
+        raw = json.loads(
+            payload,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_non_finite_json,
+        )
     except json.JSONDecodeError as exc:
         raise BusinessFactoryError("business snapshot is invalid JSON") from exc
     if not isinstance(raw, dict):

@@ -304,3 +304,34 @@ def test_business_snapshot_rejects_token_shaped_raw_credential() -> None:
             channel_id="sandbox-email",
             counterparty_ref="sk-" + "a" * 24,
         )
+
+
+def test_factory_detaches_ingress_restore_and_snapshot_authority() -> None:
+    objective = BusinessObjective(
+        objective_id="objective-detach",
+        goal="Original trusted business goal",
+        research_package=_research(),
+    )
+    policy = BusinessPolicy(
+        policy_id="policy-detach",
+        allowed_channel_ids=("sandbox-email",),
+        communication_authority=CommunicationAuthority.DRAFT_ONLY,
+    )
+    factory = BusinessFactory.start(objective=objective, policy=policy)
+
+    object.__setattr__(objective, "goal", "attacker-rewritten goal")
+    object.__setattr__(policy, "allowed_channel_ids", ("attacker-channel",))
+    current = factory.snapshot()
+    assert current.objective.goal == "Original trusted business goal"
+    assert current.policy.allowed_channel_ids == ("sandbox-email",)
+
+    object.__setattr__(current.objective, "goal", "snapshot rewrite")
+    object.__setattr__(current.policy, "allowed_channel_ids", ("snapshot-channel",))
+    unchanged = factory.snapshot()
+    assert unchanged.objective.goal == "Original trusted business goal"
+    assert unchanged.policy.allowed_channel_ids == ("sandbox-email",)
+
+    restore_input = factory.snapshot()
+    restored = BusinessFactory.restore(restore_input)
+    object.__setattr__(restore_input.objective, "goal", "restore-input rewrite")
+    assert restored.snapshot().objective.goal == "Original trusted business goal"
