@@ -148,3 +148,24 @@ def test_resolve_rejects_link_to_external_blob(tmp_path: Path) -> None:
     _symlink_or_skip(stored, external)
     with pytest.raises(BlobStoreError, match="symbolic links"):
         store.resolve(artifact)
+
+
+
+def test_put_rejects_unencodable_workspace_before_storage_setup(tmp_path: Path) -> None:
+    store = ContentAddressedBlobStore(tmp_path / "blobs")
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        store.put_bytes("\ud800", b"raw")
+
+    assert not (store.root / ".tmp").exists()
+    assert list(store.root.iterdir()) == []
+
+
+def test_resolve_rejects_unencodable_workspace_as_invalid_metadata(tmp_path: Path) -> None:
+    store = ContentAddressedBlobStore(tmp_path / "blobs")
+    artifact = store.put_bytes("ws", b"raw")
+
+    with pytest.raises(BlobStoreError, match="workspace identity"):
+        store.resolve(replace(artifact, workspace_id="\ud800"))
+
+    assert store.resolve(artifact).read_bytes() == b"raw"
