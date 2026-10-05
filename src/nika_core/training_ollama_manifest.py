@@ -121,6 +121,17 @@ class OllamaPreparedModelBinding:
             (self.preparation_sha256, "preparation_sha256"),
         ):
             _require_sha256(value, name=name)
+        expected_create_request = _canonical_json_sha256(
+            {
+                "model": self.route_model_id,
+                "files": {"model.gguf": "sha256:" + self.artifact_sha256},
+                "stream": False,
+            }
+        )
+        if self.create_request_sha256 != expected_create_request:
+            raise ValueError(
+                "create_request_sha256 does not match the physical artifact binding"
+            )
         expected = _canonical_json_sha256(self._payload_without_digest())
         if self.preparation_sha256 != expected:
             raise ValueError("preparation_sha256 does not match the binding payload")
