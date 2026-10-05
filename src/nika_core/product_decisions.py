@@ -164,7 +164,7 @@ class ProductDecisionRepository:
         idempotency_key: str,
     ) -> ActionIntent:
         """Build the exact trusted-host intent required for an APPROVED decision."""
-        self._validate_input(decision, idempotency_key)
+        self._validate_input(project_id, decision, idempotency_key)
         if decision.state is not ProductDecisionState.APPROVED:
             raise ProductProjectError("approval intent requires an APPROVED product decision")
         expected_row_version = _strict_int(
@@ -213,7 +213,7 @@ class ProductDecisionRepository:
         approval: ApprovalEvidence | None = None,
         now: datetime | None = None,
     ) -> StoredProductDecision:
-        self._validate_input(decision, idempotency_key)
+        self._validate_input(project_id, decision, idempotency_key)
         expected_row_version = _strict_int(
             expected_row_version,
             label="expected ProductProject row_version",
@@ -519,15 +519,31 @@ class ProductDecisionRepository:
         )
 
     @staticmethod
-    def _validate_input(decision: ProductDecision, idempotency_key: str) -> None:
-        if not idempotency_key.strip():
-            raise ProductProjectError("idempotency_key is required")
-        if not decision.decision_id.strip() or not decision.option_id.strip():
-            raise ProductProjectError("product decision requires decision_id and option_id")
-        if not isinstance(decision.state, ProductDecisionState):
-            raise ProductProjectError("product decision state must be ProductDecisionState")
-        if not decision.rationale.strip() or not decision.decided_by_ref.strip():
-            raise ProductProjectError("product decision requires rationale and decided_by_ref")
+    def _validate_input(
+        project_id: str,
+        decision: ProductDecision,
+        idempotency_key: str,
+    ) -> None:
+        if not _valid_stored_text(project_id):
+            raise ProductProjectError("project_id must be exact non-empty UTF-8 text")
+        if not _valid_stored_text(idempotency_key):
+            raise ProductProjectError("idempotency_key must be exact non-empty UTF-8 text")
+        if type(decision) is not ProductDecision:
+            raise ProductProjectError("product decision must be an exact ProductDecision value")
+        if (
+            not _valid_stored_text(decision.decision_id)
+            or not _valid_stored_text(decision.option_id)
+        ):
+            raise ProductProjectError("product decision requires exact decision_id and option_id")
+        if type(decision.state) is not ProductDecisionState:
+            raise ProductProjectError("product decision state must be exact ProductDecisionState")
+        if (
+            not _valid_stored_text(decision.rationale)
+            or not _valid_stored_text(decision.decided_by_ref)
+        ):
+            raise ProductProjectError(
+                "product decision requires exact rationale and decided_by_ref"
+            )
 
     def _replay_conn(
         self,
