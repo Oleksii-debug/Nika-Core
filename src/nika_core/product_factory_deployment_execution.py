@@ -264,15 +264,44 @@ class DeploymentExecutionCoordinator:
         return DeploymentExecutionSnapshot(tuple(safe_records))
 
     def restore(self, snapshot: DeploymentExecutionSnapshot) -> None:
-        operation_ids = [record.spec.operation_id for record in snapshot.records]
-        if len(operation_ids) != len(set(operation_ids)):
-            raise DeploymentExecutionError("deployment execution snapshot contains duplicate operations")
+        if (
+            type(snapshot) is not DeploymentExecutionSnapshot
+            or type(snapshot.records) is not tuple
+        ):
+            raise DeploymentExecutionError("invalid deployment execution snapshot")
         restored: dict[str, DeploymentExecutionRecord] = {}
         for record in snapshot.records:
+            if (
+                type(record) is not DeploymentExecutionRecord
+                or type(record.spec) is not DeploymentExecutionSpec
+            ):
+                raise DeploymentExecutionError("invalid deployment execution snapshot record")
+            operation_id = record.spec.operation_id
+            if type(operation_id) is not str or not operation_id.strip():
+                raise DeploymentExecutionError("invalid snapshot operation identity")
+            if operation_id in restored:
+                raise DeploymentExecutionError(
+                    "deployment execution snapshot contains duplicate operations"
+                )
+            if type(record.state) is not OperationState:
+                raise DeploymentExecutionError("invalid snapshot operation state")
+            if type(record.attempt) is not int or record.attempt < 0:
+                raise DeploymentExecutionError("invalid snapshot operation attempt")
+            if type(record.evidence_refs) is not tuple or any(
+                type(ref) is not str or not ref.strip() for ref in record.evidence_refs
+            ):
+                raise DeploymentExecutionError("invalid snapshot execution evidence")
+            if (
+                record.deployment_state is not None
+                and type(record.deployment_state) is not DeploymentState
+            ):
+                raise DeploymentExecutionError("invalid snapshot deployment state")
+            if type(record.updated_at) is not datetime:
+                raise DeploymentExecutionError("invalid snapshot update timestamp")
             _aware(record.updated_at)
             if record.state is OperationState.PREPARED or record.node_id is not None:
                 raise DeploymentExecutionError("snapshot must not serialize active execution leases")
-            restored[record.spec.operation_id] = record
+            restored[operation_id] = record
         self._records = restored
         self._node_leases = {}
         self._credential_leases = {}
