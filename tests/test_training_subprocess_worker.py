@@ -819,6 +819,101 @@ sys.stdout.write(json.dumps(response))
     assert trainer_state["allowed"] == "yes"
 
 
+def test_resume_identity_binds_explicit_environment(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {"step": request["step_index"]},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials)
+    registry, artifact_id, executable, script_artifact_id = _registry_for_python(
+        tmp_path,
+        trainer,
+    )
+    assert script_artifact_id is not None
+    first_worker = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=artifact_id,
+        command_artifact_ids={1: script_artifact_id},
+        environment={"NIKA_TRAINING_MODE": "first"},
+    )
+    replacement_worker = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=artifact_id,
+        command_artifact_ids={1: script_artifact_id},
+        environment={"NIKA_TRAINING_MODE": "second"},
+    )
+
+    first = first_worker.step(
+        spec=spec,
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        replacement_worker.step(
+            spec=spec,
+            step_index=1,
+            resume_state=first.resume_state,
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "resume_state_command_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "PYTHONPATH",
+        "pythonhome",
+        "LD_PRELOAD",
+        "dyld_insert_libraries",
+        "PATH",
+        "Node_Options",
+        "DOTNET_STARTUP_HOOKS",
+    ],
+)
+def test_environment_rejects_runtime_loader_authority(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError, match="runtime or loader authority"):
+        _worker(tmp_path, trainer, environment={key: "untrusted"})
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["NIKA_API_KEY", "ACCESS_TOKEN", "DB_PASSWORD", "SERVICE_CREDENTIAL"],
+)
+def test_environment_rejects_credential_named_fields(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError, match="credential material"):
+        _worker(tmp_path, trainer, environment={key: "sensitive"})
+
+
 def test_wrong_step_identity_is_unknown_effect(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
