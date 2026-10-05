@@ -347,7 +347,7 @@ def test_model_capture_composes_after_existing_source_capture(tmp_path: Path) ->
     assert bound_model.model == "qwen3:8b"
 
 
-def test_v2_task_binding_schema_migrates_to_artifact_pin_column(tmp_path: Path) -> None:
+def test_v3_task_binding_schema_migrates_to_artifact_pin_column(tmp_path: Path) -> None:
     store = _store(tmp_path)
     settings = V01ModelSettings(store)
     assert settings.configure(_local()).status == "completed"
@@ -361,7 +361,7 @@ def test_v2_task_binding_schema_migrates_to_artifact_pin_column(tmp_path: Path) 
     with store.connection() as conn:
         conn.execute(
             "ALTER TABLE v01_task_model_bindings "
-            "RENAME TO v01_task_model_bindings_v3"
+            "RENAME TO v01_task_model_bindings_v4"
         )
         conn.execute(
             "CREATE TABLE v01_task_model_bindings ("
@@ -372,11 +372,11 @@ def test_v2_task_binding_schema_migrates_to_artifact_pin_column(tmp_path: Path) 
             "INSERT INTO v01_task_model_bindings("
             "task_id, selection_id, selection_json, created_at"
             ") SELECT task_id, selection_id, selection_json, created_at "
-            "FROM v01_task_model_bindings_v3"
+            "FROM v01_task_model_bindings_v4"
         )
-        conn.execute("DROP TABLE v01_task_model_bindings_v3")
+        conn.execute("DROP TABLE v01_task_model_bindings_v4")
         conn.execute(
-            "DELETE FROM v01_model_settings_schema WHERE version = 3"
+            "DELETE FROM v01_model_settings_schema WHERE version = 4"
         )
 
     reopened = V01ModelSettings(SQLiteStore(store.path))
