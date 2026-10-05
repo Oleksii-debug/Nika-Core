@@ -480,6 +480,80 @@ Path({str(marker)!r}).write_text("late-effect", encoding="utf-8")
 
 
 @pytest.mark.asyncio
+async def test_timeout_kills_evaluator_descendant_process_tree(tmp_path: Path) -> None:
+    spawned = tmp_path / "evaluator-descendant-spawned.txt"
+    survived = tmp_path / "evaluator-descendant-survived.txt"
+    child_code = (
+        "import pathlib,sys,time; "
+        "time.sleep(1.5); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    script = _script(
+        tmp_path,
+        f"""
+import pathlib
+import subprocess
+import sys
+import time
+
+sys.stdin.buffer.read()
+time.sleep(0.2)
+subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(survived)!r}])
+pathlib.Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
+time.sleep(30)
+""".strip(),
+    )
+    adapter, _, _, descriptor = _adapter(
+        tmp_path,
+        script,
+        timeout_seconds=1.0,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert exc_info.value.code is ModelErrorCode.TIMEOUT
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert spawned.exists(), "test did not prove that an evaluator descendant was started"
+    await asyncio.sleep(1.0)
+    assert not survived.exists(), "evaluator descendant escaped timeout containment"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object kill-on-close proof")
+async def test_success_does_not_leave_evaluator_descendant_running(tmp_path: Path) -> None:
+    spawned = tmp_path / "success-evaluator-descendant-spawned.txt"
+    survived = tmp_path / "success-evaluator-descendant-survived.txt"
+    child_code = (
+        "import pathlib,sys,time; "
+        "time.sleep(1.0); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    script = _success_script(
+        tmp_path,
+        extra_prefix=f"""
+import subprocess
+import time
+
+time.sleep(0.2)
+subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(survived)!r}])
+Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
+""".strip(),
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    result = await adapter.complete_attested(
+        _request(),
+        binding=_binding(descriptor),
+    )
+
+    assert result.response.text == "answer"
+    assert spawned.exists(), "test did not prove that an evaluator descendant was started"
+    await asyncio.sleep(1.2)
+    assert not survived.exists(), "evaluator descendant escaped successful containment"
+
+
+@pytest.mark.asyncio
 async def test_task_cancellation_kills_evaluator(tmp_path: Path) -> None:
     marker = tmp_path / "cancelled-process-survived.txt"
     script = _script(
