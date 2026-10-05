@@ -447,17 +447,17 @@ class ProductOperationsCoordinator:
             )
         reservation = self.effect_journal.lookup(
             project_id=self.project_id,
-            service=record.service,
-            request=request,
+            service=_private_service(record.service),
+            request=_private_request(request),
         )
-        if reservation is not None and not isinstance(
-            reservation,
-            MaintenanceEffectReservation,
-        ):
+        if reservation is None:
+            return None
+        try:
+            return _private_reservation(reservation)
+        except ProductOperationsError as exc:
             raise ProductOperationsError(
                 "maintenance effect journal returned invalid lookup evidence"
-            )
-        return reservation
+            ) from exc
 
     def _validate_existing_maintenance_effect(
         self,
@@ -510,18 +510,20 @@ class ProductOperationsCoordinator:
                     "maintenance effect recovery lacks durable runtime authority"
                 )
         else:
-            reservation = self.effect_journal.reserve(
+            reservation_raw = self.effect_journal.reserve(
                 project_id=self.project_id,
-                service=record.service,
-                request=request,
+                service=_private_service(record.service),
+                request=_private_request(request),
             )
-            if not isinstance(reservation, MaintenanceEffectReservation):
+            try:
+                reservation = _private_reservation(reservation_raw)
+            except ProductOperationsError as exc:
                 raise ProductOperationsError(
                     "maintenance effect journal returned invalid reservation evidence"
-                )
+                ) from exc
         if reservation.state is MaintenanceEffectState.COMPLETED:
             assert reservation.result is not None
-            return reservation.result, True
+            return _private_result(reservation.result), True
 
         if reservation.state is MaintenanceEffectState.PENDING and not reservation.created:
             raise ProductOperationsError(
@@ -534,40 +536,50 @@ class ProductOperationsCoordinator:
                     "maintenance recovery cannot create new durable effect authority"
                 )
             try:
-                result = self.port.apply(request)
+                result_raw = self.port.apply(_private_request(request))
             except BaseException:
                 self.effect_journal.mark_uncertain(reservation.operation_key)
                 raise
-            if not isinstance(result, MaintenanceResult):
+            try:
+                result = _private_result(result_raw)
+            except ProductOperationsError as exc:
                 self.effect_journal.mark_uncertain(reservation.operation_key)
                 raise ProductOperationsError(
                     "maintenance port returned invalid result evidence"
-                )
+                ) from exc
             if result.uncertain:
                 self.effect_journal.mark_uncertain(reservation.operation_key)
             else:
-                self.effect_journal.complete(reservation.operation_key, result)
-            return result, False
+                self.effect_journal.complete(
+                    reservation.operation_key,
+                    _private_result(result),
+                )
+            return _private_result(result), False
 
         if reservation.state is not MaintenanceEffectState.UNCERTAIN:
             raise ProductOperationsError(
                 "maintenance effect state is not eligible for provider inspection"
             )
         try:
-            result = self.port.inspect(request)
+            result_raw = self.port.inspect(_private_request(request))
         except BaseException:
             self.effect_journal.mark_uncertain(reservation.operation_key)
             raise
-        if not isinstance(result, MaintenanceResult):
+        try:
+            result = _private_result(result_raw)
+        except ProductOperationsError as exc:
             self.effect_journal.mark_uncertain(reservation.operation_key)
             raise ProductOperationsError(
                 "maintenance port returned invalid inspection evidence"
-            )
+            ) from exc
         if result.uncertain:
             self.effect_journal.mark_uncertain(reservation.operation_key)
         else:
-            self.effect_journal.reconcile(reservation.operation_key, result)
-        return result, True
+            self.effect_journal.reconcile(
+                reservation.operation_key,
+                _private_result(result),
+            )
+        return _private_result(result), True
 
     def _save_maintenance(
         self,
@@ -657,8 +669,8 @@ class ProductOperationsCoordinator:
         try:
             approved = self.approval_authority.verify(
                 project_id=self.project_id,
-                service=record.service,
-                request=request,
+                service=_private_service(record.service),
+                request=_private_request(request),
             )
         except Exception as exc:
             raise ProductOperationsError(
