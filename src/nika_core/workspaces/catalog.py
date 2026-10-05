@@ -89,7 +89,7 @@ class WorkspaceResolver:
         # Backslash traversal must not become admissible on non-Windows test hosts.
         if ".." in windows_path.parts or ".." in Path(relative_path).parts:
             raise ValueError("workspace path escapes configured root")
-        candidate = (self.root / relative_path).resolve()
+        candidate = (self.root / Path(relative_path.replace("\\", "/"))).resolve()
         if candidate != self.root and self.root not in candidate.parents:
             raise ValueError("workspace path escapes configured root")
         return candidate
