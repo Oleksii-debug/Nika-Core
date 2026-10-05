@@ -327,3 +327,102 @@ async def test_effect_port_gateway_failure_preserves_original_effect_truth() -> 
 
     assert exc_info.value.code is ModelErrorCode.TIMEOUT
     assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+
+
+def test_gateway_rejects_unbounded_attestor_identity() -> None:
+    with pytest.raises(ValueError, match="configured byte limit"):
+        AttestedTrainingCandidateGateway(
+            _EffectPort(),
+            binding=_binding(),
+            expected_attestor_id="a" * 513,
+            expected_attestor_sha256=_ATTESTOR_SHA256,
+        )
+
+
+@pytest.mark.asyncio
+async def test_invalid_usage_bool_is_unknown_after_provider_effect() -> None:
+    class BadUsagePort(_EffectPort):
+        async def complete_attested(
+            self,
+            request: ModelRequest,
+            *,
+            binding: TrainingEvaluationBinding,
+        ) -> AttestedModelCompletionResult:
+            result = await super().complete_attested(request, binding=binding)
+            bad_response = ModelResponse(
+                request_id=result.response.request_id,
+                text=result.response.text,
+                provider_id=result.response.provider_id,
+                provider_kind=result.response.provider_kind,
+                model=result.response.model,
+                usage=ModelUsage(input_tokens=True, output_tokens=1, total_tokens=2),
+            )
+            return AttestedModelCompletionResult(
+                response=bad_response,
+                attestation=result.attestation,
+            )
+
+    port = BadUsagePort()
+    gateway = _gateway(port)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await gateway.complete(_request())
+
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert port.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_inconsistent_usage_total_is_unknown_after_provider_effect() -> None:
+    class BadUsagePort(_EffectPort):
+        async def complete_attested(
+            self,
+            request: ModelRequest,
+            *,
+            binding: TrainingEvaluationBinding,
+        ) -> AttestedModelCompletionResult:
+            result = await super().complete_attested(request, binding=binding)
+            bad_response = ModelResponse(
+                request_id=result.response.request_id,
+                text=result.response.text,
+                provider_id=result.response.provider_id,
+                provider_kind=result.response.provider_kind,
+                model=result.response.model,
+                usage=ModelUsage(input_tokens=2, output_tokens=2, total_tokens=3),
+            )
+            return AttestedModelCompletionResult(
+                response=bad_response,
+                attestation=result.attestation,
+            )
+
+    port = BadUsagePort()
+    gateway = _gateway(port)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await gateway.complete(_request())
+
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert port.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_mutated_unbounded_attestation_identity_is_unknown() -> None:
+    class BadAttestationPort(_EffectPort):
+        async def complete_attested(
+            self,
+            request: ModelRequest,
+            *,
+            binding: TrainingEvaluationBinding,
+        ) -> AttestedModelCompletionResult:
+            result = await super().complete_attested(request, binding=binding)
+            object.__setattr__(result.attestation, "attestor_id", "a" * 513)
+            return result
+
+    port = BadAttestationPort()
+    gateway = _gateway(port)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await gateway.complete(_request())
+
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert port.calls == 1
