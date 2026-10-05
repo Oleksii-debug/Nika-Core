@@ -175,9 +175,11 @@ class StoredStandingPermission:
 
 
 class _StandingPermissionTransaction:
-    """Execute-only view of a store-owned authority transaction."""
+    """DML-only view of a store-owned authority transaction."""
 
     __slots__ = ("__connection",)
+
+    _ALLOWED_SQL_VERBS = frozenset({"SELECT", "INSERT", "UPDATE", "DELETE"})
 
     def __init__(self, connection: sqlite3.Connection) -> None:
         self.__connection = connection
@@ -187,6 +189,16 @@ class _StandingPermissionTransaction:
         sql: str,
         parameters: tuple[object, ...] = (),
     ) -> sqlite3.Cursor:
+        if type(sql) is not str:
+            raise TypeError("authority transaction SQL must be exact text")
+        statement = sql.lstrip()
+        if not statement:
+            raise ValueError("authority transaction SQL must not be empty")
+        verb = statement.split(None, 1)[0].upper()
+        if verb not in self._ALLOWED_SQL_VERBS:
+            raise ValueError(
+                "authority transaction only permits SELECT, INSERT, UPDATE, or DELETE"
+            )
         return self.__connection.execute(sql, parameters)
 
 
