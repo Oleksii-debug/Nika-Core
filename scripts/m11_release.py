@@ -18,6 +18,7 @@ from nika_core.packaging.release import (
 from nika_core.packaging.windows import default_windows_plan
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_SAFE_RELEASE_VERSION_RE = re.compile(r"^[0-9A-Za-z][0-9A-Za-z.!+_-]*$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
 
 
@@ -30,8 +31,10 @@ def _require_release_version_text(value: object, *, authority: str) -> str:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise RuntimeError(f"{authority} must be valid UTF-8 text") from exc
-    if len(encoded) > 128 or any(
-        ord(character) < 32 or ord(character) == 127 for character in value
+    if (
+        len(encoded) > 128
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or _SAFE_RELEASE_VERSION_RE.fullmatch(value) is None
     ):
         raise RuntimeError(
             f"{authority} exceeds the bounded release-version text contract"
