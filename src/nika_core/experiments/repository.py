@@ -250,7 +250,7 @@ def _encode_definition(definition: ExperimentDefinition) -> str:
             "primary_higher_is_better": definition.policy.primary_higher_is_better,
         },
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _strategy_payload(item: StrategyRef) -> dict[str, str]:
@@ -264,7 +264,10 @@ def _strategy_payload(item: StrategyRef) -> dict[str, str]:
 
 
 def _decode_definition(raw: str) -> ExperimentDefinition:
-    payload = json.loads(raw)
+    def reject_nonfinite(_value: str) -> None:
+        raise ValueError("experiment definition contains a nonfinite JSON number")
+
+    payload = json.loads(raw, parse_constant=reject_nonfinite)
     policy = payload["policy"]
     return ExperimentDefinition(
         experiment_id=payload["experiment_id"],
@@ -280,17 +283,17 @@ def _decode_definition(raw: str) -> ExperimentDefinition:
         ),
         policy=PromotionPolicy(
             primary_metric=policy["primary_metric"],
-            minimum_improvement=float(policy["minimum_improvement"]),
-            minimum_replays=int(policy["minimum_replays"]),
+            minimum_improvement=policy["minimum_improvement"],
+            minimum_replays=policy["minimum_replays"],
             guardrails=tuple(
                 MetricRule(
                     metric=item["metric"],
-                    higher_is_better=bool(item["higher_is_better"]),
-                    max_regression=float(item["max_regression"]),
+                    higher_is_better=item["higher_is_better"],
+                    max_regression=item["max_regression"],
                 )
                 for item in policy["guardrails"]
             ),
-            primary_higher_is_better=bool(policy.get("primary_higher_is_better", True)),
+            primary_higher_is_better=policy.get("primary_higher_is_better", True),
         ),
     )
 
