@@ -97,11 +97,11 @@ def test_config_rejects_duplicate_target_module(tmp_path: Path) -> None:
         driver.PhysicalPilotConfig.from_json(json.dumps(payload))
 
 
-def test_config_rejects_secret_bearing_candidate_reference(tmp_path: Path) -> None:
+def test_config_rejects_nonpublic_candidate_reference(tmp_path: Path) -> None:
     payload = _payload(tmp_path)
     descriptor = payload["candidate_descriptor"]
     assert isinstance(descriptor, dict)
-    descriptor["source_reference"] = "https://example.com/model?api_key=do-not-store"
+    descriptor["source_reference"] = "https://example.com/model?private=1"
 
     with pytest.raises(driver.PhysicalPilotDriverError, match="provenance is invalid"):
         driver.PhysicalPilotConfig.from_json(json.dumps(payload))
