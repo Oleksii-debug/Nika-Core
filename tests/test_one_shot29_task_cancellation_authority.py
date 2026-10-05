@@ -7,7 +7,13 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.multi_agent import ChildRequest, MultiAgentStore, MultiAgentSupervisor, TeamQuota, TeamState
+from nika_core.multi_agent import (
+    ChildRequest,
+    MultiAgentStore,
+    MultiAgentSupervisor,
+    TeamQuota,
+    TeamState,
+)
 from nika_core.multi_agent.cancellation import TeamCancellationJournal
 from nika_core.multi_agent.contracts import (
     CancellationEffectState,
