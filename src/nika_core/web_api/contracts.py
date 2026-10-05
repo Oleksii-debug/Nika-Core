@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import math
-import re
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -13,7 +12,6 @@ _MAX_TEXT_CHARS: Final = 64 * 1024
 _MAX_TEXT_BYTES: Final = 16 * 1024
 _MAX_KEY_BYTES: Final = 256
 _MAX_INT_BITS: Final = 4096
-_MACHINE_ID_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,159}$")
 _RESULT_STATUSES: Final = frozenset({"accepted", "completed", "rejected", "failed"})
 
 
@@ -32,6 +30,24 @@ def _machine_text(value: object, *, field_name: str, max_bytes: int = 160) -> st
         raise ValueError(f"{field_name} exceeds {max_bytes} UTF-8 bytes")
     if any(ch.isspace() or not ch.isprintable() for ch in value):
         raise ValueError(f"{field_name} contains unsupported whitespace or control text")
+    return value
+
+
+def _opaque_identity(value: object, *, field_name: str, max_bytes: int = 160) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{field_name} must be an exact string")
+    if not value or value != value.strip():
+        raise ValueError(f"{field_name} must be non-empty without surrounding whitespace")
+    if len(value) > _MAX_TEXT_CHARS:
+        raise ValueError(f"{field_name} is too long")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 text") from exc
+    if len(encoded) > max_bytes:
+        raise ValueError(f"{field_name} exceeds {max_bytes} UTF-8 bytes")
+    if any(not ch.isprintable() for ch in value):
+        raise ValueError(f"{field_name} contains control text")
     return value
 
 
@@ -126,9 +142,7 @@ class WebPrincipal:
 
     def __post_init__(self) -> None:
         for name in ("tenant_id", "user_id", "workspace_id", "session_id"):
-            value = _machine_text(getattr(self, name), field_name=name)
-            if _MACHINE_ID_RE.fullmatch(value) is None:
-                raise ValueError(f"{name} contains unsupported identifier characters")
+            _opaque_identity(getattr(self, name), field_name=name)
 
 
 @dataclass(frozen=True, slots=True)
