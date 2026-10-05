@@ -809,9 +809,16 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         if state is None:
             return None
         if state["phase"] == "terminal":
-            raw = state["evidence"]
-            token = raw.get("result_sha") if type(raw) is dict else None
-            return RecoveryState("terminal", token)
+            try:
+                evidence = _evidence_from_state(state)
+                result = _result_from_payload(state["result"])
+                self._validate_terminal_storage(evidence, result)
+            except Exception:
+                return RecoveryState(
+                    "manual_reconcile_required",
+                    "terminal-candidate-invalid",
+                )
+            return RecoveryState("terminal", evidence.result_sha)
         return RecoveryState("manual_reconcile_required", "local-effect-uncertain")
 
     async def recover(self, job: CodingJob, state: RecoveryState) -> CodingResult:
