@@ -143,6 +143,29 @@ def test_release_version_rejects_shell_or_filename_metacharacters(
         project_version(tmp_path)
 
 
+def test_release_manifest_rejects_unsafe_product_version_authority(tmp_path: Path) -> None:
+    bundle = tmp_path / "NikaCore"
+    bundle.mkdir()
+    (bundle / "NikaCore.exe").write_bytes(b"binary")
+    valid = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
+
+    unsafe = replace(valid, version="1.0.0';Write-Host injected;#")
+    assert verify_release_manifest(bundle, unsafe) == ("manifest:product-version",)
+
+    with pytest.raises(ValueError, match="manifest:product-version"):
+        build_release_manifest(
+            bundle,
+            product="NikaCore",
+            version="../1.0.0",
+            source_sha=SOURCE_SHA,
+        )
+
+
 def test_release_source_sha_requires_exact_full_commit(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("NIKA_SOURCE_SHA", raising=False)
     monkeypatch.delenv("GITHUB_SHA", raising=False)
