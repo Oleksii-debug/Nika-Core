@@ -219,6 +219,22 @@ def test_duplicate_keys_nonfinite_constants_and_non_object_roots_are_rejected() 
     assert handler.calls == 0
 
 
+
+def test_oversized_numeric_literals_are_rejected_before_dispatch() -> None:
+    adapter, authorization, handler = _adapter()
+    prefix = b'{"request_id":"one","action_id":"task.create","payload":{"value":'
+    for literal in (b"9" * 5000, b"1." + b"2" * 5000):
+        response = adapter.handle(
+            principal=_principal(),
+            method="POST",
+            content_type="application/json",
+            body=prefix + literal + b"}}",
+        )
+        assert response.status_code == 400
+    assert authorization.calls == 0
+    assert handler.calls == 0
+
+
 def test_invalid_utf8_and_empty_body_are_rejected_before_dispatch() -> None:
     adapter, authorization, handler = _adapter()
     for body in (b"\xff", b""):
