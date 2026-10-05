@@ -32,6 +32,14 @@ class ProductFactoryDeploymentCheckpointError(ValueError):
     """Raised when durable PF6 deployment checkpoint invariants are violated."""
 
 
+def _require_exact_identity(value: object, label: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise ProductFactoryDeploymentCheckpointError(
+            f"{label} must be exact non-empty text"
+        )
+    return value
+
+
 def _canonical_json(payload: dict[str, object]) -> str:
     return json.dumps(
         payload,
@@ -158,6 +166,8 @@ class ProductFactoryDeploymentCheckpointHost:
         return True
 
     def _require_host_task(self, *, host_task_id: str, project_id: str) -> None:
+        host_task_id = _require_exact_identity(host_task_id, "host_task_id")
+        project_id = _require_exact_identity(project_id, "project_id")
         with self._store.connection() as conn:
             row = conn.execute(
                 "SELECT payload_json FROM tasks WHERE task_id = ?",
@@ -195,10 +205,8 @@ class DurableDeploymentFabric(DeploymentFabric):
         project_id: str,
     ) -> None:
         super().__init__(provider)
-        if not host_task_id.strip() or not project_id.strip():
-            raise ProductFactoryDeploymentCheckpointError(
-                "durable deployment host/task identity must not be empty"
-            )
+        host_task_id = _require_exact_identity(host_task_id, "host_task_id")
+        project_id = _require_exact_identity(project_id, "project_id")
         self._deployment_checkpoint_host = checkpoint_host
         self._deployment_host_task_id = host_task_id
         self._deployment_project_id = project_id
