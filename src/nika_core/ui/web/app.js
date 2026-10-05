@@ -1697,6 +1697,11 @@
       }
       announce(message, failed);
       appendLog(message);
+      // Commit directed keyboard focus before an asynchronous state refresh can rerender its target.
+      const focusId = result.focus_id
+        || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
+      if (focusId) focusElementById(focusId);
+      else trigger?.focus?.();
       let stateReady = false;
       try {
         stateReady = await refreshState();
@@ -1714,10 +1719,6 @@
           true,
         );
       }
-      const focusId = result.focus_id
-        || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
-      if (focusId) focusElementById(focusId);
-      else trigger?.focus?.();
     } finally {
       if (!keepLocked) inFlightActions.delete(lockKey);
     }
