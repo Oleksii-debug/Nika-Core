@@ -256,6 +256,8 @@ class ModelBenchmarkRunner:
                 resource_after=resource_after,
                 accelerator_before=accelerator_before,
                 accelerator_after=accelerator_after,
+                evaluation_weight=float(case.weight),
+                pass_score=float(case.pass_score),
             )
 
         self._validate_response_identity(candidate, request, response)
@@ -285,6 +287,8 @@ class ModelBenchmarkRunner:
             resource_after=resource_after,
             accelerator_before=accelerator_before,
             accelerator_after=accelerator_after,
+            evaluation_weight=float(case.weight),
+            pass_score=float(case.pass_score),
         )
 
     def _elapsed_ms(self, started: float) -> float:
