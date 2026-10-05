@@ -118,6 +118,17 @@ def test_binding_rejects_mutated_preparation_digest() -> None:
         replace(binding, preparation_sha256="0" * 64)
 
 
+def test_binding_rejects_forged_create_request_digest() -> None:
+    binding = _binding()
+
+    with pytest.raises(ValueError, match="create_request_sha256"):
+        replace(
+            binding,
+            create_request_sha256=_sha(b"forged-create-request"),
+            preparation_sha256=_sha(b"also-forged-preparation"),
+        )
+
+
 @pytest.mark.asyncio
 async def test_prepare_existing_blob_binds_exact_blob_create_and_manifest() -> None:
     seen: list[tuple[str, str, object]] = []
