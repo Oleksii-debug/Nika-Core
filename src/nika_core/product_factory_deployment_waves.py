@@ -32,10 +32,16 @@ class ServiceRolloutSpec:
     depends_on: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        if not self.service_id.strip():
-            raise DeploymentWaveError("service identity must not be empty")
+        if type(self.service_id) is not str or not self.service_id.strip():
+            raise DeploymentWaveError("service identity must be nonempty text")
         if type(self.wave) is not int or self.wave < 0:
             raise DeploymentWaveError("wave index must be a nonnegative integer")
+        if type(self.execution) is not DeploymentExecutionSpec:
+            raise DeploymentWaveError("service execution must be a deployment execution spec")
+        if type(self.depends_on) is not tuple or any(
+            type(parent) is not str or not parent.strip() for parent in self.depends_on
+        ):
+            raise DeploymentWaveError("service dependencies must be a tuple of nonempty text")
         if len(self.depends_on) != len(set(self.depends_on)):
             raise DeploymentWaveError("service dependencies must not contain duplicates")
         if self.service_id in self.depends_on:
@@ -49,8 +55,17 @@ class DeploymentWavePlan:
     services: tuple[ServiceRolloutSpec, ...]
 
     def __post_init__(self) -> None:
-        if not self.plan_id.strip() or not self.project_id.strip():
-            raise DeploymentWaveError("rollout identity must not be empty")
+        if (
+            type(self.plan_id) is not str
+            or not self.plan_id.strip()
+            or type(self.project_id) is not str
+            or not self.project_id.strip()
+        ):
+            raise DeploymentWaveError("rollout identity must be nonempty text")
+        if type(self.services) is not tuple or any(
+            type(service) is not ServiceRolloutSpec for service in self.services
+        ):
+            raise DeploymentWaveError("rollout services must be a tuple of service specs")
         if not self.services:
             raise DeploymentWaveError("rollout must contain at least one service")
         service_ids = [service.service_id for service in self.services]

@@ -365,3 +365,33 @@ def test_restore_rejects_ambiguous_attempt_even_when_python_equality_matches() -
     target, _ = _coordinator()
     with pytest.raises(DeploymentWaveError, match="execution snapshot"):
         target.restore(corrupted)
+
+
+@pytest.mark.parametrize("value", [None, 3, b"api", "", "  "])
+def test_plan_rejects_noncanonical_identity_carriers(value: object) -> None:
+    with pytest.raises(DeploymentWaveError, match="service identity"):
+        replace(_execution("api"), service_id=value)
+    with pytest.raises(DeploymentWaveError, match="rollout identity"):
+        DeploymentWavePlan(value, "social", (_execution("api"),))
+    with pytest.raises(DeploymentWaveError, match="rollout identity"):
+        DeploymentWavePlan("plan", value, (_execution("api"),))
+
+
+@pytest.mark.parametrize(
+    "dependencies",
+    [None, ["db"], ("",), (3,), (object(),), "db"],
+)
+def test_service_rejects_noncanonical_dependency_carriers(dependencies: object) -> None:
+    with pytest.raises(DeploymentWaveError, match="dependencies"):
+        replace(_execution("api"), depends_on=dependencies)
+
+
+@pytest.mark.parametrize("services", [None, [], [_execution("api")], ("api",)])
+def test_plan_rejects_noncanonical_service_collections(services: object) -> None:
+    with pytest.raises(DeploymentWaveError, match="services|at least one"):
+        DeploymentWavePlan("plan", "social", services)
+
+
+def test_service_rejects_noncanonical_execution_before_plan_dispatch() -> None:
+    with pytest.raises(DeploymentWaveError, match="execution spec"):
+        replace(_execution("api"), execution=object())
