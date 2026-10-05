@@ -294,6 +294,30 @@ def test_unsolicited_304_cannot_mark_unvalidated_source_current(
         assert state.current_raw_sha256 is None
 
 
+def test_orphan_304_validator_cannot_stand_in_for_cached_content(tmp_path: Path) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers["if-none-match"] == '"orphan"'
+        return httpx.Response(304)
+
+    store, _, network, service = _service(tmp_path, handler=handler)
+    service.register_source(_source())
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE research_http_sources SET etag=? WHERE source_id=?",
+            ('"orphan"', "web-1"),
+        )
+
+    result = service.refresh_source("web-1")
+
+    assert result.disposition is RefreshDisposition.FAILED
+    assert result.error_code == "unexpected_not_modified"
+    assert network.attempt_count("web-1") == 1
+    assert network.snapshot_count("web-1") == 0
+    state = network.get_source("web-1")
+    assert state.current_raw_sha256 is None
+    assert state.freshness is FreshnessState.ERROR
+
+
 def test_changed_raw_bytes_can_deduplicate_to_same_normalized_document(tmp_path: Path) -> None:
     calls = 0
 
