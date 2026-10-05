@@ -4,6 +4,7 @@ import ctypes
 import os
 import signal
 import subprocess
+import threading
 from typing import Self
 
 
@@ -16,10 +17,12 @@ class WindowsJob:
 
     def __init__(self) -> None:
         self._handle: int | None = None
+        self._lock = threading.Lock()
 
     @property
     def active(self) -> bool:
-        return self._handle is not None
+        with self._lock:
+            return self._handle is not None
 
     def assign(self, process_handle: int) -> None:
         if os.name != "nt":
@@ -91,15 +94,17 @@ class WindowsJob:
             raise ProcessContainmentError(
                 f"AssignProcessToJobObject failed with Win32 error {ctypes.get_last_error()}"
             )
-        self._handle = int(job)
+        with self._lock:
+            self._handle = int(job)
 
     def close(self) -> None:
-        if self._handle is None or os.name != "nt":
+        with self._lock:
+            handle = self._handle
             self._handle = None
+        if handle is None or os.name != "nt":
             return
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CloseHandle(ctypes.c_void_p(self._handle))
-        self._handle = None
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
 
     def __enter__(self) -> Self:
         return self
