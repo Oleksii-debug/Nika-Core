@@ -316,6 +316,24 @@ def test_download_filename_accepts_255_utf16_unit_unicode_component() -> None:
     assert _safe_download_filename(filename) == filename
 
 
+def test_download_broker_rejects_replaced_approved_root_before_save(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    original_root = broker.approved_root
+    moved_root = tmp_path / "downloads-moved"
+    original_root.rename(moved_root)
+    original_root.mkdir()
+    download = _FakeDownload("evidence.txt", "must not be written")
+
+    with pytest.raises(UnsupportedInteractionError, match="root identity"):
+        broker.handle(download)
+
+    assert download.destination is None
+    assert list(original_root.iterdir()) == []
+    assert list(moved_root.iterdir()) == []
+
+
 def test_download_filename_subclass_is_rejected_without_behavior(
     tmp_path: Path,
 ) -> None:
