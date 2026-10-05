@@ -261,3 +261,60 @@ def test_validated_approval_alias_cannot_rewrite_durable_attribution(
     assert payload["approval_authority"]["issuer_id"] == expected_issuer
     assert payload["approval_authority"]["issuer_id"] != approval.issuer_id
 
+class _ExplodingDatetime(datetime):
+    def __bool__(self) -> bool:
+        raise AssertionError("datetime subclass truthiness executed")
+
+
+def test_approval_time_rejects_behavioral_datetime_before_verifier_use(
+    tmp_path: Path,
+) -> None:
+    store, projects, decision = _setup(tmp_path)
+    authority = ApprovalAuthority()
+    decisions = ProductDecisionRepository(
+        store,
+        approval_verifier=authority.verifier(),
+    )
+    intent = decisions.approval_intent(
+        "p1",
+        decision,
+        expected_row_version=0,
+        idempotency_key="decision:approval-time",
+    )
+    request = authority.request(intent, now=_NOW)
+    approval = authority.approve(
+        request.request_id,
+        now=_NOW + timedelta(seconds=1),
+    )
+    hostile_now = _ExplodingDatetime(
+        2026,
+        10,
+        5,
+        4,
+        0,
+        2,
+        tzinfo=UTC,
+    )
+
+    with pytest.raises(ValueError, match="exact datetime"):
+        decisions.record(
+            "p1",
+            decision,
+            expected_row_version=0,
+            idempotency_key="decision:approval-time",
+            approval=approval,
+            now=hostile_now,
+        )
+
+    assert projects.get("p1").row_version == 0
+    stored = decisions.record(
+        "p1",
+        decision,
+        expected_row_version=0,
+        idempotency_key="decision:approval-time",
+        approval=approval,
+        now=_NOW + timedelta(seconds=2),
+    )
+    assert stored.decision.decided_by_ref.startswith("approval://")
+    assert projects.get("p1").row_version == 1
+
