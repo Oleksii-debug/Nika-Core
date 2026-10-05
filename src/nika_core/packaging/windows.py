@@ -80,6 +80,13 @@ class WindowsBuildPlan:
             ("spec_dir", self.spec_dir),
         ):
             _reject_linked_path(label, path)
+        # A pre-existing bundle leaf can itself be a junction/symlink even when
+        # dist_dir is ordinary. Reject it before PyInstaller is allowed to
+        # delete/write output through --noconfirm.
+        _reject_linked_path(
+            "bundle_dir",
+            self.dist_dir / _require_windows_bundle_name(self.name),
+        )
         if not self.entrypoint.is_file():
             raise ValueError("entrypoint must be a file")
         if not self.web_assets.is_dir():
@@ -130,7 +137,11 @@ class WindowsBuildPlan:
     @property
     def bundle_dir(self) -> Path:
         _reject_linked_path("dist_dir", self.dist_dir)
-        return self.dist_dir / _require_windows_bundle_name(self.name)
+        bundle = self.dist_dir / _require_windows_bundle_name(self.name)
+        # Revalidate the leaf after the build as well. Release evidence,
+        # notices and manifests must never follow a swapped output junction.
+        _reject_linked_path("bundle_dir", bundle)
+        return bundle
 
 
 def default_windows_plan(project_root: Path) -> WindowsBuildPlan:
