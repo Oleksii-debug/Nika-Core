@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
@@ -23,6 +24,14 @@ def _now() -> str:
 
 def _canonical(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _is_lock_contention(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    return isinstance(error_code, int) and (error_code & 0xFF) in {
+        sqlite3.SQLITE_BUSY,
+        sqlite3.SQLITE_LOCKED,
+    }
 
 
 def _strict_int(value: Any, *, label: str, minimum: int) -> int:
@@ -90,6 +99,15 @@ class ProductDecisionRepository:
             ).encode()
         ).hexdigest()
         with self.store.connection() as conn:
+            # Serialize idempotency/version authority with the durable decision mutation.
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            except sqlite3.OperationalError as exc:
+                if _is_lock_contention(exc):
+                    raise ProductProjectError(
+                        "product decision write is temporarily busy"
+                    ) from exc
+                raise
             replay = conn.execute(
                 "SELECT project_id,operation_kind,entity_id,entity_version,input_fingerprint "
                 "FROM product_project_mutation_idempotency WHERE operation_key=?",
@@ -207,12 +225,22 @@ class ProductDecisionRepository:
                     "evidence_package_ids": list(evidence_package_ids),
                 },
             )
-            return self._get_version_conn(
+            stored = self._get_version_conn(
                 conn,
                 project_id,
                 decision.decision_id,
                 version,
             )
+            try:
+                conn.commit()
+            except sqlite3.OperationalError as exc:
+                if _is_lock_contention(exc):
+                    conn.rollback()
+                    raise ProductProjectError(
+                        "product decision write is temporarily busy"
+                    ) from exc
+                raise
+            return stored
 
     def get(self, project_id: str, decision_id: str) -> StoredProductDecision:
         with self.store.connection() as conn:
@@ -325,6 +353,14 @@ class ProductDecisionRepository:
             decision_ids=decision_ids,
         )
         spec = replace(project.spec, requirements=tuple(requirements))
+
+        def verify_current_evidence(conn: Any) -> None:
+            verify_sealed_handoffs_conn(
+                conn,
+                project_id,
+                decision.evidence_package_ids,
+            )
+
         return self.projects.update_spec(
             project_id,
             spec,
@@ -333,6 +369,7 @@ class ProductDecisionRepository:
                 f"link approved decision {decision_id} and evidence "
                 f"to requirement {requirement_id}"
             ),
+            read_only_precondition=verify_current_evidence,
         )
 
     @staticmethod
