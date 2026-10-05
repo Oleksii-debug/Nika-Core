@@ -125,6 +125,7 @@ def test_finite_integral_and_float_timeouts_preserve_success(seconds: float) -> 
         "safe\u2066-id",
         "safe\u2028-id",
         "safe\u2029-id",
+        "Cafe\u0301",
         "\ud800",
         "x" * 513,
         "x" * 1_000_000,
@@ -180,3 +181,11 @@ def test_valid_ukrainian_run_and_task_complete_real_deterministic_step() -> None
     assert result.completed_actions == ("advance",)
     assert result.final_state.facts == frozenset({"готово"})
     assert journal.inspected is True
+
+
+def test_composed_unicode_run_identity_remains_accepted() -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    result = _run(brain, run_id="Café")
+    assert result.ok
+    assert planner.calls == 1
