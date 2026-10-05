@@ -1,10 +1,46 @@
 from __future__ import annotations
 
+import multiprocessing
+import os
 from pathlib import Path
 
 import pytest
 
 from nika_core.packaging import notices
+
+
+def _read_after_fifo_swap(
+    target_text: str,
+    fifo_text: str,
+    link_swap: bool,
+    sender: object,
+) -> None:
+    target = Path(target_text)
+    fifo = Path(fifo_text)
+    original_lstat = Path.lstat
+    swapped = False
+
+    def swapping_lstat(path: Path, *args: object, **kwargs: object):
+        nonlocal swapped
+        result = original_lstat(path, *args, **kwargs)
+        if path == target and not swapped:
+            swapped = True
+            target.unlink()
+            if link_swap:
+                target.symlink_to(fifo)
+            else:
+                os.replace(fifo, target)
+        return result
+
+    Path.lstat = swapping_lstat
+    try:
+        result = notices._read_notices(target)
+        sender.send(("ok", result))
+    except BaseException as exc:
+        sender.send(("error", type(exc).__name__, str(exc)))
+    finally:
+        Path.lstat = original_lstat
+        sender.close()
 
 
 @pytest.fixture
@@ -82,14 +118,14 @@ def test_notice_open_failure_returns_sanitized_finding(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     bundle, target, _valid = notice_bundle
-    original_open = Path.open
+    original_open = notices._open_notices_descriptor
 
-    def denied_open(path: Path, *args: object, **kwargs: object):
+    def denied_open(path: Path) -> int:
         if path == target:
             raise PermissionError("private host path")
-        return original_open(path, *args, **kwargs)
+        return original_open(path)
 
-    monkeypatch.setattr(Path, "open", denied_open)
+    monkeypatch.setattr(notices, "_open_notices_descriptor", denied_open)
     assert notices.verify_third_party_notices(bundle) == ("notices:unreadable",)
 
 
@@ -103,16 +139,48 @@ def test_notice_path_swap_between_check_and_open_is_rejected(
         pytest.skip("host does not expose file identity")
     replacement = tmp_path / "replacement.txt"
     replacement.write_bytes(valid)
-    original_open = Path.open
+    original_open = notices._open_notices_descriptor
 
-    def swapped_open(path: Path, *args: object, **kwargs: object):
+    def swapped_open(path: Path) -> int:
         if path == target:
             target.unlink()
             replacement.replace(target)
-        return original_open(path, *args, **kwargs)
+        return original_open(path)
 
-    monkeypatch.setattr(Path, "open", swapped_open)
+    monkeypatch.setattr(notices, "_open_notices_descriptor", swapped_open)
     assert notices.verify_third_party_notices(bundle) == ("notices:unreadable",)
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "mkfifo"),
+    reason="FIFO race regression requires a POSIX host",
+)
+@pytest.mark.parametrize("link_swap", [False, True], ids=["fifo", "symlink-to-fifo"])
+def test_notice_fifo_swap_is_process_bounded(
+    notice_bundle: tuple[Path, Path, bytes],
+    tmp_path: Path,
+    link_swap: bool,
+) -> None:
+    _bundle, target, _valid = notice_bundle
+    fifo = tmp_path / "blocked-notices.fifo"
+    os.mkfifo(fifo)
+    context = multiprocessing.get_context("fork")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_read_after_fifo_swap,
+        args=(str(target), str(fifo), link_swap, sender),
+    )
+    process.start()
+    sender.close()
+    process.join(1.0)
+    if process.is_alive():
+        process.kill()
+        process.join()
+        pytest.fail("notice admission blocked while opening a swapped FIFO")
+    assert process.exitcode == 0
+    assert receiver.poll(0.1)
+    assert receiver.recv() == ("ok", None)
+    receiver.close()
 
 
 def test_generated_notices_reject_oversize_before_replacing_existing_file(
