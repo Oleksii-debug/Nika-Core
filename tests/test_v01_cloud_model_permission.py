@@ -1187,4 +1187,49 @@ def test_recovered_legacy_task_without_frozen_model_selection_never_prompts(
 
     assert prompts == []
     assert service.execution_authority_for_task(record.task_id) is None
+def test_recovered_running_task_with_corrupt_bound_selection_fails_before_reprompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
 
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT selection_json FROM v01_task_model_bindings WHERE task_id = ?",
+            (record.task_id,),
+        ).fetchone()
+        assert row is not None
+        body = row["selection_json"]
+        assert '"model":"api-model"' in body
+        corrupt = body.replace(
+            '"model":"api-model"',
+            '"model":"shadow-model","model":"api-model"',
+            1,
+        )
+        conn.execute(
+            "UPDATE v01_task_model_bindings SET selection_json = ? WHERE task_id = ?",
+            (corrupt, record.task_id),
+        )
+
+    instant[0] = NOW + timedelta(hours=25)
+    with pytest.raises(CloudModelPermissionDenied, match="збережений маршрут"):
+        service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 1
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0] == 1
