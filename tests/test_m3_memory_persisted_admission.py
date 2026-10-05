@@ -283,3 +283,296 @@ def test_invalid_write_identity_preserves_existing_record(
     assert memory.get(
         scope=MemoryScope.TASK, owner_id="owner", namespace="scratch", key="entry"
     ).value == {"safe": True}
+
+
+def test_public_identity_admission_is_consistent_across_crud(tmp_path: Path) -> None:
+    _store, memory = _memory(tmp_path)
+    memory.put(
+        scope=MemoryScope.TASK,
+        owner_id=" owner ",
+        namespace=" scratch ",
+        key=" entry ",
+        value={"safe": True},
+    )
+
+    record = memory.get(
+        scope=MemoryScope.TASK,
+        owner_id=" owner ",
+        namespace=" scratch ",
+        key=" entry ",
+    )
+    assert record is not None
+    assert (record.owner_id, record.namespace, record.key) == (
+        "owner",
+        "scratch",
+        "entry",
+    )
+    assert [
+        item.key
+        for item in memory.list_namespace(
+            scope=MemoryScope.TASK,
+            owner_id=" owner ",
+            namespace=" scratch ",
+        )
+    ] == ["entry"]
+    assert memory.delete(
+        scope=MemoryScope.TASK,
+        owner_id=" owner ",
+        namespace=" scratch ",
+        key=" entry ",
+    )
+    assert memory.get(
+        scope=MemoryScope.TASK,
+        owner_id="owner",
+        namespace="scratch",
+        key="entry",
+    ) is None
+
+
+@pytest.mark.parametrize("operation", ["get", "list", "delete"])
+def test_public_read_delete_identity_rejects_invalid_unicode(
+    tmp_path: Path, operation: str
+) -> None:
+    _store, memory = _memory(tmp_path)
+    _put(memory)
+    with pytest.raises(ValueError, match="must be valid UTF-8"):
+        if operation == "get":
+            memory.get(
+                scope=MemoryScope.TASK,
+                owner_id="owner",
+                namespace="scratch",
+                key="\ud800",
+            )
+        elif operation == "list":
+            memory.list_namespace(
+                scope=MemoryScope.TASK,
+                owner_id="\ud800",
+                namespace="scratch",
+            )
+        else:
+            memory.delete(
+                scope=MemoryScope.TASK,
+                owner_id="owner",
+                namespace="scratch",
+                key="\ud800",
+            )
+    assert memory.get(
+        scope=MemoryScope.TASK,
+        owner_id="owner",
+        namespace="scratch",
+        key="entry",
+    ) is not None
+
+
+@pytest.mark.parametrize(
+    ("field", "stored", "operation", "message"),
+    [
+        ("memory_key", b"entry", "list", "stored memory key must be text"),
+        (
+            "created_at",
+            b"2038-01-01T00:00:00+00:00",
+            "get",
+            "stored memory created_at must be text",
+        ),
+        (
+            "updated_at",
+            "2038-01-01T00:00:00",
+            "get",
+            "stored memory updated_at must be timezone-aware",
+        ),
+        (
+            "expires_at",
+            b"2038-01-01T00:00:00+00:00",
+            "get",
+            "stored memory expiry must be text",
+        ),
+    ],
+)
+def test_corrupt_persisted_identity_and_datetime_carriers_fail_closed(
+    tmp_path: Path,
+    field: str,
+    stored: object,
+    operation: str,
+    message: str,
+) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            f"UPDATE memory_records SET {field} = ? WHERE memory_key = 'entry'",
+            (stored,),
+        )
+
+    with pytest.raises(ValueError, match=message):
+        if operation == "list":
+            memory.list_namespace(
+                scope=MemoryScope.TASK,
+                owner_id="owner",
+                namespace="scratch",
+            )
+        else:
+            memory.get(
+                scope=MemoryScope.TASK,
+                owner_id="owner",
+                namespace="scratch",
+                key="entry",
+            )
+
+
+def test_noncanonical_persisted_key_is_not_returned(tmp_path: Path) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET memory_key = ' entry ' "
+            "WHERE memory_key = 'entry'"
+        )
+    with pytest.raises(ValueError, match="stored memory key is not canonical"):
+        memory.list_namespace(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+        )
+
+
+def test_corrupt_created_at_blocks_put_before_mutation(tmp_path: Path) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET created_at = ? WHERE memory_key = 'entry'",
+            ("2038-01-01T00:00:00",),
+        )
+
+    with pytest.raises(ValueError, match="stored memory created_at must be timezone-aware"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+            value={"replacement": True},
+        )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT value_json, created_at FROM memory_records "
+            "WHERE memory_key = 'entry'"
+        ).fetchone()
+        assert row["value_json"] == '{"safe":true}'
+        assert row["created_at"] == "2038-01-01T00:00:00"
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "bad\x00key",
+        "bad\nkey",
+        "bad\u200bkey",
+        "bad\u2028key",
+    ],
+)
+def test_ambiguous_identity_characters_fail_before_memory_effect(
+    tmp_path: Path, invalid: str
+) -> None:
+    store, memory = _memory(tmp_path)
+    with pytest.raises(ValueError, match="control or invisible"):
+        memory.put(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key=invalid,
+            value={"unsafe": True},
+        )
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 0
+
+
+def test_normal_unicode_memory_identity_remains_supported(tmp_path: Path) -> None:
+    _store, memory = _memory(tmp_path)
+    record = memory.put(
+        scope=MemoryScope.TASK,
+        owner_id="користувач один",
+        namespace="нотатки шахи",
+        key="позиція № 1",
+        value={"мова": "українська"},
+    )
+    assert (record.owner_id, record.namespace, record.key) == (
+        "користувач один",
+        "нотатки шахи",
+        "позиція № 1",
+    )
+
+
+def test_get_does_not_delete_expired_record_before_full_carrier_validation(
+    tmp_path: Path,
+) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ?, updated_at = ? "
+            "WHERE memory_key = 'entry'",
+            (
+                datetime(2035, 1, 1, tzinfo=UTC).isoformat(),
+                "2038-01-01T00:00:00",
+            ),
+        )
+
+    with pytest.raises(ValueError, match="stored memory updated_at must be timezone-aware"):
+        memory.get(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+            now=datetime(2036, 1, 1, tzinfo=UTC),
+        )
+
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_records WHERE memory_key = 'entry'"
+        ).fetchone()[0] == 1
+
+
+def test_list_does_not_delete_expired_record_with_corrupt_persisted_key(
+    tmp_path: Path,
+) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ?, memory_key = ? "
+            "WHERE memory_key = 'entry'",
+            (datetime(2035, 1, 1, tzinfo=UTC).isoformat(), b"entry"),
+        )
+
+    with pytest.raises(ValueError, match="stored memory key must be text"):
+        memory.list_namespace(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            now=datetime(2036, 1, 1, tzinfo=UTC),
+        )
+
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 1
+
+
+def test_purge_does_not_delete_expired_record_before_full_carrier_validation(
+    tmp_path: Path,
+) -> None:
+    store, memory = _memory(tmp_path)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET expires_at = ?, value_json = 'NaN' "
+            "WHERE memory_key = 'entry'",
+            (datetime(2035, 1, 1, tzinfo=UTC).isoformat(),),
+        )
+
+    with pytest.raises(ValueError, match="invalid stored memory JSON constant"):
+        memory.purge_expired(now=datetime(2036, 1, 1, tzinfo=UTC))
+
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM memory_records WHERE memory_key = 'entry'"
+        ).fetchone()[0] == 1

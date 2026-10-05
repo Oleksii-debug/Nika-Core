@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from datetime import UTC, datetime
 from typing import Any
 
@@ -50,7 +51,11 @@ class MemoryService:
                 "AND namespace = ? AND memory_key = ?",
                 (scope.value, owner_id, namespace, key),
             ).fetchone()
-            created_at = existing["created_at"] if existing else now.isoformat()
+            if existing is not None:
+                _parse_stored_datetime("created_at", existing["created_at"])
+                created_at = existing["created_at"]
+            else:
+                created_at = now.isoformat()
             conn.execute(
                 """INSERT INTO memory_records(
                     scope, owner_id, namespace, memory_key, value_json, user_approved,
@@ -104,6 +109,9 @@ class MemoryService:
         now: datetime | None = None,
     ) -> MemoryRecord | None:
         scope = _require_scope(scope)
+        owner_id = _required("owner_id", owner_id)
+        namespace = _required("namespace", namespace)
+        key = _required("key", key)
         current = _as_utc(now) if now else datetime.now(UTC)
         with self._store.connection() as conn:
             row = conn.execute(
@@ -113,15 +121,16 @@ class MemoryService:
             ).fetchone()
             if row is None:
                 return None
-            expires_at = _parse_optional(row["expires_at"])
-            if expires_at is not None and expires_at <= current:
+            record = _record_from_row(row)
+            expires_at = record.expires_at
+            if expires_at is not None and _as_utc(expires_at) <= current:
                 conn.execute(
                     "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
                     "AND namespace = ? AND memory_key = ?",
                     (scope.value, owner_id, namespace, key),
                 )
                 return None
-        return _record_from_row(row)
+        return record
 
     def list_namespace(
         self,
@@ -132,6 +141,8 @@ class MemoryService:
         now: datetime | None = None,
     ) -> tuple[MemoryRecord, ...]:
         scope = _require_scope(scope)
+        owner_id = _required("owner_id", owner_id)
+        namespace = _required("namespace", namespace)
         current = _as_utc(now) if now is not None else datetime.now(UTC)
         with self._store.connection() as conn:
             # Compare actual instants, not offset-sensitive ISO strings. Older
@@ -143,20 +154,24 @@ class MemoryService:
             ).fetchall()
             records: list[MemoryRecord] = []
             for row in rows:
-                expiry = _parse_optional(row["expires_at"])
+                record = _record_from_row(row)
+                expiry = record.expires_at
                 if expiry is not None and _as_utc(expiry) <= current:
                     conn.execute(
                         "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
                         "AND namespace = ? AND memory_key = ?",
-                        (scope.value, owner_id, namespace, row["memory_key"]),
+                        (scope.value, owner_id, namespace, record.key),
                     )
                 else:
-                    records.append(_record_from_row(row))
+                    records.append(record)
             # Failure to parse a later row rolls back all scoped deletions.
             return tuple(records)
 
     def delete(self, *, scope: MemoryScope, owner_id: str, namespace: str, key: str) -> bool:
         scope = _require_scope(scope)
+        owner_id = _required("owner_id", owner_id)
+        namespace = _required("namespace", namespace)
+        key = _required("key", key)
         with self._store.connection() as conn:
             cursor = conn.execute(
                 "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
@@ -179,17 +194,22 @@ class MemoryService:
             # An explicit global purge must obey the same offset-aware expiry
             # semantics as get() and scoped reads; invalid dates roll back.
             rows = conn.execute(
-                "SELECT scope, owner_id, namespace, memory_key, expires_at "
-                "FROM memory_records WHERE expires_at IS NOT NULL"
+                "SELECT * FROM memory_records WHERE expires_at IS NOT NULL"
             ).fetchall()
             deleted = 0
             for row in rows:
-                expiry = _parse_optional(row["expires_at"])
+                record = _record_from_row(row)
+                expiry = record.expires_at
                 if expiry is not None and _as_utc(expiry) <= current:
                     cursor = conn.execute(
                         "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
                         "AND namespace = ? AND memory_key = ?",
-                        (row["scope"], row["owner_id"], row["namespace"], row["memory_key"]),
+                        (
+                            record.scope.value,
+                            record.owner_id,
+                            record.namespace,
+                            record.key,
+                        ),
                     )
                     deleted += cursor.rowcount
         return deleted
@@ -208,6 +228,11 @@ def _required(name: str, value: str) -> str:
     result = value.strip()
     if not result:
         raise ValueError(f"{name} must not be empty")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in result
+    ):
+        raise ValueError(f"{name} must not contain control or invisible characters")
     try:
         result.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -221,8 +246,31 @@ def _as_utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def _parse_optional(value: str | None) -> datetime | None:
-    return datetime.fromisoformat(value) if value else None
+def _parse_optional(value: Any) -> datetime | None:
+    if value is None:
+        return None
+    return _parse_stored_datetime("expiry", value)
+
+
+def _parse_stored_datetime(name: str, value: Any) -> datetime:
+    if type(value) is not str:
+        raise ValueError(f"stored memory {name} must be text")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid stored memory {name}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"stored memory {name} must be timezone-aware")
+    return parsed
+
+
+def _stored_required(name: str, value: Any) -> str:
+    if type(value) is not str:
+        raise ValueError(f"stored memory {name} must be text")
+    normalized = _required(name, value)
+    if normalized != value:
+        raise ValueError(f"stored memory {name} is not canonical")
+    return normalized
 
 
 def _reject_memory_constant(value: str) -> None:
@@ -262,7 +310,16 @@ def _validate_scalar_unicode(value: Any) -> None:
 
 
 def _record_from_row(row: Any) -> MemoryRecord:
-    scope = MemoryScope(row["scope"])
+    stored_scope = row["scope"]
+    if type(stored_scope) is not str:
+        raise ValueError("stored memory scope must be text")
+    try:
+        scope = MemoryScope(stored_scope)
+    except ValueError as exc:
+        raise ValueError("invalid stored memory scope") from exc
+    owner_id = _stored_required("owner_id", row["owner_id"])
+    namespace = _stored_required("namespace", row["namespace"])
+    key = _stored_required("key", row["memory_key"])
     approval = row["user_approved"]
     if type(approval) is not int or approval not in (0, 1):
         raise ValueError("invalid stored memory approval flag")
@@ -278,12 +335,12 @@ def _record_from_row(row: Any) -> MemoryRecord:
     _validate_scalar_unicode(value)
     return MemoryRecord(
         scope=scope,
-        owner_id=row["owner_id"],
-        namespace=row["namespace"],
-        key=row["memory_key"],
+        owner_id=owner_id,
+        namespace=namespace,
+        key=key,
         value=value,
         user_approved=bool(approval),
         expires_at=_parse_optional(row["expires_at"]),
-        created_at=datetime.fromisoformat(row["created_at"]),
-        updated_at=datetime.fromisoformat(row["updated_at"]),
+        created_at=_parse_stored_datetime("created_at", row["created_at"]),
+        updated_at=_parse_stored_datetime("updated_at", row["updated_at"]),
     )
