@@ -73,8 +73,10 @@ raw evidence.
 
 ## Integrity behavior
 
-Persisted audit payloads are required to be canonical JSON objects. Non-finite
-numbers and non-object payloads are rejected before append. Non-finite JSON
+Persisted audit payloads are required to be canonical JSON objects. On readback, decoded evidence
+is reserialized through the same canonical writer and must match the stored text exactly; alternate
+key order, whitespace, Unicode escape spelling or numeric spelling fails closed even when semantic
+values would be equal. Non-finite numbers and non-object payloads are rejected before append. Non-finite JSON
 constants, finite-syntax float overflow or duplicate keys
 (including equal-value duplicates and nested duplicates) fail closed on read.
 Inspection fails closed with

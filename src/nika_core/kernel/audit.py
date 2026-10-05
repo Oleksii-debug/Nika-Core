@@ -282,6 +282,8 @@ class AuditLog:
                 parse_float=_reject_overflow_json_float,
             )
             payload = _snapshot_audit_payload(payload)
+            if _canonical_payload_json(payload) != payload_json:
+                raise ValueError("persisted audit payload is not canonical JSON")
         except (json.JSONDecodeError, TypeError, ValueError, RecursionError) as exc:
             raise AuditIntegrityError(
                 f"audit event {event_id} contains invalid durable evidence"

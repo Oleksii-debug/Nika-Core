@@ -332,6 +332,11 @@ def test_append_rejects_noncanonical_json_number_before_persistence(tmp_path, no
         '{"duration":-Infinity}',
         '{"mode":"denied","mode":"granted"}',
         '{"nested":{"approved":false,"approved":false}}',
+        '{"b":2,"a":1}',
+        '{"ok" :true}',
+        '{"text":"\\u0442"}',
+        '{"value":-0}',
+        '{"value":1e0}',
     ],
 )
 def test_inspection_rejects_noncanonical_persisted_json(tmp_path, corrupted):
