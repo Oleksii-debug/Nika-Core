@@ -179,3 +179,31 @@ def test_schedule_identity_and_recurrence_binding_compose_without_mutation(tmp_p
         )
 
     assert jobs.get(original.job_id) == updated
+
+
+def test_schedule_identity_composes_with_linearized_dispatch_authority(
+    tmp_path: Path,
+) -> None:
+    jobs = ScheduledJobStore(_store(tmp_path))
+    identity = ScheduleIdentity(
+        scope="product_project",
+        owner_id="project-linearized",
+        dedup_key="dispatch-linearized",
+        product_project_id="project-linearized",
+    )
+    job = ScheduledJob(
+        job_id="identity-linearized-dispatch",
+        action_id="monitor.check",
+        trigger_kind=TriggerKind.INTERVAL,
+        trigger={"minutes": 5, "timezone": "UTC"},
+        payload={"value": 1},
+        identity=identity,
+    )
+    jobs.upsert(job)
+    restored = jobs.get(job.job_id)
+    assert restored == job
+    assert jobs.authorize_dispatch(restored) == restored
+    assert jobs.list_for_owner(
+        scope=identity.scope,
+        owner_id=identity.owner_id,
+    ) == (restored,)
