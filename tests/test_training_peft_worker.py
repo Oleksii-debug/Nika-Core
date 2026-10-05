@@ -851,10 +851,11 @@ def test_new_job_can_warm_start_from_promoted_candidate(
         "base_artifact_sha256": config.base_gguf_sha256,
         "candidate_artifact_ref": request.base_artifact_ref,
         "consumed_materials_sha256": "7" * 64,
-        "foundation_model_sha256": config.base_gguf_sha256,
         "job_fingerprint": "8" * 64,
+        "previous_adapter_tensors_sha256": "6" * 64,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
         "schema": "nika-peft-candidate-v2",
+        "trained_adapter_tensors_sha256": "9" * 64,
         "step_number": 2,
         "trainer_artifact_id": "a" * 64,
         "trainer_implementation_sha256": "b" * 64,
@@ -890,6 +891,7 @@ def test_new_job_can_warm_start_from_promoted_candidate(
     )
     assert candidate_sha256 == _sha256(candidate.read_bytes())
     manifest = peft.candidate_adapter_manifest(candidate)
+    assert manifest["schema"] == "nika-peft-candidate-v3"
     assert manifest["foundation_model_sha256"] == config.base_gguf_sha256
     assert manifest["previous_adapter_tensors_sha256"] is not None
     assert manifest["trained_adapter_tensors_sha256"] is not None
@@ -924,7 +926,7 @@ def test_warm_start_rejects_wrong_foundation_chain(
         initial_adapter_sha256=promoted_sha256,
     )
     manifest = {
-        "schema": "nika-peft-candidate-v2",
+        "schema": "nika-peft-candidate-v3",
         "candidate_artifact_ref": request.base_artifact_ref,
         "foundation_model_sha256": "0" * 64,
         "adapter_config": {},
@@ -1653,7 +1655,7 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
     assert manifest["training_runtime_versions"] == _RUNTIME_VERSIONS
 
 
-def test_candidate_manifest_v2_binds_foundation_and_v1_remains_readable(
+def test_candidate_manifest_v2_v3_and_v1_are_exact_disjoint_contracts(
     tmp_path: Path,
 ) -> None:
     request, base = _parsed(tmp_path)
@@ -1668,7 +1670,7 @@ def test_candidate_manifest_v2_binds_foundation_and_v1_remains_readable(
         "target_modules": list(config.lora_target_modules),
         "task_type": "CAUSAL_LM",
     }
-    current = json.loads(
+    tensor_v2 = json.loads(
         peft._candidate_manifest_json(
             request=request,
             config=config,
@@ -1679,19 +1681,69 @@ def test_candidate_manifest_v2_binds_foundation_and_v1_remains_readable(
         )
     )
 
-    assert current["schema"] == "nika-peft-candidate-v2"
-    assert current["foundation_model_sha256"] == config.base_gguf_sha256
-    assert current["previous_adapter_tensors_sha256"] is None
-    assert current["trained_adapter_tensors_sha256"] == "9" * 64
-    assert peft._validate_candidate_manifest_payload(current) == current
+    assert tensor_v2["schema"] == "nika-peft-candidate-v2"
+    assert "foundation_model_sha256" not in tensor_v2
+    assert tensor_v2["previous_adapter_tensors_sha256"] is None
+    assert tensor_v2["trained_adapter_tensors_sha256"] == "9" * 64
+    assert peft._validate_candidate_manifest_payload(tensor_v2) == tensor_v2
+    assert (
+        peft._candidate_foundation_model_sha256(tensor_v2)
+        == tensor_v2["base_artifact_sha256"]
+    )
 
-    legacy = dict(current)
-    legacy.pop("foundation_model_sha256")
-    legacy.pop("previous_adapter_tensors_sha256")
-    legacy.pop("trained_adapter_tensors_sha256")
-    legacy["schema"] = "nika-peft-candidate-v1"
-    assert peft._validate_candidate_manifest_payload(legacy) == legacy
+    promoted = tmp_path / "promoted.safetensors"
+    promoted.write_bytes(b"promoted")
+    promoted_sha256 = _sha256(b"promoted")
+    warm_request = replace(
+        request,
+        base_artifact_ref="models/candidate/pilot",
+        base_artifact_sha256=promoted_sha256,
+    )
+    warm_config = replace(
+        config,
+        initial_adapter=promoted.resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    warm_adapter_config = dict(adapter_config)
+    warm_adapter_config["base_model_name_or_path"] = warm_request.base_artifact_ref
+    warm_v3 = json.loads(
+        peft._candidate_manifest_json(
+            request=warm_request,
+            config=warm_config,
+            consumed=consumed,
+            adapter_config=warm_adapter_config,
+            previous_adapter_tensors_sha256="7" * 64,
+            trained_adapter_tensors_sha256="8" * 64,
+        )
+    )
 
+    assert warm_v3["schema"] == "nika-peft-candidate-v3"
+    assert warm_v3["foundation_model_sha256"] == config.base_gguf_sha256
+    assert peft._validate_candidate_manifest_payload(warm_v3) == warm_v3
+    assert (
+        peft._candidate_foundation_model_sha256(warm_v3)
+        == config.base_gguf_sha256
+    )
+
+    aliased_v2 = dict(tensor_v2)
+    aliased_v2["foundation_model_sha256"] = config.base_gguf_sha256
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(aliased_v2)
+
+    incomplete_v3 = dict(warm_v3)
+    incomplete_v3.pop("foundation_model_sha256")
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(incomplete_v3)
+
+    legacy_v1 = dict(tensor_v2)
+    legacy_v1.pop("previous_adapter_tensors_sha256")
+    legacy_v1.pop("trained_adapter_tensors_sha256")
+    legacy_v1["schema"] = "nika-peft-candidate-v1"
+    assert peft._validate_candidate_manifest_payload(legacy_v1) == legacy_v1
+    assert (
+        peft._candidate_foundation_model_sha256(legacy_v1)
+        == legacy_v1["base_artifact_sha256"]
+    )
 
 def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
     tmp_path: Path,
