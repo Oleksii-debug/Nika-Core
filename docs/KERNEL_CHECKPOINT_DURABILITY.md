@@ -15,7 +15,7 @@ This contract reuses the existing SQLite `checkpoints` table and public `Checkpo
 5. A durable read fails closed when payload bytes are malformed JSON, recurse beyond the JSON decoder/encoder safety boundary, decode to a non-object value, contain a non-finite number, or do not match the canonical representation produced by the service.
 6. Checkpoint payloads are bounded before serialization to at most 10,000 JSON value nodes, depth 64, 4,096-bit integers, and 1 MiB canonical UTF-8 JSON. Invalid Unicode fails before SQLite mutation.
 7. Restart reads fetch at most the admitted payload prefix and 65 checksum bytes through SQLite BLOB projections, verify the underlying storage classes and byte lengths, then strictly decode UTF-8/ASCII. Oversized durable payloads or checksums therefore fail closed without returning their full TEXT values to Python.
-8. Existing finite object payloads written by the prior service remain byte-compatible because the prior writer already used sorted keys, UTF-8 Unicode, and compact separators.
+8. Public `task_id` and `stage` inputs are exact strings with valid UTF-8 and a 4 KiB byte ceiling. Restart reads apply the same bounded SQLite TEXT projection to durable `checkpoint_id`, `task_id`, and `stage` carriers and bind the persisted task identity to the requested task before exposing a `Checkpoint`.\n9. Existing finite object payloads written by the prior service remain byte-compatible because the prior writer already used sorted keys, UTF-8 Unicode, and compact separators.
 
 ## Threat model
 
@@ -43,6 +43,6 @@ The focused regression family is `tests/test_kernel_checkpoint_durability.py` an
 - controlled rejection of excessive JSON nesting on both write and restart read;
 - pre-serialization node/depth/integer/UTF-8 resource admission with exact positive boundary cases;
 - oversized durable payload/checksum rejection through bounded SQLite BLOB projections;
-- durable node-overflow rejection even when checksum and canonical JSON bytes otherwise match.
+- durable node-overflow rejection even when checksum and canonical JSON bytes otherwise match;\n- exact-string and UTF-8/byte-bounded task/stage ingress;\n- BLOB/oversized durable checkpoint identity and stage rejection before public rehydration.
 
 Repository Core CI and applicable integrated workflows remain authoritative for merge credit. `HUMAN_TESTED` and `NVDA_VERIFIED` are not established by these automated tests.
