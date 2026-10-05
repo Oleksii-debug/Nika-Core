@@ -76,6 +76,42 @@ def test_grant_transaction_rolls_back_grant_and_audit_on_dependent_failure(
         ).fetchone()[0] == 0
 
 
+def test_grant_transaction_keeps_commit_control_inside_store(
+    tmp_path: Path,
+) -> None:
+    store, audit, permissions = _authority(tmp_path)
+    permission_id = "model-cloud:no-caller-commit"
+
+    with pytest.raises(RuntimeError, match="dependent write rejected"):
+        with permissions.grant_transaction(
+            permission_id=permission_id,
+            scope=_scope(),
+        ) as (transaction, _granted):
+            assert not hasattr(transaction, "commit")
+            assert not hasattr(transaction, "rollback")
+            assert not hasattr(transaction, "close")
+            transaction.execute(
+                "CREATE TABLE dependent_atomicity_probe(value TEXT NOT NULL)"
+            )
+            transaction.execute(
+                "INSERT INTO dependent_atomicity_probe(value) VALUES (?)",
+                ("uncommitted",),
+            )
+            raise RuntimeError("dependent write rejected")
+
+    assert permissions.get(permission_id) is None
+    assert audit.list_for(
+        entity_type="standing_permission",
+        entity_id=permission_id,
+    ) == ()
+    with store.connection() as conn:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
+            "AND name = 'dependent_atomicity_probe'"
+        ).fetchone()
+    assert exists is None
+
+
 def test_grant_transaction_abrupt_exit_leaves_no_grant_or_audit(
     tmp_path: Path,
 ) -> None:
