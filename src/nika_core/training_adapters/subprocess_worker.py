@@ -566,6 +566,7 @@ class SubprocessTrainingWorker:
         stdout = self._execute(
             request_bytes + b"\n",
             expected_command_records=command_records,
+            expected_training_materials=training_materials,
         )
         response = self._parse_response(stdout, expected_step_id=current_step_id)
         completed = response["completed"]
@@ -793,6 +794,7 @@ class SubprocessTrainingWorker:
         request_bytes: bytes,
         *,
         expected_command_records: Mapping[int, ArtifactRecord],
+        expected_training_materials: ResolvedTrainingPackage,
     ) -> bytes:
         deadline = time.monotonic() + self._timeout_seconds
         try:
@@ -837,6 +839,18 @@ class SubprocessTrainingWorker:
             self._reap_process(process)
             raise _error(
                 "command_artifact_changed_after_process_start",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            ) from exc
+
+        try:
+            expected_training_materials.reverify()
+        except TrainingMaterialResolutionError as exc:
+            self._close_pipe(process.stdin)
+            self._close_pipe(process.stdout)
+            self._kill_process(process)
+            self._reap_process(process)
+            raise _error(
+                "training_material_changed_after_process_start",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             ) from exc
 
