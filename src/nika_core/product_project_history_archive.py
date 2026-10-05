@@ -16,6 +16,7 @@ _MAX_ARCHIVE_BYTES = 64 * 1024 * 1024
 _MAX_DURABLE_JSON_BYTES = 2 * 1024 * 1024
 _MAX_JSON_DEPTH = 128
 _MAX_JSON_NODES = 500_000
+_MAX_JSON_NUMBER_CHARS = 1024
 _ARCHIVE_ENVELOPE_KEYS = frozenset({"digest_sha256", "payload"})
 _ARCHIVE_PAYLOAD_KEYS = frozenset(
     {"schema", "project_id", "spec_version", "row_version", "history"}
@@ -46,7 +47,15 @@ def _reject_json_constant(value: str) -> Any:
     raise _StrictJsonError(f"non-finite JSON constant: {value}")
 
 
+def _parse_bounded_int(value: str) -> int:
+    if len(value) > _MAX_JSON_NUMBER_CHARS:
+        raise _StrictJsonError("JSON integer exceeds digit limit")
+    return int(value)
+
+
 def _parse_finite_float(value: str) -> float:
+    if len(value) > _MAX_JSON_NUMBER_CHARS:
+        raise _StrictJsonError("JSON number exceeds character limit")
     parsed = float(value)
     if not math.isfinite(parsed):
         raise _StrictJsonError("non-finite JSON number")
@@ -92,6 +101,8 @@ def _validate_json_shape(value: Any, *, label: str) -> Any:
 def _strict_json_text(value: Any, *, label: str, max_bytes: int) -> Any:
     if type(value) is not str:
         raise ProductProjectError(f"{label} must be JSON text")
+    if len(value) > max_bytes:
+        raise ProductProjectError(f"{label} exceeds byte limit")
     try:
         encoded = value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -104,6 +115,7 @@ def _strict_json_text(value: Any, *, label: str, max_bytes: int) -> Any:
             object_pairs_hook=_unique_json_object,
             parse_constant=_reject_json_constant,
             parse_float=_parse_finite_float,
+            parse_int=_parse_bounded_int,
         )
     except (
         json.JSONDecodeError,
@@ -254,9 +266,15 @@ class ProductProjectHistoryArchiveService:
                 "audit_events": audit,
             },
         }
+        _validate_json_shape(
+            payload,
+            label="ProductProject history archive payload",
+        )
         digest = _sha256(payload)
         envelope = {"digest_sha256": digest, "payload": payload}
         archive_bytes = _canonical(envelope).encode("utf-8")
+        if len(archive_bytes) > _MAX_ARCHIVE_BYTES:
+            raise ProductProjectError("ProductProject history archive exceeds byte limit")
         summary = self._summary(payload, digest)
         return ProductProjectHistoryArchive(summary=summary, bytes=archive_bytes)
 
