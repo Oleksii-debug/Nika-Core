@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -64,6 +65,17 @@ class AppConfig(BaseSettings):
 
     @classmethod
     def from_environment(cls) -> AppConfig:
+        # Both names are supported for compatibility, but selecting one silently
+        # when they disagree can start Nika against the wrong durable database.
+        # Match the case-insensitive BaseSettings environment contract on every OS.
+        aliases = {"nika_db_path", "nika_database_path"}
+        overrides = [
+            Path(value).expanduser()
+            for name, value in os.environ.items()
+            if name.casefold() in aliases
+        ]
+        if overrides and any(path != overrides[0] for path in overrides[1:]):
+            raise ValueError("conflicting NIKA database path environment overrides")
         config = cls()
         if getattr(sys, "frozen", False) and "database_path" not in config.model_fields_set:
             from nika_core.reliability.legacy_database import (
