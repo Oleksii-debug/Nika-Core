@@ -164,6 +164,13 @@ def _request_matches_binding(
             provider_id=binding.challenger_provider_id,
             failure_effect=ModelFailureEffect.NO_EFFECT,
         )
+    if request.metadata.get("evaluation_set_sha256") != binding.evaluation_set_sha256:
+        raise ModelGatewayError(
+            ModelErrorCode.INVALID_REQUEST,
+            "benchmark evaluation-set identity does not match evaluation binding",
+            provider_id=binding.challenger_provider_id,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
 
 
 def _validate_usage(usage: ModelUsage, *, provider_id: str) -> None:
