@@ -125,7 +125,7 @@ class RuntimeIdempotencyEffectJournal:
         payload = {
             "action_id": action.action_id,
             "adds": sorted(action.adds),
-            "arguments": action.arguments,
+            "arguments": dict(action.arguments),
             "forbids": sorted(action.forbids),
             "removes": sorted(action.removes),
             "requires": sorted(action.requires),
