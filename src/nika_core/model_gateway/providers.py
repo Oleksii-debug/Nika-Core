@@ -271,13 +271,21 @@ class OllamaProvider:
         return self._capabilities
 
     @staticmethod
-    def _catalog_manifest_sha256(body: object, *, model: str) -> str:
+    def _model_aliases(model: str) -> frozenset[str]:
+        final_segment = model.rsplit("/", 1)[-1]
+        if ":" in final_segment:
+            return frozenset((model,))
+        return frozenset((model, f"{model}:latest"))
+
+    @classmethod
+    def _catalog_manifest_sha256(cls, body: object, *, model: str) -> str:
         if type(body) is not dict:
             raise ValueError("Ollama model catalog must be an object")
         models = body.get("models")
         if type(models) is not list or len(models) > _MAX_OLLAMA_CATALOG_MODELS:
             raise ValueError("Ollama model catalog is invalid or unbounded")
 
+        aliases = cls._model_aliases(model)
         matches: list[str] = []
         for item in models:
             if type(item) is not dict:
@@ -292,10 +300,11 @@ class OllamaProvider:
                 or _OLLAMA_MANIFEST_DIGEST.fullmatch(digest) is None
             ):
                 raise ValueError("Ollama catalog digest is invalid")
-            if name == model or item_model == model:
-                if name != model or item_model != model:
-                    raise ValueError("Ollama catalog model identity is ambiguous")
-                matches.append(digest)
+            if name not in aliases and item_model not in aliases:
+                continue
+            if name != item_model or name not in aliases:
+                raise ValueError("Ollama catalog model identity is ambiguous")
+            matches.append(digest)
 
         if len(matches) != 1:
             raise ValueError("Ollama catalog does not contain one exact model identity")
