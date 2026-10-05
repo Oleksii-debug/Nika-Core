@@ -41,8 +41,8 @@ _SENSITIVE_REFERENCE_MARKERS = (
 
 def _strict_utf8(reference: str) -> bytes:
     try:
-        return reference.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
+        return str.encode(reference, "utf-8", errors="strict")
+    except (TypeError, UnicodeEncodeError) as exc:
         raise ValueError("evidence reference must be valid UTF-8 text") from exc
 
 
@@ -87,11 +87,12 @@ def safe_evidence_reference(reference: str) -> str:
     """
 
     encoded = _strict_utf8(reference)
+    canonical = encoded.decode("utf-8", errors="strict")
     if len(encoded) > _MAX_EVIDENCE_REFERENCE_BYTES:
         digest = hashlib.sha256(encoded).hexdigest()
         return f"evidence-sha256:{digest}"
 
-    if _is_sensitive(reference):
+    if _is_sensitive(canonical):
         digest = hashlib.sha256(encoded).hexdigest()
         return f"evidence-sha256:{digest}"
-    return reference
+    return canonical
