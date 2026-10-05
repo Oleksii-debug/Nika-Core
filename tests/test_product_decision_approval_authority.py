@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
     ProductOption,
+    ProductProjectError,
     ProductProjectRepository,
     ProductProjectSpec,
     ResearchEvidencePackage,
@@ -20,6 +22,19 @@ from nika_core.product_project import (
 from nika_core.security import ApprovalAuthority
 
 _NOW = datetime(2026, 10, 5, 4, 0, tzinfo=UTC)
+
+
+class _TextCarrier(str):
+    pass
+
+
+class _DecisionCarrier:
+    def __init__(self, decision: ProductDecision) -> None:
+        self.decision_id = decision.decision_id
+        self.option_id = decision.option_id
+        self.state = decision.state
+        self.rationale = decision.rationale
+        self.decided_by_ref = decision.decided_by_ref
 
 
 def _setup(tmp_path: Path):
@@ -64,6 +79,67 @@ def _setup(tmp_path: Path):
         decided_by_ref="user://owner",
     )
     return store, projects, decision
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "project-id-carrier",
+        "idempotency-carrier",
+        "decision-carrier",
+        "decision-id-carrier",
+        "option-id-carrier",
+        "state-carrier",
+        "rationale-carrier",
+        "attribution-carrier",
+    ),
+)
+def test_owner_decision_boundary_rejects_nonexact_input_carriers(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    store, projects, decision = _setup(tmp_path)
+    decisions = ProductDecisionRepository(store)
+    project_id: str = "p1"
+    idempotency_key: str = "decision:carrier"
+    candidate: object = decision
+
+    if case == "project-id-carrier":
+        project_id = _TextCarrier(project_id)
+    elif case == "idempotency-carrier":
+        idempotency_key = _TextCarrier(idempotency_key)
+    elif case == "decision-carrier":
+        candidate = _DecisionCarrier(decision)
+    else:
+        field, value = {
+            "decision-id-carrier": ("decision_id", _TextCarrier(decision.decision_id)),
+            "option-id-carrier": ("option_id", _TextCarrier(decision.option_id)),
+            "state-carrier": ("state", decision.state.value),
+            "rationale-carrier": ("rationale", _TextCarrier(decision.rationale)),
+            "attribution-carrier": (
+                "decided_by_ref",
+                _TextCarrier(decision.decided_by_ref),
+            ),
+        }[case]
+        object.__setattr__(decision, field, value)
+
+    with pytest.raises(ProductProjectError, match="exact"):
+        decisions.approval_intent(
+            project_id,
+            candidate,  # type: ignore[arg-type]
+            expected_row_version=0,
+            idempotency_key=idempotency_key,
+        )
+
+    assert projects.get("p1").row_version == 0
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM product_decisions WHERE project_id='p1'"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM product_project_mutation_idempotency "
+            "WHERE project_id='p1' AND operation_kind='product_decision.record'"
+        ).fetchone()[0] == 0
 
 
 def test_caller_text_cannot_mint_product_owner_approval(tmp_path: Path) -> None:
@@ -120,12 +196,14 @@ def test_exact_trusted_approval_commits_and_replay_needs_no_second_approval(
     )
     replay = decisions.record(
         "p1",
-        decision,
+        replace(decision, decided_by_ref="user://spoofed-owner"),
         expected_row_version=0,
         idempotency_key="decision:approved",
     )
 
     assert replay == stored
+    assert stored.decision.decided_by_ref.startswith("approval://")
+    assert stored.decision.decided_by_ref != decision.decided_by_ref
     assert projects.get("p1").row_version == 1
     with store.connection() as conn:
         row = conn.execute(
@@ -136,6 +214,8 @@ def test_exact_trusted_approval_commits_and_replay_needs_no_second_approval(
     payload = json.loads(row["payload_json"])
     assert payload["approval_authority"]["approval_id"] == approval.approval_id
     assert payload["approval_authority"]["issuer_id"] == approval.issuer_id
+    assert payload["decided_by_ref"] == stored.decision.decided_by_ref
+    assert "user://owner" not in payload["decided_by_ref"]
 
 
 def test_approval_is_bound_to_exact_evidence_bytes(tmp_path: Path) -> None:

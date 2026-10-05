@@ -110,10 +110,27 @@ def _decision_fingerprint(project_id: str, decision: ProductDecision) -> str:
                 "option_id": decision.option_id,
                 "state": decision.state.value,
                 "rationale": decision.rationale,
-                "decided_by_ref": decision.decided_by_ref,
+                "decided_by_ref": (
+                    None
+                    if decision.state is ProductDecisionState.APPROVED
+                    else decision.decided_by_ref
+                ),
             }
         ).encode()
     ).hexdigest()
+
+
+def _trusted_decided_by_ref(approval: ApprovalEvidence) -> str:
+    digest = hashlib.sha256(
+        _canonical(
+            {
+                "approval_id": approval.approval_id,
+                "issuer_id": approval.issuer_id,
+                "authority_version": approval.authority_version,
+            }
+        ).encode()
+    ).hexdigest()
+    return f"approval://{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -147,7 +164,7 @@ class ProductDecisionRepository:
         idempotency_key: str,
     ) -> ActionIntent:
         """Build the exact trusted-host intent required for an APPROVED decision."""
-        self._validate_input(decision, idempotency_key)
+        self._validate_input(project_id, decision, idempotency_key)
         if decision.state is not ProductDecisionState.APPROVED:
             raise ProductProjectError("approval intent requires an APPROVED product decision")
         expected_row_version = _strict_int(
@@ -196,7 +213,7 @@ class ProductDecisionRepository:
         approval: ApprovalEvidence | None = None,
         now: datetime | None = None,
     ) -> StoredProductDecision:
-        self._validate_input(decision, idempotency_key)
+        self._validate_input(project_id, decision, idempotency_key)
         expected_row_version = _strict_int(
             expected_row_version,
             label="expected ProductProject row_version",
@@ -281,6 +298,14 @@ class ProductDecisionRepository:
                     )
                     verifier.validate_locked(intent, approval, now=current_time)
 
+                persisted_decision = (
+                    replace(
+                        decision,
+                        decided_by_ref=_trusted_decided_by_ref(approval),
+                    )
+                    if approval is not None
+                    else decision
+                )
                 current = self._latest_conn(conn, project_id, decision.decision_id)
                 version = 1 if current is None else current.decision_version + 1
                 now_text = _now()
@@ -300,12 +325,12 @@ class ProductDecisionRepository:
                     "VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         project_id,
-                        decision.decision_id,
+                        persisted_decision.decision_id,
                         version,
-                        decision.option_id,
-                        decision.state.value,
-                        decision.rationale,
-                        decision.decided_by_ref,
+                        persisted_decision.option_id,
+                        persisted_decision.state.value,
+                        persisted_decision.rationale,
+                        persisted_decision.decided_by_ref,
                         _canonical(list(evidence_package_ids)),
                         now_text,
                     ),
@@ -329,6 +354,7 @@ class ProductDecisionRepository:
                     "decision_version": version,
                     "option_id": decision.option_id,
                     "state": decision.state.value,
+                    "decided_by_ref": persisted_decision.decided_by_ref,
                     "evidence_package_ids": list(evidence_package_ids),
                 }
                 if approval is not None:
@@ -493,15 +519,31 @@ class ProductDecisionRepository:
         )
 
     @staticmethod
-    def _validate_input(decision: ProductDecision, idempotency_key: str) -> None:
-        if not idempotency_key.strip():
-            raise ProductProjectError("idempotency_key is required")
-        if not decision.decision_id.strip() or not decision.option_id.strip():
-            raise ProductProjectError("product decision requires decision_id and option_id")
-        if not isinstance(decision.state, ProductDecisionState):
-            raise ProductProjectError("product decision state must be ProductDecisionState")
-        if not decision.rationale.strip() or not decision.decided_by_ref.strip():
-            raise ProductProjectError("product decision requires rationale and decided_by_ref")
+    def _validate_input(
+        project_id: str,
+        decision: ProductDecision,
+        idempotency_key: str,
+    ) -> None:
+        if not _valid_stored_text(project_id):
+            raise ProductProjectError("project_id must be exact non-empty UTF-8 text")
+        if not _valid_stored_text(idempotency_key):
+            raise ProductProjectError("idempotency_key must be exact non-empty UTF-8 text")
+        if type(decision) is not ProductDecision:
+            raise ProductProjectError("product decision must be an exact ProductDecision value")
+        if (
+            not _valid_stored_text(decision.decision_id)
+            or not _valid_stored_text(decision.option_id)
+        ):
+            raise ProductProjectError("product decision requires exact decision_id and option_id")
+        if type(decision.state) is not ProductDecisionState:
+            raise ProductProjectError("product decision state must be exact ProductDecisionState")
+        if (
+            not _valid_stored_text(decision.rationale)
+            or not _valid_stored_text(decision.decided_by_ref)
+        ):
+            raise ProductProjectError(
+                "product decision requires exact rationale and decided_by_ref"
+            )
 
     def _replay_conn(
         self,
