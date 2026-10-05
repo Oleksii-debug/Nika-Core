@@ -2243,6 +2243,113 @@ def test_fenced_host_active_ownership_collision_does_not_cancel_sibling(
     assert _record(restored, independent.component_id).state is WorkState.REVIEW_REQUIRED
 
 
+def test_fenced_recovery_active_ownership_collision_does_not_cancel_sibling(
+    tmp_path: Path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+    )
+    worker = FakeProgramWorker()
+    requests = coordinator.ready_requests()
+    worker.fail_dispatch.update(request.component_id for request in requests)
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        owner_id="program-host:recovery-sibling",
+    )
+
+    initial = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_parallel=2,
+            max_count=2,
+        )
+    )
+    assert all(item.disposition is ProgramWorkDisposition.UNCERTAIN for item in initial)
+
+    collided, independent = requests
+    authority = ProductFactoryWorkOwnership(store)
+    external_lease = authority.acquire(
+        project_id=collided.project_id,
+        work_id=collided.work_id,
+        owner_id="program-host:other-recovery-generation",
+        lease_seconds=300,
+    )
+    worker.recovery_states[collided.work_id] = RecoveryState("interrupted", "other")
+    worker.recovery_states[independent.work_id] = RecoveryState("interrupted", "resume")
+
+    outcomes = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_parallel=2,
+        )
+    )
+    by_component = {item.component_id: item for item in outcomes}
+
+    assert by_component[collided.component_id].disposition is (
+        ProgramWorkDisposition.NEEDS_RECONCILIATION
+    )
+    assert by_component[collided.component_id].state is WorkState.RUNNING
+    assert by_component[collided.component_id].operation_status is IdempotencyStatus.UNCERTAIN
+    assert by_component[independent.component_id].disposition is (
+        ProgramWorkDisposition.REVIEW_REQUIRED
+    )
+    assert [request.work_id for request, _ in worker.recover_calls] == [independent.work_id]
+    assert authority.current(
+        project_id=collided.project_id,
+        work_id=collided.work_id,
+    ) == external_lease
+    assert authority.current(
+        project_id=independent.project_id,
+        work_id=independent.work_id,
+    ) is None
+
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    assert _record(restored, collided.component_id).state is WorkState.RUNNING
+    assert _record(restored, independent.component_id).state is WorkState.REVIEW_REQUIRED
+
+
+def test_dispatch_ownership_backend_failure_remains_fail_closed(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+    )
+    worker = FakeProgramWorker()
+
+    class BrokenOwnership(ProductFactoryWorkOwnership):
+        def acquire(self, **kwargs):
+            raise WorkOwnershipError("forced corrupt ownership authority")
+
+    host = ProductFactoryProgramHost(
+        store,
+        worker,
+        ownership=BrokenOwnership(store),
+        owner_id="program-host:fail-closed-owner",
+    )
+
+    with pytest.raises(ProductFactoryProgramError, match="forced corrupt ownership authority"):
+        _run(
+            host.dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=2,
+                max_count=2,
+            )
+        )
+
+    assert worker.dispatch_calls == []
+    assert all(
+        record.state is WorkState.READY
+        for record in coordinator.snapshot().records
+    )
+
+
 @pytest.mark.parametrize(
     "malformed",
     (
