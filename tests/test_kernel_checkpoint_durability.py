@@ -274,3 +274,151 @@ def test_latest_normalizes_decoder_recursion_error(
     monkeypatch.setattr(checkpoint_module.json, "loads", recurse)
     with pytest.raises(ValueError, match="invalid JSON"):
         checkpoints.latest(task_id)
+
+def _nested_payload(depth: int) -> dict[str, object]:
+    value: object = 0
+    for _ in range(depth - 1):
+        value = {"value": value}
+    assert isinstance(value, dict)
+    return value
+
+
+def test_save_rejects_excessive_nodes_before_json_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    payload: dict[str, object] = {"items": [0] * 9_999}
+
+    def unexpected_encoder(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("oversized node graph reached json.dumps")
+
+    monkeypatch.setattr(checkpoint_module.json, "dumps", unexpected_encoder)
+    with pytest.raises(ValueError, match="node limit"):
+        checkpoints.save(task_id=task_id, stage="too-wide", payload=payload)
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_save_accepts_exact_node_and_depth_boundaries(tmp_path: Path) -> None:
+    _store, task_id, checkpoints = _build_service(tmp_path)
+    exact_nodes: dict[str, object] = {"items": [0] * 9_998}
+
+    wide = checkpoints.save(task_id=task_id, stage="wide-boundary", payload=exact_nodes)
+    deep = checkpoints.save(
+        task_id=task_id,
+        stage="depth-boundary",
+        payload=_nested_payload(64),
+    )
+
+    assert len(wide.payload["items"]) == 9_998
+    assert deep.payload == _nested_payload(64)
+
+
+def test_save_rejects_depth_above_boundary(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+
+    with pytest.raises(ValueError, match="depth limit"):
+        checkpoints.save(
+            task_id=task_id,
+            stage="too-deep",
+            payload=_nested_payload(65),
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_save_rejects_integer_above_bit_boundary(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+
+    accepted = checkpoints.save(
+        task_id=task_id,
+        stage="integer-boundary",
+        payload={"value": 1 << 4095},
+    )
+    assert accepted.payload["value"] == 1 << 4095
+
+    with pytest.raises(ValueError, match="integer exceeds"):
+        checkpoints.save(
+            task_id=task_id,
+            stage="integer-overflow",
+            payload={"value": 1 << 4096},
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 1
+
+
+def test_save_rejects_invalid_utf8_text_before_persistence(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        checkpoints.save(
+            task_id=task_id,
+            stage="invalid-text",
+            payload={"value": "\ud800"},
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_latest_rejects_oversized_durable_payload(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    oversized = '{"value":"' + ("a" * (1024 * 1024)) + '"}'
+    _insert_raw_checkpoint(
+        store,
+        task_id=task_id,
+        checkpoint_id="oversized",
+        payload_json=oversized,
+    )
+
+    with pytest.raises(ValueError, match="UTF-8 byte limit"):
+        checkpoints.latest(task_id)
+
+
+def test_latest_rejects_durable_node_overflow_with_matching_checksum(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    payload_json = '{"items":[' + ",".join("0" for _ in range(9_999)) + "]}"
+
+    _insert_raw_checkpoint(
+        store,
+        task_id=task_id,
+        checkpoint_id="too-wide",
+        payload_json=payload_json,
+    )
+
+    with pytest.raises(ValueError, match="node limit"):
+        checkpoints.latest(task_id)
+
+
+def test_latest_rejects_oversized_checksum_without_unbounded_read(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    saved = checkpoints.save(task_id=task_id, stage="valid", payload={"revision": 1})
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET checksum_sha256 = ? WHERE checkpoint_id = ?",
+            ("a" * (1024 * 1024), saved.checkpoint_id),
+        )
+
+    with pytest.raises(ValueError, match="checksum is invalid"):
+        checkpoints.latest(task_id)
