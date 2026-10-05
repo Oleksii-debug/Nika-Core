@@ -67,6 +67,7 @@ def build_windows_bridge(
         store=store,
         config=config,
         source_settings=source_settings,
+        model_settings=model_settings,
     )
     backend = DesktopBackend(
         queue=TaskQueue(store),
