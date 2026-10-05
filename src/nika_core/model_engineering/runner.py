@@ -243,6 +243,7 @@ class ModelBenchmarkRunner:
             return CaseBenchmarkResult(
                 candidate_id=candidate.candidate_id,
                 case_id=case.case_id,
+                evaluation_weight=float(case.weight),
                 score=0.0,
                 passed=False,
                 completion_succeeded=False,
@@ -272,6 +273,7 @@ class ModelBenchmarkRunner:
         return CaseBenchmarkResult(
             candidate_id=candidate.candidate_id,
             case_id=case.case_id,
+            evaluation_weight=float(case.weight),
             score=score,
             passed=score >= float(case.pass_score),
             completion_succeeded=True,
@@ -423,10 +425,9 @@ class ModelBenchmarkRunner:
         run_id: str,
         configuration_sha256: str,
     ) -> CandidateBenchmarkReport:
-        case_by_id = {case.case_id: case for case in evaluation_set.cases}
-        total_weight = sum(float(case.weight) for case in evaluation_set.cases)
+        total_weight = sum(float(result.evaluation_weight) for result in results)
         quality = sum(
-            result.score * float(case_by_id[result.case_id].weight)
+            float(result.score) * float(result.evaluation_weight)
             for result in results
         ) / total_weight
         pass_rate = sum(result.passed for result in results) / len(results)
