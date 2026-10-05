@@ -356,21 +356,35 @@ def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
     return normalized.startswith((b"env:", b"keyring:", b"credential-ref:"))
 
 
-def _window_contains_secret_assignment(window: bytes) -> bool:
+def _window_contains_secret_assignment(
+    window: bytes,
+    *,
+    scan_namespaced_secrets: bool,
+) -> bool:
     if _PRIVATE_KEY_PEM_RE.search(window):
         return True
     if _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE.search(window):
         return True
-    if _OVERSIZED_NAMESPACED_SECRET_ASSIGNMENT_RE.search(window):
+    if (
+        scan_namespaced_secrets
+        and _OVERSIZED_NAMESPACED_SECRET_ASSIGNMENT_RE.search(window)
+    ):
         return True
-    for pattern in (_SECRET_ASSIGNMENT_RE, _NAMESPACED_SECRET_ASSIGNMENT_RE):
+    patterns = (_SECRET_ASSIGNMENT_RE,)
+    if scan_namespaced_secrets:
+        patterns += (_NAMESPACED_SECRET_ASSIGNMENT_RE,)
+    for pattern in patterns:
         for match in pattern.finditer(window):
             if not _secret_assignment_value_is_placeholder(match.group("value")):
                 return True
     return False
 
 
-def _stream_contains_secret_assignment(handle: Any) -> bool:
+def _stream_contains_secret_assignment(
+    handle: Any,
+    *,
+    scan_namespaced_secrets: bool = False,
+) -> bool:
     overlap = b""
     first_window = True
     while True:
@@ -380,7 +394,10 @@ def _stream_contains_secret_assignment(handle: Any) -> bool:
         raw_window = overlap + chunk
         window = b"\n" + raw_window if first_window else raw_window
         first_window = False
-        if _window_contains_secret_assignment(window):
+        if _window_contains_secret_assignment(
+            window,
+            scan_namespaced_secrets=scan_namespaced_secrets,
+        ):
             return True
         overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
 
@@ -397,10 +414,16 @@ def _archive_member_contains_secret_assignment(
     archive: zipfile.ZipFile,
     member: zipfile.ZipInfo,
 ) -> bool:
-    if not _release_content_requires_secret_scan(_zip_member_path(member)):
+    relative_path = _zip_member_path(member)
+    if not _release_content_requires_secret_scan(relative_path):
         return False
     with archive.open(member, "r") as handle:
-        return _stream_contains_secret_assignment(handle)
+        return _stream_contains_secret_assignment(
+            handle,
+            scan_namespaced_secrets=(
+                PurePosixPath(relative_path).name.casefold() == ".env.example"
+            ),
+        )
 
 
 def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
@@ -485,6 +508,7 @@ def _stream_release_file_snapshot(
     handle: Any,
     *,
     scan_secrets: bool,
+    scan_namespaced_secrets: bool = False,
 ) -> _ReleaseFileSnapshot:
     digest = hashlib.sha256()
     size = 0
@@ -504,7 +528,10 @@ def _stream_release_file_snapshot(
         raw_window = overlap + chunk
         window = b"\n" + raw_window if first_window else raw_window
         first_window = False
-        if _window_contains_secret_assignment(window):
+        if _window_contains_secret_assignment(
+            window,
+            scan_namespaced_secrets=scan_namespaced_secrets,
+        ):
             contains_secret_assignment = True
         overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
 
@@ -571,7 +598,13 @@ def _stable_release_file_snapshot(
             before = os.fstat(handle.fileno())
             if not stat.S_ISREG(before.st_mode):
                 return None
-            snapshot = _stream_release_file_snapshot(handle, scan_secrets=scan_secrets)
+            snapshot = _stream_release_file_snapshot(
+                handle,
+                scan_secrets=scan_secrets,
+                scan_namespaced_secrets=(
+                    path.name.casefold() == ".env.example"
+                ),
+            )
             after = os.fstat(handle.fileno())
         if root is None:
             current = path.stat()
