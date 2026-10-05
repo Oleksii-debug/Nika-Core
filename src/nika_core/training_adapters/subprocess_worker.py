@@ -116,7 +116,6 @@ def _error(code: str, *, effect: TrainingWorkerFailureEffect) -> TrainingSubproc
     return TrainingSubprocessError(code, effect=effect)
 
 
-_WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_READ_ATTRIBUTES = 0x00000080
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
@@ -143,9 +142,7 @@ def _windows_open_launch_lock(path: Path, *, directory: bool) -> int:
         wintypes.HANDLE,
     )
     create_file.restype = wintypes.HANDLE
-    desired_access = (
-        _WINDOWS_FILE_READ_ATTRIBUTES if directory else _WINDOWS_GENERIC_READ
-    )
+    desired_access = _WINDOWS_FILE_READ_ATTRIBUTES
     share_mode = _WINDOWS_FILE_SHARE_READ
     if directory:
         share_mode |= _WINDOWS_FILE_SHARE_WRITE
