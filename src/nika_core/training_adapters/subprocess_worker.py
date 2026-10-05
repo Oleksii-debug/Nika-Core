@@ -5,6 +5,7 @@ import hmac
 import json
 import math
 import os
+import re
 import subprocess
 import threading
 from collections.abc import Mapping, Sequence
@@ -61,15 +62,17 @@ _FORBIDDEN_ENVIRONMENT_KEYS = frozenset(
         "_java_options",
     }
 )
-_SECRET_ENVIRONMENT_MARKERS = (
-    "api_key",
-    "apikey",
-    "auth",
-    "credential",
-    "passwd",
-    "password",
-    "secret",
-    "token",
+_SECRET_ENVIRONMENT_TOKENS = frozenset(
+    {
+        "auth",
+        "authorization",
+        "credential",
+        "credentials",
+        "passwd",
+        "password",
+        "secret",
+        "token",
+    }
 )
 
 
@@ -194,9 +197,16 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
 
     total_bytes = 0
     for index, argument in enumerate(normalized):
-        if type(argument) is not str or "\x00" in argument:
-            raise ValueError("command arguments must be NUL-free strings")
-        encoded_length = len(argument.encode("utf-8"))
+        if (
+            type(argument) is not str
+            or "\x00" in argument
+            or any(not character.isprintable() for character in argument)
+        ):
+            raise ValueError("command arguments must be printable NUL-free strings")
+        try:
+            encoded_length = len(argument.encode("utf-8", errors="strict"))
+        except UnicodeEncodeError as exc:
+            raise ValueError("command arguments must be valid UTF-8 text") from exc
         if encoded_length > _MAX_ARGUMENT_BYTES:
             raise ValueError("command argument exceeds the configured byte limit")
         total_bytes += encoded_length
@@ -283,6 +293,21 @@ def _command_sha256(
     return hashlib.sha256(b"nika-training-command-v2\x00" + encoded).hexdigest()
 
 
+def _environment_key_contains_credential_name(key: str) -> bool:
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.casefold()).strip("_")
+    if not normalized:
+        return False
+    parts = tuple(part for part in normalized.split("_") if part)
+    if "apikey" in parts:
+        return True
+    if any(part in _SECRET_ENVIRONMENT_TOKENS for part in parts):
+        return True
+    return any(
+        left == "api" and right == "key"
+        for left, right in zip(parts, parts[1:], strict=False)
+    )
+
+
 def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
     if environment is None:
         return {}
@@ -290,12 +315,23 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
         raise ValueError("environment contains too many entries")
 
     result: dict[str, str] = {}
+    normalized_keys: set[str] = set()
     for key, value in environment.items():
         if type(key) is not str or type(value) is not str:
             raise ValueError("environment keys and values must be strings")
-        if not key or "=" in key or "\x00" in key or "\x00" in value:
+        if (
+            not key
+            or "=" in key
+            or "\x00" in key
+            or "\x00" in value
+            or any(not character.isprintable() for character in key)
+            or any(not character.isprintable() for character in value)
+        ):
             raise ValueError("environment contains an invalid key or value")
         normalized_key = key.casefold()
+        if normalized_key in normalized_keys:
+            raise ValueError("environment keys must be unique ignoring case")
+        normalized_keys.add(normalized_key)
         if (
             normalized_key in _FORBIDDEN_ENVIRONMENT_KEYS
             or normalized_key.startswith("python")
@@ -303,11 +339,16 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
             or normalized_key.startswith("dyld_")
         ):
             raise ValueError("environment may not alter runtime or loader authority")
-        if any(marker in normalized_key for marker in _SECRET_ENVIRONMENT_MARKERS):
+        if _environment_key_contains_credential_name(key):
             raise ValueError("training environment must not contain credential material")
-        if len(key.encode("utf-8")) > _MAX_ENVIRONMENT_FIELD_BYTES:
+        try:
+            key_bytes = key.encode("utf-8", errors="strict")
+            value_bytes = value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("environment must use valid UTF-8 text") from exc
+        if len(key_bytes) > _MAX_ENVIRONMENT_FIELD_BYTES:
             raise ValueError("environment key exceeds the configured byte limit")
-        if len(value.encode("utf-8")) > _MAX_ENVIRONMENT_FIELD_BYTES:
+        if len(value_bytes) > _MAX_ENVIRONMENT_FIELD_BYTES:
             raise ValueError("environment value exceeds the configured byte limit")
         result[key] = value
     return result
@@ -403,8 +444,9 @@ class SubprocessTrainingWorker:
     """Shell-free TrainingWorkerPort adapter for one Registry-authorized trainer command.
 
     Durable resume state binds the exact command vector, Registry-bound command artifacts,
-    explicit sterile environment, trainer digest and frozen/material job identities. Absolute command-file arguments must
-    have Artifact Registry authority; relative path arguments are forbidden. Physical training
+    explicit sterile environment, trainer digest and frozen/material job identities. Absolute
+    command-file arguments must have Artifact Registry authority; relative path arguments are
+    forbidden. Physical training
     paths remain transient request data only. Immediately before spawn, the canonical Registry
     verifies every bound command artifact and ResolvedTrainingPackage re-binds all input bytes.
     """
