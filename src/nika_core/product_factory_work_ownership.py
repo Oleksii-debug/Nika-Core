@@ -8,6 +8,10 @@ from datetime import UTC, datetime, timedelta
 from nika_core.data.sqlite import SQLiteStore
 
 
+_MAX_IDENTITY_UTF8_BYTES = 4096
+_IDENTITY_ERROR = "work ownership identity must be exact canonical bounded non-empty text"
+
+
 class WorkOwnershipError(ValueError):
     """Raised when Product Factory work ownership authority is violated."""
 
@@ -70,11 +74,7 @@ class ProductFactoryWorkOwnership:
         _lease_seconds(lease_seconds)
         with self._store.connection() as connection:
             _begin_immediate(connection)
-            row = connection.execute(
-                "SELECT owner_id, fence, issued_at, expires_at FROM product_factory_work_ownership "
-                "WHERE project_id = ? AND work_id = ?",
-                (project_id, work_id),
-            ).fetchone()
+            row = _select_ownership_row(connection, project_id, work_id)
             instant = self._instant()
             expires_at = _expiry(instant, lease_seconds)
             if row is None:
@@ -92,15 +92,14 @@ class ProductFactoryWorkOwnership:
                 if current_owner is None:
                     if current_issued is not None or current_expires is not None:
                         raise WorkOwnershipError("corrupt work ownership record")
-                elif (
-                    type(current_owner) is not str
-                    or not current_owner.strip()
-                    or current_owner != current_owner.strip()
-                    or current_issued is None
-                    or current_expires is None
-                    or current_expires <= current_issued
-                ):
-                    raise WorkOwnershipError("corrupt work ownership record")
+                else:
+                    current_owner = _persisted_owner(current_owner)
+                    if (
+                        current_issued is None
+                        or current_expires is None
+                        or current_expires <= current_issued
+                    ):
+                        raise WorkOwnershipError("corrupt work ownership record")
                 if current_owner is not None and current_expires > instant:
                     if instant < current_issued:
                         raise WorkOwnershipError("work ownership clock precedes lease issuance")
@@ -235,24 +234,13 @@ def _load(
     project_id: str,
     work_id: str,
 ) -> WorkOwnershipLease | None:
-    row = connection.execute(
-        "SELECT owner_id, fence, issued_at, expires_at FROM product_factory_work_ownership "
-        "WHERE project_id = ? AND work_id = ?",
-        (project_id, work_id),
-    ).fetchone()
+    row = _select_ownership_row(connection, project_id, work_id)
     if row is None or row[0] is None:
         return None
-    owner_id = row[0]
+    owner_id = _persisted_owner(row[0])
     issued_at = _optional_time(row[2])
     expires_at = _optional_time(row[3])
-    if (
-        type(owner_id) is not str
-        or not owner_id
-        or owner_id != owner_id.strip()
-        or issued_at is None
-        or expires_at is None
-        or expires_at <= issued_at
-    ):
+    if issued_at is None or expires_at is None or expires_at <= issued_at:
         raise WorkOwnershipError("corrupt work ownership record")
     return WorkOwnershipLease(
         project_id,
@@ -262,6 +250,23 @@ def _load(
         issued_at,
         expires_at,
     )
+
+
+def _select_ownership_row(
+    connection: sqlite3.Connection,
+    project_id: str,
+    work_id: str,
+) -> sqlite3.Row | None:
+    try:
+        return connection.execute(
+            "SELECT owner_id, fence, issued_at, expires_at "
+            "FROM product_factory_work_ownership WHERE project_id = ? AND work_id = ?",
+            (project_id, work_id),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "Could not decode to UTF-8 column" in str(exc):
+            raise WorkOwnershipError("corrupt work ownership record") from exc
+        raise
 
 
 def _validate_observation_time(current: WorkOwnershipLease, now: datetime) -> None:
@@ -315,11 +320,29 @@ def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
 
 
 def _identity(*values: str) -> None:
-    if not values or any(
-        type(value) is not str or not value or value != value.strip()
-        for value in values
-    ):
-        raise WorkOwnershipError("work ownership identity must be exact canonical non-empty text")
+    if not values:
+        raise WorkOwnershipError(_IDENTITY_ERROR)
+    for value in values:
+        if type(value) is not str or not value or value != value.strip():
+            raise WorkOwnershipError(_IDENTITY_ERROR)
+        try:
+            encoded = value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise WorkOwnershipError(_IDENTITY_ERROR) from exc
+        if (
+            len(encoded) > _MAX_IDENTITY_UTF8_BYTES
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise WorkOwnershipError(_IDENTITY_ERROR)
+
+
+def _persisted_owner(value: object) -> str:
+    try:
+        _identity(value)  # type: ignore[arg-type]
+    except WorkOwnershipError as exc:
+        raise WorkOwnershipError("corrupt work ownership record") from exc
+    assert type(value) is str
+    return value
 
 
 def _strict_fence(value: object) -> int:
