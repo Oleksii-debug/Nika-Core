@@ -133,3 +133,32 @@ def test_negative_subtitle_timestamp_is_never_published(
     )
     assert len(result.segments) == 1
     assert result.segments[0].start_ms == 100
+
+@pytest.mark.parametrize(
+    ("override", "field"),
+    (
+        ({"automatic_min_segments": True}, "automatic_min_segments"),
+        ({"automatic_min_segments": 0}, "automatic_min_segments"),
+        ({"automatic_min_coverage_ratio": float("nan")}, "automatic_min_coverage_ratio"),
+        ({"automatic_min_coverage_ratio": float("inf")}, "automatic_min_coverage_ratio"),
+        ({"automatic_min_coverage_ratio": True}, "automatic_min_coverage_ratio"),
+        ({"automatic_min_coverage_ratio": 1.1}, "automatic_min_coverage_ratio"),
+        ({"automatic_max_malformed_ratio": -0.1}, "automatic_max_malformed_ratio"),
+        ({"automatic_max_malformed_ratio": float("nan")}, "automatic_max_malformed_ratio"),
+    ),
+)
+def test_invalid_quality_policy_cannot_bypass_automatic_admission(
+    override: dict[str, object], field: str
+) -> None:
+    with pytest.raises(ValueError, match=field):
+        SubtitlePolicy(**override)  # type: ignore[arg-type]
+
+
+def test_valid_quality_policy_boundary_ratios_remain_available() -> None:
+    policy = SubtitlePolicy(
+        automatic_min_segments=1,
+        automatic_min_coverage_ratio=0,
+        automatic_max_malformed_ratio=1,
+    )
+    assert policy.automatic_min_coverage_ratio == 0
+    assert policy.automatic_max_malformed_ratio == 1
