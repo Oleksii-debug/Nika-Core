@@ -141,7 +141,7 @@ class ProcessPolicy:
     shell_allowed: bool = False
 
     def __post_init__(self) -> None:
-        if self.shell_allowed:
+        if type(self.shell_allowed) is not bool or self.shell_allowed:
             raise ValueError("generic shell execution is not allowed")
         if not self.allowed_executables:
             raise ValueError("at least one executable must be allowlisted")
@@ -155,6 +155,8 @@ class NetworkPolicy:
     approved_hosts: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if type(self.mode) is not NetworkMode:
+            raise ValueError("network policy mode must be a NetworkMode value")
         if self.mode is NetworkMode.DENY and self.approved_hosts:
             raise ValueError("DENY network policy cannot contain approved hosts")
         if self.mode is NetworkMode.APPROVED_HOSTS and not self.approved_hosts:
