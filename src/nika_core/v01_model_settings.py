@@ -553,6 +553,25 @@ class V01ModelSettings:
                         raise ModelSetupError(
                             "Повтор просування не збігається з початковою моделлю."
                         )
+                    settings_row = conn.execute(
+                        "SELECT * FROM v01_model_settings WHERE singleton = 1"
+                    ).fetchone()
+                    current_revision = self._revision(settings_row)
+                    if settings_row is None:
+                        raise ModelSetupError(
+                            "Поточні налаштування моделі відсутні."
+                        )
+                    current_selection = ModelSelection.from_stored(
+                        settings_row["selection_json"]
+                    )
+                    current_id, _ = self._selection_id(current_selection)
+                    if (
+                        current_revision != receipt.activated_revision
+                        or current_id != receipt.activated_selection_id
+                    ):
+                        raise ModelSetupError(
+                            "Просування більше не володіє поточним маршрутом моделі."
+                        )
                     return receipt
 
                 row = conn.execute(
