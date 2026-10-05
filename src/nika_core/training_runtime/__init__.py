@@ -5,6 +5,8 @@ from nika_core.training_runtime.contracts import (
     TrainingRunEvidence,
     TrainingRunState,
     TrainingStepResult,
+    TrainingWorkerError,
+    TrainingWorkerFailureEffect,
     TrainingWorkerPort,
 )
 from nika_core.training_runtime.runtime import TrainingCheckpointError, TrainingRuntime
@@ -18,5 +20,7 @@ __all__ = [
     "TrainingRunState",
     "TrainingRuntime",
     "TrainingStepResult",
+    "TrainingWorkerError",
+    "TrainingWorkerFailureEffect",
     "TrainingWorkerPort",
 ]
