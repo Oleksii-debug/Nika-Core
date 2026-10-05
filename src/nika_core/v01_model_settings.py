@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import sqlite3
@@ -23,7 +24,7 @@ from nika_core.intelligence.modes import (
     IntelligenceModeRouter,
 )
 from nika_core.kernel.audit import AuditLog
-from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_queue import decode_task_payload
 from nika_core.model_gateway.api_route import (
     ApiModelRouteConfig,
     CredentialRefOpenAICompatibleProvider,
@@ -52,8 +53,10 @@ from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
 _MAX_STORED_SELECTION_BYTES = 64 * 1024
-_SCHEMA_VERSION = 3
+_SCHEMA_VERSION = 4
 _TASK_SELECTION_FIELD = "v01_model_selection"
+_TASK_ARTIFACT_PIN_FIELD = "v01_model_artifact_pin"
+_TASK_ARTIFACT_PIN_SCHEMA = "nika.v01.model-artifact-pin.v1"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
 _ENV_CREDENTIAL_REF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")
 _FORBIDDEN_IDENTITY_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
@@ -93,6 +96,12 @@ _MIGRATIONS = {
     3: (
         "ALTER TABLE v01_model_promotions ADD COLUMN activation_request_sha256 TEXT",
         "ALTER TABLE v01_model_promotions ADD COLUMN activation_attestation_sha256 TEXT",
+    ),
+    4: (
+        (
+            "ALTER TABLE v01_task_model_bindings "
+            "ADD COLUMN artifact_pin_sha256 TEXT"
+        ),
     ),
 }
 
@@ -156,6 +165,80 @@ class ModelPromotionReceipt:
             or self.rollback_revision > MAX_MODEL_SETTINGS_REVISION
         ):
             raise ValueError("rollback_revision is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskModelArtifactPin:
+    """Digest-only artifact authority frozen into one accepted task."""
+
+    decision_sha256: str
+    binding_sha256: str
+    role: Literal["challenger", "rollback"]
+    route_revision: int
+    artifact_sha256: str
+    descriptor_digest: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.decision_sha256, "decision_sha256"),
+            (self.binding_sha256, "binding_sha256"),
+            (self.artifact_sha256, "artifact_sha256"),
+            (self.descriptor_digest, "descriptor_digest"),
+        ):
+            if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        if self.role not in {"challenger", "rollback"}:
+            raise ValueError("role must be challenger or rollback")
+        if (
+            type(self.route_revision) is not int
+            or not 1 <= self.route_revision <= MAX_MODEL_SETTINGS_REVISION
+        ):
+            raise ValueError("route_revision is invalid")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema": _TASK_ARTIFACT_PIN_SCHEMA,
+            "decision_sha256": self.decision_sha256,
+            "binding_sha256": self.binding_sha256,
+            "role": self.role,
+            "route_revision": self.route_revision,
+            "artifact_sha256": self.artifact_sha256,
+            "descriptor_digest": self.descriptor_digest,
+        }
+
+    @property
+    def pin_sha256(self) -> str:
+        body = json.dumps(
+            self.to_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_payload(cls, payload: object) -> TaskModelArtifactPin:
+        if type(payload) is not dict:
+            raise ValueError("artifact pin must be an exact object")
+        expected = {
+            "schema",
+            "decision_sha256",
+            "binding_sha256",
+            "role",
+            "route_revision",
+            "artifact_sha256",
+            "descriptor_digest",
+        }
+        if set(payload) != expected or payload.get("schema") != _TASK_ARTIFACT_PIN_SCHEMA:
+            raise ValueError("artifact pin schema does not match")
+        return cls(
+            decision_sha256=payload["decision_sha256"],
+            binding_sha256=payload["binding_sha256"],
+            role=payload["role"],
+            route_revision=payload["route_revision"],
+            artifact_sha256=payload["artifact_sha256"],
+            descriptor_digest=payload["descriptor_digest"],
+        )
 
 
 class ModelSelection(BaseModel):
@@ -457,6 +540,103 @@ class V01ModelSettings:
         if row is None:
             return None
         return self._promotion_receipt(row)
+
+    def _promotion_pin_for_revision(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        selection_id: str,
+        revision: int,
+    ) -> TaskModelArtifactPin | None:
+        rows = conn.execute(
+            "SELECT * FROM v01_model_promotions WHERE "
+            "(activated_revision = ? AND activated_selection_id = ?) OR "
+            "(rollback_revision = ? AND previous_selection_id = ?)",
+            (revision, selection_id, revision, selection_id),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ModelSetupError(
+                "Збережена модель має неоднозначний запис просування."
+            )
+        if not rows:
+            return None
+        receipt = self._promotion_receipt(rows[0])
+        if (
+            receipt.activated_revision == revision
+            and receipt.activated_selection_id == selection_id
+        ):
+            return TaskModelArtifactPin(
+                decision_sha256=receipt.decision_sha256,
+                binding_sha256=receipt.binding_sha256,
+                role="challenger",
+                route_revision=revision,
+                artifact_sha256=receipt.challenger_artifact_sha256,
+                descriptor_digest=receipt.challenger_descriptor_digest,
+            )
+        if (
+            receipt.rollback_revision == revision
+            and receipt.previous_selection_id == selection_id
+        ):
+            return TaskModelArtifactPin(
+                decision_sha256=receipt.decision_sha256,
+                binding_sha256=receipt.binding_sha256,
+                role="rollback",
+                route_revision=revision,
+                artifact_sha256=receipt.base_artifact_sha256,
+                descriptor_digest=receipt.base_descriptor_digest,
+            )
+        raise ModelSetupError(
+            "Збережений запис просування не відповідає поточному маршруту."
+        )
+
+    def _task_artifact_pin(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        payload: Mapping[str, Any],
+        selection_id: str,
+    ) -> TaskModelArtifactPin | None:
+        raw = payload.get(_TASK_ARTIFACT_PIN_FIELD)
+        if raw is None:
+            return None
+        try:
+            pin = TaskModelArtifactPin.from_payload(raw)
+        except (TypeError, ValueError) as exc:
+            raise ModelSetupError(
+                "Посилання на артефакт моделі завдання пошкоджене."
+            ) from exc
+        row = conn.execute(
+            "SELECT * FROM v01_model_promotions WHERE decision_sha256 = ?",
+            (pin.decision_sha256,),
+        ).fetchone()
+        if row is None:
+            raise ModelSetupError(
+                "Запис просування для моделі завдання не знайдено."
+            )
+        receipt = self._promotion_receipt(row)
+        if receipt.binding_sha256 != pin.binding_sha256:
+            raise ModelSetupError(
+                "Артефакт моделі не збігається з навчальним доказом."
+            )
+        if pin.role == "challenger":
+            valid = (
+                selection_id == receipt.activated_selection_id
+                and pin.route_revision == receipt.activated_revision
+                and pin.artifact_sha256 == receipt.challenger_artifact_sha256
+                and pin.descriptor_digest == receipt.challenger_descriptor_digest
+            )
+        else:
+            valid = (
+                selection_id == receipt.previous_selection_id
+                and pin.route_revision == receipt.rollback_revision
+                and pin.artifact_sha256 == receipt.base_artifact_sha256
+                and pin.descriptor_digest == receipt.base_descriptor_digest
+            )
+        if not valid:
+            raise ModelSetupError(
+                "Артефакт моделі не відповідає прийнятому маршруту завдання."
+            )
+        return pin
 
     def activate_promoted_local_model(
         self,
@@ -981,15 +1161,28 @@ class V01ModelSettings:
             return {"status": "invalid"}
 
     def prepare_task_payload(self, payload: Mapping[str, Any]) -> dict[str, Any]:
-        """Freeze the current route before TaskQueue accepts the new task."""
+        """Freeze the current route and any exact promoted artifact authority."""
 
         try:
             body = dict(payload)
-            if _TASK_SELECTION_FIELD in body:
-                raise ModelSetupError("Посилання на модель завдання задає лише Nika.")
+            if (
+                _TASK_SELECTION_FIELD in body
+                or _TASK_ARTIFACT_PIN_FIELD in body
+            ):
+                raise ModelSetupError(
+                    "Посилання на модель та її артефакт завдання задає лише Nika."
+                )
             with self._store.connection() as conn:
                 conn.execute("BEGIN IMMEDIATE")
-                selection = self._selected(conn)
+                row = conn.execute(
+                    "SELECT * FROM v01_model_settings WHERE singleton = 1"
+                ).fetchone()
+                revision = self._revision(row)
+                if row is None:
+                    raise ModelSetupError(
+                        "Спочатку виберіть режим та, якщо потрібно, модель."
+                    )
+                selection = ModelSelection.from_stored(row["selection_json"])
                 selection_id, selection_json = self._selection_id(selection)
                 conn.execute(
                     "INSERT OR IGNORE INTO v01_model_selections VALUES (?, ?)",
@@ -997,7 +1190,14 @@ class V01ModelSettings:
                 )
                 if self._selection_by_id(conn, selection_id) != selection:
                     raise ModelSetupError("Не вдалося зафіксувати вибір моделі.")
+                pin = self._promotion_pin_for_revision(
+                    conn,
+                    selection_id=selection_id,
+                    revision=revision,
+                )
             body[_TASK_SELECTION_FIELD] = selection_id
+            if pin is not None:
+                body[_TASK_ARTIFACT_PIN_FIELD] = pin.to_payload()
             return body
         except ModelSetupError:
             raise
@@ -1006,22 +1206,36 @@ class V01ModelSettings:
                 "Не вдалося підготувати модель. Завдання не створено."
             ) from exc
 
-    def for_task(self, task_id: str) -> ModelSelection:
-        """Return the exact route accepted with the task and bind it once."""
+    def for_task_binding(
+        self,
+        task_id: str,
+    ) -> tuple[ModelSelection, TaskModelArtifactPin | None]:
+        """Return the exact route and artifact pin from one durable task snapshot."""
 
         if not isinstance(task_id, str) or not task_id.strip():
             raise ModelSetupError("Немає коректного ідентифікатора завдання.")
-        try:
-            payload = TaskQueue(self._store).get(task_id).payload
-        except KeyError as exc:
-            raise ModelSetupError("Завдання для вибраної моделі не знайдено.") from exc
-        selection_id = payload.get(_TASK_SELECTION_FIELD)
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            task_row = conn.execute(
+                "SELECT payload_json FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if task_row is None:
+                raise ModelSetupError("Завдання для вибраної моделі не знайдено.")
+            payload = decode_task_payload(task_row["payload_json"])
+            selection_id = payload.get(_TASK_SELECTION_FIELD)
             accepted = self._selection_by_id(conn, selection_id)
+            accepted_pin = self._task_artifact_pin(
+                conn,
+                payload=payload,
+                selection_id=selection_id,
+            )
+            accepted_pin_sha256 = (
+                accepted_pin.pin_sha256 if accepted_pin is not None else None
+            )
             row = conn.execute(
-                "SELECT selection_id, selection_json FROM v01_task_model_bindings "
-                "WHERE task_id = ?",
+                "SELECT selection_id, selection_json, artifact_pin_sha256 "
+                "FROM v01_task_model_bindings WHERE task_id = ?",
                 (task_id,),
             ).fetchone()
             if row is not None:
@@ -1029,19 +1243,26 @@ class V01ModelSettings:
                     raise ModelSetupError(
                         "Модель не збігається з початковою конфігурацією завдання."
                     )
+                if row["artifact_pin_sha256"] != accepted_pin_sha256:
+                    raise ModelSetupError(
+                        "Артефакт моделі не збігається з початковою конфігурацією завдання."
+                    )
                 bound = ModelSelection.from_stored(row["selection_json"])
                 if bound != accepted:
                     raise ModelSetupError(
                         "Збережена модель завдання не збігається з прийнятою конфігурацією."
                     )
-                return bound
+                return bound, accepted_pin
             conn.execute(
-                "INSERT INTO v01_task_model_bindings VALUES (?, ?, ?, ?)",
+                "INSERT INTO v01_task_model_bindings("
+                "task_id, selection_id, selection_json, created_at, artifact_pin_sha256"
+                ") VALUES (?, ?, ?, ?, ?)",
                 (
                     task_id,
                     selection_id,
                     accepted.canonical_json(),
                     datetime.now(UTC).isoformat(),
+                    accepted_pin_sha256,
                 ),
             )
             accepted_provider_kind = accepted.provider_kind
@@ -1064,9 +1285,22 @@ class V01ModelSettings:
                         if accepted.model is not None
                         else None
                     ),
+                    "artifact_pin_sha256": accepted_pin_sha256,
                 },
             )
-            return accepted
+            return accepted, accepted_pin
+
+    def for_task(self, task_id: str) -> ModelSelection:
+        """Return the exact route accepted with the task and bind it once."""
+
+        selection, _ = self.for_task_binding(task_id)
+        return selection
+
+    def artifact_pin_for_task(self, task_id: str) -> TaskModelArtifactPin | None:
+        """Return the immutable digest pin accepted with a task, when present."""
+
+        _, artifact_pin = self.for_task_binding(task_id)
+        return artifact_pin
 
 
 class _TaskBoundCloudEffectAuthorizer:
@@ -1161,10 +1395,18 @@ class V01BoundModelRuntimeFactory:
         self._cloud_execution_authority_resolver = cloud_execution_authority_resolver
 
     def for_task(self, task_id: str) -> ModelGatewayAgentRuntime | None:
-        selection = self._settings.for_task(task_id)
+        selection, artifact_pin = self._settings.for_task_binding(task_id)
         if selection.route_kind == "deterministic":
+            if artifact_pin is not None:
+                raise ModelSetupError(
+                    "Детермінований маршрут не може мати артефакт моделі."
+                )
             return None
-        return self._runtime_for_selection(selection, task_id=task_id)
+        return self._runtime_for_selection(
+            selection,
+            task_id=task_id,
+            artifact_pin=artifact_pin,
+        )
 
     def supervisor_for_task(
         self,
@@ -1180,13 +1422,17 @@ class V01BoundModelRuntimeFactory:
         silently falling back to the supervisor's unrelated default.
         """
 
-        selection = self._settings.for_task(task_id)
+        selection, artifact_pin = self._settings.for_task_binding(task_id)
         if selection.route_kind == "deterministic":
             raise ModelSetupError(
                 "Детермінований режим виконується packaged runtime без ModelGateway."
             )
         return MultiAgentSupervisor(
-            runtime=self._runtime_for_selection(selection, task_id=task_id),
+            runtime=self._runtime_for_selection(
+                selection,
+                task_id=task_id,
+                artifact_pin=artifact_pin,
+            ),
             store=store,
             definitions=self._definitions,
             runtime_timeout_seconds=selection.timeout_seconds,
@@ -1218,6 +1464,7 @@ class V01BoundModelRuntimeFactory:
         selection: ModelSelection,
         *,
         task_id: str,
+        artifact_pin: TaskModelArtifactPin | None,
     ) -> ModelGatewayAgentRuntime:
         if selection.route_kind == "deterministic":
             raise ModelSetupError(
@@ -1228,6 +1475,10 @@ class V01BoundModelRuntimeFactory:
         provider_kind = selection.provider_kind
         if provider_kind is None:
             raise ModelSetupError("Збережений маршрут моделі не має типу постачальника.")
+        if artifact_pin is not None and selection.route_kind != "ollama":
+            raise ModelSetupError(
+                "Прив'язаний артефакт моделі підтримується лише для Ollama."
+            )
 
         cloud_effect_authorizer = (
             self._task_cloud_authorizer(task_id=task_id)
