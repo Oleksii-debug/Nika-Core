@@ -48,6 +48,7 @@ def _rebind_reservation(
     task_id: str,
     input_fingerprint: str,
 ) -> None:
+    original = ledger.require(operation_key)
     ledger.release_pending(operation_key)
     record, created = ledger.reserve_once(
         operation_key=operation_key,
@@ -57,12 +58,14 @@ def _rebind_reservation(
     )
     assert created
     assert record.status is IdempotencyStatus.PENDING
+    assert record.reservation_generation != original.reservation_generation
 
-    # Make the replacement generation deterministic even on clocks with coarse resolution.
+    # Reproduce the ABA window explicitly: a coarse/repeated wall clock gives both
+    # generations the same timestamp, so created_at alone cannot fence stale finalizers.
     with store.connection() as conn:
         conn.execute(
             "UPDATE idempotency_records SET created_at = ? WHERE operation_key = ?",
-            ("2099-01-01T00:00:00+00:00", operation_key),
+            (original.created_at, operation_key),
         )
 
 
@@ -103,7 +106,8 @@ def test_journal_finalizers_reject_rebound_operation(
     assert rebound.task_id == task.task_id
     assert rebound.operation_type == _OPERATION_TYPE
     assert rebound.input_fingerprint == rebound_fingerprint
-    assert rebound.created_at == "2099-01-01T00:00:00+00:00"
+    assert rebound.created_at == original.created_at
+    assert rebound.reservation_generation != original.reservation_generation
     assert rebound.status is IdempotencyStatus.PENDING
 
 
