@@ -552,7 +552,10 @@ class ProductFactoryProgramHost:
                                 coordinator,
                                 ProgramWorkDisposition.NEEDS_RECONCILIATION,
                                 operation.status,
-                                "existing worker operation has a different host or request identity",
+                                (
+                                    "existing worker operation has a different host "
+                                    "or request identity"
+                                ),
                             )
                         return _existing_operation_outcome(request, operation)
                     try:
