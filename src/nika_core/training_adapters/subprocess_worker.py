@@ -851,7 +851,6 @@ def _training_material_request(
     }
 
 
-
 def _open_windows_command_artifact_lock(path: str) -> int:
     """Open one command artifact while denying concurrent write/delete replacement."""
 
@@ -950,7 +949,10 @@ class SubprocessTrainingWorker:
     command-file arguments must have Artifact Registry authority; relative path arguments are
     forbidden. Physical training paths remain transient request data only. Immediately before
     spawn, the canonical Registry verifies every bound command artifact and
-    ResolvedTrainingPackage re-binds all input bytes. Protocol v3 additionally requires the
+    ResolvedTrainingPackage re-binds all input bytes. On Windows, Registry-bound command
+    files are held read-only with write/delete sharing denied from the final canonical
+    verification through child completion, closing pathname replacement at process launch.
+    Protocol v3 additionally requires the
     exact Registry-bound trainer to attest the digest of the bytes it actually consumed. The
     trainer must only return that attestation after binding its own consumed byte streams to
     the requested material paths; echoing the requested digest without consumption verification
