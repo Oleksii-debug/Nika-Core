@@ -68,7 +68,6 @@ def _positive_finite_seconds(value: object, *, name: str) -> float:
     return seconds
 
 
-
 def _required_utf8_identity(value: object, *, name: str) -> str:
     """Reject malformed caller identities before planning, journaling or effects."""
     if type(value) is not str or not value.strip():
