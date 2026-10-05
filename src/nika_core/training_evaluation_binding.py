@@ -62,8 +62,54 @@ class TrainingEvaluationBinding:
     descriptor_registry_key: str
     challenger_size_bytes: int
 
-    @property
-    def binding_sha256(self) -> str:
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.job_id, "job_id"),
+            (self.base_candidate_id, "base_candidate_id"),
+            (self.challenger_candidate_id, "challenger_candidate_id"),
+            (self.candidate_artifact_ref, "candidate_artifact_ref"),
+        ):
+            if type(value) is not str or not value or value != value.strip():
+                raise ValueError(f"{name} must be non-empty canonical text")
+        for value, name in (
+            (self.base_sha256, "base_sha256"),
+            (self.challenger_sha256, "challenger_sha256"),
+            (self.frozen_package_sha256, "frozen_package_sha256"),
+            (self.evaluation_set_sha256, "evaluation_set_sha256"),
+            (self.descriptor_digest, "descriptor_digest"),
+            (self.descriptor_registry_key, "descriptor_registry_key"),
+        ):
+            if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        if (
+            type(self.challenger_size_bytes) is not int
+            or self.challenger_size_bytes <= 0
+        ):
+            raise ValueError("challenger_size_bytes must be a positive integer")
+        if self.base_candidate_id == self.challenger_candidate_id:
+            raise ValueError("old/new candidate identities must be distinct")
+
+    def revalidated(self) -> TrainingEvaluationBinding:
+        if type(self) is not TrainingEvaluationBinding:
+            raise TypeError("binding must be an exact TrainingEvaluationBinding")
+        try:
+            return TrainingEvaluationBinding(
+                job_id=self.job_id,
+                base_candidate_id=self.base_candidate_id,
+                challenger_candidate_id=self.challenger_candidate_id,
+                base_sha256=self.base_sha256,
+                challenger_sha256=self.challenger_sha256,
+                candidate_artifact_ref=self.candidate_artifact_ref,
+                frozen_package_sha256=self.frozen_package_sha256,
+                evaluation_set_sha256=self.evaluation_set_sha256,
+                descriptor_digest=self.descriptor_digest,
+                descriptor_registry_key=self.descriptor_registry_key,
+                challenger_size_bytes=self.challenger_size_bytes,
+            )
+        except AttributeError as exc:
+            raise ValueError("binding fields must be complete") from exc
+
+    def _binding_sha256_unchecked(self) -> str:
         payload = {
             "schema": "nika-training-evaluation-binding-v1",
             "job_id": self.job_id,
@@ -85,6 +131,10 @@ class TrainingEvaluationBinding:
             separators=(",", ":"),
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+    @property
+    def binding_sha256(self) -> str:
+        return self.revalidated()._binding_sha256_unchecked()
 
 
 def _require_sha256(value: object, *, name: str) -> str:
