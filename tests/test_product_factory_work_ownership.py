@@ -259,7 +259,6 @@ def test_active_owner_conflict_is_typed_without_weakening_base_error_contract(
     assert isinstance(caught.value, WorkOwnershipError)
 
 
-
 def test_expired_owner_can_be_replaced_but_stale_fence_cannot_mutate(tmp_path) -> None:
     service, clock = _service(tmp_path)
     old = _acquire(service, seconds=10)
