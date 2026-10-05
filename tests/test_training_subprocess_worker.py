@@ -101,11 +101,17 @@ def _spec(
     )
 
 
-def _registry_for_python(tmp_path: Path) -> tuple[ArtifactRegistry, str, Path]:
+def _registry_for_python(
+    tmp_path: Path,
+    script: Path | None = None,
+) -> tuple[ArtifactRegistry, str, Path, str | None]:
     executable = Path(sys.executable).resolve()
+    roots = [executable.parent]
+    if script is not None and script.parent.resolve() not in roots:
+        roots.append(script.parent.resolve())
     registry = ArtifactRegistry.from_store(
         SQLiteStore(tmp_path / "artifacts.sqlite3"),
-        local_file_roots=(executable.parent,),
+        local_file_roots=tuple(roots),
     )
     record = registry.register_file(
         workspace_id="trainer-tests",
@@ -113,7 +119,16 @@ def _registry_for_python(tmp_path: Path) -> tuple[ArtifactRegistry, str, Path]:
         path=executable,
         kind="training_executable",
     )
-    return registry, record.artifact_id, executable
+    script_artifact_id: str | None = None
+    if script is not None:
+        script_record = registry.register_file(
+            workspace_id="trainer-tests",
+            idempotency_key="trainer-script",
+            path=script,
+            kind="training_command_file",
+        )
+        script_artifact_id = script_record.artifact_id
+    return registry, record.artifact_id, executable, script_artifact_id
 
 
 def _worker(
@@ -121,11 +136,16 @@ def _worker(
     script: Path,
     **kwargs: object,
 ) -> tuple[SubprocessTrainingWorker, ArtifactRegistry, str]:
-    registry, artifact_id, executable = _registry_for_python(tmp_path)
+    registry, artifact_id, executable, script_artifact_id = _registry_for_python(
+        tmp_path,
+        script,
+    )
+    assert script_artifact_id is not None
     worker = SubprocessTrainingWorker(
         (str(executable), str(script)),
         artifact_registry=registry,
         trainer_artifact_id=artifact_id,
+        command_artifact_ids={1: script_artifact_id},
         **kwargs,
     )
     return worker, registry, artifact_id
@@ -171,6 +191,8 @@ sys.stdout.write(json.dumps(response))
     assert observed["protocol_version"] == 2
     assert observed["trainer_artifact_id"] == artifact_id
     assert observed["trainer_sha256"] == record.sha256
+    assert observed["command_sha256"] == observed["job"]["command_sha256"]
+    assert {item["argument_index"] for item in observed["command_artifacts"]} == {0, 1}
     assert observed["job"]["frozen_package_sha256"] == spec.frozen_package_sha256
     assert observed["job"]["training_material_sha256"] == spec.training_material_sha256
     assert observed["training_materials"]["training_material_sha256"] == (
@@ -184,6 +206,7 @@ sys.stdout.write(json.dumps(response))
     ]
     envelope = result.resume_state["_nika_subprocess"]
     assert isinstance(envelope, dict)
+    assert envelope["command_sha256"] == observed["command_sha256"]
     assert envelope["trainer_artifact_id"] == artifact_id
     assert envelope["trainer_sha256"] == record.sha256
 
@@ -249,11 +272,16 @@ sys.stdout.write(json.dumps(response))
     )
     materials = _resolved_materials(tmp_path)
     spec = _spec(materials)
-    registry, first_id, executable = _registry_for_python(tmp_path)
+    registry, first_id, executable, script_artifact_id = _registry_for_python(
+        tmp_path,
+        trainer,
+    )
+    assert script_artifact_id is not None
     first_worker = SubprocessTrainingWorker(
         (str(executable), str(trainer)),
         artifact_registry=registry,
         trainer_artifact_id=first_id,
+        command_artifact_ids={1: script_artifact_id},
     )
     first = first_worker.step(
         spec=spec,
@@ -271,6 +299,7 @@ sys.stdout.write(json.dumps(response))
         (str(executable), str(trainer)),
         artifact_registry=registry,
         trainer_artifact_id=second_record.artifact_id,
+        command_artifact_ids={1: script_artifact_id},
     )
 
     with pytest.raises(TrainingSubprocessError) as exc_info:
@@ -281,7 +310,7 @@ sys.stdout.write(json.dumps(response))
             training_materials=materials,
         )
 
-    assert exc_info.value.code == "resume_state_trainer_artifact_mismatch"
+    assert exc_info.value.code == "resume_state_command_mismatch"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
 
 
@@ -398,14 +427,13 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
 
 
 def test_registry_artifact_must_match_command_executable(tmp_path: Path) -> None:
-    trainer = _script(tmp_path, "raise SystemExit(0)")
     materials = _resolved_materials(tmp_path)
     spec = _spec(materials, max_steps=1)
-    registry, artifact_id, _ = _registry_for_python(tmp_path)
+    registry, artifact_id, _, _ = _registry_for_python(tmp_path)
 
     with pytest.raises(TrainingSubprocessError) as exc_info:
         SubprocessTrainingWorker(
-            (str(tmp_path / "different.exe"), str(trainer)),
+            (str(tmp_path / "different.exe"),),
             artifact_registry=registry,
             trainer_artifact_id=artifact_id,
         ).step(
@@ -415,8 +443,58 @@ def test_registry_artifact_must_match_command_executable(tmp_path: Path) -> None
             training_materials=materials,
         )
 
-    assert exc_info.value.code == "trainer_artifact_command_mismatch"
+    assert exc_info.value.code == "command_artifact_argument_mismatch"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+
+
+def test_absolute_command_file_requires_registry_binding(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
+
+    with pytest.raises(ValueError, match="absolute command file arguments"):
+        SubprocessTrainingWorker(
+            (str(executable), str(trainer)),
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+        )
+
+
+def test_relative_command_file_argument_is_rejected(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
+
+    with pytest.raises(ValueError, match="unbound command arguments"):
+        SubprocessTrainingWorker(
+            (str(executable), trainer.name),
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+        )
+
+
+def test_bound_command_file_tamper_fails_before_process_effect(tmp_path: Path) -> None:
+    marker = tmp_path / "started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    trainer.write_text("raise SystemExit(0)", encoding="utf-8")
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "command_artifact_not_verified"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
 
 
 def test_parent_environment_is_not_inherited_by_default(
@@ -565,7 +643,7 @@ sys.stdout.write("{not-json")
 
 
 def test_command_must_not_be_a_shell_string(tmp_path: Path) -> None:
-    registry, artifact_id, _ = _registry_for_python(tmp_path)
+    registry, artifact_id, _, _ = _registry_for_python(tmp_path)
     with pytest.raises(TypeError, match="not a shell string"):
         SubprocessTrainingWorker(
             "python trainer.py",
@@ -575,7 +653,7 @@ def test_command_must_not_be_a_shell_string(tmp_path: Path) -> None:
 
 
 def test_trainer_artifact_id_must_be_exact_sha256(tmp_path: Path) -> None:
-    registry, _, executable = _registry_for_python(tmp_path)
+    registry, _, executable, _ = _registry_for_python(tmp_path)
     with pytest.raises(ValueError, match="trainer_artifact_id"):
         SubprocessTrainingWorker(
             (str(executable),),
@@ -586,7 +664,7 @@ def test_trainer_artifact_id_must_be_exact_sha256(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("timeout", [float("nan"), float("inf"), -1.0, 0.0, True])
 def test_invalid_timeout_is_rejected(tmp_path: Path, timeout: object) -> None:
-    registry, artifact_id, executable = _registry_for_python(tmp_path)
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
     with pytest.raises(ValueError, match="timeout_seconds"):
         SubprocessTrainingWorker(
             (str(executable),),
@@ -597,7 +675,7 @@ def test_invalid_timeout_is_rejected(tmp_path: Path, timeout: object) -> None:
 
 
 def test_huge_integer_timeout_is_rejected_without_overflow(tmp_path: Path) -> None:
-    registry, artifact_id, executable = _registry_for_python(tmp_path)
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
     with pytest.raises(ValueError, match="timeout_seconds"):
         SubprocessTrainingWorker(
             (str(executable),),
