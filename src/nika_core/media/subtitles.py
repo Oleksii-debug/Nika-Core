@@ -28,6 +28,21 @@ class SubtitlePolicy:
     automatic_max_malformed_ratio: float = 0.05
     automatic_min_coverage_ratio: float = 0.55
 
+    def __post_init__(self) -> None:
+        if type(self.automatic_min_segments) is not int or self.automatic_min_segments < 1:
+            raise ValueError("automatic_min_segments must be a positive integer")
+        for name, value in (
+            ("automatic_max_malformed_ratio", self.automatic_max_malformed_ratio),
+            ("automatic_min_coverage_ratio", self.automatic_min_coverage_ratio),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0 <= value <= 1
+            ):
+                raise ValueError(f"{name} must be a finite ratio in [0, 1]")
+
 
 def select_subtitle_track(
     tracks: tuple[SubtitleTrack, ...] | list[SubtitleTrack],
