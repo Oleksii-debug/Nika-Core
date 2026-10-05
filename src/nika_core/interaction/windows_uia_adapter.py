@@ -205,7 +205,13 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
         self,
         node: ControlNode,
         action: InteractionAction,
-    ) -> tuple[int, tuple[int, ...], int, ControlNode]:
+    ) -> tuple[
+        int,
+        tuple[int, ...],
+        int,
+        ControlNode,
+        UIAControlRecord,
+    ]:
         expected = self._semantic_authority(node)
         hwnd = self._live_hwnd()
         runtime_id, generation = self._control_identity(expected)
@@ -251,7 +257,46 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
                     "semantic authority is stale"
                 )
 
-        return hwnd, runtime_id, generation, expected
+        return hwnd, runtime_id, generation, expected, live
+
+    def _guarded_focus_effect(
+        self,
+        *,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        fence: UIAControlRecord,
+    ) -> None:
+        guarded = getattr(self.backend, "guarded_focus", None)
+        if not callable(guarded):
+            raise UnsupportedInteractionError(
+                "Windows UIA backend does not implement guarded focus authority"
+            )
+        guarded(hwnd, runtime_id, generation, fence)
+
+    def _guarded_action_effect(
+        self,
+        *,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        fence: UIAControlRecord,
+        action: InteractionAction,
+        value: str | None,
+    ) -> None:
+        guarded = getattr(self.backend, "guarded_action", None)
+        if not callable(guarded):
+            raise UnsupportedInteractionError(
+                "Windows UIA backend does not implement guarded action authority"
+            )
+        guarded(
+            hwnd,
+            runtime_id,
+            generation,
+            fence,
+            action,
+            value,
+        )
 
     def _exact_live_focus_match(
         self,
@@ -327,11 +372,22 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
 
         if type(node) is not ControlNode:
             raise ValueError("UIA focus target must be an exact ControlNode")
-        hwnd, runtime_id, generation, expected = self._revalidate_action_authority(
+        (
+            hwnd,
+            runtime_id,
+            generation,
+            expected,
+            live,
+        ) = self._revalidate_action_authority(
             node,
             InteractionAction.FOCUS,
         )
-        self.backend.focus(hwnd, runtime_id, generation)
+        self._guarded_focus_effect(
+            hwnd=hwnd,
+            runtime_id=runtime_id,
+            generation=generation,
+            fence=live,
+        )
         self._await_focus_acknowledgement(
             expected,
             hwnd=hwnd,
@@ -378,8 +434,19 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             return False
 
         try:
-            self.backend.focus(hwnd, runtime_id, generation)
-        except (TargetNotFoundError, StaleSnapshotError, AmbiguousTargetError):
+            self._guarded_focus_effect(
+                hwnd=hwnd,
+                runtime_id=runtime_id,
+                generation=generation,
+                fence=live,
+            )
+        except (
+            TargetNotFoundError,
+            StaleSnapshotError,
+            AmbiguousTargetError,
+            UnsupportedInteractionError,
+            ValueError,
+        ):
             return False
 
         for attempt in range(_FOCUS_ACK_ATTEMPTS):
@@ -422,27 +489,24 @@ class WindowsUIAInteractionAdapter(_BaseWindowsUIAInteractionAdapter):
             self.focus(node)
             return
 
-        hwnd, runtime_id, generation, _ = self._revalidate_action_authority(
+        (
+            hwnd,
+            runtime_id,
+            generation,
+            _,
+            live,
+        ) = self._revalidate_action_authority(
             node,
             action,
         )
-        method = {
-            InteractionAction.INVOKE: self.backend.invoke,
-            InteractionAction.SET_VALUE: self.backend.set_value,
-            InteractionAction.SELECT: self.backend.select,
-            InteractionAction.TOGGLE: self.backend.toggle,
-            InteractionAction.EXPAND: self.backend.expand,
-            InteractionAction.COLLAPSE: self.backend.collapse,
-        }.get(action)
-        if method is None:
-            raise UnsupportedInteractionError(
-                f"{action.value} has no semantic Windows UIA effect adapter"
-            )
-        if action is InteractionAction.SET_VALUE:
-            assert value is not None
-            method(hwnd, runtime_id, generation, value)  # type: ignore[call-arg]
-        else:
-            method(hwnd, runtime_id, generation)  # type: ignore[call-arg]
+        self._guarded_action_effect(
+            hwnd=hwnd,
+            runtime_id=runtime_id,
+            generation=generation,
+            fence=live,
+            action=action,
+            value=value,
+        )
 
 
 __all__ = [

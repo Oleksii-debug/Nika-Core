@@ -4,7 +4,12 @@ from dataclasses import dataclass
 
 import pytest
 
-from nika_core.interaction.domain import AmbiguousTargetError
+from nika_core.interaction.domain import (
+    AmbiguousTargetError,
+    InteractionAction,
+    StaleSnapshotError,
+    UnsupportedInteractionError,
+)
 from nika_core.interaction.windows_uia_adapter import (
     PywinautoUIABackend,
     UIAControlRecord,
@@ -279,3 +284,126 @@ def test_pywinauto_backend_omits_unaddressable_elements_without_guessing(
     assert controls[0].runtime_id == (4, 2)
     assert controls[0].element_generation == 1
     assert backend.last_unaddressable_count == 2
+
+
+class _InvokePattern:
+    def __init__(self, wrapper: "_EffectWrapper") -> None:
+        self.wrapper = wrapper
+
+    def Invoke(self) -> None:
+        self.wrapper.invoked = True
+
+
+class _EffectWrapper(FakeWrapper):
+    def __init__(self, element_info: FakeElementInfo) -> None:
+        super().__init__(element_info)
+        self.invoked = False
+        self.focused = False
+        self.iface_invoke = _InvokePattern(self)
+
+    def set_focus(self) -> None:
+        self.focused = True
+
+
+def _effect_record(
+    *,
+    name: str = "Save",
+    enabled: bool = True,
+    visible: bool = True,
+    patterns: tuple[str, ...] = ("Invoke",),
+) -> UIAControlRecord:
+    return UIAControlRecord(
+        runtime_id=(4, 2),
+        automation_id="save",
+        role="button",
+        name=name,
+        enabled=enabled,
+        visible=visible,
+        focused=False,
+        value=None,
+        bounds=(0, 0, 100, 30),
+        patterns=patterns,
+        element_generation=1,
+    )
+
+
+@pytest.mark.parametrize(
+    "live",
+    (
+        _effect_record(name="Delete"),
+        _effect_record(enabled=False),
+        _effect_record(visible=False),
+    ),
+)
+def test_guarded_action_rejects_semantic_drift_before_same_wrapper_effect(
+    monkeypatch: pytest.MonkeyPatch,
+    live: UIAControlRecord,
+) -> None:
+    backend = PywinautoUIABackend()
+    wrapper = _EffectWrapper(FakeElementInfo((4, 2), "same-live-element"))
+    expected = _effect_record()
+    monkeypatch.setattr(
+        backend,
+        "_pairs",
+        lambda _hwnd, _view: ((wrapper, live),),
+    )
+
+    with pytest.raises(
+        (StaleSnapshotError, UnsupportedInteractionError),
+        match="guarded|disabled|hidden",
+    ):
+        backend.guarded_action(
+            100,
+            (4, 2),
+            1,
+            expected,
+            InteractionAction.INVOKE,
+            None,
+        )
+
+    assert wrapper.invoked is False
+
+
+def test_guarded_action_rejects_pattern_drift_before_same_wrapper_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PywinautoUIABackend()
+    wrapper = _EffectWrapper(FakeElementInfo((4, 2), "same-live-element"))
+    expected = _effect_record()
+    live = _effect_record(patterns=())
+    monkeypatch.setattr(
+        backend,
+        "_pairs",
+        lambda _hwnd, _view: ((wrapper, live),),
+    )
+
+    with pytest.raises(UnsupportedInteractionError, match="pattern changed"):
+        backend.guarded_action(
+            100,
+            (4, 2),
+            1,
+            expected,
+            InteractionAction.INVOKE,
+            None,
+        )
+
+    assert wrapper.invoked is False
+
+
+def test_guarded_focus_rejects_semantic_drift_before_same_wrapper_effect(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PywinautoUIABackend()
+    wrapper = _EffectWrapper(FakeElementInfo((4, 2), "same-live-element"))
+    expected = _effect_record()
+    live = _effect_record(name="Delete")
+    monkeypatch.setattr(
+        backend,
+        "_pairs",
+        lambda _hwnd, _view: ((wrapper, live),),
+    )
+
+    with pytest.raises(StaleSnapshotError, match="role/name drift"):
+        backend.guarded_focus(100, (4, 2), 1, expected)
+
+    assert wrapper.focused is False

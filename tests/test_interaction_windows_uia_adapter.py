@@ -134,6 +134,38 @@ class FakeBackend:
         self.calls.append(("collapse", runtime_id, generation, None))
         self.controls = [replace(control, value="collapsed") for control in self.controls]
 
+    def guarded_focus(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+    ) -> None:
+        self.focus(hwnd, runtime_id, generation)
+
+    def guarded_action(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+        action: InteractionAction,
+        value: str | None,
+    ) -> None:
+        method = {
+            InteractionAction.INVOKE: self.invoke,
+            InteractionAction.SET_VALUE: self.set_value,
+            InteractionAction.SELECT: self.select,
+            InteractionAction.TOGGLE: self.toggle,
+            InteractionAction.EXPAND: self.expand,
+            InteractionAction.COLLAPSE: self.collapse,
+        }[action]
+        if action is InteractionAction.SET_VALUE:
+            assert value is not None
+            method(hwnd, runtime_id, generation, value)
+        else:
+            method(hwnd, runtime_id, generation)
+
 
 def _adapter(backend: FakeBackend, **kwargs) -> WindowsUIAInteractionAdapter:
     return WindowsUIAInteractionAdapter(

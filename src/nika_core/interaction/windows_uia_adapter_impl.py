@@ -78,6 +78,24 @@ class WindowsUIABackend(Protocol):
         generation: int,
     ) -> None: ...
 
+    def guarded_focus(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+    ) -> None: ...
+
+    def guarded_action(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+        action: InteractionAction,
+        value: str | None,
+    ) -> None: ...
+
     def invoke(
         self,
         hwnd: int,
@@ -517,6 +535,134 @@ class PywinautoUIABackend:
         record = focused[0]
         assert record.runtime_id is not None
         return record.runtime_id, record.element_generation
+
+    def _guarded_wrapper(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+        *,
+        required_pattern: str | None = None,
+    ):
+        if type(expected) is not UIAControlRecord:
+            raise ValueError("guarded UIA effect requires an exact UIAControlRecord")
+        if (
+            expected.runtime_id != runtime_id
+            or expected.element_generation != generation
+        ):
+            raise ValueError("guarded UIA effect fence identity does not match target")
+
+        matches = [
+            (wrapper, record)
+            for wrapper, record in self._pairs(hwnd, "control")
+            if record.runtime_id == runtime_id
+            and record.element_generation == generation
+        ]
+        if not matches:
+            raise StaleSnapshotError(
+                f"guarded UIA identity {(runtime_id, generation)!r} is stale"
+            )
+        if len(matches) != 1:
+            raise AmbiguousTargetError(
+                "guarded UIA identity resolved to multiple live elements"
+            )
+
+        wrapper, live = matches[0]
+        if live.role != expected.role or live.name != expected.name:
+            raise StaleSnapshotError(
+                "guarded UIA effect rejected accessible role/name drift"
+            )
+        if live.enabled != expected.enabled or live.visible != expected.visible:
+            raise StaleSnapshotError(
+                "guarded UIA effect rejected enabled/visible state drift"
+            )
+        if not live.enabled or not live.visible:
+            raise UnsupportedInteractionError(
+                "disabled/hidden controls cannot receive guarded UIA effects"
+            )
+        if required_pattern is not None:
+            if required_pattern not in expected.patterns:
+                raise UnsupportedInteractionError(
+                    f"{required_pattern} pattern was absent from the effect fence"
+                )
+            if required_pattern not in live.patterns:
+                raise UnsupportedInteractionError(
+                    f"{required_pattern} pattern changed before the UIA effect"
+                )
+        return wrapper
+
+    def guarded_focus(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+    ) -> None:
+        self._guarded_wrapper(
+            hwnd,
+            runtime_id,
+            generation,
+            expected,
+        ).set_focus()
+
+    def guarded_action(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+        action: InteractionAction,
+        value: str | None,
+    ) -> None:
+        if type(action) is not InteractionAction:
+            raise ValueError("guarded UIA action must be an exact InteractionAction")
+        if action is InteractionAction.SET_VALUE:
+            if type(value) is not str:
+                raise ValueError("guarded SET_VALUE requires an exact string")
+        elif value is not None:
+            raise ValueError("only guarded SET_VALUE accepts a value")
+
+        spec = {
+            InteractionAction.INVOKE: ("Invoke", "iface_invoke", "Invoke"),
+            InteractionAction.SET_VALUE: ("Value", "iface_value", "SetValue"),
+            InteractionAction.SELECT: (
+                "SelectionItem",
+                "iface_selection_item",
+                "Select",
+            ),
+            InteractionAction.TOGGLE: ("Toggle", "iface_toggle", "Toggle"),
+            InteractionAction.EXPAND: (
+                "ExpandCollapse",
+                "iface_expand_collapse",
+                "Expand",
+            ),
+            InteractionAction.COLLAPSE: (
+                "ExpandCollapse",
+                "iface_expand_collapse",
+                "Collapse",
+            ),
+        }.get(action)
+        if spec is None:
+            raise UnsupportedInteractionError(
+                f"{action.value} has no guarded Windows UIA effect"
+            )
+
+        required_pattern, attribute, method = spec
+        wrapper = self._guarded_wrapper(
+            hwnd,
+            runtime_id,
+            generation,
+            expected,
+            required_pattern=required_pattern,
+        )
+        args = (value,) if action is InteractionAction.SET_VALUE else ()
+        try:
+            getattr(getattr(wrapper, attribute), method)(*args)
+        except Exception as exc:
+            raise UnsupportedInteractionError(
+                f"{required_pattern} pattern is unavailable"
+            ) from exc
 
     def focus(
         self,

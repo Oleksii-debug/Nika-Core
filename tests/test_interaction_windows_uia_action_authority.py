@@ -132,6 +132,60 @@ class DriftAfterFocusBackend:
     ) -> None:
         raise AssertionError("not used")
 
+    def guarded_focus(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+    ) -> None:
+        self.focus(hwnd, runtime_id, generation)
+
+    def guarded_action(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+        action: InteractionAction,
+        value: str | None,
+    ) -> None:
+        if (
+            self.record.role != expected.role
+            or self.record.name != expected.name
+            or self.record.enabled != expected.enabled
+            or self.record.visible != expected.visible
+        ):
+            raise StaleSnapshotError("guarded semantic effect fence changed")
+        if "Invoke" not in self.record.patterns:
+            raise UnsupportedInteractionError(
+                "guarded semantic effect fence lost Invoke"
+            )
+        if action is not InteractionAction.INVOKE or value is not None:
+            raise AssertionError("unexpected guarded action")
+        self.invoke(hwnd, runtime_id, generation)
+
+
+class DriftInsideGuardBackend(DriftAfterFocusBackend):
+    def guarded_action(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+        action: InteractionAction,
+        value: str | None,
+    ) -> None:
+        self.record = replace(self.record, name="Delete account")
+        super().guarded_action(
+            hwnd,
+            runtime_id,
+            generation,
+            expected,
+            action,
+            value,
+        )
+
 
 @pytest.mark.parametrize(
     ("drift", "focus_rejects"),
@@ -190,3 +244,17 @@ def test_public_node_mutation_cannot_launder_live_semantic_drift() -> None:
 
     assert backend.invoked is False
 
+
+def test_action_guard_rechecks_after_adapter_semantic_validation() -> None:
+    backend = DriftInsideGuardBackend({})
+    adapter = WindowsUIAInteractionAdapter(
+        process_id=77,
+        window_title="Nika Fixture",
+        backend=backend,
+    )
+    validated = adapter.observe().controls[0]
+
+    with pytest.raises(StaleSnapshotError, match="guarded semantic effect fence"):
+        adapter.act(validated, InteractionAction.INVOKE, None)
+
+    assert backend.invoked is False

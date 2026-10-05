@@ -82,6 +82,26 @@ class FocusAckBackend:
         assert (runtime_id, generation) == ((1, 2), 1)
         self.focus_calls += 1
 
+    def guarded_focus(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+    ) -> None:
+        self.focus(hwnd, runtime_id, generation)
+
+    def guarded_action(
+        self,
+        hwnd: int,
+        runtime_id: tuple[int, ...],
+        generation: int,
+        expected: UIAControlRecord,
+        action: InteractionAction,
+        value: str | None,
+    ) -> None:
+        raise AssertionError("non-focus guarded action is not used")
+
 
 def _adapter(backend: FocusAckBackend) -> WindowsUIAInteractionAdapter:
     return WindowsUIAInteractionAdapter(
