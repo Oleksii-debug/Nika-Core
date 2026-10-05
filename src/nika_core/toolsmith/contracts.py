@@ -171,6 +171,11 @@ class NetworkPolicy:
             raise ValueError("approved-host network policy requires at least one host")
 
 
+_MAX_PROCESS_TIMEOUT_SECONDS = 60 * 60
+_MAX_CAPTURED_OUTPUT_BYTES = 64 * 1024 * 1024
+_MAX_CHANGED_FILES = 10_000
+
+
 @dataclass(frozen=True, slots=True)
 class ResourceBudget:
     timeout_seconds: int
@@ -181,6 +186,13 @@ class ResourceBudget:
         values = (self.timeout_seconds, self.max_output_bytes, self.max_changed_files)
         if any(type(value) is not int or value <= 0 for value in values):
             raise ValueError("resource budget values must be positive integers")
+        limits = (
+            (self.timeout_seconds, _MAX_PROCESS_TIMEOUT_SECONDS),
+            (self.max_output_bytes, _MAX_CAPTURED_OUTPUT_BYTES),
+            (self.max_changed_files, _MAX_CHANGED_FILES),
+        )
+        if any(value > maximum for value, maximum in limits):
+            raise ValueError("resource budget values exceed safe limits")
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,6 +216,11 @@ class AcceptanceCommand:
             type(self.timeout_seconds) is not int or self.timeout_seconds <= 0
         ):
             raise ValueError("acceptance command timeout must be a positive integer")
+        if (
+            self.timeout_seconds is not None
+            and self.timeout_seconds > _MAX_PROCESS_TIMEOUT_SECONDS
+        ):
+            raise ValueError("acceptance command timeout exceeds safe limit")
 
 
 @dataclass(frozen=True, slots=True)
