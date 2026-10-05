@@ -304,16 +304,43 @@ class MCPClientAdapter:
                     if tool_id in seen_tool_ids:
                         raise ValueError(f"duplicate MCP tool id: {tool_id}")
                     seen_tool_ids.add(tool_id)
-                    raw_description = tool.description or tool.title or tool_name
-                    if (
-                        type(raw_description) is str
-                        and len(raw_description) > _MAX_MCP_DISCOVERY_BYTES
-                    ):
-                        raise ValueError("MCP discovery exceeds safe metadata limit")
-                    description = _exact_utf8_text(
-                        raw_description, field="MCP tool description"
-                    )
-                    schema = _snapshot_mcp_arguments(tool.input_schema or {})
+                    try:
+                        raw_description = tool.description
+                        raw_title = tool.title
+                        raw_schema = tool.input_schema
+                    except AttributeError as exc:
+                        raise ValueError("MCP tool metadata is incomplete") from exc
+
+                    description: str | None = None
+                    if raw_description is not None:
+                        if type(raw_description) is not str:
+                            raise TypeError(
+                                "MCP tool description must be an exact string"
+                            )
+                        if len(raw_description) > _MAX_MCP_DISCOVERY_BYTES:
+                            raise ValueError(
+                                "MCP discovery exceeds safe metadata limit"
+                            )
+                        description = _exact_utf8_text(
+                            raw_description, field="MCP tool description"
+                        )
+                    if not description and raw_title is not None:
+                        if type(raw_title) is not str:
+                            raise TypeError("MCP tool title must be an exact string")
+                        if len(raw_title) > _MAX_MCP_DISCOVERY_BYTES:
+                            raise ValueError(
+                                "MCP discovery exceeds safe metadata limit"
+                            )
+                        description = _exact_utf8_text(
+                            raw_title, field="MCP tool title"
+                        )
+                    if not description:
+                        description = tool_name
+
+                    if raw_schema is None:
+                        schema: dict[str, object] = {}
+                    else:
+                        schema = _snapshot_mcp_arguments(raw_schema)
                     discovery_bytes += (
                         len(tool_id.encode("utf-8"))
                         + len(description.encode("utf-8"))
