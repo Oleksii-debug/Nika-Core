@@ -213,3 +213,15 @@ def test_data_adoption_helper_reuses_strict_pf11_evidence_reader(
             cwd=cwd,
         )
 
+@pytest.mark.parametrize("state", ["active\x00hidden", "act\u2028ive", "act\u2060ive"])
+def test_control_text_is_rejected_from_pf11_state(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    state: str,
+) -> None:
+    payload = _payload()
+    payload["state"] = state
+
+    with pytest.raises(RuntimeError, match="invalid state"):
+        _proof(monkeypatch, tmp_path, _json_writer(payload))
+
