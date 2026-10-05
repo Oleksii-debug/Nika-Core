@@ -44,6 +44,27 @@ def _release_zip(
     return artifact
 
 
+@pytest.mark.parametrize(
+    "expected_product",
+    [
+        "N" * 129,
+        "NikaCore\x1f",
+    ],
+)
+def test_release_archive_rejects_invalid_trusted_product_identity(
+    tmp_path: Path,
+    expected_product: str,
+) -> None:
+    artifact = _release_zip(tmp_path, manifest_version=TRUSTED_VERSION)
+
+    assert verify_release_archive(
+        artifact,
+        source_sha=SOURCE_SHA,
+        expected_product=expected_product,
+        expected_product_version=TRUSTED_VERSION,
+    ) == ("archive:expected-product-format",)
+
+
 def test_release_archive_rejects_embedded_product_mismatch(tmp_path: Path) -> None:
     artifact = _release_zip(
         tmp_path,
