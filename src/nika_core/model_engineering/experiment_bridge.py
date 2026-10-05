@@ -195,6 +195,10 @@ def _validate_report_aggregates(
             raise ValueError(
                 "benchmark case weight evidence does not match the evaluation set"
             )
+        if result.evaluation_pass_score != float(case.pass_score):
+            raise ValueError(
+                "benchmark case threshold evidence does not match the evaluation set"
+            )
 
     total_weight = sum(float(case.weight) for case in evaluation_set.cases)
     expected_quality = sum(
