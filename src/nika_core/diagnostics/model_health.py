@@ -296,6 +296,19 @@ class OllamaModelHealthProbe:
         return f"{self._model_id}:latest" in models
 
     @staticmethod
+    def _same_model_identity(left: str, right: str) -> bool:
+        if left == right:
+            return True
+
+        def default_tag_alias(value: str) -> str | None:
+            leaf = value.rsplit("/", 1)[-1]
+            if ":" in leaf or "@" in leaf:
+                return None
+            return f"{value}:latest"
+
+        return default_tag_alias(left) == right or default_tag_alias(right) == left
+
+    @staticmethod
     def _successful_response(response: httpx.Response) -> bool:
         status_code = response.status_code
         return type(status_code) is int and 200 <= status_code < 300
@@ -324,6 +337,13 @@ class OllamaModelHealthProbe:
                     return None
                 item_identities.append(value)
             if not item_identities:
+                return None
+            if (
+                len(item_identities) == 2
+                and not OllamaModelHealthProbe._same_model_identity(
+                    item_identities[0], item_identities[1]
+                )
+            ):
                 return None
             identities.update(item_identities)
         return identities
