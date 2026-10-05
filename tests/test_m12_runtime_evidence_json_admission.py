@@ -13,6 +13,30 @@ from scripts.m12_release_evidence import (
 )
 
 
+PROJECT_ID = "product-" + "a" * 64
+
+
+def _pf11_payload() -> dict[str, object]:
+    return {
+        "route": "product_project",
+        "project_id": PROJECT_ID,
+        "spec_version": 1,
+        "state": "active",
+        "command_center_state_proven": True,
+        "current_command_proven": True,
+        "current_command_focus_proven": True,
+        "bridge_state_project_id": PROJECT_ID,
+        "bridge_state_spec_version": 1,
+        "bridge_state_status_count": 0,
+        "bridge_state_decision_count": 0,
+        "restart_selection_integrity_proven": True,
+        "bounded_projection_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -87,13 +111,12 @@ def test_pf11_rejects_boolean_spec_version(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = tmp_path / "pf11.json"
-    output.write_text(
-        '{"route":"product_project","spec_version":true,"project_id":"p"}',
-        encoding="utf-8",
-    )
+    payload = _pf11_payload()
+    payload["spec_version"] = True
+    output.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(release_evidence, "_run_checked", lambda *args, **kwargs: None)
 
-    with pytest.raises(RuntimeError, match="invalid PF11 route evidence"):
+    with pytest.raises(RuntimeError, match="invalid spec_version"):
         _run_installed_pf11(Path("NikaCore.exe"), output, env={})
 
 
@@ -117,15 +140,40 @@ def test_pf11_accepts_exact_typed_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = tmp_path / "pf11.json"
-    payload = {
-        "route": "product_project",
-        "spec_version": 1,
-        "project_id": "product-project",
-    }
+    payload = _pf11_payload()
     output.write_text(json.dumps(payload), encoding="utf-8")
     monkeypatch.setattr(release_evidence, "_run_checked", lambda *args, **kwargs: None)
 
     assert _run_installed_pf11(Path("NikaCore.exe"), output, env={}) == payload
+
+
+def test_pf11_rejects_noncanonical_product_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "pf11.json"
+    payload = _pf11_payload()
+    payload["project_id"] = "product-project"
+    payload["bridge_state_project_id"] = "product-project"
+    output.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(release_evidence, "_run_checked", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="non-canonical ProductProject id"):
+        _run_installed_pf11(Path("NikaCore.exe"), output, env={})
+
+
+def test_pf11_rejects_missing_restart_selection_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "pf11.json"
+    payload = _pf11_payload()
+    payload["restart_selection_integrity_proven"] = False
+    output.write_text(json.dumps(payload), encoding="utf-8")
+    monkeypatch.setattr(release_evidence, "_run_checked", lambda *args, **kwargs: None)
+
+    with pytest.raises(RuntimeError, match="restart_selection_integrity_proven=true"):
+        _run_installed_pf11(Path("NikaCore.exe"), output, env={})
 
 
 def test_rollback_marker_rejects_boolean_version(tmp_path: Path) -> None:
