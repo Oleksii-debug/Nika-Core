@@ -110,6 +110,23 @@ def test_m11_release_version_is_validated_and_not_interpolated_into_powershell()
     assert "-DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}" not in m11
 
 
+def test_m11_runs_all_release_boundary_regressions() -> None:
+    m11 = (ROOT / ".github" / "workflows" / "m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    for test_path in (
+        "tests/test_m11_m12_release.py",
+        "tests/test_m5_shell_required_assets.py",
+        "tests/test_qa_workflow_lineage.py",
+        "tests/test_release_special_bundle_entries.py",
+        "tests/test_windows_packaging_ancestor_links.py",
+        "tests/test_windows_packaging_input_safety.py",
+        "tests/test_windows_packaging_output_safety.py",
+    ):
+        assert m11.count(test_path) == 3, test_path
+
+
 def test_m12_release_version_reuses_validated_m11_authority() -> None:
     m12 = M12_WORKFLOW.read_text(encoding="utf-8")
 
