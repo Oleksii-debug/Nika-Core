@@ -18,8 +18,23 @@ from nika_core.model_gateway.contracts import (
 )
 
 
+def _require_provider_text(name: str, value: object) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be exact text")
+    if not value:
+        raise ValueError(f"{name} must not be empty")
+    if value != value.strip():
+        raise ValueError(f"{name} must not contain surrounding whitespace")
+    if any(not char.isprintable() for char in value):
+        raise ValueError(f"{name} must not contain control characters")
+    return value
+
+
 class DeterministicMockProvider:
     def __init__(self, *, provider_id: str = "mock", prefix: str = "mock") -> None:
+        provider_id = _require_provider_text("provider_id", provider_id)
+        if type(prefix) is not str:
+            raise TypeError("prefix must be exact text")
         self._capabilities = ProviderCapabilities(
             provider_id=provider_id,
             kind=ProviderKind.NO_LLM,
@@ -55,8 +70,19 @@ class OpenAICompatibleProvider:
         supports_hard_cancellation: bool = False,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
+        provider_id = _require_provider_text("provider_id", provider_id)
+        base_url = _require_provider_text("base_url", base_url)
+        default_model = _require_provider_text("default_model", default_model)
+        if type(kind) is not ProviderKind:
+            raise TypeError("kind must be a ProviderKind")
         if kind is ProviderKind.NO_LLM:
             raise ValueError("HTTP provider cannot be no_llm")
+        if api_key is not None and type(api_key) is not str:
+            raise TypeError("api_key must be exact text when supplied")
+        if type(supports_private_data) is not bool:
+            raise TypeError("supports_private_data must be an exact boolean")
+        if type(supports_hard_cancellation) is not bool:
+            raise TypeError("supports_hard_cancellation must be an exact boolean")
         self._capabilities = ProviderCapabilities(
             provider_id=provider_id,
             kind=kind,
@@ -190,22 +216,29 @@ class OllamaProvider:
         think: bool | str = False,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
-        if not default_model.strip():
-            raise ValueError("default_model must not be empty")
-        if default_model != default_model.strip():
-            raise ValueError("default_model must not contain surrounding whitespace")
-        if not base_url.strip():
-            raise ValueError("base_url must not be empty")
-        if base_url != base_url.strip():
-            raise ValueError("base_url must not contain surrounding whitespace")
-        parsed = urlsplit(base_url)
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        default_model = _require_provider_text("default_model", default_model)
+        base_url = _require_provider_text("base_url", base_url)
+        if "\\" in base_url:
+            raise ValueError("Ollama base_url contains unsafe characters")
+        try:
+            parsed = urlsplit(base_url)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            raise ValueError("Ollama base_url is invalid") from None
+        if parsed.scheme.lower() not in {"http", "https"} or not hostname:
             raise ValueError("Ollama base_url requires an HTTP(S) loopback host")
-        if parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
+        if hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
             raise ValueError("Ollama local route must use a loopback host")
+        if "%" in parsed.netloc or port == 0 or parsed.netloc.endswith(":"):
+            raise ValueError("Ollama base_url has an invalid authority")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("Ollama base_url must not contain userinfo")
-        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        if (
+            parsed.path not in {"", "/"}
+            or "?" in base_url
+            or "#" in base_url
+        ):
             raise ValueError("Ollama base_url must not contain path, query, or fragment")
         self._capabilities = ProviderCapabilities(
             provider_id="ollama",
@@ -325,9 +358,9 @@ def _classify_http_status(status: int) -> tuple[ModelErrorCode, bool]:
 
 
 def _normalize_ollama_think(value: bool | str) -> bool | str:
-    if isinstance(value, bool):
+    if type(value) is bool:
         return value
-    if not isinstance(value, str):
+    if type(value) is not str:
         raise TypeError("think must be a boolean or an Ollama thinking level")
     level = value.strip().lower()
     if level not in {"low", "medium", "high"}:
