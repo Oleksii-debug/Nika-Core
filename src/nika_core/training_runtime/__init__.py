@@ -14,6 +14,11 @@ from nika_core.training_runtime.runtime import (
     TrainingRuntime,
     training_job_fingerprint,
 )
+from nika_core.training_runtime.status import (
+    TrainingStatusError,
+    TrainingStatusProjection,
+    TrainingStatusService,
+)
 
 __all__ = [
     "ArtifactIdentity",
@@ -23,6 +28,9 @@ __all__ = [
     "TrainingRunEvidence",
     "TrainingRunState",
     "TrainingRuntime",
+    "TrainingStatusError",
+    "TrainingStatusProjection",
+    "TrainingStatusService",
     "TrainingStepResult",
     "TrainingWorkerError",
     "TrainingWorkerFailureEffect",
