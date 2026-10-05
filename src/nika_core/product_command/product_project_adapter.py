@@ -12,6 +12,7 @@ from nika_core.product_command.contracts import (
     ProductStatusKind,
     ProductUserDecision,
 )
+from nika_core.product_command.reference_safety import safe_evidence_reference
 from nika_core.product_decisions import ProductDecisionRepository, StoredProductDecision
 from nika_core.product_project import (
     ProductDecision,
@@ -29,7 +30,6 @@ from nika_core.product_project_lifecycle import (
 
 _MAX_LABEL = 240
 _MAX_DETAIL = 4000
-_MAX_REFERENCE = 512
 
 
 class ProductProjectDecisionUnavailableError(RuntimeError):
@@ -439,13 +439,9 @@ def _reference_entries(
 
 
 def _evidence(kind: str, reference: str, label: str) -> EvidenceReference:
-    visible_reference = reference
-    if len(visible_reference) > _MAX_REFERENCE:
-        digest = hashlib.sha256(visible_reference.encode("utf-8")).hexdigest()
-        visible_reference = f"sha256:{digest}"
     return EvidenceReference(
         kind=kind,
-        reference=visible_reference,
+        reference=safe_evidence_reference(reference),
         label=_bounded(label, _MAX_LABEL),
     )
 
