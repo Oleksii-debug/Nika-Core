@@ -137,6 +137,54 @@ def _snapshot_decision(decision: object) -> ProductDecision:
     )
 
 
+def _snapshot_approval(approval: object) -> ApprovalEvidence:
+    if type(approval) is not ApprovalEvidence:
+        raise PermissionError(
+            "trusted product-owner approval evidence must be an exact ApprovalEvidence"
+        )
+    try:
+        text_fields: dict[str, str] = {}
+        for field_name in (
+            "approval_id",
+            "request_id",
+            "issuer_id",
+            "authority_version",
+            "action_fingerprint",
+            "effect_fingerprint",
+            "signature",
+        ):
+            value = _validated_text(
+                getattr(approval, field_name),
+                label=f"approval evidence {field_name}",
+            )
+            if value != value.strip():
+                raise ProductProjectError(
+                    f"approval evidence {field_name} must not contain surrounding whitespace"
+                )
+            text_fields[field_name] = value
+        approved_at = approval.approved_at
+        expires_at = approval.expires_at
+        if type(approved_at) is not datetime or type(expires_at) is not datetime:
+            raise ProductProjectError(
+                "approval evidence timestamps must be exact datetime values"
+            )
+        return ApprovalEvidence(
+            approval_id=text_fields["approval_id"],
+            request_id=text_fields["request_id"],
+            issuer_id=text_fields["issuer_id"],
+            authority_version=text_fields["authority_version"],
+            action_fingerprint=text_fields["action_fingerprint"],
+            effect_fingerprint=text_fields["effect_fingerprint"],
+            approved_at=approved_at,
+            expires_at=expires_at,
+            signature=text_fields["signature"],
+        )
+    except (AttributeError, ProductProjectError, ValueError) as exc:
+        raise PermissionError(
+            "trusted product-owner approval evidence is malformed"
+        ) from exc
+
+
 def _decode_id_list(raw: Any, *, label: str) -> tuple[str, ...]:
     raw_text = _validated_text(raw, label=f"{label} JSON")
     try:
@@ -300,6 +348,7 @@ class ProductDecisionRepository:
                 return replay
 
         verifier: ApprovalVerifier | None = None
+        approval_snapshot: ApprovalEvidence | None = None
         current_time: datetime | None = None
         if decision.state is ProductDecisionState.APPROVED:
             verifier = self.approval_verifier
@@ -307,6 +356,7 @@ class ProductDecisionRepository:
                 raise PermissionError("trusted product-owner approval verifier is required")
             if approval is None:
                 raise PermissionError("trusted product-owner approval evidence is required")
+            approval_snapshot = _snapshot_approval(approval)
             current_time = now or datetime.now(UTC)
             if current_time.tzinfo is None:
                 raise ValueError("product decision approval time must be timezone-aware")
@@ -346,7 +396,7 @@ class ProductDecisionRepository:
                     expected_row_version=expected_row_version,
                 )
                 if verifier is not None:
-                    assert approval is not None
+                    assert approval_snapshot is not None
                     assert current_time is not None
                     evidence_fingerprint = self._evidence_authority_fingerprint_conn(
                         conn,
@@ -361,14 +411,18 @@ class ProductDecisionRepository:
                         mutation_fingerprint=fingerprint,
                         evidence_fingerprint=evidence_fingerprint,
                     )
-                    verifier.validate_locked(intent, approval, now=current_time)
+                    verifier.validate_locked(
+                        intent,
+                        approval_snapshot,
+                        now=current_time,
+                    )
 
                 persisted_decision = (
                     replace(
                         decision,
-                        decided_by_ref=_trusted_decided_by_ref(approval),
+                        decided_by_ref=_trusted_decided_by_ref(approval_snapshot),
                     )
-                    if approval is not None
+                    if approval_snapshot is not None
                     else decision
                 )
                 current = self._latest_conn(conn, project_id, decision.decision_id)
@@ -422,14 +476,14 @@ class ProductDecisionRepository:
                     "decided_by_ref": persisted_decision.decided_by_ref,
                     "evidence_package_ids": list(evidence_package_ids),
                 }
-                if approval is not None:
+                if approval_snapshot is not None:
                     audit_payload["approval_authority"] = {
-                        "approval_id": approval.approval_id,
-                        "request_id": approval.request_id,
-                        "issuer_id": approval.issuer_id,
-                        "authority_version": approval.authority_version,
-                        "action_fingerprint": approval.action_fingerprint,
-                        "effect_fingerprint": approval.effect_fingerprint,
+                        "approval_id": approval_snapshot.approval_id,
+                        "request_id": approval_snapshot.request_id,
+                        "issuer_id": approval_snapshot.issuer_id,
+                        "authority_version": approval_snapshot.authority_version,
+                        "action_fingerprint": approval_snapshot.action_fingerprint,
+                        "effect_fingerprint": approval_snapshot.effect_fingerprint,
                     }
                 self._audit(conn, project_id, audit_payload)
                 stored = self._get_version_conn(
@@ -449,8 +503,8 @@ class ProductDecisionRepository:
                     raise
 
             if verifier is not None:
-                assert approval is not None
-                verifier.commit_locked(approval)
+                assert approval_snapshot is not None
+                verifier.commit_locked(approval_snapshot)
             return stored
 
     def get(self, project_id: str, decision_id: str) -> StoredProductDecision:
