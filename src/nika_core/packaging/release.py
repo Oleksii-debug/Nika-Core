@@ -287,14 +287,20 @@ def _stable_release_file_snapshot(
     path: Path,
     *,
     scan_secrets: bool,
+    root: Path | None = None,
 ) -> _ReleaseFileSnapshot | None:
     try:
         with path.open("rb") as handle:
             before = os.fstat(handle.fileno())
             snapshot = _stream_release_file_snapshot(handle, scan_secrets=scan_secrets)
             after = os.fstat(handle.fileno())
-        current = path.stat()
-    except OSError:
+        if root is None:
+            current = path.stat()
+        else:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+            current = resolved.stat()
+    except (OSError, RuntimeError, ValueError):
         return None
     if not _release_file_snapshot_is_stable(before, after, current, snapshot.size):
         return None
@@ -407,7 +413,11 @@ def build_release_manifest(
         if path.name == _RELEASE_MANIFEST_NAME:
             continue
         relative_path = path.relative_to(root).as_posix()
-        snapshot = _stable_release_file_snapshot(path, scan_secrets=False)
+        snapshot = _stable_release_file_snapshot(
+            path,
+            scan_secrets=False,
+            root=root,
+        )
         if snapshot is None:
             raise ValueError(f"release file changed while building manifest: {relative_path}")
         entries_list.append(
@@ -489,7 +499,11 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
         scan_secrets = (
             PurePosixPath(relative_path).suffix.casefold() in _SECRET_CONTENT_SUFFIXES
         )
-        snapshot = _stable_release_file_snapshot(path, scan_secrets=scan_secrets)
+        snapshot = _stable_release_file_snapshot(
+            path,
+            scan_secrets=scan_secrets,
+            root=root,
+        )
         if snapshot is None:
             findings.append(f"unstable:{relative_path}")
             continue
