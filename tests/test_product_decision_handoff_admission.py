@@ -93,6 +93,10 @@ def _corrupt(payload, case):
     elif case == "surrogate-provenance":
         payload["evidence"][0]["provenance_ref"] = "\ud800"
         return json.dumps(payload, ensure_ascii=True)
+    elif case == "invisible-evidence-id":
+        payload["evidence"][0]["evidence_id"] = "evidence-\u200b1"
+    elif case == "control-provenance":
+        payload["evidence"][0]["provenance_ref"] = "source:\u0085ref"
     elif case == "duplicate-evidence":
         payload["evidence"].append(dict(payload["evidence"][0]))
     elif case == "invalid-option-id":
@@ -140,6 +144,8 @@ def _corrupt(payload, case):
         "empty-provenance",
         "surrogate-evidence-id",
         "surrogate-provenance",
+        "invisible-evidence-id",
+        "control-provenance",
         "duplicate-evidence",
         "invalid-option-id",
         "missing-package-ids",
