@@ -45,8 +45,6 @@ from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
 from nika_core.training_ollama_manifest import (
-    ManifestPinnedOllamaProvider,
-    OllamaManifestAuthority,
     OllamaPromotionManifestStore,
     OllamaPromotionManifestStoreError,
 )
@@ -1541,10 +1539,6 @@ class V01BoundModelRuntimeFactory:
                 )
             else:
                 try:
-                    authority = OllamaManifestAuthority(
-                        base_url=base_url,
-                        client_factory=self._client_factory,
-                    )
                     prepared = OllamaPromotionManifestStore(self._store).resolve(
                         decision_sha256=artifact_pin.decision_sha256,
                         binding_sha256=artifact_pin.binding_sha256,
@@ -1554,10 +1548,11 @@ class V01BoundModelRuntimeFactory:
                         route_model_id=model,
                         base_url=base_url,
                     )
-                    provider = ManifestPinnedOllamaProvider(
-                        binding=prepared,
-                        authority=authority,
+                    provider = OllamaProvider(
+                        default_model=model,
+                        base_url=base_url,
                         think=False,
+                        expected_manifest_sha256=prepared.provider_manifest_sha256,
                         client_factory=self._client_factory,
                     )
                 except (
