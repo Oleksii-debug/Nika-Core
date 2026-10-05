@@ -305,6 +305,36 @@ def test_keymap_bridge_messages_reach_live_status_region() -> None:
         assert announce_index - call_index < 300
 
 
+def test_keymap_transport_failure_is_announced_and_disables_stale_hotkeys() -> None:
+    script = index_path().with_name("app.js").read_text(encoding="utf-8")
+    helper_start = script.index("function reportKeymapBridgeFailure(focusTarget)")
+    helper_end = script.index("function validKeymapResponse", helper_start)
+    helper = script[helper_start:helper_end]
+    assert "actionsReady = false;" in helper
+    assert (
+        "Немає підтвердження стану карти клавіш. "
+        "Комбінації тимчасово вимкнено до успішного перечитування."
+    ) in helper
+    assert "announce(message, true);" in helper
+    assert "appendLog(message);" in helper
+    assert "focusTarget?.focus?.();" in helper
+
+    for api_call in (
+        "globalThis.pywebview.api.set_binding",
+        "globalThis.pywebview.api.restore_default",
+        "globalThis.pywebview.api.export_keymap",
+        "globalThis.pywebview.api.import_keymap",
+    ):
+        call_index = script.index(api_call)
+        boundary = script[call_index - 220 : call_index + 850]
+        assert "try {" in boundary
+        assert "catch {" in boundary
+        assert "validKeymapResponse(response" in boundary
+        assert "reportKeymapBridgeFailure(" in boundary
+
+    assert script.count('throw new Error("Keymap refresh unavailable")') == 3
+
+
 def test_packaged_uia_gate_waits_for_bridge_readiness_before_hotkeys() -> None:
     proof = Path(__file__).parents[1] / "scripts" / "m5_uia_proof.ps1"
     script = proof.read_text(encoding="utf-8")
