@@ -64,6 +64,31 @@ def test_register_detaches_manifest_and_nested_capability_authority() -> None:
     assert adapter.closed is True
 
 
+def test_register_rejects_mutated_manifest_container_without_iteration() -> None:
+    manifest = _manifest()
+    hostile = _BehavioralTuple(manifest.capabilities)
+    object.__setattr__(manifest, "capabilities", hostile)
+    _BehavioralTuple.touched = False
+
+    with pytest.raises(PluginCompatibilityError, match="capabilities"):
+        PluginRuntime().register(manifest, lambda: _Adapter(manifest))
+
+    assert _BehavioralTuple.touched is False
+
+
+def test_register_rejects_mutated_nested_capability_text_without_behavior() -> None:
+    manifest = _manifest()
+    capability = manifest.capabilities[0]
+    hostile = _BehavioralText(capability.description)
+    object.__setattr__(capability, "description", hostile)
+    _BehavioralText.touched = False
+
+    with pytest.raises(PluginCompatibilityError, match="non-canonical fields"):
+        PluginRuntime().register(manifest, lambda: _Adapter(manifest))
+
+    assert _BehavioralText.touched is False
+
+
 def test_manifest_read_surface_returns_detached_authority() -> None:
     manifest = _manifest()
     runtime = PluginRuntime()
