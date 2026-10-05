@@ -114,6 +114,58 @@ def test_pinned_bare_model_accepts_latest_alias_in_manifest_catalog() -> None:
     assert seen == ["/api/tags", "/api/chat", "/api/ps"]
 
 
+def test_manifest_catalog_response_is_byte_bounded_before_chat() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.url.path == "/api/tags"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b" " * (1024 * 1024 + 1),
+        )
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(_provider(handler).complete(_request()))
+
+    assert caught.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert caught.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert calls == 1
+
+
+def test_manifest_catalog_rejects_duplicate_json_keys_before_chat() -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        assert request.url.path == "/api/tags"
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=(
+                b'{"models":[],"models":['
+                + json.dumps(
+                    {
+                        "name": _MODEL,
+                        "model": _MODEL,
+                        "digest": _EXPECTED,
+                    }
+                ).encode("utf-8")
+                + b"]}"
+            ),
+        )
+
+    with pytest.raises(ModelGatewayError) as caught:
+        asyncio.run(_provider(handler).complete(_request()))
+
+    assert caught.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert caught.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert calls == 1
+
+
 def test_preflight_manifest_mismatch_blocks_chat_with_no_effect() -> None:
     seen: list[str] = []
 
