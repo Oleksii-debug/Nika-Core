@@ -75,6 +75,8 @@ class DailyActivityReportService:
         self._resource_observer = resource_observer
 
     def build_utc_day(self, day: date) -> DailyActivityReport:
+        if type(day) is not date:
+            raise TypeError("day must be a built-in date")
         start = datetime.combine(day, time.min, tzinfo=UTC)
         return self.build_window(start=start, end=start + timedelta(days=1))
 
@@ -262,13 +264,16 @@ def _grouped_counts(
 ) -> tuple[tuple[ActivityCount, ...], bool]:
     truncated = len(rows) > _MAX_GROUPED_ACTIVITY_ITEMS
     selected = rows[:_MAX_GROUPED_ACTIVITY_ITEMS]
-    return (
-        tuple(
-            ActivityCount(value=str(row["value"]), count=int(row["count"]))  # type: ignore[index]
-            for row in selected
-        ),
-        truncated,
-    )
+    counts: list[ActivityCount] = []
+    for row in selected:
+        value = row["value"]  # type: ignore[index]
+        count = row["count"]  # type: ignore[index]
+        if type(value) is not str:
+            raise ValueError("grouped activity label must use SQLite TEXT storage")
+        if type(count) is not int or not 1 <= count <= _MAX_SIGNED_64:
+            raise ValueError("grouped activity count must be a positive SQLite integer")
+        counts.append(ActivityCount(value=value, count=count))
+    return tuple(counts), truncated
 
 
 def _scalar_count(row: object | None) -> int:
