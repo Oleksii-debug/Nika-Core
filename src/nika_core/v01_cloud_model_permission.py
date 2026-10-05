@@ -92,6 +92,11 @@ class V01CloudModelPermissionService:
         selection = self._settings.for_task(record.task_id)
         if selection.route_kind != "openai_compatible":
             return
+        if not selection.private_data_allowed:
+            raise CloudModelPermissionDenied(
+                "Вибраний зовнішній API не має дозволу на приватні дані. "
+                "Увімкніть цей параметр у налаштуваннях моделі або виберіть локальний режим."
+            )
 
         request = self._grant_request(record, selection)
         try:
