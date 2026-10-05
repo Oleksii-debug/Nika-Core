@@ -5,11 +5,11 @@ import hmac
 import json
 import re
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from nika_core.kernel.checkpoint import Checkpoint, CheckpointService
 from nika_core.resources.manager import ResourceManager
 from nika_core.training_materials import ResolvedTrainingPackage, TrainingMaterialResolutionError
-from nika_core.training_scale import TrainingScaleAuthorization
 from nika_core.training_runtime.contracts import (
     TrainingControl,
     TrainingJobSpec,
@@ -20,6 +20,9 @@ from nika_core.training_runtime.contracts import (
     TrainingWorkerFailureEffect,
     TrainingWorkerPort,
 )
+
+if TYPE_CHECKING:
+    from nika_core.training_scale import TrainingScaleAuthorization
 
 _CHECKPOINT_PREFIX = "training_runtime/v4/"
 _LEGACY_CHECKPOINT_PREFIXES = ("training_runtime/v3/",)
@@ -148,6 +151,12 @@ class TrainingRuntime:
     ) -> TrainingRunEvidence:
         control = control or (lambda: TrainingControl.CONTINUE)
         execution_plan_sha256 = _worker_execution_plan_sha256(worker)
+        from nika_core.training_scale import TrainingScaleAuthorization
+
+        if type(scale_authorization) is not TrainingScaleAuthorization:
+            raise TypeError(
+                "scale_authorization must be an exact TrainingScaleAuthorization"
+            )
         scale_authorization.verify_for_runtime(
             spec=spec,
             material_evidence=self._training_materials.evidence,
