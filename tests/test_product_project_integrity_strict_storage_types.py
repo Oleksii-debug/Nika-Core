@@ -22,6 +22,10 @@ from nika_core.product_project_history_integrity import (
     ProductProjectHistoricalIntegrityService,
 )
 from nika_core.product_project_integrity import ProductProjectIntegrityService
+from nika_core.product_project_lifecycle import (
+    ProductProjectLifecycleService,
+    ProductProjectState,
+)
 
 
 def _project(tmp_path):
@@ -306,11 +310,6 @@ def test_historical_integrity_rejects_blob_creation_timestamp(tmp_path) -> None:
 def test_historical_integrity_rejects_nontext_lifecycle_actor(tmp_path) -> None:
     store, projects = _project(tmp_path)
     current = projects.get("project-1")
-    from nika_core.product_project_lifecycle import (
-        ProductProjectLifecycleService,
-        ProductProjectState,
-    )
-
     ProductProjectLifecycleService(store).transition(
         "project-1",
         ProductProjectState.PAUSED,
