@@ -398,6 +398,13 @@ class CaseBenchmarkResult:
         ):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer")
+        if (
+            self.total_tokens is not None
+            and self.input_tokens is not None
+            and self.output_tokens is not None
+            and self.total_tokens < self.input_tokens + self.output_tokens
+        ):
+            raise ValueError("total_tokens is smaller than known token components")
         if self.error_code is not None and not any(
             self.error_code is member for member in ModelErrorCode
         ):
