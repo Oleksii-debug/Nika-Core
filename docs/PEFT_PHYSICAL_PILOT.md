@@ -14,15 +14,19 @@ Windows-only. A successful call must:
 2. execute one trainer step and persist a `PAUSED` checkpoint at `next_step == 1`;
 3. construct new runtime and worker objects through the supplied restart factories;
 4. require the restarted worker to expose the same execution-plan digest;
-5. resume the same authorized job to `COMPLETED`;
-6. require a distinct durable completion checkpoint;
-7. reverify the final candidate through the existing canonical
+5. run a no-worker-effect `PAUSE` probe on the restarted runtime and require it to
+   reopen the same job at `next_step == 1`;
+6. persist a distinct restart-probe checkpoint before any resumed trainer effect;
+7. resume the same authorized job to `COMPLETED`;
+8. require a third distinct durable completion checkpoint;
+9. reverify the final candidate through the existing canonical
    `training_artifacts.verify_candidate_artifact` boundary; and
-8. require the verifier receipt SHA-256 to equal the completed runtime evidence.
+10. require the verifier receipt SHA-256 to equal the completed runtime evidence.
 
 The resulting `PhysicalTrainingPilotReport` is path-free. It contains bounded identifiers,
-SHA-256 identities, descriptor/registry digests, checkpoint IDs, candidate byte count,
-completed step count, schema version, and the literal platform value `windows`. It does not
+SHA-256 identities, descriptor/registry digests, the original pause, restart-probe, and
+completion checkpoint IDs, candidate byte count, completed step count, schema version, and
+the literal platform value `windows`. It does not
 serialize training/validation records, model paths, credentials, environment variables,
 prompts, responses, or checkpoint payloads.
 
@@ -37,8 +41,11 @@ Resolve the frozen training package through the canonical training-material reso
 the pilot-tier `TrainingScaleAuthorization` from the same material evidence and the
 `SubprocessTrainingWorker.execution_plan_sha256`. The job must use `max_steps >= 2`.
 
-The restart factory must reopen durable state rather than returning the original
-`TrainingRuntime` object. The worker restart factory must construct a new
+The restart factory must reopen the same durable checkpoint state rather than returning the
+original `TrainingRuntime` object or a new runtime backed by an empty store. The harness proves
+that reopen before resumed trainer effects by issuing a `PAUSE` control probe: the new runtime
+must observe `next_step == 1` and emit a new restart-probe checkpoint. A fresh/incorrect store
+would observe step 0 and is rejected. The worker restart factory must construct a new
 `SubprocessTrainingWorker` from the same Registry-bound command and environment authority.
 
 Create or retrieve the canonical SHA-256 `ModelArtifactDescriptor` for the final published
@@ -70,7 +77,9 @@ report_path.write_text(report.to_json(), encoding="utf-8")
 print(report.evidence_sha256)
 ```
 
-The helper itself supplies the control sequence required to create the one-step pause.
+The helper itself supplies the control sequence required to create the one-step pause and the
+effect-free restart probe. Reports use schema version 2 because the durable-reopen checkpoint is
+now part of the evidence identity.
 
 ## Evidence boundaries
 
