@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
 
 
 _MAX_AGENT_JSON_BYTES = 1024 * 1024
@@ -52,7 +52,7 @@ class AgentDefinition(BaseModel):
     resource_budget_ref: Annotated[str | None, Field(max_length=160)] = None
     tool_grants: tuple[ToolGrant, ...] = ()
     max_steps: Annotated[StrictInt, Field(ge=1, le=100_000)] = 100
-    enabled: bool = True
+    enabled: StrictBool = True
 
     @field_validator("format_version", mode="before")
     @classmethod
