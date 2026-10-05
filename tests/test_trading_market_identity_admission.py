@@ -151,6 +151,7 @@ def test_valid_market_evidence_preserves_unicode_and_detaches_mapping() -> None:
     assert instrument.currency == "UAH"
     assert Provenance("Джерело", source_uri=None, acquired_at=NOW).source_id == "Джерело"
 
+
 @pytest.mark.parametrize("event", ("bar", "tick", "quote", "odds", "settlement"))
 @pytest.mark.parametrize("field,bad", (("instrument", None), ("instrument", "sim"),
                                       ("time", None), ("time", "2026-01-01")))
