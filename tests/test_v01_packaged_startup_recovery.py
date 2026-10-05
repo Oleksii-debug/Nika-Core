@@ -8,6 +8,7 @@ from nika_core.kernel.agent_registry import AgentRegistry
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
+from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.runtime.contracts import (
     RuntimeCapability,
     RuntimeOutcome,
@@ -17,7 +18,6 @@ from nika_core.runtime.contracts import (
 )
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.runtime.session_store import RuntimeSessionStore
-from nika_core.kernel.workspace_registry import WorkspaceRegistry
 from nika_core.ui.desktop_backend import DesktopBackend
 from scripts import nika_windows
 
