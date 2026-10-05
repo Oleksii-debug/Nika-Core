@@ -16,6 +16,7 @@ from nika_core.training_artifacts import (
     VerifiedCandidateArtifact,
     verify_candidate_artifact,
 )
+from nika_core.training_peft_worker import PeftTrainerError, candidate_adapter_manifest
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingControl,
@@ -26,8 +27,8 @@ from nika_core.training_runtime import (
 )
 from nika_core.training_scale import TrainingScaleAuthorization
 
-_SCHEMA_VERSION = 2
-_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v2\x00"
+_SCHEMA_VERSION = 3
+_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v3\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_TEXT_BYTES = 1024
 _MAX_STEPS = 1_000_000
@@ -41,16 +42,24 @@ _REQUIRED_REPORT_FIELDS = {
     "candidate_sha256",
     "completed_checkpoint_id",
     "completed_steps",
+    "consumed_materials_sha256",
     "execution_plan_sha256",
     "frozen_package_sha256",
     "job_fingerprint",
     "job_id",
+    "model_dir_manifest_sha256",
     "paused_checkpoint_id",
+    "previous_adapter_sha256",
     "restart_checkpoint_id",
     "platform",
     "scale_authorization_sha256",
     "schema_version",
+    "trained_adapter_sha256",
+    "trainer_artifact_id",
+    "trainer_implementation_sha256",
+    "trainer_sha256",
     "training_material_sha256",
+    "training_runtime_manifest_sha256",
 }
 
 
@@ -172,6 +181,14 @@ class PhysicalTrainingPilotReport:
     scale_authorization_sha256: str
     execution_plan_sha256: str
     job_fingerprint: str
+    consumed_materials_sha256: str
+    model_dir_manifest_sha256: str
+    previous_adapter_sha256: str
+    trained_adapter_sha256: str
+    trainer_artifact_id: str
+    trainer_implementation_sha256: str
+    trainer_sha256: str
+    training_runtime_manifest_sha256: str
     paused_checkpoint_id: str
     restart_checkpoint_id: str
     completed_checkpoint_id: str
@@ -204,11 +221,24 @@ class PhysicalTrainingPilotReport:
             (self.scale_authorization_sha256, "scale_authorization_sha256"),
             (self.execution_plan_sha256, "execution_plan_sha256"),
             (self.job_fingerprint, "job_fingerprint"),
+            (self.consumed_materials_sha256, "consumed_materials_sha256"),
+            (self.model_dir_manifest_sha256, "model_dir_manifest_sha256"),
+            (self.previous_adapter_sha256, "previous_adapter_sha256"),
+            (self.trained_adapter_sha256, "trained_adapter_sha256"),
+            (self.trainer_artifact_id, "trainer_artifact_id"),
+            (self.trainer_implementation_sha256, "trainer_implementation_sha256"),
+            (self.trainer_sha256, "trainer_sha256"),
+            (self.training_runtime_manifest_sha256, "training_runtime_manifest_sha256"),
             (self.candidate_descriptor_sha256, "candidate_descriptor_sha256"),
             (self.candidate_registry_key, "candidate_registry_key"),
             (self.candidate_sha256, "candidate_sha256"),
         ):
             _require_sha256(value, name=name)
+        if hmac.compare_digest(
+            self.previous_adapter_sha256,
+            self.trained_adapter_sha256,
+        ):
+            _fail("physical pilot did not prove trainable adapter weight mutation")
         if len(
             {
                 self.paused_checkpoint_id,
@@ -223,12 +253,8 @@ class PhysicalTrainingPilotReport:
             or self.candidate_byte_count > (1 << 63) - 1
         ):
             _fail("candidate_byte_count must be a positive signed-64 integer")
-        if (
-            type(self.completed_steps) is not int
-            or self.completed_steps < 2
-            or self.completed_steps > _MAX_STEPS
-        ):
-            _fail("physical pilot must complete after a real restart boundary")
+        if type(self.completed_steps) is not int or self.completed_steps != 2:
+            _fail("physical pilot must complete exactly two bounded trainer steps")
 
     def canonical_payload(self) -> dict[str, object]:
         return {
@@ -240,16 +266,24 @@ class PhysicalTrainingPilotReport:
             "candidate_sha256": self.candidate_sha256,
             "completed_checkpoint_id": self.completed_checkpoint_id,
             "completed_steps": self.completed_steps,
+            "consumed_materials_sha256": self.consumed_materials_sha256,
             "execution_plan_sha256": self.execution_plan_sha256,
             "frozen_package_sha256": self.frozen_package_sha256,
             "job_fingerprint": self.job_fingerprint,
             "job_id": self.job_id,
+            "model_dir_manifest_sha256": self.model_dir_manifest_sha256,
             "paused_checkpoint_id": self.paused_checkpoint_id,
+            "previous_adapter_sha256": self.previous_adapter_sha256,
             "restart_checkpoint_id": self.restart_checkpoint_id,
             "platform": self.platform,
             "scale_authorization_sha256": self.scale_authorization_sha256,
             "schema_version": self.schema_version,
+            "trained_adapter_sha256": self.trained_adapter_sha256,
+            "trainer_artifact_id": self.trainer_artifact_id,
+            "trainer_implementation_sha256": self.trainer_implementation_sha256,
+            "trainer_sha256": self.trainer_sha256,
             "training_material_sha256": self.training_material_sha256,
+            "training_runtime_manifest_sha256": self.training_runtime_manifest_sha256,
         }
 
     @property
@@ -289,6 +323,14 @@ class PhysicalTrainingPilotReport:
             scale_authorization_sha256=value["scale_authorization_sha256"],
             execution_plan_sha256=value["execution_plan_sha256"],
             job_fingerprint=value["job_fingerprint"],
+            consumed_materials_sha256=value["consumed_materials_sha256"],
+            model_dir_manifest_sha256=value["model_dir_manifest_sha256"],
+            previous_adapter_sha256=value["previous_adapter_sha256"],
+            trained_adapter_sha256=value["trained_adapter_sha256"],
+            trainer_artifact_id=value["trainer_artifact_id"],
+            trainer_implementation_sha256=value["trainer_implementation_sha256"],
+            trainer_sha256=value["trainer_sha256"],
+            training_runtime_manifest_sha256=value["training_runtime_manifest_sha256"],
             paused_checkpoint_id=value["paused_checkpoint_id"],
             restart_checkpoint_id=value["restart_checkpoint_id"],
             completed_checkpoint_id=value["completed_checkpoint_id"],
@@ -386,6 +428,50 @@ def _snapshot_run_evidence(
     )
 
 
+def _peft_candidate_manifest_evidence(
+    *,
+    candidate_path: Path,
+    completed: TrainingRunEvidence,
+) -> dict[str, str]:
+    path = _require_path(candidate_path, name="candidate_path")
+    try:
+        manifest = candidate_adapter_manifest(path)
+    except (PeftTrainerError, TypeError, ValueError) as exc:
+        raise PhysicalTrainingPilotError(
+            "canonical PEFT candidate manifest verification failed"
+        ) from exc
+    if type(manifest) is not dict:
+        _fail("canonical PEFT candidate manifest returned invalid evidence")
+    if (
+        manifest.get("base_artifact_ref") != completed.base_artifact.artifact_ref
+        or manifest.get("base_artifact_sha256") != completed.base_artifact.sha256
+        or manifest.get("candidate_artifact_ref") != completed.candidate_artifact_ref
+        or manifest.get("job_fingerprint") != completed.job_fingerprint
+        or manifest.get("step_number") != completed.next_step
+    ):
+        _fail("PEFT candidate manifest does not match completed runtime identity")
+    names = (
+        "consumed_materials_sha256",
+        "model_dir_manifest_sha256",
+        "previous_adapter_sha256",
+        "trained_adapter_sha256",
+        "trainer_artifact_id",
+        "trainer_implementation_sha256",
+        "trainer_sha256",
+        "training_runtime_manifest_sha256",
+    )
+    evidence = {
+        name: _require_sha256(manifest.get(name), name=name)
+        for name in names
+    }
+    if hmac.compare_digest(
+        evidence["previous_adapter_sha256"],
+        evidence["trained_adapter_sha256"],
+    ):
+        _fail("PEFT candidate manifest does not prove adapter weight mutation")
+    return evidence
+
+
 def build_physical_training_pilot_report(
     *,
     paused: TrainingRunEvidence,
@@ -418,8 +504,8 @@ def build_physical_training_pilot_report(
         _fail("physical pilot must pause exactly after its first trainer step")
     if restart_probe.next_step != 1:
         _fail("restarted runtime did not reopen the one-step durable checkpoint")
-    if completed.next_step < 2:
-        _fail("physical pilot must complete after the restart boundary")
+    if completed.next_step != 2:
+        _fail("physical pilot must complete exactly two bounded trainer steps")
     if paused.candidate_sha256 is not None or restart_probe.candidate_sha256 is not None:
         _fail("paused pilot evidence must not already publish a candidate")
     checkpoint_ids = (
@@ -462,6 +548,10 @@ def build_physical_training_pilot_report(
     )
     if receipt.sha256 != completed.candidate_sha256:
         _fail("physical candidate receipt does not match completed runtime evidence")
+    manifest_evidence = _peft_candidate_manifest_evidence(
+        candidate_path=candidate_path,
+        completed=completed,
+    )
 
     return PhysicalTrainingPilotReport(
         job_id=completed.job_id,
@@ -471,6 +561,18 @@ def build_physical_training_pilot_report(
         scale_authorization_sha256=completed.scale_authorization_sha256,
         execution_plan_sha256=completed.execution_plan_sha256,
         job_fingerprint=completed.job_fingerprint,
+        consumed_materials_sha256=manifest_evidence["consumed_materials_sha256"],
+        model_dir_manifest_sha256=manifest_evidence["model_dir_manifest_sha256"],
+        previous_adapter_sha256=manifest_evidence["previous_adapter_sha256"],
+        trained_adapter_sha256=manifest_evidence["trained_adapter_sha256"],
+        trainer_artifact_id=manifest_evidence["trainer_artifact_id"],
+        trainer_implementation_sha256=manifest_evidence[
+            "trainer_implementation_sha256"
+        ],
+        trainer_sha256=manifest_evidence["trainer_sha256"],
+        training_runtime_manifest_sha256=manifest_evidence[
+            "training_runtime_manifest_sha256"
+        ],
         paused_checkpoint_id=paused.checkpoint_id,
         restart_checkpoint_id=restart_probe.checkpoint_id,
         completed_checkpoint_id=completed.checkpoint_id,
@@ -563,8 +665,8 @@ def run_physical_training_pilot(
         raise TypeError("restart factories must be callable")
     if not callable(candidate_descriptor_factory):
         raise TypeError("candidate_descriptor_factory must be callable")
-    if canonical_spec.max_steps < 2:
-        _fail("physical pilot requires max_steps >= 2")
+    if canonical_spec.max_steps != 2:
+        _fail("physical pilot requires exactly max_steps == 2")
     initial_execution_plan_sha256 = _require_sha256(
         worker.execution_plan_sha256,
         name="initial worker execution_plan_sha256",
