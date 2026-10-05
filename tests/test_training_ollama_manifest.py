@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
@@ -20,6 +21,8 @@ from nika_core.training_ollama_manifest import (
     ManifestPinnedOllamaProvider,
     OllamaManifestAuthority,
     OllamaManifestAuthorityError,
+    OllamaPromotionManifestStore,
+    OllamaPromotionManifestStoreError,
     OllamaPreparedModelBinding,
 )
 
@@ -380,3 +383,185 @@ async def test_manifest_pinned_provider_rejects_model_substitution_without_effec
 def test_manifest_authority_rejects_non_loopback_endpoint() -> None:
     with pytest.raises(ValueError, match="loopback"):
         OllamaManifestAuthority(base_url="https://example.test:11434")
+
+
+
+def test_promotion_manifest_store_survives_restart_and_resolves_exact_task_pin(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "profile" / "nika.db")
+    store.initialize()
+    manifests = OllamaPromotionManifestStore(store)
+    decision = _sha(b"promotion-decision")
+    training_binding = _sha(b"training-binding")
+    base = _binding(
+        route_model_id="base:latest",
+        manifest_model_id="base:latest",
+        manifest_sha256=_sha(b"base-manifest"),
+    )
+    challenger = _binding()
+
+    manifests.save_pair(
+        decision_sha256=decision,
+        binding_sha256=training_binding,
+        base=base,
+        challenger=challenger,
+    )
+
+    reopened = OllamaPromotionManifestStore(SQLiteStore(store.path))
+    resolved_challenger = reopened.resolve(
+        decision_sha256=decision,
+        binding_sha256=training_binding,
+        role="challenger",
+        artifact_sha256=challenger.artifact_sha256,
+        descriptor_digest=challenger.descriptor_digest,
+        route_model_id=challenger.route_model_id,
+        base_url="http://localhost:11434",
+    )
+    resolved_rollback = reopened.resolve(
+        decision_sha256=decision,
+        binding_sha256=training_binding,
+        role="rollback",
+        artifact_sha256=base.artifact_sha256,
+        descriptor_digest=base.descriptor_digest,
+        route_model_id=base.route_model_id,
+        base_url="http://localhost:11434",
+    )
+
+    assert resolved_challenger == challenger
+    assert resolved_rollback == base
+
+
+def test_promotion_manifest_store_replay_is_idempotent_but_substitution_is_rejected(
+    tmp_path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    manifests = OllamaPromotionManifestStore(store)
+    decision = _sha(b"promotion-decision")
+    training_binding = _sha(b"training-binding")
+    base = _binding(
+        route_model_id="base:latest",
+        manifest_model_id="base:latest",
+        manifest_sha256=_sha(b"base-manifest"),
+    )
+    challenger = _binding()
+
+    manifests.save_pair(
+        decision_sha256=decision,
+        binding_sha256=training_binding,
+        base=base,
+        challenger=challenger,
+    )
+    manifests.save_pair(
+        decision_sha256=decision,
+        binding_sha256=training_binding,
+        base=base,
+        challenger=challenger,
+    )
+
+    substituted = _binding(manifest_sha256=_sha(b"substituted-provider-manifest"))
+    with pytest.raises(OllamaPromotionManifestStoreError, match="immutable"):
+        manifests.save_pair(
+            decision_sha256=decision,
+            binding_sha256=training_binding,
+            base=base,
+            challenger=substituted,
+        )
+
+    assert manifests.resolve(
+        decision_sha256=decision,
+        binding_sha256=training_binding,
+        role="challenger",
+        artifact_sha256=challenger.artifact_sha256,
+        descriptor_digest=challenger.descriptor_digest,
+        route_model_id=challenger.route_model_id,
+        base_url="http://localhost:11434",
+    ) == challenger
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("artifact_sha256", _sha(b"other-artifact")),
+        ("descriptor_digest", _sha(b"other-descriptor")),
+        ("route_model_id", "other:latest"),
+        ("base_url", "http://localhost:11435"),
+    ),
+)
+def test_promotion_manifest_store_resolve_rejects_task_identity_drift(
+    tmp_path,
+    field: str,
+    value: str,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    manifests = OllamaPromotionManifestStore(store)
+    decision = _sha(b"promotion-decision")
+    training_binding = _sha(b"training-binding")
+    base = _binding(
+        route_model_id="base:latest",
+        manifest_model_id="base:latest",
+        manifest_sha256=_sha(b"base-manifest"),
+    )
+    challenger = _binding()
+    manifests.save_pair(
+        decision_sha256=decision,
+        binding_sha256=training_binding,
+        base=base,
+        challenger=challenger,
+    )
+    values = {
+        "decision_sha256": decision,
+        "binding_sha256": training_binding,
+        "role": "challenger",
+        "artifact_sha256": challenger.artifact_sha256,
+        "descriptor_digest": challenger.descriptor_digest,
+        "route_model_id": challenger.route_model_id,
+        "base_url": "http://localhost:11434",
+    }
+    values[field] = value
+
+    with pytest.raises(
+        OllamaPromotionManifestStoreError,
+        match="does not match the task pin",
+    ):
+        manifests.resolve(**values)
+
+
+def test_promotion_manifest_store_rejects_corrupted_durable_json(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    manifests = OllamaPromotionManifestStore(store)
+    decision = _sha(b"promotion-decision")
+    training_binding = _sha(b"training-binding")
+    base = _binding(
+        route_model_id="base:latest",
+        manifest_model_id="base:latest",
+        manifest_sha256=_sha(b"base-manifest"),
+    )
+    challenger = _binding()
+    manifests.save_pair(
+        decision_sha256=decision,
+        binding_sha256=training_binding,
+        base=base,
+        challenger=challenger,
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE training_ollama_promotion_manifests "
+            "SET prepared_model_json = ? "
+            "WHERE decision_sha256 = ? AND role = 'challenger'",
+            ('{"schema":"broken"}', decision),
+        )
+
+    with pytest.raises(OllamaPromotionManifestStoreError, match="invalid"):
+        manifests.resolve(
+            decision_sha256=decision,
+            binding_sha256=training_binding,
+            role="challenger",
+            artifact_sha256=challenger.artifact_sha256,
+            descriptor_digest=challenger.descriptor_digest,
+            route_model_id=challenger.route_model_id,
+            base_url="http://localhost:11434",
+        )
