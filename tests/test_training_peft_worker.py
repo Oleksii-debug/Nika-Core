@@ -143,6 +143,11 @@ def _config(tmp_path: Path, request: peft.ParsedRequest, base: bytes) -> peft.Tr
         base_gguf=base_path,
         model_dir=model_dir,
         model_dir_manifest_sha256=peft.model_directory_manifest_sha256(model_dir),
+        trainer_implementation_sha256=peft.trainer_implementation_sha256(),
+        training_runtime_versions=tuple(
+            (distribution, _RUNTIME_VERSIONS[distribution])
+            for distribution, _ in peft._TRAINING_RUNTIME_DISTRIBUTIONS
+        ),
         output_root=output_root,
         max_records=100,
         max_sequence_length=64,
@@ -749,6 +754,8 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     ]
     assert loaded.lora_r == 16
     assert loaded.torch_num_threads == 3
+    assert loaded.trainer_implementation_sha256 == peft.trainer_implementation_sha256()
+    assert dict(loaded.training_runtime_versions) == _RUNTIME_VERSIONS
     assert loaded.seed == 99
 
 
@@ -842,6 +849,8 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     )
     manifest = json.loads(raw)
     assert peft._validate_candidate_manifest_payload(manifest) == manifest
+    assert manifest["trainer_implementation_sha256"] == config.trainer_implementation_sha256
+    assert manifest["training_runtime_versions"] == dict(config.training_runtime_versions)
     assert manifest["trainer_parameters"]["torch_num_threads"] == config.torch_num_threads
 
     bad_sha = json.loads(raw)
@@ -858,6 +867,21 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     bad_thread_count["trainer_parameters"]["torch_num_threads"] = 0
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(bad_thread_count)
+
+    bad_runtime_version = json.loads(raw)
+    bad_runtime_version["training_runtime_versions"]["torch"] = ""
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_runtime_version)
+
+    missing_runtime_version = json.loads(raw)
+    del missing_runtime_version["training_runtime_versions"]["torch"]
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(missing_runtime_version)
+
+    bad_trainer_implementation = json.loads(raw)
+    bad_trainer_implementation["trainer_implementation_sha256"] = "0" * 63
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_trainer_implementation)
 
     missing_thread_count = json.loads(raw)
     del missing_thread_count["trainer_parameters"]["torch_num_threads"]
