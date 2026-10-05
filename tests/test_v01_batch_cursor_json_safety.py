@@ -14,21 +14,26 @@ from nika_core.batch_cursor import (
     BatchTargetSpec,
 )
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.task_queue import TaskQueue
 from nika_core.memory import MemoryScope, MemoryService
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 
 
-def _services(tmp_path: Path) -> tuple[MemoryService, IdempotencyLedger]:
+def _services(tmp_path: Path) -> tuple[MemoryService, IdempotencyLedger, str]:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
-    return MemoryService(store), IdempotencyLedger(store)
+    task_id = TaskQueue(store).create(
+        workspace_id="batch-json-tests",
+        agent_id="batch-json-tests",
+    ).task_id
+    return MemoryService(store), IdempotencyLedger(store), task_id
 
 
 def _cursor(
     memory: MemoryService,
     ledger: IdempotencyLedger,
     *,
-    task_id: str = "batch-json",
+    task_id: str,
 ) -> BatchCursor:
     return BatchCursor.create(
         memory,
@@ -94,42 +99,42 @@ def test_exact_byte_boundary_and_depth_limit_remain_supported() -> None:
 def test_invalid_utf8_identity_fails_before_cursor_write(
     tmp_path: Path, bad_id: str
 ) -> None:
-    memory, ledger = _services(tmp_path)
+    memory, ledger, task_id = _services(tmp_path)
     with pytest.raises(ValueError, match="UTF-8"):
         BatchCursor.create(
             memory,
             ledger,
-            task_id="batch-invalid-identity",
+            task_id=task_id,
             cursor_id="cursor",
             targets=[BatchTargetSpec(target_id=bad_id)],
             batch_size=1,
         )
-    assert ledger.list_for_task("batch-invalid-identity") == ()
+    assert ledger.list_for_task(task_id) == ()
     assert memory.get(
         scope=MemoryScope.TASK,
-        owner_id="batch-invalid-identity",
+        owner_id=task_id,
         namespace="v01.batch_cursor",
         key="cursor",
     ) is None
 
 
 def test_invalid_input_payload_cannot_create_cursor_or_effect(tmp_path: Path) -> None:
-    memory, ledger = _services(tmp_path)
+    memory, ledger, task_id = _services(tmp_path)
     with pytest.raises(BatchCursorStateError, match="bounded JSON"):
         BatchCursor.create(
             memory,
             ledger,
-            task_id="batch-invalid-input",
+            task_id=task_id,
             cursor_id="cursor",
             targets=[
                 BatchTargetSpec(target_id="valid", payload={"number": float("nan")})
             ],
             batch_size=1,
         )
-    assert ledger.list_for_task("batch-invalid-input") == ()
+    assert ledger.list_for_task(task_id) == ()
     assert memory.get(
         scope=MemoryScope.TASK,
-        owner_id="batch-invalid-input",
+        owner_id=task_id,
         namespace="v01.batch_cursor",
         key="cursor",
     ) is None
@@ -146,8 +151,8 @@ def test_invalid_input_payload_cannot_create_cursor_or_effect(tmp_path: Path) ->
 def test_invalid_completion_cannot_complete_durable_effect(
     tmp_path: Path, bad_result: dict[str, object]
 ) -> None:
-    memory, ledger = _services(tmp_path)
-    cursor = _cursor(memory, ledger)
+    memory, ledger, task_id = _services(tmp_path)
+    cursor = _cursor(memory, ledger, task_id=task_id)
     grant = cursor.begin_effect("перший")
     assert grant.execute is True
 
@@ -161,8 +166,8 @@ def test_invalid_completion_cannot_complete_durable_effect(
 def test_invalid_uncertainty_evidence_cannot_partially_mark_ledger(
     tmp_path: Path,
 ) -> None:
-    memory, ledger = _services(tmp_path)
-    cursor = _cursor(memory, ledger)
+    memory, ledger, task_id = _services(tmp_path)
+    cursor = _cursor(memory, ledger, task_id=task_id)
     grant = cursor.begin_effect("перший")
 
     with pytest.raises(BatchCursorStateError, match="bounded JSON"):
@@ -173,8 +178,8 @@ def test_invalid_uncertainty_evidence_cannot_partially_mark_ledger(
 
 
 def test_ambiguous_legacy_completion_fails_closed_on_restart(tmp_path: Path) -> None:
-    memory, ledger = _services(tmp_path)
-    cursor = _cursor(memory, ledger)
+    memory, ledger, task_id = _services(tmp_path)
+    cursor = _cursor(memory, ledger, task_id=task_id)
     grant = cursor.begin_effect("перший")
     ledger.complete(
         grant.operation_key,
@@ -191,7 +196,7 @@ def test_ambiguous_legacy_completion_fails_closed_on_restart(tmp_path: Path) -> 
         BatchCursor.restore(
             memory,
             ledger,
-            task_id="batch-json",
+            task_id=task_id,
             cursor_id="cursor",
             targets=[BatchTargetSpec(target_id="перший", payload={"text": "привіт"})],
             batch_size=1,
@@ -200,15 +205,15 @@ def test_ambiguous_legacy_completion_fails_closed_on_restart(tmp_path: Path) -> 
 
 
 def test_pre_envelope_legacy_result_remains_restorable(tmp_path: Path) -> None:
-    memory, ledger = _services(tmp_path)
-    cursor = _cursor(memory, ledger)
+    memory, ledger, task_id = _services(tmp_path)
+    cursor = _cursor(memory, ledger, task_id=task_id)
     grant = cursor.begin_effect("перший")
     ledger.complete(grant.operation_key, {"remote_id": "доказ"})
 
     restarted = BatchCursor.restore(
         memory,
         ledger,
-        task_id="batch-json",
+        task_id=task_id,
         cursor_id="cursor",
         targets=[BatchTargetSpec(target_id="перший", payload={"text": "привіт"})],
         batch_size=1,
