@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import hashlib
-from urllib.parse import unquote, urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 _MAX_EVIDENCE_REFERENCE_BYTES = 512
 _SENSITIVE_REFERENCE_MARKERS = (
@@ -46,10 +46,18 @@ def _strict_utf8(reference: str) -> bytes:
         raise ValueError("evidence reference must be valid UTF-8 text") from exc
 
 
+def _contains_sensitive_marker(reference: str) -> bool:
+    return any(marker in reference for marker in _SENSITIVE_REFERENCE_MARKERS)
+
+
 def _is_sensitive(reference: str) -> bool:
     normalized = reference.strip().casefold()
     for _ in range(_MAX_EVIDENCE_REFERENCE_BYTES):
-        if any(marker in normalized for marker in _SENSITIVE_REFERENCE_MARKERS):
+        if _contains_sensitive_marker(normalized):
+            return True
+
+        form_decoded = unquote_plus(normalized).casefold()
+        if _contains_sensitive_marker(form_decoded):
             return True
 
         if "://" in normalized:
