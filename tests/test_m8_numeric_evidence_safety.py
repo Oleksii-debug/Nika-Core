@@ -8,8 +8,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
     ArtifactKind, ExperimentDefinition, ExperimentEngine, ExperimentSnapshot, ExperimentStatus,
     InMemoryExperimentRepository, MetricObservation, MetricRule, PromotionPolicy,
-    SQLiteExperimentRepository,
-    ReplayCase, StrategyRef,
+    ReplayCase, SQLiteExperimentRepository, StrategyRef,
 )
 from nika_core.experiments.repository import _decode_definition, _encode_definition
 
@@ -165,3 +164,31 @@ def test_reloaded_guardrail_threshold_rejects_unsafe_scalar(bad):
     data["policy"]["guardrails"][0]["max_regression"] = bad
     with pytest.raises((TypeError, ValueError)):
         _decode_definition(json.dumps(data))
+
+
+def test_sqlite_overflowed_promotion_preserves_running_on_reopen(tmp_path):
+    path = tmp_path / "M8 відновлення.db"
+    store = SQLiteStore(path)
+    store.initialize()
+    engine = ExperimentEngine(SQLiteExperimentRepository(store))
+    engine.create(_definition())
+    engine.start("numeric-safety")
+    for candidate, score in (("champion", -1e308), ("challenger", 1e308)):
+        engine.record(
+            "numeric-safety", MetricObservation(candidate, "r1", "quality", score)
+        )
+    with pytest.raises(ValueError, match="improvement is not finite"):
+        engine.complete("numeric-safety")
+
+    reopened_store = SQLiteStore(path)
+    reopened_store.initialize()
+    recovered = SQLiteExperimentRepository(reopened_store).get("numeric-safety")
+    assert recovered.status is ExperimentStatus.RUNNING
+    assert len(recovered.observations) == 2
+    assert recovered.selected_candidate_id is None
+    with reopened_store.connection() as conn:
+        events = conn.execute(
+            "SELECT new_status FROM experiment_events WHERE experiment_id = ? "
+            "ORDER BY event_id", ("numeric-safety",)
+        ).fetchall()
+    assert [row["new_status"] for row in events] == ["draft", "running"]
