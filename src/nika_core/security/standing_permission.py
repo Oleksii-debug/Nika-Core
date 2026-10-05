@@ -226,9 +226,21 @@ class StandingPermissionStore:
                 raise RuntimeError(
                     f"standing permission schema {version} is newer than supported 1"
                 )
+            if version < 0:
+                raise StandingPermissionIntegrityError(
+                    "standing permission schema version is invalid"
+                )
             if version == 0:
+                preexisting_permissions = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                    ("standing_permissions",),
+                ).fetchone()
+                if preexisting_permissions is not None:
+                    raise StandingPermissionIntegrityError(
+                        "standing permission table exists without schema version"
+                    )
                 conn.execute(
-                    """CREATE TABLE IF NOT EXISTS standing_permissions (
+                    """CREATE TABLE standing_permissions (
                         permission_id TEXT PRIMARY KEY,
                         parent_permission_id TEXT,
                         scope_json TEXT NOT NULL,
