@@ -304,6 +304,9 @@ class TeacherConsultationService:
                     code=ModelErrorCode.RESOURCE_LIMIT,
                     retryable=False,
                     failure_effect=ModelFailureEffect.UNKNOWN,
+                    response_chars=response_chars,
+                    usage=usage,
+                    latency_ms=latency_ms,
                 ),
             )
 
@@ -468,6 +471,9 @@ def _failure_evidence(
     code: ModelErrorCode,
     retryable: bool,
     failure_effect: ModelFailureEffect,
+    response_chars: int | None = None,
+    usage: tuple[int | None, int | None, int | None] = (None, None, None),
+    latency_ms: float | None = None,
 ) -> TeacherConsultationEvidence:
     return TeacherConsultationEvidence(
         consultation_id=spec.consultation_id,
@@ -483,15 +489,15 @@ def _failure_evidence(
         timeout_seconds=spec.policy.timeout_seconds,
         max_observed_total_tokens=spec.policy.max_observed_total_tokens,
         request_chars=request_chars,
-        response_chars=None,
+        response_chars=response_chars,
         response_sha256=None,
-        input_tokens=None,
-        output_tokens=None,
-        total_tokens=None,
-        latency_ms=None,
+        input_tokens=usage[0],
+        output_tokens=usage[1],
+        total_tokens=usage[2],
+        latency_ms=latency_ms,
         budget_status=_budget_status(
             limit=spec.policy.max_observed_total_tokens,
-            total_tokens=None,
+            total_tokens=usage[2],
         ),
         error_code=code,
         retryable=retryable,
