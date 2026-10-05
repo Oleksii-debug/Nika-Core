@@ -110,22 +110,28 @@ class V01CloudModelPermissionService:
                 "Зовнішній API для цього завдання не дозволено; завдання не запущено."
             )
 
-        now = self._utc_now()
-        context = self._context(record)
-        self._permissions.grant(
-            permission_id=self._permission_id(record.task_id),
-            scope=StandingPermissionScope(
-                subject_id=_CLOUD_SUBJECT_ID,
-                context=context,
-                action_class=_CLOUD_ACTION_CLASS,
-                targets=(request.provider_id,),
-                sites=(request.network_host,),
-                resources=(request.model,),
-                risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
-                granted_at=now,
-                expires_at=now + _GRANT_TTL,
-            ),
-        )
+        try:
+            now = self._utc_now()
+            context = self._context(record)
+            self._permissions.grant(
+                permission_id=self._permission_id(record.task_id),
+                scope=StandingPermissionScope(
+                    subject_id=_CLOUD_SUBJECT_ID,
+                    context=context,
+                    action_class=_CLOUD_ACTION_CLASS,
+                    targets=(request.provider_id,),
+                    sites=(request.network_host,),
+                    resources=(request.model,),
+                    risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+                    granted_at=now,
+                    expires_at=now + _GRANT_TTL,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - durable permission boundary fails closed
+            raise CloudModelPermissionDenied(
+                "Не вдалося безпечно зберегти дозвіл для зовнішньої моделі; "
+                "завдання не запущено."
+            ) from None
 
     def execution_authority_for_task(
         self,
