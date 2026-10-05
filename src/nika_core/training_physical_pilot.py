@@ -3,14 +3,20 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import stat
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NoReturn
 
+from nika_core.model_artifacts import ModelArtifactDescriptor
 from nika_core.training_adapters import SubprocessTrainingWorker
+from nika_core.training_artifacts import (
+    CandidateArtifactIntegrityError,
+    VerifiedCandidateArtifact,
+    verify_candidate_artifact,
+)
 from nika_core.training_runtime import (
+    ArtifactIdentity,
     TrainingControl,
     TrainingJobSpec,
     TrainingRunEvidence,
@@ -23,12 +29,14 @@ _SCHEMA_VERSION = 1
 _REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v1\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_TEXT_BYTES = 1024
-_READ_CHUNK_BYTES = 1024 * 1024
+_MAX_STEPS = 1_000_000
 _PLATFORM_PATH_TYPE = type(Path())
 _REQUIRED_REPORT_FIELDS = {
     "base_sha256",
     "candidate_artifact_ref",
     "candidate_byte_count",
+    "candidate_descriptor_sha256",
+    "candidate_registry_key",
     "candidate_sha256",
     "completed_checkpoint_id",
     "completed_steps",
@@ -76,6 +84,12 @@ def _require_sha256(value: object, *, name: str) -> str:
     return value
 
 
+def _require_path(value: object, *, name: str) -> Path:
+    if type(value) is not _PLATFORM_PATH_TYPE or not value.is_absolute():
+        _fail(f"{name} must be an absolute canonical platform Path")
+    return value
+
+
 def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {}
     for key, value in pairs:
@@ -109,90 +123,40 @@ def _is_windows() -> bool:
     return os.name == "nt"
 
 
-def _is_reparse_point(value: os.stat_result) -> bool:
-    attributes = int(getattr(value, "st_file_attributes", 0))
-    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
-    return bool(attributes & reparse_flag)
-
-
-def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
-    return (
-        value.st_dev,
-        value.st_ino,
-        value.st_mode,
-        value.st_size,
-        value.st_mtime_ns,
-        value.st_ctime_ns,
-    )
-
-
-def _verify_candidate_file(candidate_path: Path) -> tuple[str, int]:
-    if type(candidate_path) is not _PLATFORM_PATH_TYPE or not candidate_path.is_absolute():
-        _fail("candidate path must be an absolute canonical platform Path")
+def _verify_candidate_receipt(
+    *,
+    candidate_path: Path,
+    candidate_descriptor: ModelArtifactDescriptor,
+    candidate_root: Path | None,
+) -> VerifiedCandidateArtifact:
+    path = _require_path(candidate_path, name="candidate_path")
+    if type(candidate_descriptor) is not ModelArtifactDescriptor:
+        raise TypeError("candidate_descriptor must be exact ModelArtifactDescriptor")
+    if candidate_root is not None:
+        root = _require_path(candidate_root, name="candidate_root")
+    else:
+        root = None
     try:
-        before = os.lstat(candidate_path)
-    except OSError as exc:
-        raise PhysicalTrainingPilotError("candidate file is not accessible") from exc
-    if stat.S_ISLNK(before.st_mode) or _is_reparse_point(before):
-        _fail("candidate file must not be a symbolic link or reparse point")
-    if not stat.S_ISREG(before.st_mode):
-        _fail("candidate path must identify a regular file")
-    if before.st_size <= 0:
-        _fail("candidate file must not be empty")
-    before_identity = _stat_identity(before)
-
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    try:
-        descriptor = os.open(candidate_path, flags)
-    except OSError as exc:
-        raise PhysicalTrainingPilotError("candidate file could not be opened safely") from exc
-
-    digest = hashlib.sha256()
-    byte_count = 0
-    try:
-        try:
-            opened = os.fstat(descriptor)
-        except OSError as exc:
-            raise PhysicalTrainingPilotError("candidate metadata could not be read") from exc
-        if not stat.S_ISREG(opened.st_mode):
-            _fail("opened candidate must remain a regular file")
-        opened_identity = _stat_identity(opened)
-        if os.name != "nt" and opened_identity != before_identity:
-            _fail("candidate changed before verification")
-        while True:
-            try:
-                chunk = os.read(descriptor, _READ_CHUNK_BYTES)
-            except OSError as exc:
-                raise PhysicalTrainingPilotError("candidate bytes could not be read") from exc
-            if not chunk:
-                break
-            byte_count += len(chunk)
-            digest.update(chunk)
-        try:
-            after_open = os.fstat(descriptor)
-        except OSError as exc:
-            raise PhysicalTrainingPilotError("candidate metadata could not be re-read") from exc
-        if _stat_identity(after_open) != opened_identity:
-            _fail("candidate changed during verification")
-    finally:
-        try:
-            os.close(descriptor)
-        except OSError:
-            pass
-
-    try:
-        after_path = os.lstat(candidate_path)
-    except OSError as exc:
-        raise PhysicalTrainingPilotError("candidate path disappeared after verification") from exc
-    if stat.S_ISLNK(after_path.st_mode) or _is_reparse_point(after_path):
-        _fail("candidate path became a symbolic link or reparse point")
-    if not stat.S_ISREG(after_path.st_mode):
-        _fail("candidate path stopped identifying a regular file")
-    if os.name != "nt" and _stat_identity(after_path) != before_identity:
-        _fail("candidate path changed during verification")
-    if byte_count != opened.st_size or byte_count != after_path.st_size:
-        _fail("candidate size changed during verification")
-    return digest.hexdigest(), byte_count
+        receipt = verify_candidate_artifact(
+            path,
+            candidate_descriptor,
+            allowed_root=root,
+        )
+    except (CandidateArtifactIntegrityError, TypeError, ValueError) as exc:
+        raise PhysicalTrainingPilotError(
+            "canonical candidate artifact verification failed"
+        ) from exc
+    if type(receipt) is not VerifiedCandidateArtifact:
+        _fail("canonical candidate verifier returned invalid evidence")
+    _require_sha256(receipt.descriptor_digest, name="candidate_descriptor_sha256")
+    _require_sha256(receipt.registry_key, name="candidate_registry_key")
+    _require_sha256(receipt.sha256, name="candidate_sha256")
+    if (
+        type(receipt.size_bytes) is not int
+        or not 1 <= receipt.size_bytes <= (1 << 63) - 1
+    ):
+        _fail("canonical candidate verifier returned invalid size evidence")
+    return receipt
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,6 +173,8 @@ class PhysicalTrainingPilotReport:
     paused_checkpoint_id: str
     completed_checkpoint_id: str
     candidate_artifact_ref: str
+    candidate_descriptor_sha256: str
+    candidate_registry_key: str
     candidate_sha256: str
     candidate_byte_count: int
     completed_steps: int
@@ -218,7 +184,7 @@ class PhysicalTrainingPilotReport:
     def __post_init__(self) -> None:
         if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
             _fail("unsupported physical pilot report schema")
-        if self.platform != "windows" or type(self.platform) is not str:
+        if type(self.platform) is not str or self.platform != "windows":
             _fail("physical PEFT pilot report must identify Windows")
         for value, name in (
             (self.job_id, "job_id"),
@@ -234,6 +200,8 @@ class PhysicalTrainingPilotReport:
             (self.scale_authorization_sha256, "scale_authorization_sha256"),
             (self.execution_plan_sha256, "execution_plan_sha256"),
             (self.job_fingerprint, "job_fingerprint"),
+            (self.candidate_descriptor_sha256, "candidate_descriptor_sha256"),
+            (self.candidate_registry_key, "candidate_registry_key"),
             (self.candidate_sha256, "candidate_sha256"),
         ):
             _require_sha256(value, name=name)
@@ -248,7 +216,7 @@ class PhysicalTrainingPilotReport:
         if (
             type(self.completed_steps) is not int
             or self.completed_steps < 2
-            or self.completed_steps > 1_000_000
+            or self.completed_steps > _MAX_STEPS
         ):
             _fail("physical pilot must complete after a real restart boundary")
 
@@ -257,6 +225,8 @@ class PhysicalTrainingPilotReport:
             "base_sha256": self.base_sha256,
             "candidate_artifact_ref": self.candidate_artifact_ref,
             "candidate_byte_count": self.candidate_byte_count,
+            "candidate_descriptor_sha256": self.candidate_descriptor_sha256,
+            "candidate_registry_key": self.candidate_registry_key,
             "candidate_sha256": self.candidate_sha256,
             "completed_checkpoint_id": self.completed_checkpoint_id,
             "completed_steps": self.completed_steps,
@@ -300,29 +270,28 @@ class PhysicalTrainingPilotReport:
             raise PhysicalTrainingPilotError("pilot report JSON is invalid") from exc
         if type(value) is not dict or set(value) != _REQUIRED_REPORT_FIELDS:
             _fail("pilot report fields do not match the strict schema")
-        try:
-            return cls(
-                job_id=value["job_id"],
-                base_sha256=value["base_sha256"],
-                frozen_package_sha256=value["frozen_package_sha256"],
-                training_material_sha256=value["training_material_sha256"],
-                scale_authorization_sha256=value["scale_authorization_sha256"],
-                execution_plan_sha256=value["execution_plan_sha256"],
-                job_fingerprint=value["job_fingerprint"],
-                paused_checkpoint_id=value["paused_checkpoint_id"],
-                completed_checkpoint_id=value["completed_checkpoint_id"],
-                candidate_artifact_ref=value["candidate_artifact_ref"],
-                candidate_sha256=value["candidate_sha256"],
-                candidate_byte_count=value["candidate_byte_count"],
-                completed_steps=value["completed_steps"],
-                platform=value["platform"],
-                schema_version=value["schema_version"],
-            )
-        except (KeyError, TypeError, ValueError) as exc:
-            raise PhysicalTrainingPilotError("pilot report fields are invalid") from exc
+        return cls(
+            job_id=value["job_id"],
+            base_sha256=value["base_sha256"],
+            frozen_package_sha256=value["frozen_package_sha256"],
+            training_material_sha256=value["training_material_sha256"],
+            scale_authorization_sha256=value["scale_authorization_sha256"],
+            execution_plan_sha256=value["execution_plan_sha256"],
+            job_fingerprint=value["job_fingerprint"],
+            paused_checkpoint_id=value["paused_checkpoint_id"],
+            completed_checkpoint_id=value["completed_checkpoint_id"],
+            candidate_artifact_ref=value["candidate_artifact_ref"],
+            candidate_descriptor_sha256=value["candidate_descriptor_sha256"],
+            candidate_registry_key=value["candidate_registry_key"],
+            candidate_sha256=value["candidate_sha256"],
+            candidate_byte_count=value["candidate_byte_count"],
+            completed_steps=value["completed_steps"],
+            platform=value["platform"],
+            schema_version=value["schema_version"],
+        )
 
 
-def _require_run_evidence(
+def _snapshot_run_evidence(
     value: object,
     *,
     state: TrainingRunState,
@@ -330,9 +299,75 @@ def _require_run_evidence(
 ) -> TrainingRunEvidence:
     if type(value) is not TrainingRunEvidence:
         _fail(f"{label} must be exact TrainingRunEvidence")
-    if value.state is not state:
-        _fail(f"{label} has an unexpected training state")
-    return value
+    try:
+        if type(value.state) is not TrainingRunState or value.state is not state:
+            _fail(f"{label} has an unexpected training state")
+        if (
+            type(value.next_step) is not int
+            or value.next_step < 0
+            or value.next_step > _MAX_STEPS
+        ):
+            _fail(f"{label} has an invalid step boundary")
+        base = value.base_artifact
+        if type(base) is not ArtifactIdentity:
+            _fail(f"{label} has invalid base artifact evidence")
+        canonical_base = ArtifactIdentity(
+            artifact_ref=base.artifact_ref,
+            sha256=base.sha256,
+        )
+        job_id = _require_text(value.job_id, name=f"{label} job_id")
+        frozen_package_sha256 = _require_sha256(
+            value.frozen_package_sha256,
+            name=f"{label} frozen_package_sha256",
+        )
+        training_material_sha256 = _require_sha256(
+            value.training_material_sha256,
+            name=f"{label} training_material_sha256",
+        )
+        scale_authorization_sha256 = _require_sha256(
+            value.scale_authorization_sha256,
+            name=f"{label} scale_authorization_sha256",
+        )
+        execution_plan_sha256 = _require_sha256(
+            value.execution_plan_sha256,
+            name=f"{label} execution_plan_sha256",
+        )
+        job_fingerprint = _require_sha256(
+            value.job_fingerprint,
+            name=f"{label} job_fingerprint",
+        )
+        candidate_artifact_ref = _require_text(
+            value.candidate_artifact_ref,
+            name=f"{label} candidate_artifact_ref",
+        )
+        candidate_sha256 = value.candidate_sha256
+        if candidate_sha256 is not None:
+            candidate_sha256 = _require_sha256(
+                candidate_sha256,
+                name=f"{label} candidate_sha256",
+            )
+        checkpoint_id = value.checkpoint_id
+        if checkpoint_id is not None:
+            checkpoint_id = _require_text(
+                checkpoint_id,
+                name=f"{label} checkpoint_id",
+            )
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise PhysicalTrainingPilotError(f"{label} evidence is not canonical") from exc
+    return TrainingRunEvidence(
+        job_id=job_id,
+        state=state,
+        next_step=value.next_step,
+        base_artifact=canonical_base,
+        frozen_package_sha256=frozen_package_sha256,
+        training_material_sha256=training_material_sha256,
+        scale_authorization_sha256=scale_authorization_sha256,
+        execution_plan_sha256=execution_plan_sha256,
+        job_fingerprint=job_fingerprint,
+        candidate_artifact_ref=candidate_artifact_ref,
+        candidate_sha256=candidate_sha256,
+        checkpoint_id=checkpoint_id,
+    )
 
 
 def build_physical_training_pilot_report(
@@ -340,15 +375,17 @@ def build_physical_training_pilot_report(
     paused: TrainingRunEvidence,
     completed: TrainingRunEvidence,
     candidate_path: Path,
+    candidate_descriptor: ModelArtifactDescriptor,
+    candidate_root: Path | None = None,
 ) -> PhysicalTrainingPilotReport:
-    """Build a path-free report from one durable pause/restart/completion sequence."""
+    """Build path-free evidence from one durable pause/restart/completion sequence."""
 
-    paused = _require_run_evidence(
+    paused = _snapshot_run_evidence(
         paused,
         state=TrainingRunState.PAUSED,
         label="paused run",
     )
-    completed = _require_run_evidence(
+    completed = _snapshot_run_evidence(
         completed,
         state=TrainingRunState.COMPLETED,
         label="completed run",
@@ -380,9 +417,13 @@ def build_physical_training_pilot_report(
     if completed.candidate_sha256 is None:
         _fail("completed pilot is missing candidate digest evidence")
 
-    candidate_sha256, candidate_byte_count = _verify_candidate_file(candidate_path)
-    if candidate_sha256 != completed.candidate_sha256:
-        _fail("physical candidate bytes do not match completed runtime evidence")
+    receipt = _verify_candidate_receipt(
+        candidate_path=candidate_path,
+        candidate_descriptor=candidate_descriptor,
+        candidate_root=candidate_root,
+    )
+    if receipt.sha256 != completed.candidate_sha256:
+        _fail("physical candidate receipt does not match completed runtime evidence")
 
     return PhysicalTrainingPilotReport(
         job_id=completed.job_id,
@@ -395,8 +436,10 @@ def build_physical_training_pilot_report(
         paused_checkpoint_id=paused.checkpoint_id,
         completed_checkpoint_id=completed.checkpoint_id,
         candidate_artifact_ref=completed.candidate_artifact_ref,
-        candidate_sha256=completed.candidate_sha256,
-        candidate_byte_count=candidate_byte_count,
+        candidate_descriptor_sha256=receipt.descriptor_digest,
+        candidate_registry_key=receipt.registry_key,
+        candidate_sha256=receipt.sha256,
+        candidate_byte_count=receipt.size_bytes,
         completed_steps=completed.next_step,
     )
 
@@ -410,6 +453,8 @@ def run_physical_training_pilot(
     restart_worker: Callable[[], SubprocessTrainingWorker],
     scale_authorization: TrainingScaleAuthorization,
     candidate_path: Path,
+    candidate_descriptor: ModelArtifactDescriptor,
+    candidate_root: Path | None = None,
 ) -> PhysicalTrainingPilotReport:
     """Exercise one real Windows subprocess step, reopen, resume, and verify candidate bytes."""
 
@@ -423,6 +468,8 @@ def run_physical_training_pilot(
         raise TypeError("worker must be the canonical SubprocessTrainingWorker")
     if type(scale_authorization) is not TrainingScaleAuthorization:
         raise TypeError("scale_authorization must be exact TrainingScaleAuthorization")
+    if type(candidate_descriptor) is not ModelArtifactDescriptor:
+        raise TypeError("candidate_descriptor must be exact ModelArtifactDescriptor")
     if not callable(restart_runtime) or not callable(restart_worker):
         raise TypeError("restart factories must be callable")
     if spec.max_steps < 2:
@@ -443,7 +490,7 @@ def run_physical_training_pilot(
         scale_authorization=scale_authorization,
         control=one_step_then_pause,
     )
-    paused = _require_run_evidence(
+    paused = _snapshot_run_evidence(
         paused,
         state=TrainingRunState.PAUSED,
         label="paused run",
@@ -471,4 +518,6 @@ def run_physical_training_pilot(
         paused=paused,
         completed=completed,
         candidate_path=candidate_path,
+        candidate_descriptor=candidate_descriptor,
+        candidate_root=candidate_root,
     )

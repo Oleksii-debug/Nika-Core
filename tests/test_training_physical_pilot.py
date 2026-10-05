@@ -6,6 +6,11 @@ from pathlib import Path
 
 import pytest
 
+from nika_core.model_artifacts import (
+    ModelArtifactDescriptor,
+    ModelArtifactKind,
+    ModelIntegrityBasis,
+)
 from nika_core.training_physical_pilot import (
     PhysicalTrainingPilotError,
     PhysicalTrainingPilotReport,
@@ -21,6 +26,22 @@ from nika_core.training_runtime import (
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _descriptor(path: Path, *, payload: bytes | None = None) -> ModelArtifactDescriptor:
+    body = path.read_bytes() if payload is None else payload
+    return ModelArtifactDescriptor(
+        kind=ModelArtifactKind.EMBEDDED,
+        provider_id="training-runtime",
+        model_id="physical-pilot-candidate",
+        model_version="pilot-1",
+        source_reference="https://models.example.test/nika/physical-pilot",
+        license_reference="https://licenses.example.test/nika/physical-pilot",
+        integrity_basis=ModelIntegrityBasis.SHA256,
+        sha256=_sha256(body),
+        size_bytes=len(body),
+        capabilities=("text",),
+    )
 
 
 def _run_evidence(
@@ -56,10 +77,29 @@ def _completed_for(payload: bytes) -> TrainingRunEvidence:
     )
 
 
-def test_build_report_binds_restart_and_exact_candidate_bytes(tmp_path: Path) -> None:
+def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrainingPilotReport:
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    return build_physical_training_pilot_report(
+        paused=_run_evidence(
+            state=TrainingRunState.PAUSED,
+            next_step=1,
+            checkpoint_id="checkpoint-paused",
+        ),
+        completed=_completed_for(payload),
+        candidate_path=candidate,
+        candidate_descriptor=_descriptor(candidate),
+        candidate_root=tmp_path,
+    )
+
+
+def test_build_report_binds_restart_and_canonical_candidate_receipt(
+    tmp_path: Path,
+) -> None:
     payload = b"physical-pilot-candidate"
     candidate = tmp_path / "adapter_model.safetensors"
     candidate.write_bytes(payload)
+    descriptor = _descriptor(candidate)
 
     report = build_physical_training_pilot_report(
         paused=_run_evidence(
@@ -69,29 +109,22 @@ def test_build_report_binds_restart_and_exact_candidate_bytes(tmp_path: Path) ->
         ),
         completed=_completed_for(payload),
         candidate_path=candidate,
+        candidate_descriptor=descriptor,
+        candidate_root=tmp_path,
     )
 
     assert report.platform == "windows"
     assert report.completed_steps == 2
     assert report.candidate_sha256 == _sha256(payload)
     assert report.candidate_byte_count == len(payload)
+    assert report.candidate_descriptor_sha256 == descriptor.descriptor_digest
+    assert report.candidate_registry_key == descriptor.registry_key
     assert report.paused_checkpoint_id == "checkpoint-paused"
     assert report.completed_checkpoint_id == "checkpoint-completed"
 
 
 def test_report_round_trip_is_canonical_and_digest_stable(tmp_path: Path) -> None:
-    payload = b"candidate"
-    candidate = tmp_path / "adapter_model.safetensors"
-    candidate.write_bytes(payload)
-    report = build_physical_training_pilot_report(
-        paused=_run_evidence(
-            state=TrainingRunState.PAUSED,
-            next_step=1,
-            checkpoint_id="checkpoint-paused",
-        ),
-        completed=_completed_for(payload),
-        candidate_path=candidate,
-    )
+    report = _build_report(tmp_path)
 
     restored = PhysicalTrainingPilotReport.from_json(report.to_json())
 
@@ -106,18 +139,7 @@ def test_report_round_trip_is_canonical_and_digest_stable(tmp_path: Path) -> Non
 
 
 def test_report_rejects_unknown_or_duplicate_json_fields(tmp_path: Path) -> None:
-    payload = b"candidate"
-    candidate = tmp_path / "adapter_model.safetensors"
-    candidate.write_bytes(payload)
-    report = build_physical_training_pilot_report(
-        paused=_run_evidence(
-            state=TrainingRunState.PAUSED,
-            next_step=1,
-            checkpoint_id="checkpoint-paused",
-        ),
-        completed=_completed_for(payload),
-        candidate_path=candidate,
-    )
+    report = _build_report(tmp_path)
     value = report.canonical_payload()
     value["unexpected"] = True
 
@@ -132,11 +154,12 @@ def test_report_rejects_unknown_or_duplicate_json_fields(tmp_path: Path) -> None
         PhysicalTrainingPilotReport.from_json(duplicate)
 
 
-def test_build_report_rejects_candidate_digest_mismatch(tmp_path: Path) -> None:
+def test_build_report_rejects_runtime_candidate_digest_mismatch(tmp_path: Path) -> None:
+    payload = b"actual-candidate"
     candidate = tmp_path / "adapter_model.safetensors"
-    candidate.write_bytes(b"actual-candidate")
+    candidate.write_bytes(payload)
 
-    with pytest.raises(PhysicalTrainingPilotError, match="candidate bytes"):
+    with pytest.raises(PhysicalTrainingPilotError, match="runtime evidence"):
         build_physical_training_pilot_report(
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
@@ -145,6 +168,27 @@ def test_build_report_rejects_candidate_digest_mismatch(tmp_path: Path) -> None:
             ),
             completed=_completed_for(b"different-candidate"),
             candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+def test_build_report_rejects_descriptor_digest_mismatch(tmp_path: Path) -> None:
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(b"actual-candidate")
+    descriptor = _descriptor(candidate, payload=b"different-candidate")
+
+    with pytest.raises(PhysicalTrainingPilotError, match="verification failed"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            completed=_completed_for(b"actual-candidate"),
+            candidate_path=candidate,
+            candidate_descriptor=descriptor,
+            candidate_root=tmp_path,
         )
 
 
@@ -168,10 +212,33 @@ def test_build_report_rejects_restart_identity_drift(tmp_path: Path) -> None:
                 job_fingerprint="1" * 64,
             ),
             candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
         )
 
 
-def test_build_report_requires_distinct_durable_checkpoints(tmp_path: Path) -> None:
+def test_build_report_rejects_boolean_step_carrier(tmp_path: Path) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    paused = _run_evidence(
+        state=TrainingRunState.PAUSED,
+        next_step=1,
+        checkpoint_id="checkpoint-paused",
+    )
+    object.__setattr__(paused, "next_step", True)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="step boundary"):
+        build_physical_training_pilot_report(
+            paused=paused,
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None:
     payload = b"candidate"
     candidate = tmp_path / "adapter_model.safetensors"
     candidate.write_bytes(payload)
@@ -190,41 +257,31 @@ def test_build_report_requires_distinct_durable_checkpoints(tmp_path: Path) -> N
                 candidate_sha256=_sha256(payload),
             ),
             candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
         )
 
 
-def test_build_report_rejects_empty_candidate(tmp_path: Path) -> None:
-    candidate = tmp_path / "adapter_model.safetensors"
-    candidate.write_bytes(b"")
+def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
+    report = _build_report(tmp_path)
 
-    with pytest.raises(PhysicalTrainingPilotError, match="must not be empty"):
-        build_physical_training_pilot_report(
-            paused=_run_evidence(
-                state=TrainingRunState.PAUSED,
-                next_step=1,
-                checkpoint_id="checkpoint-paused",
-            ),
-            completed=_completed_for(b"candidate"),
-            candidate_path=candidate,
-        )
-
-
-def test_report_rejects_non_windows_platform() -> None:
     with pytest.raises(PhysicalTrainingPilotError, match="Windows"):
         PhysicalTrainingPilotReport(
-            job_id="pilot-job",
-            base_sha256="a" * 64,
-            frozen_package_sha256="b" * 64,
-            training_material_sha256="c" * 64,
-            scale_authorization_sha256="d" * 64,
-            execution_plan_sha256="e" * 64,
-            job_fingerprint="f" * 64,
-            paused_checkpoint_id="checkpoint-paused",
-            completed_checkpoint_id="checkpoint-completed",
-            candidate_artifact_ref="models/candidate/pilot",
-            candidate_sha256="1" * 64,
-            candidate_byte_count=10,
-            completed_steps=2,
+            job_id=report.job_id,
+            base_sha256=report.base_sha256,
+            frozen_package_sha256=report.frozen_package_sha256,
+            training_material_sha256=report.training_material_sha256,
+            scale_authorization_sha256=report.scale_authorization_sha256,
+            execution_plan_sha256=report.execution_plan_sha256,
+            job_fingerprint=report.job_fingerprint,
+            paused_checkpoint_id=report.paused_checkpoint_id,
+            completed_checkpoint_id=report.completed_checkpoint_id,
+            candidate_artifact_ref=report.candidate_artifact_ref,
+            candidate_descriptor_sha256=report.candidate_descriptor_sha256,
+            candidate_registry_key=report.candidate_registry_key,
+            candidate_sha256=report.candidate_sha256,
+            candidate_byte_count=report.candidate_byte_count,
+            completed_steps=report.completed_steps,
             platform="linux",
         )
 
@@ -244,4 +301,5 @@ def test_physical_runner_refuses_non_windows_execution(monkeypatch: pytest.Monke
             restart_worker=lambda: object(),  # type: ignore[return-value]
             scale_authorization=object(),  # type: ignore[arg-type]
             candidate_path=Path("candidate"),
+            candidate_descriptor=object(),  # type: ignore[arg-type]
         )

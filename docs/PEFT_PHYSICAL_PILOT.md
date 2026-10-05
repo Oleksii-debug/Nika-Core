@@ -1,8 +1,8 @@
 # PEFT physical pilot evidence
 
 This harness is an acceptance tool for the canonical Loop-C training stack. It does not
-implement another trainer, checkpoint store, artifact registry, evaluation engine, or
-promotion authority.
+implement another trainer, checkpoint store, artifact registry, physical artifact verifier,
+evaluation engine, or promotion authority.
 
 ## What it proves mechanically
 
@@ -16,13 +16,15 @@ Windows-only. A successful call must:
 4. require the restarted worker to expose the same execution-plan digest;
 5. resume the same authorized job to `COMPLETED`;
 6. require a distinct durable completion checkpoint;
-7. hash the final candidate file and match it to the runtime's candidate SHA-256; and
-8. return a minimized, path-free `PhysicalTrainingPilotReport`.
+7. reverify the final candidate through the existing canonical
+   `training_artifacts.verify_candidate_artifact` boundary; and
+8. require the verifier receipt SHA-256 to equal the completed runtime evidence.
 
-The report contains only bounded identifiers, SHA-256 identities, checkpoint IDs, candidate
-byte count, completed step count, schema version, and the literal platform value `windows`.
-It does not serialize training/validation records, model paths, credentials, environment
-variables, prompts, responses, or checkpoint payloads.
+The resulting `PhysicalTrainingPilotReport` is path-free. It contains bounded identifiers,
+SHA-256 identities, descriptor/registry digests, checkpoint IDs, candidate byte count,
+completed step count, schema version, and the literal platform value `windows`. It does not
+serialize training/validation records, model paths, credentials, environment variables,
+prompts, responses, or checkpoint payloads.
 
 ## Required Windows setup
 
@@ -39,8 +41,13 @@ The restart factory must reopen durable state rather than returning the original
 `TrainingRuntime` object. The worker restart factory must construct a new
 `SubprocessTrainingWorker` from the same Registry-bound command and environment authority.
 
-Pass the final published `adapter_model.safetensors` path as `candidate_path`. Keep the
-generated report JSON outside Git when it contains run-specific operational identifiers.
+Create or retrieve the canonical SHA-256 `ModelArtifactDescriptor` for the final published
+`adapter_model.safetensors`. Its size and digest must describe those exact bytes. Pass the
+artifact path, descriptor, and preferably its containing artifact root to the pilot harness.
+The harness delegates physical byte/containment/Windows handle verification to the existing
+candidate-artifact integrity authority rather than implementing another verifier.
+
+Keep generated report JSON outside Git when it contains run-specific operational identifiers.
 A report can be shared as evidence after reviewing it for the intended run.
 
 ## Example control flow
@@ -56,6 +63,8 @@ report = run_physical_training_pilot(
     restart_worker=reopen_worker,
     scale_authorization=authorization,
     candidate_path=candidate_safetensors_path,
+    candidate_descriptor=candidate_descriptor,
+    candidate_root=candidate_artifact_root,
 )
 report_path.write_text(report.to_json(), encoding="utf-8")
 print(report.evidence_sha256)
