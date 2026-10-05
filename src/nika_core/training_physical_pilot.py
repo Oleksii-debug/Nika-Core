@@ -29,8 +29,8 @@ from nika_core.training_runtime import (
 )
 from nika_core.training_scale import TrainingScaleAuthorization
 
-_SCHEMA_VERSION = 4
-_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v4\x00"
+_SCHEMA_VERSION = 5
+_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v5\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_CANDIDATE_MANIFEST_BYTES = 512 * 1024
 _MAX_TEXT_BYTES = 1024
@@ -53,6 +53,8 @@ _REQUIRED_REPORT_FIELDS = {
     "candidate_manifest_sha256",
     "consumed_materials_sha256",
     "model_dir_manifest_sha256",
+    "previous_adapter_tensors_sha256",
+    "trained_adapter_tensors_sha256",
     "trainer_artifact_id",
     "trainer_deployment_sha256",
     "trainer_implementation_sha256",
@@ -464,6 +466,8 @@ class PhysicalTrainingPilotReport:
     candidate_manifest_sha256: str
     consumed_materials_sha256: str
     model_dir_manifest_sha256: str
+    previous_adapter_tensors_sha256: str
+    trained_adapter_tensors_sha256: str
     trainer_artifact_id: str
     trainer_deployment_sha256: str
     trainer_implementation_sha256: str
@@ -499,6 +503,11 @@ class PhysicalTrainingPilotReport:
             (self.candidate_manifest_sha256, "candidate_manifest_sha256"),
             (self.consumed_materials_sha256, "consumed_materials_sha256"),
             (self.model_dir_manifest_sha256, "model_dir_manifest_sha256"),
+            (
+                self.previous_adapter_tensors_sha256,
+                "previous_adapter_tensors_sha256",
+            ),
+            (self.trained_adapter_tensors_sha256, "trained_adapter_tensors_sha256"),
             (self.trainer_artifact_id, "trainer_artifact_id"),
             (self.trainer_deployment_sha256, "trainer_deployment_sha256"),
             (self.trainer_implementation_sha256, "trainer_implementation_sha256"),
@@ -508,6 +517,11 @@ class PhysicalTrainingPilotReport:
             ),
         ):
             _require_sha256(value, name=name)
+        if hmac.compare_digest(
+            self.previous_adapter_tensors_sha256,
+            self.trained_adapter_tensors_sha256,
+        ):
+            _fail("physical pilot report does not prove adapter tensor-state mutation")
         if len(
             {
                 self.paused_checkpoint_id,
@@ -524,10 +538,9 @@ class PhysicalTrainingPilotReport:
             _fail("candidate_byte_count must be a positive signed-64 integer")
         if (
             type(self.completed_steps) is not int
-            or self.completed_steps < 2
-            or self.completed_steps > _MAX_STEPS
+            or self.completed_steps != 2
         ):
-            _fail("physical pilot must complete after a real restart boundary")
+            _fail("physical pilot report requires exactly two completed steps")
 
     def canonical_payload(self) -> dict[str, object]:
         return {
@@ -540,6 +553,8 @@ class PhysicalTrainingPilotReport:
             "candidate_manifest_sha256": self.candidate_manifest_sha256,
             "consumed_materials_sha256": self.consumed_materials_sha256,
             "model_dir_manifest_sha256": self.model_dir_manifest_sha256,
+            "previous_adapter_tensors_sha256": self.previous_adapter_tensors_sha256,
+            "trained_adapter_tensors_sha256": self.trained_adapter_tensors_sha256,
             "trainer_artifact_id": self.trainer_artifact_id,
             "trainer_deployment_sha256": self.trainer_deployment_sha256,
             "trainer_implementation_sha256": self.trainer_implementation_sha256,
@@ -608,6 +623,10 @@ class PhysicalTrainingPilotReport:
             candidate_manifest_sha256=value["candidate_manifest_sha256"],
             consumed_materials_sha256=value["consumed_materials_sha256"],
             model_dir_manifest_sha256=value["model_dir_manifest_sha256"],
+            previous_adapter_tensors_sha256=value[
+                "previous_adapter_tensors_sha256"
+            ],
+            trained_adapter_tensors_sha256=value["trained_adapter_tensors_sha256"],
             trainer_artifact_id=value["trainer_artifact_id"],
             trainer_deployment_sha256=value["trainer_deployment_sha256"],
             trainer_implementation_sha256=value["trainer_implementation_sha256"],
@@ -932,8 +951,8 @@ def build_physical_training_pilot_report(
         _fail("physical pilot must pause exactly after its first trainer step")
     if restart_probe.next_step != 1:
         _fail("restarted runtime did not reopen the one-step durable checkpoint")
-    if completed.next_step < 2:
-        _fail("physical pilot must complete after the restart boundary")
+    if completed.next_step != 2:
+        _fail("physical pilot must complete exactly the bounded two-step run")
     if paused.candidate_sha256 is not None or restart_probe.candidate_sha256 is not None:
         _fail("paused pilot evidence must not already publish a candidate")
     checkpoint_ids = (
@@ -1009,6 +1028,10 @@ def build_physical_training_pilot_report(
         candidate_manifest_sha256=manifest_evidence.candidate_manifest_sha256,
         consumed_materials_sha256=manifest_evidence.consumed_materials_sha256,
         model_dir_manifest_sha256=manifest_evidence.model_dir_manifest_sha256,
+        previous_adapter_tensors_sha256=(
+            manifest_evidence.previous_adapter_tensors_sha256
+        ),
+        trained_adapter_tensors_sha256=manifest_evidence.trained_adapter_tensors_sha256,
         trainer_artifact_id=manifest_evidence.trainer_artifact_id,
         trainer_deployment_sha256=manifest_evidence.trainer_deployment_sha256,
         trainer_implementation_sha256=manifest_evidence.trainer_implementation_sha256,
@@ -1097,8 +1120,8 @@ def run_physical_training_pilot(
         raise TypeError("restart factories must be callable")
     if not callable(candidate_descriptor_factory):
         raise TypeError("candidate_descriptor_factory must be callable")
-    if canonical_spec.max_steps < 2:
-        _fail("physical pilot requires max_steps >= 2")
+    if canonical_spec.max_steps != 2:
+        _fail("physical pilot requires exactly max_steps == 2")
     if worker.last_accepted_consumed_materials_sha256 is not None:
         _fail("initial worker already carries accepted consumed-material evidence")
     initial_execution_plan_sha256 = _require_sha256(
