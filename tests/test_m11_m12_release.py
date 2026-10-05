@@ -148,6 +148,15 @@ def test_release_source_sha_can_come_from_explicit_release_environment(
     assert resolve_source_sha(None) == SOURCE_SHA
 
 
+def test_release_source_sha_falls_back_to_github_when_release_env_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NIKA_SOURCE_SHA", raising=False)
+    monkeypatch.setenv("GITHUB_SHA", SOURCE_SHA.upper())
+
+    assert resolve_source_sha(None) == SOURCE_SHA
+
+
 def test_third_party_notice_verification_fails_closed(tmp_path: Path) -> None:
     assert verify_third_party_notices(tmp_path) == ("missing:THIRD_PARTY_NOTICES.txt",)
 
@@ -183,7 +192,17 @@ def test_windows_plan_rejects_path_like_reserved_and_invalid_bundle_names(
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
     plan = default_windows_plan(tmp_path)
 
-    invalid_names = ("../escape", "Nika/Core", r"Nika\Core", "CON", "NikaCore.")
+    invalid_names = (
+        "../escape",
+        "Nika/Core",
+        r"Nika\Core",
+        "CON",
+        "COM1.txt",
+        "LPT³.log",
+        "NikaCore.",
+        "bad\x01name",
+        "a" * 256,
+    )
     for invalid_name in invalid_names:
         invalid = replace(plan, name=invalid_name)
         with pytest.raises(ValueError):
@@ -206,6 +225,19 @@ def test_windows_plan_accepts_unicode_single_component_bundle_name(tmp_path: Pat
     assert plan.bundle_dir == tmp_path / "dist" / "Ніка Core"
     args = plan.pyinstaller_args()
     assert args[args.index("--name") + 1] == "Ніка Core"
+
+
+def test_windows_plan_accepts_maximum_component_length(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    name = "a" * 255
+    plan = replace(default_windows_plan(tmp_path), name=name)
+
+    assert plan.bundle_dir == tmp_path / "dist" / name
+    assert plan.pyinstaller_args()[plan.pyinstaller_args().index("--name") + 1] == name
 
 
 def test_release_gate_never_self_claims_human_nvda_verification() -> None:
