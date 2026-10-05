@@ -733,47 +733,6 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         if prior is not None:
             return self._existing_result(exact, prior)
 
-        try:
-            self._validate_job(exact)
-        except (ValueError, WorkspaceSecurityError, ContainedLocalWorkerError) as exc:
-            result = self._failure(
-                exact.job_id,
-                WorkerFailureKind.INVALID_REQUEST,
-                str(exc),
-                retryable=False,
-            )
-            self._save_terminal_without_candidate(exact, result)
-            return result
-
-        try:
-            proposed = await self.planner.plan(exact)
-        except Exception:
-            result = self._failure(
-                exact.job_id,
-                WorkerFailureKind.INTERNAL_ERROR,
-                "local coding planner failed without trusted evidence",
-                retryable=True,
-            )
-            self._save_terminal_without_candidate(exact, result)
-            return result
-
-        try:
-            plan = _snapshot_plan(proposed, exact.resource_budget.max_changed_files)
-            for edit in plan.edits:
-                if not exact.allowed_paths.allows(edit.path):
-                    raise ContainedLocalWorkerError(
-                        f"local coding plan changes path outside allowed scope: {edit.path}"
-                    )
-        except (ValueError, WorkspaceSecurityError, ContainedLocalWorkerError) as exc:
-            result = self._failure(
-                exact.job_id,
-                WorkerFailureKind.POLICY_VIOLATION,
-                str(exc),
-                retryable=False,
-            )
-            self._save_terminal_without_candidate(exact, result)
-            return result
-
         cancellation = threading.Event()
         with self._active_lock:
             if exact.job_id in self._active:
@@ -784,7 +743,60 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                     retryable=False,
                 )
             self._active[exact.job_id] = cancellation
+
         try:
+            try:
+                prior = self._load_state(exact.job_id)
+            except ContainedLocalWorkerError:
+                return self._manual_reconcile(exact.job_id)
+            if prior is not None:
+                return self._existing_result(exact, prior)
+
+            try:
+                self._validate_job(exact)
+            except (ValueError, WorkspaceSecurityError, ContainedLocalWorkerError) as exc:
+                result = self._failure(
+                    exact.job_id,
+                    WorkerFailureKind.INVALID_REQUEST,
+                    str(exc),
+                    retryable=False,
+                )
+                self._save_terminal_without_candidate(exact, result)
+                return result
+
+            authority_fingerprint = _job_fingerprint(exact)
+            try:
+                planning_view = _snapshot_job(exact)
+                proposed = await self.planner.plan(planning_view)
+            except Exception:
+                result = self._failure(
+                    exact.job_id,
+                    WorkerFailureKind.INTERNAL_ERROR,
+                    "local coding planner failed without trusted evidence",
+                    retryable=True,
+                )
+                self._save_terminal_without_candidate(exact, result)
+                return result
+            if _job_fingerprint(exact) != authority_fingerprint:
+                return self._manual_reconcile(exact.job_id)
+
+            try:
+                plan = _snapshot_plan(proposed, exact.resource_budget.max_changed_files)
+                for edit in plan.edits:
+                    if not exact.allowed_paths.allows(edit.path):
+                        raise ContainedLocalWorkerError(
+                            f"local coding plan changes path outside allowed scope: {edit.path}"
+                        )
+            except (ValueError, WorkspaceSecurityError, ContainedLocalWorkerError) as exc:
+                result = self._failure(
+                    exact.job_id,
+                    WorkerFailureKind.POLICY_VIOLATION,
+                    str(exc),
+                    retryable=False,
+                )
+                self._save_terminal_without_candidate(exact, result)
+                return result
+
             return await asyncio.to_thread(self._execute_sync, exact, plan, cancellation)
         except asyncio.CancelledError:
             cancellation.set()
