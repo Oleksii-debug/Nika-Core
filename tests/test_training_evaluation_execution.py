@@ -406,3 +406,58 @@ async def test_caller_mutation_during_effect_cannot_retarget_snapshot() -> None:
     assert port.calls == 2
     assert result.report.candidate.provider_id == "ollama"
     assert result.report.task_pass_rate == 1.0
+
+
+
+@pytest.mark.asyncio
+async def test_scorer_failure_after_provider_effect_is_unknown_and_secret_free() -> None:
+    class ExplodingScorer:
+        def score(self, case, response):
+            del case, response
+            raise RuntimeError("private scorer detail must not escape")
+
+    port = _AttestedEffectPort()
+
+    with pytest.raises(TrainingEvaluationExecutionError) as exc_info:
+        evaluation = _evaluation_set()
+        await run_attested_challenger_benchmark(
+            binding=_binding(evaluation),
+            challenger=_challenger(),
+            evaluation_set=evaluation,
+            effect_port=port,
+            expected_attestor_id=_ATTESTOR_ID,
+            expected_attestor_sha256=_ATTESTOR_SHA256,
+            scorer=ExplodingScorer(),
+            scorer_id="test-exploding-scorer-v1",
+        )
+
+    assert port.calls == 1
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert "private scorer detail" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
+
+
+@pytest.mark.asyncio
+async def test_resource_observer_failure_before_provider_effect_is_no_effect() -> None:
+    class ExplodingObserver:
+        def snapshot(self):
+            raise RuntimeError("private resource detail must not escape")
+
+    port = _AttestedEffectPort()
+
+    with pytest.raises(TrainingEvaluationExecutionError) as exc_info:
+        evaluation = _evaluation_set()
+        await run_attested_challenger_benchmark(
+            binding=_binding(evaluation),
+            challenger=_challenger(),
+            evaluation_set=evaluation,
+            effect_port=port,
+            expected_attestor_id=_ATTESTOR_ID,
+            expected_attestor_sha256=_ATTESTOR_SHA256,
+            resource_observer=ExplodingObserver(),
+        )
+
+    assert port.calls == 0
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert "private resource detail" not in str(exc_info.value)
+    assert exc_info.value.__cause__ is None
