@@ -48,7 +48,7 @@ def load_incident_snapshot(
 ) -> IncidentLifecycleSnapshot:
     """Parse canonical PF8 JSON and revalidate external authority before trust."""
 
-    if not isinstance(payload, str):
+    if type(payload) is not str:
         raise ProductIncidentError("incident snapshot payload must be non-empty JSON text")
     # Apply the cheap size check before stripping or encoding untrusted text.
     if len(payload) > MAX_INCIDENT_SNAPSHOT_BYTES:
