@@ -76,6 +76,26 @@ def test_grant_transaction_rolls_back_grant_and_audit_on_dependent_failure(
         ).fetchone()[0] == 0
 
 
+def test_grant_transaction_abrupt_exit_leaves_no_grant_or_audit(
+    tmp_path: Path,
+) -> None:
+    _store, audit, permissions = _authority(tmp_path)
+    permission_id = "model-cloud:atomic-system-exit"
+
+    with pytest.raises(SystemExit):
+        with permissions.grant_transaction(
+            permission_id=permission_id,
+            scope=_scope(),
+        ):
+            raise SystemExit("simulated process exit")
+
+    assert permissions.get(permission_id) is None
+    assert audit.list_for(
+        entity_type="standing_permission",
+        entity_id=permission_id,
+    ) == ()
+
+
 def test_grant_transaction_commits_grant_and_dependent_write_together(
     tmp_path: Path,
 ) -> None:
