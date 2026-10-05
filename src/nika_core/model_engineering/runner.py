@@ -1,23 +1,27 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import unicodedata
 from collections.abc import Callable, Sequence
 from math import ceil, isfinite
 from statistics import fmean
 from time import perf_counter
 from typing import Protocol
+from uuid import uuid4
 
 from nika_core.model_engineering.contracts import (
     AcceleratorObserverPort,
     AcceleratorSnapshot,
     BenchmarkExecutionConfig,
+    BenchmarkRunEvidence,
     BenchmarkSuiteReport,
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
     EvaluationCase,
     EvaluationSet,
     ModelCandidate,
+    benchmark_configuration_sha256,
 )
 from nika_core.model_gateway.contracts import (
     ModelGatewayError,
@@ -61,6 +65,10 @@ class ExactMatchScorer:
 _DEFAULT_SCORER_ID = "exact-match-nfc-v1"
 
 
+def _default_run_id() -> str:
+    return f"run-{uuid4().hex}"
+
+
 class ModelBenchmarkRunner:
     def __init__(
         self,
@@ -71,6 +79,7 @@ class ModelBenchmarkRunner:
         resource_observer: ResourceObserverPort | None = None,
         accelerator_observer: AcceleratorObserverPort | None = None,
         clock: Callable[[], float] = perf_counter,
+        run_id_factory: Callable[[], str] = _default_run_id,
     ) -> None:
         self._gateway = gateway
         if scorer is None:
@@ -92,6 +101,7 @@ class ModelBenchmarkRunner:
         self._resource_observer = resource_observer
         self._accelerator_observer = accelerator_observer
         self._clock = clock
+        self._run_id_factory = run_id_factory
 
     async def benchmark(
         self,
@@ -110,6 +120,14 @@ class ModelBenchmarkRunner:
             temperature=temperature,
             scorer_id=self._scorer_id,
         )
+        run_id = self._new_run_id()
+        configuration_sha256 = benchmark_configuration_sha256(
+            candidate_evidence_sha256=candidate.evidence_sha256,
+            evaluation_set_id=evaluation_set.evaluation_set_id,
+            evaluation_set_version=evaluation_set.version,
+            evaluation_set_sha256=evaluation_set.content_sha256,
+            execution_config_sha256=execution_config.evidence_sha256,
+        )
 
         results: list[CaseBenchmarkResult] = []
         for case in evaluation_set.cases:
@@ -119,6 +137,8 @@ class ModelBenchmarkRunner:
                     evaluation_set,
                     case,
                     execution_config=execution_config,
+                    run_id=run_id,
+                    configuration_sha256=configuration_sha256,
                 )
             )
         return self._build_report(
@@ -126,6 +146,8 @@ class ModelBenchmarkRunner:
             evaluation_set,
             execution_config,
             tuple(results),
+            run_id=run_id,
+            configuration_sha256=configuration_sha256,
         )
 
     async def benchmark_suite(
@@ -178,6 +200,8 @@ class ModelBenchmarkRunner:
         case: EvaluationCase,
         *,
         execution_config: BenchmarkExecutionConfig,
+        run_id: str,
+        configuration_sha256: str,
     ) -> CaseBenchmarkResult:
         resource_before = self._resource_snapshot()
         accelerator_before = self._accelerator_snapshot()
@@ -186,7 +210,8 @@ class ModelBenchmarkRunner:
                 candidate,
                 evaluation_set,
                 case,
-                execution_config,
+                run_id,
+                configuration_sha256,
             ),
             messages=case.messages,
             model=candidate.request_model,
@@ -202,6 +227,8 @@ class ModelBenchmarkRunner:
                 "evaluation_case_id": case.case_id,
                 "model_candidate_id": candidate.candidate_id,
                 "benchmark_execution_config_sha256": execution_config.evidence_sha256,
+                "benchmark_run_id": run_id,
+                "benchmark_configuration_sha256": configuration_sha256,
             },
         )
         started = self._clock()
@@ -274,14 +301,23 @@ class ModelBenchmarkRunner:
         candidate: ModelCandidate,
         evaluation_set: EvaluationSet,
         case: EvaluationCase,
-        execution_config: BenchmarkExecutionConfig,
+        run_id: str,
+        configuration_sha256: str,
     ) -> str:
+        del candidate, evaluation_set
         raw = (
-            f"nika-model-benchmark-v2\0{candidate.evidence_sha256}\0"
-            f"{evaluation_set.content_sha256}\0{case.case_id}\0"
-            f"{execution_config.evidence_sha256}"
+            f"nika-model-benchmark-v3\0{run_id}\0"
+            f"{configuration_sha256}\0{case.case_id}"
         ).encode()
         return f"model-bench-{hashlib.sha256(raw).hexdigest()[:32]}"
+
+    def _new_run_id(self) -> str:
+        run_id = self._run_id_factory()
+        BenchmarkRunEvidence(
+            run_id=run_id,
+            configuration_sha256="0" * 64,
+        )
+        return run_id
 
     @staticmethod
     def _validate_response_identity(
@@ -377,6 +413,9 @@ class ModelBenchmarkRunner:
         evaluation_set: EvaluationSet,
         execution_config: BenchmarkExecutionConfig,
         results: tuple[CaseBenchmarkResult, ...],
+        *,
+        run_id: str,
+        configuration_sha256: str,
     ) -> CandidateBenchmarkReport:
         case_by_id = {case.case_id: case for case in evaluation_set.cases}
         total_weight = sum(float(case.weight) for case in evaluation_set.cases)
@@ -415,6 +454,10 @@ class ModelBenchmarkRunner:
         ]
         return CandidateBenchmarkReport(
             candidate=candidate,
+            run=BenchmarkRunEvidence(
+                run_id=run_id,
+                configuration_sha256=configuration_sha256,
+            ),
             evaluation_set_id=evaluation_set.evaluation_set_id,
             evaluation_set_version=evaluation_set.version,
             evaluation_set_sha256=evaluation_set.content_sha256,
