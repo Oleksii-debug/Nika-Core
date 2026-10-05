@@ -292,6 +292,31 @@ class StandingPermissionStore:
                     (datetime.now(UTC).isoformat(),),
                 )
             self._validate_schema_shape(conn)
+            self._validate_migration_history(conn)
+
+    @staticmethod
+    def _validate_migration_history(conn: sqlite3.Connection) -> None:
+        rows = conn.execute(
+            "SELECT version, typeof(version) AS version_type, "
+            "applied_at, typeof(applied_at) AS applied_at_type "
+            "FROM standing_permission_schema_migrations ORDER BY version"
+        ).fetchall()
+        if (
+            len(rows) != 1
+            or rows[0]["version_type"] != "integer"
+            or rows[0]["version"] != 1
+        ):
+            raise StandingPermissionIntegrityError(
+                "standing permission migration history is invalid"
+            )
+        applied_at = rows[0]["applied_at"]
+        if (
+            rows[0]["applied_at_type"] != "text"
+            or not _is_canonical_utc_timestamp(applied_at)
+        ):
+            raise StandingPermissionIntegrityError(
+                "standing permission migration timestamp is invalid"
+            )
 
     @staticmethod
     def _validate_schema_shape(
@@ -1055,6 +1080,20 @@ def _utc(value: datetime, label: str) -> datetime:
     if type(value) is not datetime or value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{label} must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def _is_canonical_utc_timestamp(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return (
+        parsed.tzinfo is not None
+        and parsed.utcoffset() is not None
+        and parsed.astimezone(UTC).isoformat() == value
+    )
 
 
 def _hash(value: str) -> str:
