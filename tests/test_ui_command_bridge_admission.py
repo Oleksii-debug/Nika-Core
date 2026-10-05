@@ -19,7 +19,7 @@ def test_real_bridge_rejects_bad_payload_without_invoking_handler() -> None:
         )
         assert result["request_id"] == "r1"
         assert result["status"] == "rejected"
-        assert result["message"].startswith("Invalid UI command:")
+        assert result["message"] == "Некоректна команда інтерфейсу."
         assert invoked == []
 
     accepted = bridge.dispatch(
