@@ -64,6 +64,21 @@ def test_linked_shared_workspace_ancestor_cannot_redirect_both_inputs(tmp_path: 
         plan.pyinstaller_args()
 
 
+def test_broken_linked_source_ancestor_fails_as_link_before_exists_check(
+    tmp_path: Path,
+) -> None:
+    plan = _plan(tmp_path)
+    scripts = tmp_path / "worktree" / "scripts"
+    preserved = tmp_path / "preserved-scripts"
+    scripts.rename(preserved)
+    missing_target = tmp_path / "missing-scripts"
+    _symlink(scripts, missing_target)
+
+    assert not plan.entrypoint.exists()
+    with pytest.raises(ValueError, match="path traverses a symbolic link or junction"):
+        plan.validate()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows junction-only regression")
 def test_windows_source_parent_junction_is_rejected(tmp_path: Path) -> None:
     plan = _plan(tmp_path)
