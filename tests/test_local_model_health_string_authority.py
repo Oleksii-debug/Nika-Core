@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from nika_core.diagnostics import ModelHealthFact, OllamaModelHealthProbe
 
 
@@ -72,6 +74,7 @@ def test_string_subclass_identities_fail_before_overloadable_operations_or_effec
 def test_model_id_subclass_cannot_spoof_catalog_membership() -> None:
     _assert_rejected(model_id=_CatalogSpoof("attacker-model"))
 
+
 class _Response:
     def __init__(self, payload: object) -> None:
         self._payload = payload
@@ -97,6 +100,16 @@ class _CatalogClient:
         if url.endswith("/api/tags"):
             return _Response(self._payload)
         return _Response({"models": []})
+
+
+def _catalog_factory(
+    payload: object,
+    calls: list[str],
+) -> Callable[..., _CatalogClient]:
+    def create(**_kwargs: object) -> _CatalogClient:
+        return _CatalogClient(payload, calls)
+
+    return create
 
 
 def test_route_text_rejects_noncanonical_path_and_invisible_model_identities() -> None:
@@ -146,15 +159,12 @@ def test_malformed_catalog_identity_is_unknown_not_absent() -> None:
     ):
         calls: list[str] = []
 
-        def client_factory(**kwargs: object) -> _CatalogClient:
-            return _CatalogClient(
-                {"models": [{"name": catalog_model}]},
-                calls,
-            )
-
         snapshot = OllamaModelHealthProbe(
             model_id="local-model:1",
-            client_factory=client_factory,
+            client_factory=_catalog_factory(
+                {"models": [{"name": catalog_model}]},
+                calls,
+            ),
         ).snapshot()
 
         assert snapshot.model_present is ModelHealthFact.UNKNOWN
