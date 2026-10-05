@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import unicodedata
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -57,7 +58,10 @@ def _require_run_identity(value: object, *, name: str) -> None:
     """Reject ambiguous or non-UTF-8 task/call identities before durable effects."""
     if type(value) is not str or not value or len(value) > 512 or value != value.strip():
         raise ValueError(f"{name} must be canonical bounded UTF-8 text")
-    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in value
+    ):
         raise ValueError(f"{name} must be canonical bounded UTF-8 text")
     try:
         encoded = value.encode("utf-8")
