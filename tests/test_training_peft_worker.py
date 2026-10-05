@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 import nika_core.training_peft_worker as peft
+from nika_core.artifacts import ArtifactLocationKind, ArtifactRecord
 
 
 _RUNTIME_VERSIONS = {
@@ -18,6 +19,37 @@ _RUNTIME_VERSIONS = {
     "gguf": "0.19.1",
     "safetensors": "0.8.2",
 }
+
+
+def _runtime_metadata(
+    versions: dict[str, str] | None = None,
+) -> dict[str, str]:
+    selected = _RUNTIME_VERSIONS if versions is None else versions
+    return {
+        peft._TRAINING_RUNTIME_METADATA_KEYS[distribution]: selected[distribution]
+        for distribution, _ in peft._TRAINING_RUNTIME_DISTRIBUTIONS
+    }
+
+
+def _trainer_artifact(
+    tmp_path: Path,
+    *,
+    metadata: dict[str, str] | None = None,
+) -> ArtifactRecord:
+    trainer = tmp_path / "nika-peft-trainer.exe"
+    trainer.write_bytes(b"registry-authorized-peft-trainer")
+    payload = trainer.read_bytes()
+    return ArtifactRecord(
+        artifact_id="a" * 64,
+        idempotency_key="peft-trainer",
+        workspace_id="peft-tests",
+        kind="training_executable",
+        location_kind=ArtifactLocationKind.LOCAL_FILE,
+        locator=str(trainer.resolve()),
+        sha256=_sha256(payload),
+        size_bytes=len(payload),
+        metadata=_runtime_metadata() if metadata is None else dict(metadata),
+    )
 
 
 def _sha256(payload: bytes) -> str:
@@ -718,7 +750,7 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
         output_root=config.output_root,
-        runtime_versions=dict(_RUNTIME_VERSIONS),
+        trainer_artifact=_trainer_artifact(tmp_path),
         max_records=123,
         max_sequence_length=256,
         learning_rate=0.0003,
@@ -742,6 +774,7 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     assert environment["NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"] == (
         peft._training_runtime_manifest_sha256(dict(_RUNTIME_VERSIONS))
     )
+    assert environment["NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"] == "a" * 64
     for distribution, environment_key in peft._TRAINING_RUNTIME_DISTRIBUTIONS:
         assert environment[environment_key] == _RUNTIME_VERSIONS[distribution]
 
@@ -774,7 +807,7 @@ def test_environment_builder_rejects_invalid_torch_thread_count(
             base_gguf=config.base_gguf,
             model_dir=config.model_dir,
             output_root=config.output_root,
-            runtime_versions=dict(_RUNTIME_VERSIONS),
+            trainer_artifact=_trainer_artifact(tmp_path),
             torch_num_threads=0,
         )
 
@@ -794,7 +827,7 @@ def test_read_config_rejects_training_runtime_version_drift(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
         output_root=config.output_root,
-        runtime_versions=dict(_RUNTIME_VERSIONS),
+        trainer_artifact=_trainer_artifact(tmp_path),
     )
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
@@ -823,7 +856,7 @@ def test_environment_builder_does_not_probe_parent_runtime_versions(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
         output_root=config.output_root,
-        runtime_versions=dict(_RUNTIME_VERSIONS),
+        trainer_artifact=_trainer_artifact(tmp_path),
     )
 
     assert environment["NIKA_TRAINER_TORCH_VERSION"] == _RUNTIME_VERSIONS["torch"]
@@ -839,7 +872,7 @@ def test_read_config_rejects_missing_training_dependency(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
         output_root=config.output_root,
-        runtime_versions=dict(_RUNTIME_VERSIONS),
+        trainer_artifact=_trainer_artifact(tmp_path),
     )
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
@@ -858,16 +891,51 @@ def test_environment_builder_rejects_incomplete_runtime_manifest(
 ) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
-    incomplete = dict(_RUNTIME_VERSIONS)
-    incomplete.pop("gguf")
+    incomplete = _runtime_metadata()
+    incomplete.pop(peft._TRAINING_RUNTIME_METADATA_KEYS["gguf"])
 
-    with pytest.raises(ValueError, match="runtime manifest"):
+    with pytest.raises(ValueError, match="trainer deployment runtime metadata"):
         peft.build_trainer_environment(
             base_gguf=config.base_gguf,
             model_dir=config.model_dir,
             output_root=config.output_root,
-            runtime_versions=incomplete,
+            trainer_artifact=_trainer_artifact(tmp_path, metadata=incomplete),
         )
+
+
+def test_environment_builder_rejects_ambiguous_registry_runtime_metadata(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    ambiguous = _runtime_metadata()
+    ambiguous["nika.training.runtime.unexpected.version"] = "1.0"
+
+    with pytest.raises(ValueError, match="trainer deployment runtime metadata"):
+        peft.build_trainer_environment(
+            base_gguf=config.base_gguf,
+            model_dir=config.model_dir,
+            output_root=config.output_root,
+            trainer_artifact=_trainer_artifact(tmp_path, metadata=ambiguous),
+        )
+
+
+def test_environment_builder_allows_unrelated_registry_metadata(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    metadata = _runtime_metadata()
+    metadata["nika.training.provenance"] = "fixture"
+
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+        trainer_artifact=_trainer_artifact(tmp_path, metadata=metadata),
+    )
+
+    assert environment["NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"] == "a" * 64
 
 
 def test_read_config_rejects_runtime_manifest_digest_tamper(
@@ -880,7 +948,7 @@ def test_read_config_rejects_runtime_manifest_digest_tamper(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
         output_root=config.output_root,
-        runtime_versions=dict(_RUNTIME_VERSIONS),
+        trainer_artifact=_trainer_artifact(tmp_path),
     )
     environment["NIKA_TRAINER_TORCH_VERSION"] = "2.99.0"
     for key, value in environment.items():
