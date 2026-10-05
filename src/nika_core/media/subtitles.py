@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -95,7 +96,7 @@ def normalize_subtitle_file(
         start_ms = int(event.start)
         end_ms = int(event.end)
         text = _normalize_text(str(event.text))
-        if end_ms < start_ms or start_ms < previous_start:
+        if start_ms < 0 or end_ms < start_ms or start_ms < previous_start:
             malformed += 1
             continue
         previous_start = start_ms
@@ -130,16 +131,26 @@ def normalize_subtitle_file(
                 MediaErrorCode.LOW_QUALITY_SUBTITLE,
                 "automatic subtitle has too many malformed segments",
             )
-        if media_duration_seconds and media_duration_seconds > 0:
-            covered = max(segment.end_ms for segment in segments) - min(
-                segment.start_ms for segment in segments
-            )
-            coverage_ratio = covered / (media_duration_seconds * 1000)
-            if coverage_ratio < active.automatic_min_coverage_ratio:
+        if media_duration_seconds is not None:
+            if (
+                isinstance(media_duration_seconds, bool)
+                or not isinstance(media_duration_seconds, (int, float))
+                or not math.isfinite(media_duration_seconds)
+                or media_duration_seconds < 0
+            ):
                 raise MediaError(
-                    MediaErrorCode.LOW_QUALITY_SUBTITLE,
-                    "automatic subtitle coverage is too low",
+                    MediaErrorCode.INVALID_SUBTITLE,
+                    "media duration must be a finite nonnegative number",
                 )
+            if media_duration_seconds > 0:
+                coverage_ratio = _covered_duration_ms(
+                    segments, duration_ms=media_duration_seconds * 1000
+                ) / (media_duration_seconds * 1000)
+                if coverage_ratio < active.automatic_min_coverage_ratio:
+                    raise MediaError(
+                        MediaErrorCode.LOW_QUALITY_SUBTITLE,
+                        "automatic subtitle coverage is too low",
+                    )
 
     source_sha = sha256_file(path)
     transcript_id = f"subtitle:{source_sha[:32]}"
@@ -151,6 +162,23 @@ def normalize_subtitle_file(
         segments=tuple(segments),
         source_track_id=track.track_id,
     )
+
+
+def _covered_duration_ms(segments: list[Segment], *, duration_ms: float) -> float:
+    """Count the union of caption intervals inside the actual media duration.
+
+    Span between the first and last caption is not evidence that intervening
+    dialogue has been transcribed. Overlapping cues must not count twice.
+    """
+    covered = 0.0
+    previous_end = 0.0
+    for segment in segments:
+        start = min(segment.start_ms, duration_ms)
+        end = min(segment.end_ms, duration_ms)
+        if end > previous_end:
+            covered += end - max(start, previous_end)
+            previous_end = end
+    return covered
 
 
 def _normalize_language(value: str) -> str:
