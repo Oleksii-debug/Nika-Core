@@ -457,3 +457,42 @@ def test_final_candidate_is_never_overwritten(
         peft._train_one_step(request, config, consumed)
 
     assert candidate.read_bytes() == b"existing"
+
+
+def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+        max_records=123,
+        max_sequence_length=256,
+        learning_rate=0.0003,
+        lora_r=16,
+        lora_alpha=32,
+        lora_dropout=0.1,
+        lora_target_modules=("q_proj", "k_proj", "v_proj"),
+        seed=99,
+    )
+
+    assert environment["NIKA_TRAINER_IMPLEMENTATION_SHA256"] == (
+        peft.trainer_implementation_sha256()
+    )
+    assert environment["NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"] == (
+        peft.model_directory_manifest_sha256(config.model_dir)
+    )
+    assert environment["NIKA_TRAINER_LORA_TARGET_MODULES"] == "q_proj,k_proj,v_proj"
+    assert environment["NIKA_TRAINER_MAX_RECORDS"] == "123"
+
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    loaded = peft._read_config()
+    assert loaded.model_dir_manifest_sha256 == environment[
+        "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"
+    ]
+    assert loaded.lora_r == 16
+    assert loaded.seed == 99

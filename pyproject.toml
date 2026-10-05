@@ -18,6 +18,9 @@ dependencies = [
   "defusedxml>=0.7.1,<1",
 ]
 
+[project.scripts]
+nika-peft-trainer = "nika_core.training_peft_worker:main"
+
 [project.optional-dependencies]
 agent = [
   "langgraph>=1,<2",

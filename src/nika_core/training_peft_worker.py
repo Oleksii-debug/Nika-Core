@@ -103,6 +103,11 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def trainer_implementation_sha256() -> str:
+    """Digest the exact installed trainer source used by a product execution plan."""
+    return _sha256_file(Path(__file__).resolve())
+
+
 def _require_sha256(value: object, *, field: str) -> str:
     if type(value) is not str or _HEX_RE.fullmatch(value) is None:
         _fail(f"{field}_invalid")
@@ -393,6 +398,91 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
     return hashlib.sha256(b"nika-peft-model-dir-v1\x00" + encoded).hexdigest()
 
 
+def build_trainer_environment(
+    *,
+    base_gguf: Path,
+    model_dir: Path,
+    output_root: Path,
+    max_records: int = _MAX_RECORDS_DEFAULT,
+    max_sequence_length: int = _MAX_SEQUENCE_LENGTH_DEFAULT,
+    learning_rate: float = 2e-4,
+    lora_r: int = 8,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.05,
+    lora_target_modules: tuple[str, ...] = ("q_proj", "v_proj"),
+    seed: int = 1729,
+) -> dict[str, str]:
+    """Build the sterile, execution-plan-bound environment for SubprocessTrainingWorker."""
+    base = Path(base_gguf)
+    model = Path(model_dir)
+    output = Path(output_root)
+    if not base.is_absolute() or not model.is_absolute() or not output.is_absolute():
+        raise ValueError("trainer paths must be absolute")
+    _require_regular_unlinked(base, code="nika_trainer_base_gguf_invalid")
+    if base.suffix.casefold() != ".gguf":
+        raise ValueError("base_gguf must use the .gguf suffix")
+    try:
+        model_manifest = model_directory_manifest_sha256(model)
+    except ValueError as exc:
+        raise ValueError("model_dir is not a canonical local model directory") from exc
+    if type(max_records) is not int or not 2 <= max_records <= _MAX_RECORDS_LIMIT:
+        raise ValueError("max_records is outside the supported bound")
+    if (
+        type(max_sequence_length) is not int
+        or not 32 <= max_sequence_length <= _MAX_SEQUENCE_LENGTH_LIMIT
+    ):
+        raise ValueError("max_sequence_length is outside the supported bound")
+    for value, name, minimum, maximum in (
+        (learning_rate, "learning_rate", 1e-8, 1.0),
+        (lora_dropout, "lora_dropout", 0.0, 1.0),
+    ):
+        if type(value) is not float or not math.isfinite(value) or not minimum <= value <= maximum:
+            raise ValueError(f"{name} is outside the supported bound")
+    if type(lora_r) is not int or not 1 <= lora_r <= 1024:
+        raise ValueError("lora_r is outside the supported bound")
+    if type(lora_alpha) is not int or not 1 <= lora_alpha <= 65536:
+        raise ValueError("lora_alpha is outside the supported bound")
+    if type(seed) is not int or not 0 <= seed <= (1 << 31) - 1:
+        raise ValueError("seed is outside the supported bound")
+    if (
+        type(lora_target_modules) is not tuple
+        or not lora_target_modules
+        or len(lora_target_modules) > 64
+        or len(set(lora_target_modules)) != len(lora_target_modules)
+        or any(
+            type(item) is not str or _TOKEN_RE.fullmatch(item) is None
+            for item in lora_target_modules
+        )
+    ):
+        raise ValueError("lora_target_modules is invalid")
+    output.mkdir(parents=True, exist_ok=True)
+    try:
+        output_stat = os.lstat(output)
+    except OSError as exc:
+        raise ValueError("output_root is not accessible") from exc
+    if (
+        stat.S_ISLNK(output_stat.st_mode)
+        or _is_reparse(output_stat)
+        or not stat.S_ISDIR(output_stat.st_mode)
+    ):
+        raise ValueError("output_root must be a non-linked directory")
+    return {
+        "NIKA_TRAINER_BASE_GGUF": os.fspath(base),
+        "NIKA_TRAINER_IMPLEMENTATION_SHA256": trainer_implementation_sha256(),
+        "NIKA_TRAINER_LEARNING_RATE": format(learning_rate, ".17g"),
+        "NIKA_TRAINER_LORA_ALPHA": str(lora_alpha),
+        "NIKA_TRAINER_LORA_DROPOUT": format(lora_dropout, ".17g"),
+        "NIKA_TRAINER_LORA_R": str(lora_r),
+        "NIKA_TRAINER_LORA_TARGET_MODULES": ",".join(lora_target_modules),
+        "NIKA_TRAINER_MAX_RECORDS": str(max_records),
+        "NIKA_TRAINER_MAX_SEQUENCE_LENGTH": str(max_sequence_length),
+        "NIKA_TRAINER_MODEL_DIR": os.fspath(model),
+        "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256": model_manifest,
+        "NIKA_TRAINER_OUTPUT_ROOT": os.fspath(output),
+        "NIKA_TRAINER_SEED": str(seed),
+    }
+
+
 def _require_regular_unlinked(path: Path, *, code: str) -> os.stat_result:
     try:
         value = os.lstat(path)
@@ -585,6 +675,12 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
 
 
 def _read_config() -> TrainerConfig:
+    expected_implementation_sha256 = _require_sha256(
+        os.environ.get("NIKA_TRAINER_IMPLEMENTATION_SHA256"),
+        field="nika_trainer_implementation_sha256",
+    )
+    if trainer_implementation_sha256() != expected_implementation_sha256:
+        _fail("nika_trainer_implementation_mismatch")
     base_gguf = _absolute_env_path("NIKA_TRAINER_BASE_GGUF", file=True)
     if base_gguf.suffix.casefold() != ".gguf":
         _fail("nika_trainer_base_gguf_invalid")
