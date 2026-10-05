@@ -380,6 +380,30 @@ def test_corrupt_durable_state_fails_closed_to_manual_reconciliation(
     assert recovered.failure.retryable is False
 
 
+def test_worker_configuration_mappings_are_detached_and_read_only(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _base_sha = _repository(tmp_path)
+    repositories = {"repo-1": repository}
+    environment = {"SYSTEMROOT": "trusted-root"}
+    worker = ContainedLocalCodingWorker(
+        workspace_parent=(tmp_path / "jobs"),
+        repositories=repositories,
+        planner=_MustNotPlan(),
+        source_environment=environment,
+    )
+
+    repositories["repo-1"] = tmp_path / "other"
+    environment["SYSTEMROOT"] = "changed"
+
+    assert worker.repositories["repo-1"] == repository.resolve(strict=True)
+    assert worker.source_environment["SYSTEMROOT"] == "trusted-root"
+    with pytest.raises(TypeError):
+        worker.repositories["repo-2"] = repository  # type: ignore[index]
+    with pytest.raises(TypeError):
+        worker.source_environment["NEW_SECRET"] = "x"  # type: ignore[index]
+
+
 def test_same_job_single_flight_precedes_planner_side_effect(
     tmp_path: pathlib.Path,
 ) -> None:
