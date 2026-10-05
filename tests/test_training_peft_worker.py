@@ -1388,6 +1388,90 @@ def test_candidate_manifest_producer_rejects_reader_invalid_adapter_config(
         )
 
 
+def test_loaded_tensor_digest_matches_path_digest_formula(tmp_path: Path) -> None:
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(b"same-canonical-tensor-state")
+    torch = _fake_stack()[0]
+    from_path = peft._adapter_tensor_sha256(
+        candidate,
+        safe_open=_fake_safe_open,
+        safe_serialize=_fake_safe_serialize,
+        torch=torch,
+        invalid_code="invalid",
+        non_finite_code="non_finite",
+    )
+    from_loaded = peft._canonical_adapter_tensor_sha256(
+        {"lora.weight": _FakeTensor(candidate.read_bytes())},
+        safe_serialize=_fake_safe_serialize,
+        torch=torch,
+        invalid_code="invalid",
+        non_finite_code="non_finite",
+    )
+
+    assert from_loaded == from_path
+
+
+def test_candidate_manifest_reader_rejects_non_finite_published_tensor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256="9" * 64,
+    )
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+    published_tensor = _FakeTensor(b"published-nan-tensor")
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def keys(self) -> list[str]:
+            return ["lora.weight"]
+
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return published_tensor
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": raw}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    monkeypatch.setattr(
+        peft,
+        "_candidate_tensor_dependencies",
+        lambda: (_fake_stack()[0], safe_open, _fake_safe_serialize),
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_safetensors_non_finite"):
+        peft.candidate_adapter_manifest(candidate.resolve())
+
+
 def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
