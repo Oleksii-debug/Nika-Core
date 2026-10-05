@@ -974,6 +974,7 @@ def test_verification_rehydration_rejects_expected_metadata_drift(tmp_path: Path
     with pytest.raises(ArtifactRegistryError, match="expected metadata"):
         registry.verification_history(record.artifact_id)
 
+
 @pytest.mark.parametrize(
     "operation",
     (
