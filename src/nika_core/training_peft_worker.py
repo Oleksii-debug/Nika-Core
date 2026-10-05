@@ -595,15 +595,17 @@ def _training_runtime_versions_from_trainer_artifact(
         or trainer_artifact.location_kind is not ArtifactLocationKind.LOCAL_FILE
     ):
         raise ValueError("trainer_artifact must authorize a local training executable")
-    try:
-        versions = {
-            distribution: trainer_artifact.metadata[
-                _TRAINING_RUNTIME_METADATA_KEYS[distribution]
-            ]
-            for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
-        }
-    except KeyError as exc:
-        raise ValueError("trainer artifact runtime metadata is incomplete") from exc
+    metadata = dict(trainer_artifact.metadata)
+    expected_runtime_keys = set(_TRAINING_RUNTIME_METADATA_KEYS.values())
+    runtime_keys = {
+        key for key in metadata if key.startswith("nika.training.runtime.")
+    }
+    if runtime_keys != expected_runtime_keys:
+        raise ValueError("trainer artifact runtime metadata is incomplete or ambiguous")
+    versions = {
+        distribution: metadata[_TRAINING_RUNTIME_METADATA_KEYS[distribution]]
+        for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
+    }
     return trainer_artifact.artifact_id, _normalize_training_runtime_versions(versions)
 
 
