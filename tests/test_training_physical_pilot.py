@@ -24,6 +24,14 @@ from nika_core.training_runtime import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _windows_report_builder(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "nika_core.training_physical_pilot._is_windows",
+        lambda: True,
+    )
+
+
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
@@ -51,7 +59,11 @@ def _run_evidence(
     checkpoint_id: str,
     candidate_sha256: str | None = None,
     job_fingerprint: str | None = None,
+    reason: str | None = None,
 ) -> TrainingRunEvidence:
+    effective_reason = reason
+    if effective_reason is None and state is TrainingRunState.PAUSED:
+        effective_reason = "paused"
     return TrainingRunEvidence(
         job_id="pilot-job",
         state=state,
@@ -65,6 +77,7 @@ def _run_evidence(
         candidate_artifact_ref="models/candidate/pilot",
         candidate_sha256=candidate_sha256,
         checkpoint_id=checkpoint_id,
+        reason=effective_reason,
     )
 
 
@@ -256,6 +269,53 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
                 checkpoint_id="same-checkpoint",
                 candidate_sha256=_sha256(payload),
             ),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+
+def test_build_report_rejects_non_windows_builder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(b"candidate")
+    monkeypatch.setattr(
+        "nika_core.training_physical_pilot._is_windows",
+        lambda: False,
+    )
+
+    with pytest.raises(PhysicalTrainingPilotError, match="built on Windows"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            completed=_completed_for(b"candidate"),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+def test_build_report_requires_explicit_pause_reason(tmp_path: Path) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    paused = _run_evidence(
+        state=TrainingRunState.PAUSED,
+        next_step=1,
+        checkpoint_id="checkpoint-paused",
+    )
+    object.__setattr__(paused, "reason", "resource_revalidation:denied")
+
+    with pytest.raises(PhysicalTrainingPilotError, match="explicit pause control"):
+        build_physical_training_pilot_report(
+            paused=paused,
+            completed=_completed_for(payload),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,

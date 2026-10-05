@@ -352,6 +352,9 @@ def _snapshot_run_evidence(
                 checkpoint_id,
                 name=f"{label} checkpoint_id",
             )
+        reason = value.reason
+        if reason is not None:
+            reason = _require_text(reason, name=f"{label} reason")
     except (AttributeError, TypeError, ValueError) as exc:
         raise PhysicalTrainingPilotError(f"{label} evidence is not canonical") from exc
     return TrainingRunEvidence(
@@ -367,6 +370,7 @@ def _snapshot_run_evidence(
         candidate_artifact_ref=candidate_artifact_ref,
         candidate_sha256=candidate_sha256,
         checkpoint_id=checkpoint_id,
+        reason=reason,
     )
 
 
@@ -380,6 +384,8 @@ def build_physical_training_pilot_report(
 ) -> PhysicalTrainingPilotReport:
     """Build path-free evidence from one durable pause/restart/completion sequence."""
 
+    if not _is_windows():
+        _fail("physical PEFT pilot report must be built on Windows")
     paused = _snapshot_run_evidence(
         paused,
         state=TrainingRunState.PAUSED,
@@ -400,6 +406,8 @@ def build_physical_training_pilot_report(
         _fail("physical pilot requires durable pause and completion checkpoints")
     if paused.checkpoint_id == completed.checkpoint_id:
         _fail("physical pilot did not advance durable checkpoint identity")
+    if paused.reason != "paused":
+        _fail("physical pilot pause must come from the explicit pause control")
 
     identity_fields = (
         "job_id",
