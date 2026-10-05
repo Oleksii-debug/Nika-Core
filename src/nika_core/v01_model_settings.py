@@ -44,6 +44,12 @@ from nika_core.model_gateway.providers import OllamaProvider
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
+from nika_core.training_ollama_manifest import (
+    ManifestPinnedOllamaProvider,
+    OllamaManifestAuthority,
+    OllamaPromotionManifestStore,
+    OllamaPromotionManifestStoreError,
+)
 from nika_core.security.model_cloud_authority import (
     StandingPermissionCloudEffectAuthorizer,
     StandingPermissionExecutionAuthority,
@@ -1526,15 +1532,44 @@ class V01BoundModelRuntimeFactory:
             )
         elif selection.route_kind == "ollama":
             base_url = self._required_text(selection.base_url, field="base_url")
-            gateway.register(
-                OllamaProvider(
+            if artifact_pin is None:
+                provider = OllamaProvider(
                     default_model=model,
                     base_url=base_url,
                     think=False,
                     client_factory=self._client_factory,
-                ),
-                default=True,
-            )
+                )
+            else:
+                try:
+                    authority = OllamaManifestAuthority(
+                        base_url=base_url,
+                        client_factory=self._client_factory,
+                    )
+                    prepared = OllamaPromotionManifestStore(self._store).resolve(
+                        decision_sha256=artifact_pin.decision_sha256,
+                        binding_sha256=artifact_pin.binding_sha256,
+                        role=artifact_pin.role,
+                        artifact_sha256=artifact_pin.artifact_sha256,
+                        descriptor_digest=artifact_pin.descriptor_digest,
+                        route_model_id=model,
+                        base_url=base_url,
+                    )
+                    provider = ManifestPinnedOllamaProvider(
+                        binding=prepared,
+                        authority=authority,
+                        think=False,
+                        client_factory=self._client_factory,
+                    )
+                except (
+                    TypeError,
+                    ValueError,
+                    OllamaPromotionManifestStoreError,
+                ) as exc:
+                    raise ModelSetupError(
+                        "Прив'язку Ollama-артефакту до provider manifest "
+                        "не вдалося перевірити."
+                    ) from exc
+            gateway.register(provider, default=True)
         else:
             base_url = self._required_text(selection.base_url, field="base_url")
             if selection.credential_ref is None:
