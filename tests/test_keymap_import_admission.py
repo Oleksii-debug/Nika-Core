@@ -93,3 +93,26 @@ def test_valid_partial_import_and_existing_export_remain_compatible(keymap: Keym
     exported = json.loads(keymap.export_json())
     assert exported["format_version"] == 1
     assert exported["bindings"]["test.first"] == "Ctrl+Shift+K"
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        r'{"format_version":1,"bindings":{"test.first":"Ctrl+\ud800"}}',
+        r'{"format_version":1,"bindings":{"test.\udfff":"Ctrl+3"}}',
+        r'{"format_version":1,"bindings":{},"note":"\ud800"}',
+    ],
+)
+def test_json_escaped_invalid_unicode_fails_before_sqlite(
+    keymap: Keymap, document: str
+) -> None:
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        keymap.import_json(document)
+    assert keymap.resolve("test.first") == "Ctrl+1"
+    with keymap._store.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) FROM keymap_overrides").fetchone()[0]
+    assert count == 0
+
+
+def test_valid_json_escaped_surrogate_pair_is_accepted(keymap: Keymap) -> None:
+    keymap.import_json(r'{"format_version":1,"bindings":{},"note":"\ud83d\ude00"}')
+    assert keymap.resolve("test.first") == "Ctrl+1"

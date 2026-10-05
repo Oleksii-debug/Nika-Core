@@ -174,6 +174,15 @@ class Keymap:
             )
         except RecursionError:
             raise ValueError("keymap JSON is too deeply nested") from None
+        # JSON escapes can produce lone surrogates after raw UTF-8 admission.
+        # Validate decoded text, including otherwise ignored document members,
+        # before any binding is normalized or a SQLite transaction is opened.
+        try:
+            json.dumps(raw, ensure_ascii=False).encode("utf-8")
+        except UnicodeEncodeError:
+            raise ValueError("keymap import must contain valid UTF-8") from None
+        except RecursionError:
+            raise ValueError("keymap JSON is too deeply nested") from None
         if type(raw) is not dict:
             raise TypeError("keymap document must be an object")
         if (
