@@ -12,7 +12,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_state import TaskState
 from nika_core.scheduler.contracts import ScheduledJob, SchedulerPort, TriggerKind
-from nika_core.scheduler.store import ScheduledJobStore
+from nika_core.scheduler.store import ScheduledJobStore, _same_job_snapshot
 
 ActionHandler = Callable[[dict[str, Any]], None]
 HandlerResolver = Callable[[str], ActionHandler]
@@ -156,7 +156,7 @@ class APSchedulerAdapter(SchedulerPort):
                     return None
                 if not self._task_authority_allows(job):
                     current = self._jobs.get(job_id)
-                    if current is not None and current != job:
+                    if current is not None and not _same_job_snapshot(current, job):
                         continue
                     self._remove_runtime_job(job_id)
                     return None
@@ -164,15 +164,15 @@ class APSchedulerAdapter(SchedulerPort):
                 if current is None or not current.enabled:
                     self._remove_runtime_job(job_id)
                     return None
-                if current != job:
+                if not _same_job_snapshot(current, job):
                     continue
                 if not self._task_authority_allows(current):
                     after_authority = self._jobs.get(job_id)
-                    if after_authority is not None and after_authority != current:
+                    if after_authority is not None and not _same_job_snapshot(after_authority, current):
                         continue
                     self._remove_runtime_job(job_id)
                     return None
-                if self._jobs.get(job_id) != current:
+                if not _same_job_snapshot(self._jobs.get(job_id), current):
                     continue
                 try:
                     self._install(current)
@@ -213,7 +213,7 @@ class APSchedulerAdapter(SchedulerPort):
         job = self._jobs.get(job_id)
         if job is None or not job.enabled:
             return
-        if installed_job is not None and job != installed_job:
+        if installed_job is not None and not _same_job_snapshot(job, installed_job):
             return
         if not self._task_authority_allows(job):
             if self._started or self._starting:
