@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
@@ -247,3 +248,81 @@ def test_unready_ollama_route_blocks_recovery_before_runtime_resume(tmp_path) ->
     assert runtime.resume_calls == 0
     assert health.probe.calls == 1
     assert queue.get(task_id).state is TaskState.RUNNING
+
+def _remove_model_reference(store: SQLiteStore, task_id: str) -> None:
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["payload_json"])
+        assert isinstance(payload, dict)
+        assert payload.pop("v01_model_selection", None) is not None
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (json.dumps(payload, sort_keys=True), task_id),
+        )
+
+
+def test_bound_model_task_cannot_downgrade_to_legacy_after_reference_loss(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "bound-reference-loss" / "nika.db")
+    store.initialize()
+    settings, _queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    assert settings.for_task(task_id).model == "qwen3:8b"
+    _remove_model_reference(store, task_id)
+    runtime = _runtime(store, settings, _UnexpectedHealthFactory())
+    thread_id = f"desktop-{task_id}"
+
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=runtime.initial_resume_token(
+                task_id=task_id,
+                thread_id=thread_id,
+            ),
+        )
+    )
+
+    assert probe.status is RuntimeResumeProbeStatus.UNVERIFIABLE
+    assert probe.checkpoint_id is None
+
+
+def test_true_legacy_task_without_selection_or_binding_keeps_no_model_resume(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "legacy-no-model" / "nika.db")
+    store.initialize()
+    queue = TaskQueue(store)
+    task = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "historical deterministic task"},
+    )
+    settings = V01ModelSettings(store)
+    runtime = _runtime(store, settings, _UnexpectedHealthFactory())
+    thread_id = f"desktop-{task.task_id}"
+
+    probe = asyncio.run(
+        runtime.probe_resume(
+            task_id=task.task_id,
+            thread_id=thread_id,
+            resume_token=runtime.initial_resume_token(
+                task_id=task.task_id,
+                thread_id=thread_id,
+            ),
+        )
+    )
+
+    assert probe.status is RuntimeResumeProbeStatus.READY
+
