@@ -13,6 +13,7 @@ import zipfile
 from pathlib import Path
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.packaging.pf11_evidence import require_packaged_pf11_evidence
 from nika_core.packaging.release import (
     build_release_manifest,
     verify_distributable_evidence,
@@ -401,21 +402,7 @@ def _run_installed_pf11(executable: Path, output: Path, *, env: dict[str, str]) 
         output,
         label="installed NikaCore.exe PF11 evidence",
     )
-    if type(payload) is not dict:
-        raise TypeError("installed NikaCore.exe PF11 evidence must be an object")
-    route = payload.get("route")
-    project_id = payload.get("project_id")
-    spec_version = payload.get("spec_version")
-    if (
-        type(route) is not str
-        or route != "product_project"
-        or type(spec_version) is not int
-        or spec_version != 1
-        or type(project_id) is not str
-        or not project_id.strip()
-    ):
-        raise RuntimeError("installed NikaCore.exe returned invalid PF11 route evidence")
-    return payload
+    return require_packaged_pf11_evidence(payload)
 
 
 def _read_durable_project_witness(
