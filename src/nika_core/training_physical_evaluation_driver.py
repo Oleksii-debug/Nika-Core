@@ -1139,6 +1139,7 @@ async def _run_attested_comparison(
     ):
         _fail("champion and challenger evaluator commands do not share one attestor authority")
 
+    _verify_completed_checkpoint(store, task=task, report=pilot)
     experiment_id = _physical_attempt_id(
         requested_experiment_id=config.experiment_id,
         pilot=pilot,
