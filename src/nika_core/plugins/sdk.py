@@ -52,6 +52,13 @@ class PluginManifest(BaseModel):
     ] = ()
     action_ids: tuple[Annotated[str, Field(min_length=3, pattern=_IDENTIFIER_PATTERN)], ...] = ()
 
+    @field_validator("format_version", "plugin_api_min", "plugin_api_max", mode="before")
+    @classmethod
+    def require_exact_api_integers(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("plugin API version fields must be exact integers")
+        return value
+
     @field_validator("permission_ids", "action_ids")
     @classmethod
     def normalize_identifiers(cls, value: tuple[str, ...]) -> tuple[str, ...]:
@@ -125,6 +132,17 @@ class PluginRegistration:
     factory: PluginFactory
 
 
+def _snapshot_manifest(manifest: PluginManifest) -> PluginManifest:
+    if type(manifest) is not PluginManifest:
+        raise PluginCompatibilityError("plugin manifest must use the canonical contract")
+    try:
+        payload = PluginManifest.model_dump(manifest, mode="python")
+        snapshot = PluginManifest.model_validate(payload, strict=True)
+    except (TypeError, ValueError) as exc:
+        raise PluginCompatibilityError("plugin manifest is not canonical") from exc
+    return snapshot
+
+
 @dataclass(frozen=True, slots=True)
 class PluginLoadFailure:
     descriptor: EntrypointDescriptor
@@ -154,11 +172,14 @@ def inspect_plugin_entrypoints(
             loaded = load_entrypoint(descriptor)
             if not isinstance(loaded, PluginRegistration):
                 raise TypeError("plugin entry point must expose PluginRegistration")
-            if loaded.manifest.entrypoint_name != descriptor.name:
+            manifest = _snapshot_manifest(loaded.manifest)
+            if manifest.entrypoint_name != descriptor.name:
                 raise PluginCompatibilityError(
                     "manifest entrypoint_name does not match package entry point"
                 )
-            registrations.append((descriptor, loaded))
+            registrations.append(
+                (descriptor, PluginRegistration(manifest=manifest, factory=loaded.factory))
+            )
         except Exception as exc:  # noqa: BLE001 - isolate arbitrary third-party import failures.
             failures.append(
                 PluginLoadFailure(descriptor=descriptor, error_type=type(exc).__name__)
@@ -201,8 +222,12 @@ class PluginRuntime:
         policy_catalog: PluginPolicyCatalog | None = None,
         activation_authority: ActivationAuthorityPort | None = None,
     ) -> None:
+        if type(core_api) is not int or core_api <= 0:
+            raise ValueError("core_api must be an exact positive integer")
         self._core_api = core_api
-        self._policy_catalog = policy_catalog or PluginPolicyCatalog()
+        self._policy_catalog = (
+            PluginPolicyCatalog() if policy_catalog is None else policy_catalog
+        )
         self._activation_authority = activation_authority
         self._registry_lock = Lock()
         self._deactivating: set[str] = set()
@@ -211,12 +236,13 @@ class PluginRuntime:
         self._effective_permissions: dict[str, tuple[str, ...]] = {}
 
     def register(self, manifest: PluginManifest, factory: PluginFactory) -> None:
-        manifest.assert_compatible(self._core_api)
-        self._policy_catalog.validate(manifest)
+        snapshot = _snapshot_manifest(manifest)
+        snapshot.assert_compatible(self._core_api)
+        self._policy_catalog.validate(snapshot)
         with self._registry_lock:
-            if manifest.plugin_id in self._factories:
-                raise ValueError(f"plugin already registered: {manifest.plugin_id}")
-            self._factories[manifest.plugin_id] = (manifest, factory)
+            if snapshot.plugin_id in self._factories:
+                raise ValueError(f"plugin already registered: {snapshot.plugin_id}")
+            self._factories[snapshot.plugin_id] = (snapshot, factory)
 
     def upgrade(
         self,
@@ -225,23 +251,26 @@ class PluginRuntime:
         *,
         expected_version: str,
     ) -> None:
-        manifest.assert_compatible(self._core_api)
-        self._policy_catalog.validate(manifest)
+        if type(expected_version) is not str or not expected_version:
+            raise ValueError("expected_version must be exact non-empty text")
+        snapshot = _snapshot_manifest(manifest)
+        snapshot.assert_compatible(self._core_api)
+        self._policy_catalog.validate(snapshot)
         with self._registry_lock:
-            current = self._factories.get(manifest.plugin_id)
+            current = self._factories.get(snapshot.plugin_id)
             if current is None:
-                raise KeyError(f"unknown plugin: {manifest.plugin_id}")
-            if manifest.plugin_id in self._deactivating:
+                raise KeyError(f"unknown plugin: {snapshot.plugin_id}")
+            if snapshot.plugin_id in self._deactivating:
                 raise RuntimeError("plugin deactivation is still in progress")
-            if manifest.plugin_id in self._active:
+            if snapshot.plugin_id in self._active:
                 raise RuntimeError("active plugin must be deactivated before upgrade")
             if current[0].version != expected_version:
                 raise ValueError(
                     "plugin upgrade expected_version does not match current registration"
                 )
-            if manifest.version == expected_version:
+            if snapshot.version == expected_version:
                 raise ValueError("plugin upgrade must change the manifest version")
-            self._factories[manifest.plugin_id] = (manifest, factory)
+            self._factories[snapshot.plugin_id] = (snapshot, factory)
 
     def register_entrypoint(self, entrypoint: EntrypointLoaderPort) -> PluginManifest:
         """Compatibility port for an explicitly selected lazy registration loader."""
@@ -251,7 +280,7 @@ class PluginRuntime:
                 "plugin entry point must expose PluginRegistration so registration cannot execute "
                 "adapter construction"
             )
-        manifest = loaded.manifest
+        manifest = _snapshot_manifest(loaded.manifest)
         if manifest.entrypoint_name != entrypoint.name:
             raise PluginCompatibilityError(
                 "manifest entrypoint_name does not match package entry point"
@@ -265,16 +294,20 @@ class PluginRuntime:
         loaded = load_entrypoint(descriptor)
         if not isinstance(loaded, PluginRegistration):
             raise TypeError("plugin entry point must expose PluginRegistration")
-        if loaded.manifest.entrypoint_name != descriptor.name:
+        manifest = _snapshot_manifest(loaded.manifest)
+        if manifest.entrypoint_name != descriptor.name:
             raise PluginCompatibilityError(
                 "manifest entrypoint_name does not match package entry point"
             )
-        self.register(loaded.manifest, loaded.factory)
-        return loaded.manifest
+        self.register(manifest, loaded.factory)
+        return manifest
 
     def manifests(self) -> Mapping[str, PluginManifest]:
         with self._registry_lock:
-            return {plugin_id: pair[0] for plugin_id, pair in self._factories.items()}
+            return {
+                plugin_id: _snapshot_manifest(pair[0])
+                for plugin_id, pair in self._factories.items()
+            }
 
     def activate(
         self,
