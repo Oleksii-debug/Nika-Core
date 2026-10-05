@@ -475,3 +475,90 @@ def test_memory_persistence_fails_closed_on_url_userinfo_key_collision(
             ("workspace", "research", "inference", "userinfo-collision"),
         ).fetchone()
     assert row is None
+
+
+def test_memory_persistence_redacts_prefixed_credential_fields_and_assignments(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "nika.db"
+    first_store = _store(db_path)
+    memory = MemoryService(first_store)
+    secrets = {
+        "openai": "sk-openai-prefixed-secret",
+        "azure_openai": "azure-openai-prefixed-secret",
+        "github": "github-prefixed-token-secret",
+        "database": "database-prefixed-password-secret",
+        "aws_secret": "aws-prefixed-secret-access-key",
+        "aws_id": "AKIAPREFIXEDIDENTITY",
+    }
+    value = {
+        "mapping": {
+            "OPENAI_API_KEY": secrets["openai"],
+            "AZURE_OPENAI_API_KEY": secrets["azure_openai"],
+            "GITHUB_TOKEN": secrets["github"],
+            "DATABASE_PASSWORD": secrets["database"],
+            "AWS_SECRET_ACCESS_KEY": secrets["aws_secret"],
+            "AWS_ACCESS_KEY_ID": secrets["aws_id"],
+            "BENIGN_PUBLIC_KEY": "public-value",
+            "TOKEN_COUNT": 7,
+            "API_KEY_COUNT": 3,
+        },
+        "dotenv": (
+            f"OPENAI_API_KEY={secrets['openai']}\n"
+            f"AWS_SECRET_ACCESS_KEY: {secrets['aws_secret']}\n"
+            f"GITHUB_TOKEN={secrets['github']}\n"
+            f"DATABASE_PASSWORD={secrets['database']}\n"
+            f"AWS_ACCESS_KEY_ID={secrets['aws_id']}\n"
+            "PUBLIC_KEY=visible\n"
+            "TOKEN_COUNT=7\n"
+            "API_KEY_COUNT=3"
+        ),
+    }
+
+    memory.put(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="research",
+        namespace="inference",
+        key="prefixed-credentials",
+        value=value,
+    )
+
+    raw_before_restart = _raw_memory_value(
+        first_store,
+        key="prefixed-credentials",
+    )
+    for secret in secrets.values():
+        assert secret not in raw_before_restart
+
+    durable = json.loads(raw_before_restart)
+    assert durable["mapping"] == {
+        "OPENAI_API_KEY": "[REDACTED]",
+        "AZURE_OPENAI_API_KEY": "[REDACTED]",
+        "GITHUB_TOKEN": "[REDACTED]",
+        "DATABASE_PASSWORD": "[REDACTED]",
+        "AWS_SECRET_ACCESS_KEY": "[REDACTED]",
+        "AWS_ACCESS_KEY_ID": "[REDACTED]",
+        "BENIGN_PUBLIC_KEY": "public-value",
+        "TOKEN_COUNT": 7,
+        "API_KEY_COUNT": 3,
+    }
+    assert durable["dotenv"] == (
+        "OPENAI_API_KEY=[REDACTED]\n"
+        "AWS_SECRET_ACCESS_KEY: [REDACTED]\n"
+        "GITHUB_TOKEN=[REDACTED]\n"
+        "DATABASE_PASSWORD=[REDACTED]\n"
+        "AWS_ACCESS_KEY_ID=[REDACTED]\n"
+        "PUBLIC_KEY=visible\n"
+        "TOKEN_COUNT=7\n"
+        "API_KEY_COUNT=3"
+    )
+
+    restarted = MemoryService(_store(db_path))
+    record = restarted.get(
+        scope=MemoryScope.WORKSPACE,
+        owner_id="research",
+        namespace="inference",
+        key="prefixed-credentials",
+    )
+    assert record is not None
+    assert record.value == durable
