@@ -520,7 +520,6 @@ time.sleep(30)
 
 
 @pytest.mark.asyncio
-@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object kill-on-close proof")
 async def test_success_does_not_leave_evaluator_descendant_running(tmp_path: Path) -> None:
     spawned = tmp_path / "success-evaluator-descendant-spawned.txt"
     survived = tmp_path / "success-evaluator-descendant-survived.txt"
@@ -551,6 +550,29 @@ Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
     assert spawned.exists(), "test did not prove that an evaluator descendant was started"
     await asyncio.sleep(1.2)
     assert not survived.exists(), "evaluator descendant escaped successful containment"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(os.name == "nt", reason="POSIX cleanup-failure injection")
+async def test_success_fails_closed_when_evaluator_group_cleanup_is_uncertain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script = _success_script(tmp_path)
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+    monkeypatch.setattr(
+        "nika_core.training_evaluation_subprocess.terminate_process_group",
+        lambda pid: False,
+    )
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(
+            _request(),
+            binding=_binding(descriptor),
+        )
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 @pytest.mark.asyncio
