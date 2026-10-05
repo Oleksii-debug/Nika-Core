@@ -8,8 +8,14 @@ const declarationStart = source.indexOf("  const taskMutationActions = new Set("
 const declarationEnd = source.indexOf("  let bridgeInitializationStarted = false;", declarationStart);
 const dispatchStart = source.indexOf("  async function dispatch(actionId, trigger = null) {");
 const dispatchEnd = source.indexOf("  async function refreshKeymap() {", dispatchStart);
+const stateRefreshStart = source.indexOf("  async function refreshState(");
+const stateRefreshEnd = source.indexOf("  async function dispatch(", stateRefreshStart);
+const pollingStart = source.indexOf("  function startStatePolling() {");
+const pollingEnd = source.indexOf("  async function initializeBridge() {", pollingStart);
 assert(declarationStart >= 0 && declarationEnd > declarationStart);
 assert(dispatchStart >= 0 && dispatchEnd > dispatchStart);
+assert(stateRefreshStart >= 0 && stateRefreshEnd > stateRefreshStart);
+assert(pollingStart >= 0 && pollingEnd > pollingStart);
 
 const factory = new Function("context", `
   const {
@@ -26,6 +32,22 @@ const factory = new Function("context", `
     dispatch, mutateKeymap, getSourceDirty: () => sourceDirty,
     getActionsReady: () => actionsReady,
   };
+`);
+
+const stateFactory = new Function("context", `
+  const {
+    globalThis, renderAutostart, reportStateUnavailable, renderSourceSetup, renderItems,
+    tasksList, tasksEmpty, agentsList, agentsEmpty, workspacesList, workspacesEmpty,
+    renderProductProject, renderTeamTask, announce, document, window,
+  } = context;
+  let autostartGeneration = 0;
+  let stateReadGeneration = 0;
+  let statePollHandle = null;
+  let stateUnavailableReported = false;
+  const inFlightActions = new Set();
+  ${source.slice(stateRefreshStart, stateRefreshEnd)}
+  ${source.slice(pollingStart, pollingEnd)}
+  return {refreshState, startStatePolling, inFlightActions};
 `);
 
 async function main() {
@@ -223,6 +245,84 @@ async function main() {
   }, null, keymapInput);
   assert.equal(postFailureMutationCalled, false);
   console.log("PASS: confirmed keymap write with failed reread disables hotkeys and retains lock");
+
+  const stateWaiters = [];
+  const stateMarkers = [];
+  let stateOutages = 0;
+  let stateApiCalls = 0;
+  let pollingCallback = null;
+  let stateReader = () => new Promise((resolve, reject) => {
+    stateWaiters.push({resolve, reject});
+  });
+  const stateDocument = {
+    hidden: false,
+    documentElement: {dataset: {nikaReady: "true"}},
+  };
+  const stateUi = stateFactory({
+    globalThis: {pywebview: {api: {get_state: () => {
+      stateApiCalls += 1;
+      return stateReader();
+    }}}},
+    renderAutostart: () => {},
+    reportStateUnavailable: () => {stateOutages += 1;},
+    renderSourceSetup: (selection) => {
+      if (selection?.marker) stateMarkers.push(selection.marker);
+    },
+    renderItems: () => {},
+    tasksList: {}, tasksEmpty: {}, agentsList: {}, agentsEmpty: {},
+    workspacesList: {}, workspacesEmpty: {},
+    renderProductProject: () => true,
+    renderTeamTask: () => ({ok: true, changed: false}),
+    announce: () => {},
+    document: stateDocument,
+    window: {setInterval: (callback) => {pollingCallback = callback; return 1;}},
+  });
+
+  const staleStateRead = stateUi.refreshState();
+  const currentStateRead = stateUi.refreshState();
+  stateWaiters[1].resolve({
+    ok: true,
+    state: {v01_sources: {marker: "current"}, tasks: [], agents: [], workspaces: []},
+  });
+  assert.equal(await currentStateRead, true);
+  stateWaiters[0].resolve({
+    ok: true,
+    state: {v01_sources: {marker: "stale"}, tasks: [], agents: [], workspaces: []},
+  });
+  assert.equal(await staleStateRead, null);
+  assert.deepEqual(stateMarkers, ["current"]);
+  console.log("PASS: stale overlapping state response cannot overwrite the current projection");
+
+  const staleFailure = stateUi.refreshState();
+  const currentAfterFailure = stateUi.refreshState();
+  stateWaiters[3].resolve({
+    ok: true,
+    state: {
+      v01_sources: {marker: "current-after-failure"}, tasks: [], agents: [], workspaces: [],
+    },
+  });
+  assert.equal(await currentAfterFailure, true);
+  stateWaiters[2].reject(new Error("STALE_PRIVATE_TRANSPORT_DETAIL"));
+  assert.equal(await staleFailure, null);
+  assert.equal(stateOutages, 0, "superseded transport failure must not announce a false outage");
+  assert.deepEqual(stateMarkers, ["current", "current-after-failure"]);
+  console.log("PASS: stale overlapping state failure cannot downgrade a newer healthy projection");
+
+  stateReader = async () => ({
+    ok: true,
+    state: {v01_sources: {marker: "polled"}, tasks: [], agents: [], workspaces: []},
+  });
+  stateUi.startStatePolling();
+  assert.equal(typeof pollingCallback, "function");
+  const callsBeforeLock = stateApiCalls;
+  stateUi.inFlightActions.add("task-control");
+  await pollingCallback();
+  assert.equal(stateApiCalls, callsBeforeLock, "poll must pause during an in-flight mutation");
+  stateUi.inFlightActions.delete("task-control");
+  await pollingCallback();
+  assert.equal(stateApiCalls, callsBeforeLock + 1);
+  assert.equal(stateDocument.documentElement.dataset.nikaReady, "true");
+  console.log("PASS: background polling pauses across in-flight command mutations");
 
   const logFunctionsStart = source.indexOf("  function announce(message, assertive = false) {");
   const logFunctionsEnd = source.indexOf("  function requestId() {", logFunctionsStart);
