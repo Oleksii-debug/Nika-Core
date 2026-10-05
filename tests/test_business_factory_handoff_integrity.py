@@ -15,6 +15,7 @@ from nika_core.business_factory_persistence import BusinessFactoryRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_project import (
     EvidenceRef,
+    ProductProject,
     ProductProjectRepository,
     ProductProjectSpec,
     ResearchEvidencePackage,
@@ -278,3 +279,44 @@ def test_post_authorization_carrier_mutation_cannot_hijack_product_target(tmp_pa
         products.get("attacker-project")
     with pytest.raises(KeyError):
         products.get("snapshot-attacker-project")
+
+
+def test_handoff_detaches_mutable_spec_before_repository_effect(tmp_path) -> None:
+    authority = _Authority()
+    store = SQLiteStore(tmp_path / "nika.sqlite")
+    store.initialize()
+    factory, caller_spec, _ = _factory_at_work_order(authority)
+
+    class _ReentrantRepository(ProductProjectRepository):
+        def create(
+            self,
+            *,
+            project_id: str,
+            name: str,
+            spec: ProductProjectSpec,
+            idempotency_key: str,
+        ) -> ProductProject:
+            caller_spec.budget["changed"] = "after-admission"
+            return super().create(
+                project_id=project_id,
+                name=name,
+                spec=spec,
+                idempotency_key=idempotency_key,
+            )
+
+    products = _ReentrantRepository(store)
+    linked = factory.handoff_to_product_factory(
+        repository=products,
+        spec=caller_spec,
+        idempotency_key="caller-request-reentrant-mutation",
+    )
+
+    assert caller_spec.budget == {"changed": "after-admission"}
+    assert linked.product_project_id == "product-handoff-1"
+    stored = products.get("product-handoff-1")
+    assert stored.spec.budget == {}
+    snapshot = factory.snapshot()
+    assert snapshot.work_order is not None
+    assert stored.spec.compliance["business_product_spec_fingerprint"] == (
+        snapshot.work_order.product_spec_fingerprint
+    )
