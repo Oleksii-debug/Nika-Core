@@ -6,9 +6,11 @@ from nika_core.toolsmith.contracts import (
     AcceptanceCommand,
     CapabilityManifestV1,
     ChangedFile,
+    ProcessPolicy,
     ResourceBudget,
     TestEvidence,
 )
+from nika_core.toolsmith.execution import ProcessExecutionError, run_typed_process
 
 
 @pytest.mark.parametrize("field", ("timeout_seconds", "max_output_bytes", "max_changed_files"))
@@ -102,3 +104,78 @@ def test_capability_manifest_preserves_version_one() -> None:
         source="test",
     )
     assert manifest.schema_version == 1
+
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("timeout_seconds", 3601),
+        ("max_output_bytes", 64 * 1024 * 1024 + 1),
+        ("max_changed_files", 10_001),
+        ("timeout_seconds", 10**1000),
+        ("max_output_bytes", 10**1000),
+        ("max_changed_files", 10**1000),
+    ],
+)
+def test_resource_budget_rejects_values_above_finite_safe_limits(
+    field: str,
+    invalid: int,
+) -> None:
+    values = {
+        "timeout_seconds": 3600,
+        "max_output_bytes": 64 * 1024 * 1024,
+        "max_changed_files": 10_000,
+    }
+    values[field] = invalid
+    with pytest.raises(ValueError, match="safe limits"):
+        ResourceBudget(**values)
+
+
+def test_resource_budget_accepts_finite_safe_limit_boundaries() -> None:
+    budget = ResourceBudget(3600, 64 * 1024 * 1024, 10_000)
+    assert budget.timeout_seconds == 3600
+    assert budget.max_output_bytes == 64 * 1024 * 1024
+    assert budget.max_changed_files == 10_000
+
+
+@pytest.mark.parametrize("timeout", [3601, 10**1000])
+def test_acceptance_timeout_rejects_values_above_safe_limit(timeout: int) -> None:
+    with pytest.raises(ValueError, match="safe limit"):
+        AcceptanceCommand(("pytest",), timeout_seconds=timeout)
+
+
+@pytest.mark.parametrize(
+    ("field", "invalid"),
+    [
+        ("timeout_seconds", 10**1000),
+        ("max_output_bytes", 10**1000),
+        ("max_changed_files", 10**1000),
+    ],
+)
+def test_tampered_resource_budget_fails_before_process_launch(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    invalid: int,
+) -> None:
+    budget = ResourceBudget(1, 1024, 1)
+    object.__setattr__(budget, field, invalid)
+    launched = False
+
+    def forbidden_popen(*_args: object, **_kwargs: object) -> object:
+        nonlocal launched
+        launched = True
+        raise AssertionError("Popen must not run for an invalid resource budget")
+
+    monkeypatch.setattr("nika_core.toolsmith.execution.subprocess.Popen", forbidden_popen)
+
+    with pytest.raises(ProcessExecutionError, match="resource budget"):
+        run_typed_process(
+            (),
+            process_policy=ProcessPolicy(("python",)),
+            resource_budget=budget,
+            cwd=tmp_path,
+            environment={},
+        )
+    assert not launched
