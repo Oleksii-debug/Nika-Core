@@ -554,3 +554,32 @@ def test_stale_creator_cannot_mark_replacement_reservation_uncertain(tmp_path) -
     assert current.status is IdempotencyStatus.PENDING
     assert current.result is None
 
+def test_same_adapter_cannot_replace_live_creator_identity(tmp_path) -> None:
+    _, _, ledger, journal = _runtime_journal(tmp_path)
+    service = _service()
+    request = _request(service)
+    first = journal.reserve(
+        project_id="project-a",
+        service=service,
+        request=request,
+    )
+    original = ledger.require(first.operation_key)
+
+    ledger.release_pending_if_matches(
+        operation_key=original.operation_key,
+        task_id=original.task_id,
+        operation_type=original.operation_type,
+        input_fingerprint=original.input_fingerprint,
+        created_at=original.created_at,
+    )
+    assert ledger.get(first.operation_key) is None
+
+    with pytest.raises(ProductOperationsError, match="already owns a live created reservation"):
+        journal.reserve(
+            project_id="project-a",
+            service=service,
+            request=request,
+        )
+
+    assert ledger.get(first.operation_key) is None
+

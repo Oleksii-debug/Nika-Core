@@ -70,6 +70,11 @@ class RuntimeIdempotencyMaintenanceJournal:
     ) -> MaintenanceEffectReservation:
         operation_key = self._operation_key(project_id, request.request_id)
         fingerprint = self._fingerprint(project_id, service, request)
+        with self._created_reservations_lock:
+            if operation_key in self._created_reservations:
+                raise ProductOperationsError(
+                    "maintenance effect adapter already owns a live created reservation"
+                )
         try:
             record, created = self._ledger.reserve_once(
                 operation_key=operation_key,
