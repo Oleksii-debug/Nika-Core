@@ -7,7 +7,6 @@ import pytest
 from product_decision_authority_support import AuthorizingProductDecisionRepository
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
     ProductDecision,
     ProductDecisionState,
