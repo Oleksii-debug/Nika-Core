@@ -21,38 +21,102 @@ _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
 
 
+def _require_release_version_text(value: object, *, authority: str) -> str:
+    if type(value) is not str:
+        raise RuntimeError(f"{authority} must be exact text")
+    if not value or value != value.strip():
+        raise RuntimeError(f"{authority} must be non-empty canonical text")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise RuntimeError(f"{authority} must be valid UTF-8 text") from exc
+    if len(encoded) > 128 or any(
+        ord(character) < 32 or ord(character) == 127 for character in value
+    ):
+        raise RuntimeError(
+            f"{authority} exceeds the bounded release-version text contract"
+        )
+    return value
+
+
 def project_version(project_root: Path) -> str:
     pyproject = project_root / "pyproject.toml"
     with pyproject.open("rb") as handle:
         data = tomllib.load(handle)
     try:
-        version = str(data["project"]["version"]).strip()
+        raw_version = data["project"]["version"]
     except (KeyError, TypeError) as exc:
         raise RuntimeError("pyproject.toml is missing [project].version") from exc
-    if not version:
-        raise RuntimeError("pyproject.toml [project].version is empty")
-    return version
+    return _require_release_version_text(
+        raw_version,
+        authority="pyproject.toml [project].version",
+    )
 
 
 def resolve_release_version(project_root: Path, requested: str | None) -> str:
     canonical = project_version(project_root)
-    if requested is not None and requested != canonical:
-        raise ValueError(
-            f"requested release version {requested!r} does not match "
-            f"pyproject version {canonical!r}"
+    if requested is not None:
+        requested = _require_release_version_text(
+            requested,
+            authority="requested release version",
         )
+        if requested != canonical:
+            raise ValueError(
+                f"requested release version {requested!r} does not match "
+                f"pyproject version {canonical!r}"
+            )
     return canonical
 
 
+def _normalize_source_sha(value: object, *, authority: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{authority} must be an exact 40-character source SHA")
+    normalized = value.lower()
+    if not _FULL_SHA_RE.fullmatch(normalized):
+        raise ValueError(f"{authority} must be an exact 40-character source SHA")
+    return normalized
+
+
 def resolve_source_sha(requested: str | None) -> str:
-    candidate = requested or os.environ.get("NIKA_SOURCE_SHA") or os.environ.get("GITHUB_SHA")
-    candidate = (candidate or "").strip().lower()
-    if not _FULL_SHA_RE.fullmatch(candidate):
+    configured = os.environ.get("NIKA_SOURCE_SHA")
+    github_sha = os.environ.get("GITHUB_SHA")
+
+    if requested is not None:
+        explicit = _normalize_source_sha(requested, authority="--source-sha")
+        if configured is not None:
+            configured_sha = _normalize_source_sha(
+                configured,
+                authority="NIKA_SOURCE_SHA",
+            )
+            if configured_sha != explicit:
+                raise ValueError(
+                    "--source-sha conflicts with configured NIKA_SOURCE_SHA authority"
+                )
+        return explicit
+
+    candidates: list[tuple[str, str]] = []
+    if configured is not None:
+        candidates.append(
+            (
+                "NIKA_SOURCE_SHA",
+                _normalize_source_sha(configured, authority="NIKA_SOURCE_SHA"),
+            )
+        )
+    if github_sha is not None:
+        candidates.append(
+            ("GITHUB_SHA", _normalize_source_sha(github_sha, authority="GITHUB_SHA"))
+        )
+    if not candidates:
         raise ValueError(
             "exact 40-character source SHA is required via --source-sha, "
             "NIKA_SOURCE_SHA or GITHUB_SHA"
         )
-    return candidate
+    if len({value for _, value in candidates}) != 1:
+        raise ValueError(
+            "conflicting exact source SHA environment authorities: "
+            + ", ".join(authority for authority, _ in candidates)
+        )
+    return candidates[0][1]
 
 
 def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> int:
