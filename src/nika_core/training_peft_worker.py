@@ -26,8 +26,11 @@ _READ_CHUNK_BYTES = 1024 * 1024
 _HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
 _MATERIAL_DOMAIN = b"nika-training-consumed-materials-v1\x00"
+_CHECKPOINT_PAYLOAD_DOMAIN = b"nika-peft-checkpoint-payload-v1\x00"
 _CHECKPOINT_MARKER = "nika_checkpoint.json"
 _CANDIDATE_FILE = "adapter_model.safetensors"
+_MAX_CHECKPOINT_FILES = 4096
+_MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
 
 
 class PeftTrainerError(RuntimeError):
@@ -497,6 +500,55 @@ def _require_regular_unlinked(path: Path, *, code: str) -> os.stat_result:
     return value
 
 
+def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
+    before = _require_regular_unlinked(path, code=code)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        _fail(code)
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail(code)
+        while True:
+            chunk = os.read(fd, _READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_CHECKPOINT_BYTES:
+                _fail(code)
+            digest.update(chunk)
+        after = os.fstat(fd)
+    except OSError:
+        _fail(code)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        current = os.lstat(path)
+    except OSError:
+        _fail(code)
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    if (
+        total != opened.st_size
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+    ):
+        _fail(code)
+    return digest.hexdigest(), total
+
+
 def _parse_jsonl_record(raw_line: bytes) -> TrainingExample:
     if not raw_line or len(raw_line) > _MAX_LINE_BYTES:
         _fail("dataset_record_size_invalid")
@@ -827,13 +879,67 @@ def _checkpoint_dir(job_root: Path, step_number: int) -> Path:
     return job_root / "trainer" / f"checkpoint-{step_number}"
 
 
+def _checkpoint_payload_manifest_sha256(checkpoint: Path) -> str:
+    try:
+        root_stat = os.lstat(checkpoint)
+    except OSError:
+        _fail("checkpoint_payload_missing")
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or _is_reparse(root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        _fail("checkpoint_payload_invalid")
+    try:
+        paths = sorted(
+            checkpoint.rglob("*"),
+            key=lambda item: item.relative_to(checkpoint).as_posix(),
+        )
+    except OSError:
+        _fail("checkpoint_payload_invalid")
+
+    entries: list[dict[str, object]] = []
+    casefold_paths: set[str] = set()
+    total_bytes = 0
+    for path in paths:
+        relative = path.relative_to(checkpoint).as_posix()
+        if relative in {_CHECKPOINT_MARKER, f".{_CHECKPOINT_MARKER}.tmp"}:
+            continue
+        try:
+            value = os.lstat(path)
+        except OSError:
+            _fail("checkpoint_payload_invalid")
+        if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+            _fail("checkpoint_payload_link_forbidden")
+        if stat.S_ISDIR(value.st_mode):
+            continue
+        if not stat.S_ISREG(value.st_mode):
+            _fail("checkpoint_payload_invalid")
+        folded = relative.casefold()
+        if folded in casefold_paths:
+            _fail("checkpoint_payload_path_collision")
+        casefold_paths.add(folded)
+        digest, size = _hash_regular_snapshot(path, code="checkpoint_payload_changed")
+        total_bytes += size
+        if len(entries) >= _MAX_CHECKPOINT_FILES or total_bytes > _MAX_CHECKPOINT_BYTES:
+            _fail("checkpoint_payload_bounds_exceeded")
+        entries.append({"path": relative, "sha256": digest, "size_bytes": size})
+    if not entries:
+        _fail("checkpoint_payload_empty")
+    encoded = _canonical_json_bytes(entries)
+    return hashlib.sha256(_CHECKPOINT_PAYLOAD_DOMAIN + encoded).hexdigest()
+
+
 def _write_checkpoint_marker(
     checkpoint: Path,
     *,
     request: ParsedRequest,
     consumed_sha256: str,
+    checkpoint_payload_sha256: str,
 ) -> str:
+    _require_sha256(checkpoint_payload_sha256, field="checkpoint_payload_sha256")
     marker = {
+        "checkpoint_payload_sha256": checkpoint_payload_sha256,
         "consumed_materials_sha256": consumed_sha256,
         "job_fingerprint": request.job_fingerprint,
         "schema_version": _SCHEMA_VERSION,
@@ -870,6 +976,7 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         return None
     expected = {
         "checkpoint_marker_sha256",
+        "checkpoint_payload_sha256",
         "checkpoint_step",
         "job_fingerprint",
         "relative_path",
@@ -898,6 +1005,10 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     marker_digest = _sha256_file(marker_path)
     if marker_digest != state.get("checkpoint_marker_sha256"):
         _fail("resume_marker_digest_mismatch")
+    expected_payload_sha256 = _require_sha256(
+        state.get("checkpoint_payload_sha256"),
+        field="resume_checkpoint_payload_sha256",
+    )
     try:
         marker = json.loads(
             marker_path.read_text(encoding="utf-8"),
@@ -906,15 +1017,26 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         )
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         _fail("resume_marker_invalid")
+    expected_marker_keys = {
+        "checkpoint_payload_sha256",
+        "consumed_materials_sha256",
+        "job_fingerprint",
+        "schema_version",
+        "step_number",
+    }
     if (
         type(marker) is not dict
+        or set(marker) != expected_marker_keys
         or marker.get("schema_version") != _SCHEMA_VERSION
         or marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index
         or marker.get("consumed_materials_sha256")
         != request.required_consumed_materials_sha256
+        or marker.get("checkpoint_payload_sha256") != expected_payload_sha256
     ):
         _fail("resume_marker_identity_mismatch")
+    if _checkpoint_payload_manifest_sha256(candidate) != expected_payload_sha256:
+        _fail("resume_checkpoint_payload_mismatch")
     return candidate
 
 
@@ -928,18 +1050,34 @@ class _TokenizedDataset:
         self._items: list[dict[str, object]] = []
         eos = tokenizer.eos_token or ""
         for example in examples:
-            text = f"{example.prompt}\n{example.response}{eos}"
+            prompt_prefix = f"{example.prompt}\n"
+            text = f"{prompt_prefix}{example.response}{eos}"
+            prompt_encoded = tokenizer(
+                prompt_prefix,
+                truncation=True,
+                max_length=max_length,
+                add_special_tokens=True,
+            )
             encoded = tokenizer(
                 text,
                 truncation=True,
                 max_length=max_length,
                 add_special_tokens=True,
             )
+            prompt_ids = prompt_encoded.get("input_ids")
+            input_ids = encoded.get("input_ids")
+            attention_mask = encoded.get("attention_mask")
+            if (
+                type(prompt_ids) is not list
+                or type(input_ids) is not list
+                or type(attention_mask) is not list
+                or len(prompt_ids) >= max_length
+                or len(input_ids) <= len(prompt_ids)
+                or len(input_ids) != len(attention_mask)
+            ):
+                _fail("response_tokens_truncated")
             self._items.append(
-                {
-                    "attention_mask": encoded["attention_mask"],
-                    "input_ids": encoded["input_ids"],
-                }
+                {"attention_mask": attention_mask, "input_ids": input_ids}
             )
 
     def __len__(self) -> int:
@@ -1020,6 +1158,7 @@ def _train_one_step(
             os.fspath(config.model_dir),
             gguf_file=os.fspath(staged_base),
             local_files_only=True,
+            trust_remote_code=False,
         )
         if tokenizer.pad_token_id is None:
             if tokenizer.eos_token_id is None:
@@ -1029,6 +1168,7 @@ def _train_one_step(
             os.fspath(config.model_dir),
             gguf_file=os.fspath(staged_base),
             local_files_only=True,
+            trust_remote_code=False,
             dtype="auto",
         )
         try:
@@ -1114,13 +1254,16 @@ def _train_one_step(
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
     _require_regular_unlinked(adapter_file, code="adapter_candidate_missing")
+    checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
         checkpoint,
         request=request,
         consumed_sha256=consumed.attestation_sha256,
+        checkpoint_payload_sha256=checkpoint_payload_sha256,
     )
     resume_state: dict[str, object] = {
         "checkpoint_marker_sha256": marker_sha256,
+        "checkpoint_payload_sha256": checkpoint_payload_sha256,
         "checkpoint_step": request.step_index + 1,
         "job_fingerprint": request.job_fingerprint,
         "relative_path": checkpoint.relative_to(job_root).as_posix(),
@@ -1134,7 +1277,11 @@ def _train_one_step(
     candidate.parent.mkdir(parents=True, exist_ok=True)
     if candidate.exists():
         _fail("candidate_publish_conflict")
-    temporary = candidate.parent / f".{_CANDIDATE_FILE}.tmp"
+    temporary = candidate.parent / (
+        f".{_CANDIDATE_FILE}.{os.getpid()}.{request.step_id[:16]}.tmp"
+    )
+    if temporary.exists():
+        _fail("candidate_publish_temp_conflict")
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
@@ -1142,6 +1289,8 @@ def _train_one_step(
         consumed=consumed,
         adapter_config=adapter_config,
     )
+    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+        _fail("checkpoint_payload_changed_before_publish")
     try:
         with safe_open(os.fspath(adapter_file), framework="pt", device="cpu") as source:
             tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
@@ -1153,7 +1302,12 @@ def _train_one_step(
             metadata={"nika_adapter_manifest": manifest_json},
         )
         _require_regular_unlinked(temporary, code="candidate_publish_failed")
-        os.replace(temporary, candidate)
+        if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+            _fail("checkpoint_payload_changed_during_publish")
+        try:
+            os.link(temporary, candidate)
+        except FileExistsError:
+            _fail("candidate_publish_conflict")
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
