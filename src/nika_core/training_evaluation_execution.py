@@ -34,7 +34,9 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.resources.contracts import ResourceObserverPort
 from nika_core.training_evaluation_attestation import (
+    AttestedModelCompletionResult,
     AttestedTrainingCandidateGateway,
+    LoadedModelArtifactAttestation,
     LoadedModelAttestedCompletionPort,
 )
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
@@ -85,6 +87,94 @@ class TrainingEvaluationExecutionError(RuntimeError):
         self.failure_effect = failure_effect
 
 
+@dataclass(frozen=True, slots=True)
+class AttestedCaseReceipt:
+    """Secret-free receipt for one benchmark request accepted by #1298."""
+
+    case_id: str
+    request_id: str
+    binding_sha256: str
+    provider_id: str
+    model_id: str
+    artifact_sha256: str
+    descriptor_digest: str
+    attestor_id: str
+    attestor_sha256: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.case_id, "case_id"),
+            (self.request_id, "request_id"),
+            (self.provider_id, "provider_id"),
+            (self.model_id, "model_id"),
+            (self.attestor_id, "attestor_id"),
+        ):
+            _canonical_text(value, name=name)
+        for value, name in (
+            (self.binding_sha256, "binding_sha256"),
+            (self.artifact_sha256, "artifact_sha256"),
+            (self.descriptor_digest, "descriptor_digest"),
+            (self.attestor_sha256, "attestor_sha256"),
+        ):
+            _sha256(value, name=name)
+
+    def revalidated(self) -> AttestedCaseReceipt:
+        if type(self) is not AttestedCaseReceipt:
+            raise TypeError("receipt must be an exact AttestedCaseReceipt")
+        try:
+            return AttestedCaseReceipt(
+                case_id=self.case_id,
+                request_id=self.request_id,
+                binding_sha256=self.binding_sha256,
+                provider_id=self.provider_id,
+                model_id=self.model_id,
+                artifact_sha256=self.artifact_sha256,
+                descriptor_digest=self.descriptor_digest,
+                attestor_id=self.attestor_id,
+                attestor_sha256=self.attestor_sha256,
+            )
+        except AttributeError as exc:
+            raise ValueError("attested case receipt fields are incomplete") from exc
+
+    def evidence_payload(self) -> dict[str, str]:
+        receipt = self.revalidated()
+        return {
+            "schema": "nika-attested-challenger-case-v1",
+            "case_id": receipt.case_id,
+            "request_id": receipt.request_id,
+            "binding_sha256": receipt.binding_sha256,
+            "provider_id": receipt.provider_id,
+            "model_id": receipt.model_id,
+            "artifact_sha256": receipt.artifact_sha256,
+            "descriptor_digest": receipt.descriptor_digest,
+            "attestor_id": receipt.attestor_id,
+            "attestor_sha256": receipt.attestor_sha256,
+        }
+
+    @property
+    def evidence_sha256(self) -> str:
+        encoded = json.dumps(
+            self.evidence_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+
+def _expected_benchmark_request_id(
+    *,
+    run_id: str,
+    configuration_sha256: str,
+    case_id: str,
+) -> str:
+    raw = (
+        f"nika-model-benchmark-v3\0{run_id}\0"
+        f"{configuration_sha256}\0{case_id}"
+    ).encode()
+    return f"model-bench-{hashlib.sha256(raw).hexdigest()[:32]}"
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class AttestedChallengerBenchmarkResult:
     """Complete challenger benchmark bound to Loop-C identity and attestor trust.
@@ -96,6 +186,7 @@ class AttestedChallengerBenchmarkResult:
 
     binding: TrainingEvaluationBinding
     report: CandidateBenchmarkReport
+    case_receipts: tuple[AttestedCaseReceipt, ...]
     attestor_id: str
     attestor_sha256: str
 
@@ -140,6 +231,34 @@ class AttestedChallengerBenchmarkResult:
             raise ValueError(
                 "attested challenger benchmark requires complete successful coverage"
             )
+        if type(self.case_receipts) is not tuple:
+            raise TypeError("case_receipts must be a canonical tuple")
+        if len(self.case_receipts) != len(self.report.case_results):
+            raise ValueError("attested receipt coverage does not match benchmark cases")
+        receipts = tuple(receipt.revalidated() for receipt in self.case_receipts)
+        expected_case_ids = tuple(result.case_id for result in self.report.case_results)
+        if tuple(receipt.case_id for receipt in receipts) != expected_case_ids:
+            raise ValueError("attested receipt case order does not match benchmark report")
+        if len({receipt.request_id for receipt in receipts}) != len(receipts):
+            raise ValueError("attested receipt request identities must be unique")
+        for receipt in receipts:
+            expected_request_id = _expected_benchmark_request_id(
+                run_id=self.report.run.run_id,
+                configuration_sha256=self.report.run.configuration_sha256,
+                case_id=receipt.case_id,
+            )
+            if receipt.request_id != expected_request_id:
+                raise ValueError("attested receipt request identity is inconsistent")
+            if (
+                receipt.binding_sha256 != binding.binding_sha256
+                or receipt.provider_id != binding.challenger_provider_id
+                or receipt.model_id != binding.challenger_model_id
+                or receipt.artifact_sha256 != binding.challenger_sha256
+                or receipt.descriptor_digest != binding.descriptor_digest
+                or receipt.attestor_id != attestor_id
+                or receipt.attestor_sha256 != attestor_sha256
+            ):
+                raise ValueError("attested case receipt does not match benchmark authority")
         # Force validated values to be consumed so mutated/behavioral carriers cannot
         # hide behind dataclass construction history.
         if attestor_id != self.attestor_id or attestor_sha256 != self.attestor_sha256:
@@ -155,6 +274,9 @@ class AttestedChallengerBenchmarkResult:
             return _build_result(
                 binding=self.binding.revalidated(),
                 report=self.report,
+                case_receipts=tuple(
+                    receipt.revalidated() for receipt in self.case_receipts
+                ),
                 attestor_id=self.attestor_id,
                 attestor_sha256=self.attestor_sha256,
             )
@@ -176,6 +298,13 @@ class AttestedChallengerBenchmarkResult:
             "attestor_id": result.attestor_id,
             "attestor_sha256": result.attestor_sha256,
             "case_count": len(result.report.case_results),
+            "case_receipts": [
+                {
+                    **receipt.evidence_payload(),
+                    "receipt_sha256": receipt.evidence_sha256,
+                }
+                for receipt in result.case_receipts
+            ],
         }
 
     @property
@@ -193,12 +322,14 @@ def _build_result(
     *,
     binding: TrainingEvaluationBinding,
     report: CandidateBenchmarkReport,
+    case_receipts: tuple[AttestedCaseReceipt, ...],
     attestor_id: str,
     attestor_sha256: str,
 ) -> AttestedChallengerBenchmarkResult:
     result = object.__new__(AttestedChallengerBenchmarkResult)
     object.__setattr__(result, "binding", binding)
     object.__setattr__(result, "report", report)
+    object.__setattr__(result, "case_receipts", case_receipts)
     object.__setattr__(result, "attestor_id", attestor_id)
     object.__setattr__(result, "attestor_sha256", attestor_sha256)
     result._validate()
@@ -253,11 +384,91 @@ def _snapshot_evaluation_set(evaluation_set: EvaluationSet) -> EvaluationSet:
         raise ValueError("evaluation set must be canonical") from exc
 
 
+class _AttestationCapturePort:
+    """Capture detached receipt data without replacing #1298 validation authority."""
+
+    def __init__(self, effect_port: LoadedModelAttestedCompletionPort) -> None:
+        self._effect_port = effect_port
+        self._pending: dict[
+            str,
+            tuple[str | None, LoadedModelArtifactAttestation | None],
+        ] = {}
+        self._receipts: list[AttestedCaseReceipt] = []
+
+    @property
+    def receipts(self) -> tuple[AttestedCaseReceipt, ...]:
+        return tuple(receipt.revalidated() for receipt in self._receipts)
+
+    async def complete_attested(
+        self,
+        request: ModelRequest,
+        *,
+        binding: TrainingEvaluationBinding,
+    ) -> AttestedModelCompletionResult:
+        request_id = request.request_id if type(request.request_id) is str else ""
+        case_id = request.metadata.get("evaluation_case_id")
+        result = await self._effect_port.complete_attested(
+            request,
+            binding=binding,
+        )
+        snapshot: LoadedModelArtifactAttestation | None = None
+        if type(result) is AttestedModelCompletionResult:
+            try:
+                snapshot = result.attestation.revalidated()
+            except (AttributeError, TypeError, ValueError):
+                snapshot = None
+        self._pending[request_id] = (
+            case_id if type(case_id) is str else None,
+            snapshot,
+        )
+        return result
+
+    def discard(self, request_id: str) -> None:
+        self._pending.pop(request_id, None)
+
+    def commit(self, request: ModelRequest) -> None:
+        request_id = request.request_id
+        pending = self._pending.pop(request_id, None)
+        if pending is None:
+            raise ValueError("attested effect did not yield capture evidence")
+        case_id, attestation = pending
+        expected_case_id = request.metadata.get("evaluation_case_id")
+        if (
+            type(expected_case_id) is not str
+            or case_id != expected_case_id
+            or attestation is None
+        ):
+            raise ValueError("attested effect capture evidence is inconsistent")
+        receipt = AttestedCaseReceipt(
+            case_id=expected_case_id,
+            request_id=request_id,
+            binding_sha256=attestation.binding_sha256,
+            provider_id=attestation.provider_id,
+            model_id=attestation.model_id,
+            artifact_sha256=attestation.artifact_sha256,
+            descriptor_digest=attestation.descriptor_digest,
+            attestor_id=attestation.attestor_id,
+            attestor_sha256=attestation.attestor_sha256,
+        )
+        if any(
+            existing.case_id == receipt.case_id
+            or existing.request_id == receipt.request_id
+            for existing in self._receipts
+        ):
+            raise ValueError("duplicate attested benchmark receipt")
+        self._receipts.append(receipt)
+
+
 class _AbortOnAttestedGatewayFailure:
     """Keep ModelBenchmarkRunner from flattening proof failures into case evidence."""
 
-    def __init__(self, gateway: ModelCompletionPort) -> None:
+    def __init__(
+        self,
+        gateway: ModelCompletionPort,
+        capture: _AttestationCapturePort,
+    ) -> None:
         self._gateway = gateway
+        self._capture = capture
         self._provider_calls_started = 0
 
     @property
@@ -267,13 +478,23 @@ class _AbortOnAttestedGatewayFailure:
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self._provider_calls_started += 1
         try:
-            return await self._gateway.complete(request)
+            response = await self._gateway.complete(request)
         except ModelGatewayError as exc:
+            self._capture.discard(request.request_id)
             raise TrainingEvaluationExecutionError(
                 "attested challenger benchmark provider effect failed",
                 code=exc.code,
                 failure_effect=exc.failure_effect,
             ) from None
+        try:
+            self._capture.commit(request)
+        except (AttributeError, TypeError, ValueError):
+            raise TrainingEvaluationExecutionError(
+                "attested challenger benchmark receipt capture failed",
+                code=ModelErrorCode.PROVIDER_ERROR,
+                failure_effect=ModelFailureEffect.UNKNOWN,
+            ) from None
+        return response
 
 
 def _validate_preflight(
@@ -352,13 +573,17 @@ async def run_attested_challenger_benchmark(
         temperature=temperature,
         scorer_id=effective_scorer_id,
     )
+    capture = _AttestationCapturePort(effect_port)
     attested_gateway = AttestedTrainingCandidateGateway(
-        effect_port,
+        capture,
         binding=canonical_binding,
         expected_attestor_id=expected_attestor_id,
         expected_attestor_sha256=expected_attestor_sha256,
     )
-    fail_fast_gateway = _AbortOnAttestedGatewayFailure(attested_gateway)
+    fail_fast_gateway = _AbortOnAttestedGatewayFailure(
+        attested_gateway,
+        capture,
+    )
     runner = ModelBenchmarkRunner(
         fail_fast_gateway,
         scorer=scorer,
@@ -394,6 +619,7 @@ async def run_attested_challenger_benchmark(
         return _build_result(
             binding=canonical_binding,
             report=report,
+            case_receipts=capture.receipts,
             attestor_id=expected_attestor_id,
             attestor_sha256=expected_attestor_sha256,
         )
@@ -405,6 +631,7 @@ async def run_attested_challenger_benchmark(
 
 
 __all__ = [
+    "AttestedCaseReceipt",
     "AttestedChallengerBenchmarkResult",
     "TrainingEvaluationExecutionError",
     "run_attested_challenger_benchmark",
