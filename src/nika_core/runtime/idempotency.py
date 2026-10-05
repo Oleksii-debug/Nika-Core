@@ -196,6 +196,7 @@ class IdempotencyLedger:
         task_id: str,
         operation_type: str,
         input_fingerprint: str,
+        created_at: str,
         result: Mapping[str, Any] | None = None,
     ) -> IdempotencyRecord:
         """Complete only the exact still-pending reservation created by the caller."""
@@ -207,6 +208,7 @@ class IdempotencyLedger:
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
+                created_at=created_at,
             )
             return self._set_status_with_connection(
                 conn,
@@ -222,6 +224,7 @@ class IdempotencyLedger:
         task_id: str,
         operation_type: str,
         input_fingerprint: str,
+        created_at: str,
     ) -> IdempotencyRecord:
         """Mark uncertainty only for the exact still-pending reservation."""
         with self._store.connection() as conn:
@@ -232,6 +235,7 @@ class IdempotencyLedger:
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
+                created_at=created_at,
             )
             return self._set_status_with_connection(
                 conn,
@@ -247,6 +251,7 @@ class IdempotencyLedger:
         task_id: str,
         operation_type: str,
         input_fingerprint: str,
+        created_at: str,
     ) -> None:
         """Delete only the exact still-pending reservation owned by the caller."""
         with self._store.connection() as conn:
@@ -257,6 +262,7 @@ class IdempotencyLedger:
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
+                created_at=created_at,
             )
             self.release_pending_with_connection(conn, operation_key)
 
@@ -350,15 +356,17 @@ class IdempotencyLedger:
         task_id: str,
         operation_type: str,
         input_fingerprint: str,
+        created_at: str,
     ) -> IdempotencyRecord:
         current = cls._require_with_connection(conn, operation_key)
         if (
             current.task_id != task_id
             or current.operation_type != operation_type
             or current.input_fingerprint != input_fingerprint
+            or current.created_at != created_at
         ):
             raise IdempotencyConflictError(
-                "operation identity changed before durable finalization"
+                "operation reservation identity changed before durable finalization"
             )
         if current.status != IdempotencyStatus.PENDING:
             raise IdempotencyConflictError(
