@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import os
 from pathlib import Path
 
@@ -105,6 +106,8 @@ def test_release_source_sha_requires_exact_full_commit(monkeypatch: pytest.Monke
     assert resolve_source_sha(SOURCE_SHA.upper()) == SOURCE_SHA
     with pytest.raises(ValueError, match="exact 40-character source SHA"):
         resolve_source_sha("deadbeef")
+    with pytest.raises(ValueError, match="exact 40-character source SHA"):
+        resolve_source_sha(f" {SOURCE_SHA}")
     with pytest.raises(ValueError, match="exact 40-character source SHA"):
         resolve_source_sha(None)
 
@@ -235,6 +238,8 @@ def test_windows_plan_is_onedir_windowed_and_bundles_web_assets(tmp_path: Path) 
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
     plan = default_windows_plan(tmp_path)
     args = plan.pyinstaller_args()
     assert "--onedir" in args
@@ -299,3 +304,124 @@ def test_release_gate_allows_final_release_only_with_complete_evidence() -> None
     assert result.production_release_ready is True
     assert result.stage == "NVDA_VERIFIED"
     assert result.blockers == ()
+
+def test_release_version_rejects_non_text_and_noncanonical_authority(tmp_path: Path) -> None:
+    pyproject = tmp_path / "pyproject.toml"
+    pyproject.write_text(
+        '[project]\nname = "nika-core"\nversion = 1\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="must be exact text"):
+        project_version(tmp_path)
+
+    pyproject.write_text(
+        '[project]\nname = "nika-core"\nversion = " 1.0.0"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="canonical text"):
+        project_version(tmp_path)
+
+    pyproject.write_text(
+        '[project]\nname = "nika-core"\nversion = "1.0.0"\n',
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="canonical text"):
+        resolve_release_version(tmp_path, "1.0.0 ")
+
+def test_release_source_sha_rejects_explicit_configured_conflict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NIKA_SOURCE_SHA", "a" * 40)
+    monkeypatch.setenv("GITHUB_SHA", "b" * 40)
+
+    with pytest.raises(ValueError, match="conflicts with configured NIKA_SOURCE_SHA"):
+        resolve_source_sha("c" * 40)
+
+    assert resolve_source_sha("A" * 40) == "a" * 40
+
+def test_release_source_sha_falls_back_to_github_when_release_env_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("NIKA_SOURCE_SHA", raising=False)
+    monkeypatch.setenv("GITHUB_SHA", SOURCE_SHA.upper())
+
+    assert resolve_source_sha(None) == SOURCE_SHA
+
+def test_windows_plan_rejects_path_like_reserved_and_invalid_bundle_names(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
+    plan = default_windows_plan(tmp_path)
+
+    invalid_names = (
+        "../escape",
+        "Nika/Core",
+        r"Nika\Core",
+        "CON",
+        "COM1.txt",
+        "LPT³.log",
+        "NikaCore.",
+        "bad\x01name",
+        "a" * 256,
+    )
+    for invalid_name in invalid_names:
+        invalid = replace(plan, name=invalid_name)
+        with pytest.raises(ValueError):
+            invalid.pyinstaller_args()
+        with pytest.raises(ValueError):
+            _ = invalid.bundle_dir
+
+    with pytest.raises(TypeError, match="exact text"):
+        _ = replace(plan, name=123).bundle_dir  # type: ignore[arg-type]
+
+def test_windows_plan_accepts_unicode_single_component_bundle_name(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
+    plan = replace(default_windows_plan(tmp_path), name="Ніка Core")
+
+    assert plan.bundle_dir == tmp_path / "dist" / "Ніка Core"
+    args = plan.pyinstaller_args()
+    assert args[args.index("--name") + 1] == "Ніка Core"
+
+def test_windows_plan_rejects_behavioral_string_bundle_name(tmp_path: Path) -> None:
+    class BehavioralName(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            raise AssertionError("behavioral string must not execute")
+
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
+    plan = replace(default_windows_plan(tmp_path), name=BehavioralName("NikaCore"))
+
+    with pytest.raises(TypeError, match="exact text"):
+        _ = plan.bundle_dir
+
+def test_windows_plan_accepts_maximum_component_length(tmp_path: Path) -> None:
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "nika_windows.py").write_text("pass\n", encoding="utf-8")
+    web = tmp_path / "src" / "nika_core" / "ui" / "web"
+    web.mkdir(parents=True)
+    (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
+    name = "a" * 255
+    plan = replace(default_windows_plan(tmp_path), name=name)
+
+    assert plan.bundle_dir == tmp_path / "dist" / name
+    assert plan.pyinstaller_args()[plan.pyinstaller_args().index("--name") + 1] == name
+

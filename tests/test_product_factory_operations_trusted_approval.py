@@ -26,7 +26,12 @@ SHA_B = "b" * 40
 NOW = datetime(2026, 8, 23, 21, 0, tzinfo=UTC)
 
 
-def _service(service_id: str, release_sha: str) -> DeployableService:
+def _service(
+    service_id: str,
+    release_sha: str,
+    *,
+    credentials: tuple[str, ...] = (),
+) -> DeployableService:
     return DeployableService(
         service_id=service_id,
         project_id="project-a",
@@ -34,6 +39,7 @@ def _service(service_id: str, release_sha: str) -> DeployableService:
         release_sha=release_sha,
         wave=0,
         replicas=(ServiceReplica(f"{service_id}-replica", f"node-{service_id}"),),
+        credential_refs=credentials,
     )
 
 
@@ -194,6 +200,79 @@ def test_trusted_approval_is_bound_to_exact_service_release_and_request() -> Non
     saved = coordinator.request_maintenance(approved)
     assert saved.request == approved
     assert port.apply_calls == 1
+
+
+def test_revoked_service_credential_blocks_approved_maintenance_before_effect() -> None:
+    port = CountingPort()
+    authority = ExactApprovalAuthority()
+    coordinator = ProductOperationsCoordinator(
+        "project-a",
+        port=port,
+        approval_authority=authority,
+        effect_journal=MemoryEffectJournal(),
+    )
+    service = _service(
+        "service-a",
+        SHA_A,
+        credentials=("credential:service-a",),
+    )
+    coordinator.register(service)
+    coordinator.record_observation(_healthy(service))
+    approved = _request(service)
+    authority.allow(service, approved)
+
+    assert coordinator.revoke_credential("credential:service-a") == ("service-a",)
+
+    with pytest.raises(ProductOperationsError, match="blocked by revoked"):
+        coordinator.request_maintenance(approved)
+
+    assert port.apply_calls == 0
+    assert coordinator.snapshot().services[0].blocked_credentials == (
+        "credential:service-a",
+    )
+
+
+def test_credential_revocation_linearizes_after_inflight_maintenance_effect() -> None:
+    port = BlockingPort()
+    authority = ExactApprovalAuthority()
+    coordinator = ProductOperationsCoordinator(
+        "project-a",
+        port=port,
+        approval_authority=authority,
+        effect_journal=MemoryEffectJournal(),
+    )
+    service = _service(
+        "service-a",
+        SHA_A,
+        credentials=("credential:service-a",),
+    )
+    coordinator.register(service)
+    coordinator.record_observation(_healthy(service))
+    approved = _request(service)
+    authority.allow(service, approved)
+    revoke_entered = Event()
+
+    def revoke() -> tuple[str, ...]:
+        revoke_entered.set()
+        return coordinator.revoke_credential("credential:service-a")
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        maintenance = pool.submit(coordinator.request_maintenance, approved)
+        assert port.started.wait(2), "maintenance call did not reach provider"
+        revocation = pool.submit(revoke)
+        assert revoke_entered.wait(2), "revocation worker did not start"
+        assert not revocation.done()
+
+        port.release.set()
+        saved = maintenance.result(timeout=2)
+        affected = revocation.result(timeout=2)
+
+    assert saved.result.applied is True
+    assert affected == ("service-a",)
+    assert port.apply_calls == 1
+    assert coordinator.snapshot().services[0].blocked_credentials == (
+        "credential:service-a",
+    )
 
 
 def test_missing_durable_effect_journal_blocks_provider_dispatch() -> None:
