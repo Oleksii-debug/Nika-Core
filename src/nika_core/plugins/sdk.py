@@ -132,15 +132,71 @@ class PluginRegistration:
     factory: PluginFactory
 
 
+def _snapshot_capability(value: object) -> CapabilityDeclaration:
+    if type(value) is not CapabilityDeclaration:
+        raise PluginCompatibilityError("plugin capability must use the canonical contract")
+    if (
+        type(value.capability_id) is not str
+        or type(value.risk) is not ToolRisk
+        or type(value.description) is not str
+    ):
+        raise PluginCompatibilityError("plugin capability contains non-canonical fields")
+    try:
+        return CapabilityDeclaration(
+            capability_id=value.capability_id,
+            risk=value.risk,
+            description=value.description,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PluginCompatibilityError("plugin capability is not canonical") from exc
+
+
 def _snapshot_manifest(manifest: PluginManifest) -> PluginManifest:
     if type(manifest) is not PluginManifest:
         raise PluginCompatibilityError("plugin manifest must use the canonical contract")
+    scalar_text = (
+        manifest.plugin_id,
+        manifest.name,
+        manifest.version,
+        manifest.entrypoint_name,
+    )
+    scalar_int = (
+        manifest.format_version,
+        manifest.plugin_api_min,
+        manifest.plugin_api_max,
+    )
+    if any(type(value) is not str for value in scalar_text):
+        raise PluginCompatibilityError("plugin manifest contains non-canonical text")
+    if any(type(value) is not int for value in scalar_int):
+        raise PluginCompatibilityError("plugin manifest contains non-canonical API versions")
+    if type(manifest.capabilities) is not tuple:
+        raise PluginCompatibilityError("plugin capabilities must be an exact tuple")
+    permission_ids = _exact_text_tuple(
+        manifest.permission_ids,
+        label="manifest permission_ids",
+    )
+    action_ids = _exact_text_tuple(
+        manifest.action_ids,
+        label="manifest action_ids",
+    )
+    capabilities = tuple(
+        _snapshot_capability(capability) for capability in manifest.capabilities
+    )
     try:
-        payload = PluginManifest.model_dump(manifest, mode="python")
-        snapshot = PluginManifest.model_validate(payload, strict=True)
+        return PluginManifest(
+            format_version=manifest.format_version,
+            plugin_id=manifest.plugin_id,
+            name=manifest.name,
+            version=manifest.version,
+            plugin_api_min=manifest.plugin_api_min,
+            plugin_api_max=manifest.plugin_api_max,
+            entrypoint_name=manifest.entrypoint_name,
+            capabilities=capabilities,
+            permission_ids=permission_ids,
+            action_ids=action_ids,
+        )
     except (TypeError, ValueError) as exc:
         raise PluginCompatibilityError("plugin manifest is not canonical") from exc
-    return snapshot
 
 
 def _exact_text_tuple(value: object, *, label: str) -> tuple[str, ...]:
