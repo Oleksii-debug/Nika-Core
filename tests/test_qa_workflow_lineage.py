@@ -99,6 +99,17 @@ def test_release_artifact_and_evidence_use_the_verified_candidate_sha() -> None:
     assert "m12-prehuman-${{ env.NIKA_CANDIDATE_SHA }}" in m12
 
 
+def test_m11_release_version_is_validated_and_not_interpolated_into_powershell() -> None:
+    m11 = (ROOT / ".github" / "workflows" / "m11-windows-release.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "from scripts.m11_release import project_version" in m11
+    assert m11.count("NIKA_RELEASE_VERSION: ${{ steps.release.outputs.version }}") == 2
+    assert "-WindowTitle 'Nika Core ${{ steps.release.outputs.version }}'" not in m11
+    assert "-DestinationPath ./dist/NikaCore-${{ steps.release.outputs.version }}" not in m11
+
+
 def test_release_gates_run_automatically_on_main_push() -> None:
     for path in RELEASE_WORKFLOWS:
         text = path.read_text(encoding="utf-8")
