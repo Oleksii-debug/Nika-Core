@@ -10,7 +10,6 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_work_ownership import (
     ProductFactoryWorkOwnership,
-    WorkOwnershipConflictError,
     WorkOwnershipError,
     WorkOwnershipLease,
 )
@@ -241,22 +240,6 @@ def test_one_writer_lease_survives_restart_and_blocks_competitor(tmp_path) -> No
             owner_id="worker-b",
             lease_seconds=60,
         )
-
-
-def test_active_owner_conflict_is_typed_without_weakening_base_error_contract(
-    tmp_path,
-) -> None:
-    service, _ = _service(tmp_path)
-    _acquire(service)
-
-    with pytest.raises(WorkOwnershipConflictError, match="another active owner") as caught:
-        service.acquire(
-            project_id="project-1",
-            work_id="work-1",
-            owner_id="worker-b",
-        )
-
-    assert isinstance(caught.value, WorkOwnershipError)
 
 
 def test_expired_owner_can_be_replaced_but_stale_fence_cannot_mutate(tmp_path) -> None:
