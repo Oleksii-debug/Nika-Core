@@ -131,6 +131,7 @@ def test_m12_runs_when_upstream_release_workflows_change() -> None:
     for workflow_path in M12_UPSTREAM_WORKFLOW_PATHS:
         assert m12.count(workflow_path) == 2, workflow_path
 
+
 def test_m11_requalifies_model_recovery_health_changes() -> None:
     m11 = (ROOT / ".github" / "workflows" / "m11-windows-release.yml").read_text(
         encoding="utf-8"
