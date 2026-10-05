@@ -154,5 +154,73 @@ async function main() {
   assert(messages.at(-1)[0].includes("Зміну підтверджено"));
   assert(logs.includes("Прийнято."));
   console.log("PASS: confirmed keymap write with failed refresh disables stale hotkeys");
+
+  const logFunctionsStart = source.indexOf("  function announce(message, assertive = false) {");
+  const logFunctionsEnd = source.indexOf("  function requestId() {", logFunctionsStart);
+  const reportStart = source.indexOf("  function reportStateUnavailable() {");
+  const reportEnd = source.indexOf("  function renderProductProject(project) {", reportStart);
+  assert(logFunctionsStart >= 0 && logFunctionsEnd > logFunctionsStart);
+  assert(reportStart >= 0 && reportEnd > reportStart);
+  assert(source.includes(
+    "    stateUnavailableReported = false;\\n    if (announceTeamTransitions && teamRender.changed) {".replace(
+      "\\\\n", "\\n",
+    ),
+  ), "healthy state must rearm outage reporting");
+
+  const entries = [];
+  let listLabel = "";
+  let alerts = 0;
+  const activityLog = {
+    get lastElementChild() {return entries.at(-1);},
+    get firstElementChild() {return entries[0];},
+    get childElementCount() {return entries.length;},
+    appendChild(item) {
+      item.remove = () => {entries.splice(entries.indexOf(item), 1);};
+      entries.push(item);
+    },
+    setAttribute(name, value) {if (name === "aria-label") listLabel = value;},
+  };
+  const statusNode = {
+    textContent: "",
+    setAttribute() {},
+  };
+  const logFactory = new Function("context", `
+    const {
+      document, statusNode, activityLog, renderProductProjectUnavailable,
+      renderTeamTaskUnavailable, productProjectUnavailableMessage,
+    } = context;
+    let stateUnavailableReported = false;
+    const maxActivityItems = 200;
+    ${source.slice(logFunctionsStart, logFunctionsEnd)}
+    ${source.slice(reportStart, reportEnd)}
+    return {
+      appendLog, reportStateUnavailable, reset: () => {stateUnavailableReported = false;},
+    };
+  `);
+  const uiLog = logFactory({
+    document: {createElement: () => ({textContent: ""})},
+    statusNode, activityLog,
+    renderProductProjectUnavailable: () => {},
+    renderTeamTaskUnavailable: () => {},
+    productProjectUnavailableMessage: "Стан недоступний",
+  });
+  uiLog.appendLog("same message");
+  uiLog.appendLog("same message");
+  assert.equal(entries.length, 1, "immediate duplicate must not grow the log");
+  for (let i = 0; i < 205; i += 1) uiLog.appendLog(`entry-${i}`);
+  assert.equal(entries.length, 200);
+  assert.equal(entries[0].textContent, "entry-5");
+  assert.equal(entries.at(-1).textContent, "entry-204");
+  assert(listLabel.includes("останні 200"), "log truncation must be accessible");
+  console.log("PASS: transient UI log bounded, deduplicated and labeled");
+
+  statusNode.setAttribute = () => {alerts += 1;};
+  uiLog.reportStateUnavailable();
+  uiLog.reportStateUnavailable();
+  assert.equal(alerts, 1, "same outage must announce once");
+  uiLog.reset();
+  uiLog.reportStateUnavailable();
+  assert.equal(alerts, 2, "fresh outage after recovery must announce again");
+  console.log("PASS: backend outage announced once per episode and rearmed on recovery");
 }
 main().catch((error) => {console.error(error); process.exitCode = 1;});
