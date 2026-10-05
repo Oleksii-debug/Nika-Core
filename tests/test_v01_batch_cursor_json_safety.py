@@ -220,3 +220,27 @@ def test_pre_envelope_legacy_result_remains_restorable(tmp_path: Path) -> None:
     )
     assert restarted.state.confirmed_count == 1
     assert restarted.state.targets[0].confirmed_result == {"remote_id": "доказ"}
+
+
+def test_missing_durable_completion_never_accepts_a_new_caller_claim(
+    tmp_path: Path,
+) -> None:
+    memory, ledger, task_id = _services(tmp_path)
+    cursor = _cursor(memory, ledger, task_id=task_id)
+    grant = cursor.begin_effect("перший")
+    ledger.complete(grant.operation_key)
+
+    with pytest.raises(BatchCursorStateError, match="missing durable result"):
+        cursor.confirm("перший", {"claimed": "success"})
+    assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
+
+    with pytest.raises(BatchCursorStateError, match="missing durable result"):
+        BatchCursor.restore(
+            memory,
+            ledger,
+            task_id=task_id,
+            cursor_id="cursor",
+            targets=[BatchTargetSpec(target_id="перший", payload={"text": "привіт"})],
+            batch_size=1,
+        )
+    assert ledger.require(grant.operation_key).status is IdempotencyStatus.COMPLETED
