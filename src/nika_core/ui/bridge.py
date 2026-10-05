@@ -129,15 +129,33 @@ class UIActionBridge:
                     "невідома дія."
                 ),
             }
+        except (TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося відновити комбінацію за замовчуванням: "
+                    "перевірте конфлікти карти клавіш."
+                ),
+            }
         return {
             "ok": True,
             "message": "Комбінацію за замовчуванням відновлено.",
         }
 
     def export_keymap(self) -> dict[str, Any]:
+        try:
+            data = self._keymap.export_json()
+        except (KeyError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "message": (
+                    "Не вдалося експортувати карту клавіш: "
+                    "перевірте збережені налаштування."
+                ),
+            }
         return {
             "ok": True,
-            "data": self._keymap.export_json(),
+            "data": data,
             "message": "Карту клавіш експортовано.",
         }
 
