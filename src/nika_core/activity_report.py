@@ -9,6 +9,8 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.resources.contracts import ResourceObserverPort, ResourceSnapshot
 
 _MAX_SIGNED_64 = (1 << 63) - 1
+_MAX_GROUPED_ACTIVITY_ITEMS = 20
+_GROUPED_QUERY_LIMIT = _MAX_GROUPED_ACTIVITY_ITEMS + 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,6 +75,8 @@ class DailyActivityReportService:
         self._resource_observer = resource_observer
 
     def build_utc_day(self, day: date) -> DailyActivityReport:
+        if type(day) is not date:
+            raise TypeError("day must be a built-in date")
         start = datetime.combine(day, time.min, tzinfo=UTC)
         return self.build_window(start=start, end=start + timedelta(days=1))
 
@@ -88,28 +92,28 @@ class DailyActivityReportService:
             raise FileNotFoundError(f"Nika database does not exist: {self._store.path}")
         with self._store.connection() as conn:
             conn.execute("PRAGMA query_only = ON")
-            task_transitions = _grouped_counts(
+            task_transitions, task_transitions_truncated = _grouped_counts(
                 conn.execute(
                     "SELECT new_state AS value, COUNT(*) AS count "
                     "FROM task_events WHERE created_at >= ? AND created_at < ? "
-                    "GROUP BY new_state ORDER BY new_state",
-                    (start_iso, end_iso),
+                    "GROUP BY new_state ORDER BY new_state LIMIT ?",
+                    (start_iso, end_iso, _GROUPED_QUERY_LIMIT),
                 ).fetchall()
             )
-            audit_events = _grouped_counts(
+            audit_events, audit_events_truncated = _grouped_counts(
                 conn.execute(
                     "SELECT event_type AS value, COUNT(*) AS count "
                     "FROM audit_events WHERE created_at >= ? AND created_at < ? "
-                    "GROUP BY event_type ORDER BY event_type",
-                    (start_iso, end_iso),
+                    "GROUP BY event_type ORDER BY event_type LIMIT ?",
+                    (start_iso, end_iso, _GROUPED_QUERY_LIMIT),
                 ).fetchall()
             )
-            experiment_transitions = _grouped_counts(
+            experiment_transitions, experiment_transitions_truncated = _grouped_counts(
                 conn.execute(
                     "SELECT new_status AS value, COUNT(*) AS count "
                     "FROM experiment_events WHERE created_at >= ? AND created_at < ? "
-                    "GROUP BY new_status ORDER BY new_status",
-                    (start_iso, end_iso),
+                    "GROUP BY new_status ORDER BY new_status LIMIT ?",
+                    (start_iso, end_iso, _GROUPED_QUERY_LIMIT),
                 ).fetchall()
             )
             research_documents_added = _scalar_count(
@@ -131,6 +135,39 @@ class DailyActivityReportService:
         if self._resource_observer is not None:
             snapshot = _observe_resource_snapshot(self._resource_observer)
 
+        limitations = [
+            "Включено лише канонічні durable-записи, що існують у локальній БД.",
+            (
+                "Вміст task payload, audit payload, пам'яті та дослідницьких документів "
+                "навмисно не виводиться."
+            ),
+            (
+                "Історичні CPU/RAM, API token usage і вартість не вигадуються; ресурсний "
+                "знімок, якщо є, відображає лише момент побудови звіту."
+            ),
+            (
+                "Семантичне твердження про те, що саме Nika вивчила, потребує окремого "
+                "перевіреного learning evidence і тут не синтезується."
+            ),
+        ]
+        truncated_sections = tuple(
+            label
+            for label, truncated in (
+                ("переходи завдань", task_transitions_truncated),
+                ("події аудиту", audit_events_truncated),
+                ("переходи експериментів", experiment_transitions_truncated),
+            )
+            if truncated
+        )
+        if truncated_sections:
+            limitations.append(
+                "Для доступного читання в кожному групованому розділі показано не більше "
+                f"{_MAX_GROUPED_ACTIVITY_ITEMS} категорій у стабільному порядку; "
+                "додаткові категорії існують, але не деталізовані: "
+                + ", ".join(truncated_sections)
+                + "."
+            )
+
         return DailyActivityReport(
             window_start=start_utc,
             window_end=end_utc,
@@ -140,21 +177,7 @@ class DailyActivityReportService:
             research_documents_added=research_documents_added,
             memory_update_events=memory_update_events,
             resource_snapshot=snapshot,
-            limitations=(
-                "Включено лише канонічні durable-записи, що існують у локальній БД.",
-                (
-                    "Вміст task payload, audit payload, пам'яті та дослідницьких документів "
-                    "навмисно не виводиться."
-                ),
-                (
-                    "Історичні CPU/RAM, API token usage і вартість не вигадуються; ресурсний "
-                    "знімок, якщо є, відображає лише момент побудови звіту."
-                ),
-                (
-                    "Семантичне твердження про те, що саме Nika вивчила, потребує окремого "
-                    "перевіреного learning evidence і тут не синтезується."
-                ),
-            ),
+            limitations=tuple(limitations),
         )
 
 
@@ -236,11 +259,21 @@ def _valid_optional_nonnegative_int(value: object) -> bool:
     return value is None or _valid_nonnegative_int(value)
 
 
-def _grouped_counts(rows: list[object]) -> tuple[ActivityCount, ...]:
-    return tuple(
-        ActivityCount(value=str(row["value"]), count=int(row["count"]))  # type: ignore[index]
-        for row in rows
-    )
+def _grouped_counts(
+    rows: list[object],
+) -> tuple[tuple[ActivityCount, ...], bool]:
+    truncated = len(rows) > _MAX_GROUPED_ACTIVITY_ITEMS
+    selected = rows[:_MAX_GROUPED_ACTIVITY_ITEMS]
+    counts: list[ActivityCount] = []
+    for row in selected:
+        value = row["value"]  # type: ignore[index]
+        count = row["count"]  # type: ignore[index]
+        if type(value) is not str:
+            raise ValueError("grouped activity label must use SQLite TEXT storage")
+        if type(count) is not int or not 1 <= count <= _MAX_SIGNED_64:
+            raise ValueError("grouped activity count must be a positive SQLite integer")
+        counts.append(ActivityCount(value=value, count=count))
+    return tuple(counts), truncated
 
 
 def _scalar_count(row: object | None) -> int:
