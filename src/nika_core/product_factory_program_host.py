@@ -455,7 +455,10 @@ class ProductFactoryProgramHost:
                         coordinator,
                         ProgramWorkDisposition.NEEDS_RECONCILIATION,
                         operation.status,
-                        "existing worker operation has a different host or request identity",
+                        (
+                            "existing worker operation has a different host "
+                            "or request identity"
+                        ),
                     )
                 self._release_best_effort(lease)
                 return _existing_operation_outcome(request, operation)
