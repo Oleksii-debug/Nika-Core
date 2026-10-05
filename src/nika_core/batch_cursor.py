@@ -381,11 +381,14 @@ class BatchCursor:
             self._confirm_from_durable(target, durable_result)
             self._advance(durable_due)
         else:
+            # Reject malformed evidence before changing the durable ledger. A
+            # failed caller-side serialization must not create a partial mark.
+            clean_evidence = _json_copy(evidence)
             if record.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain(target.operation_key)
             target.attempt_state = AttemptState.UNCERTAIN
             target.confirmed_result = None
-            target.uncertain_result = _json_copy(evidence)
+            target.uncertain_result = clean_evidence
             self._state.next_scheduled_intent = _reconcile_intent(target)
         self._persist()
 
