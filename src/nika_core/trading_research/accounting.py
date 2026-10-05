@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
 
 from .contracts import Instrument, TradingResearchError
+from .identity import InstrumentIdentity, instrument_identity
 from .orders import Side, SimulatedFill
 
 
@@ -32,7 +34,7 @@ class PortfolioLedger:
     starting_cash: Decimal
     _cash: Decimal = field(init=False)
     _fees: Decimal = field(default=Decimal(0), init=False)
-    _positions: dict[str, Position] = field(default_factory=dict, init=False)
+    _positions: dict[InstrumentIdentity, Position] = field(default_factory=dict, init=False)
     _applied_fill_ids: set[str] = field(default_factory=set, init=False)
 
     def __post_init__(self) -> None:
@@ -49,7 +51,7 @@ class PortfolioLedger:
         return self._fees
 
     def position(self, instrument: Instrument) -> Position:
-        return self._positions.get(instrument.instrument_id, Position(instrument))
+        return self._positions.get(instrument_identity(instrument), Position(instrument))
 
     def apply_fill(self, fill: SimulatedFill) -> None:
         if fill.fill_id in self._applied_fill_ids:
@@ -59,14 +61,14 @@ class PortfolioLedger:
         gross = fill.quantity * fill.price
         self._cash += (-gross if fill.side is Side.BUY else gross) - fill.fee
         self._fees += fill.fee
-        self._positions[fill.instrument.instrument_id] = _apply_position_fill(
+        self._positions[instrument_identity(fill.instrument)] = _apply_position_fill(
             current, signed_fill, fill.price
         )
         self._applied_fill_ids.add(fill.fill_id)
 
-    def snapshot(self, marks: dict[str, Decimal]) -> AccountSnapshot:
+    def snapshot(self, marks: Mapping[InstrumentIdentity, Decimal]) -> AccountSnapshot:
         positions = tuple(
-            sorted(self._positions.values(), key=lambda item: item.instrument.instrument_id)
+            sorted(self._positions.values(), key=lambda item: instrument_identity(item.instrument))
         )
         realized = sum((item.realized_pnl for item in positions), Decimal(0))
         unrealized = Decimal(0)
@@ -76,10 +78,11 @@ class PortfolioLedger:
         for item in positions:
             if item.quantity == 0:
                 continue
-            mark = marks.get(item.instrument.instrument_id)
+            identity = instrument_identity(item.instrument)
+            mark = marks.get(identity)
             if mark is None or mark <= 0:
                 raise TradingResearchError(
-                    f"positive mark required for open position {item.instrument.instrument_id}"
+                    f"positive mark required for open position identity {identity!r}"
                 )
             value = item.quantity * mark
             market_value += value
