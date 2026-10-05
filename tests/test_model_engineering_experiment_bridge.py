@@ -926,3 +926,57 @@ def test_observation_bridge_revalidates_mutated_promotion_policy() -> None:
             definition=definition,
             evaluation_set=evaluation,
         )
+
+
+def test_definition_bridge_revalidates_mutated_guardrail_rule() -> None:
+    guardrail = MetricRule(metric=LATENCY_METRIC, max_regression=1.0)
+    policy = PromotionPolicy(
+        primary_metric=QUALITY_METRIC,
+        minimum_replays=2,
+        guardrails=(guardrail,),
+    )
+    object.__setattr__(guardrail, "max_regression", -1.0)
+
+    with pytest.raises(ValueError, match="max_regression"):
+        build_experiment_definition(
+            experiment_id="guardrail-revalidation",
+            champion=_candidate("champion", "m1"),
+            challengers=(_candidate("challenger", "m2"),),
+            evaluation_set=_evaluation(),
+            execution_config=_execution_config(),
+            policy=policy,
+            permission_fingerprint="permissions-v1",
+        )
+
+
+def test_observation_bridge_revalidates_mutated_guardrail_rule() -> None:
+    candidate = _candidate("candidate", "m1")
+    evaluation = _evaluation()
+    guardrail = MetricRule(metric=LATENCY_METRIC, max_regression=1.0)
+    definition = build_experiment_definition(
+        experiment_id="observation-guardrail-revalidation",
+        champion=candidate,
+        challengers=(_candidate("other", "m2"),),
+        evaluation_set=evaluation,
+        execution_config=_execution_config(),
+        policy=PromotionPolicy(
+            primary_metric=QUALITY_METRIC,
+            minimum_replays=2,
+            guardrails=(guardrail,),
+        ),
+        permission_fingerprint="permissions-v1",
+    )
+    report = _report(
+        candidate,
+        evaluation,
+        quality=(1.0, 1.0),
+        latency=(10.0, 20.0),
+    )
+    object.__setattr__(guardrail, "max_regression", -1.0)
+
+    with pytest.raises(ValueError, match="max_regression"):
+        benchmark_observations(
+            report,
+            definition=definition,
+            evaluation_set=evaluation,
+        )
