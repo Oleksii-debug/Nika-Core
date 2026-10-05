@@ -661,6 +661,7 @@ def _candidate_descriptor(
         capabilities=("text",),
     )
 
+
 def run_physical_pilot_from_config(
     config: PhysicalPilotConfig,
 ) -> PhysicalTrainingPilotReport:
