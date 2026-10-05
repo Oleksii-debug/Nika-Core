@@ -473,10 +473,13 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
     text = _read_notices(target)
     if text is None:
         return ("notices:unreadable",)
+    structural_error = False
     try:
         sections, duplicates = _sections(text)
     except ValueError:
-        return ("notices:structure",)
+        sections = {}
+        duplicates = ()
+        structural_error = True
 
     findings: list[str] = []
     expected_titles = {"Python runtime"}
@@ -508,4 +511,6 @@ def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
 
     if set(sections).difference(expected_titles):
         findings.append("notices:unexpected-section")
+    if structural_error:
+        findings.append("notices:structure")
     return tuple(dict.fromkeys(findings))
