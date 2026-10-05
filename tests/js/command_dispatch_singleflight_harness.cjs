@@ -299,8 +299,9 @@ async function main() {
       if (selection?.marker) stateMarkers.push(selection.marker);
     },
     renderItems: () => {},
-    tasksList: {}, tasksEmpty: {}, agentsList: {}, agentsEmpty: {},
-    workspacesList: {}, workspacesEmpty: {},
+    tasksList: {replaceChildren() {}}, tasksEmpty: {},
+    agentsList: {replaceChildren() {}}, agentsEmpty: {},
+    workspacesList: {replaceChildren() {}}, workspacesEmpty: {},
     renderProductProject: () => true,
     renderTeamTask: () => ({ok: true, changed: false}),
     announce: () => {},
@@ -337,6 +338,15 @@ async function main() {
   assert.equal(stateOutages, 0, "superseded transport failure must not announce a false outage");
   assert.deepEqual(stateMarkers, ["current", "current-after-failure"]);
   console.log("PASS: stale overlapping state failure cannot downgrade a newer healthy projection");
+
+  const outagesBeforeMalformed = stateOutages;
+  stateReader = async () => ({
+    ok: true,
+    state: {tasks: {}, agents: [], workspaces: []},
+  });
+  assert.equal(await stateUi.refreshState(), false);
+  assert.equal(stateOutages, outagesBeforeMalformed + 1);
+  console.log("PASS: malformed summary collections fail closed without renderer exceptions");
 
   stateReader = async () => ({
     ok: true,
