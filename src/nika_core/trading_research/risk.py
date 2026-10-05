@@ -9,12 +9,14 @@ from .contracts import TradingResearchError, require_aware_utc
 from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
 from .orders import (
     ExecutionPolicy,
+    OrderAuthority,
     OrderIntent,
     OrderType,
     RiskApprovedOrder,
     Side,
     apply_slippage,
     fee_for,
+    order_authority_sha256,
 )
 
 
@@ -92,6 +94,7 @@ class RiskEngine:
         self,
         intent: OrderIntent,
         *,
+        authority: OrderAuthority,
         snapshot: AccountSnapshot,
         mark_price: Decimal,
         pending_signed_quantity: Decimal,
@@ -102,6 +105,8 @@ class RiskEngine:
         pending_orders: tuple[PendingRiskOrder, ...] = (),
     ) -> RiskApprovedOrder:
         approved_at = require_aware_utc(approved_at, "approved_at")
+        if type(authority) is not OrderAuthority:
+            raise TradingResearchError("approve requires host OrderAuthority")
         if mark_price <= 0:
             raise TradingResearchError("mark_price must be positive")
         if pending_orders and pending_signed_quantity != 0:
@@ -119,6 +124,11 @@ class RiskEngine:
             if pending.order.approval_id in seen_pending_approvals:
                 raise TradingResearchError("duplicate pending approval_id")
             seen_pending_approvals.add(pending.order.approval_id)
+            if (
+                pending.order.authority.workspace_id != authority.workspace_id
+                or pending.order.authority.run_id != authority.run_id
+            ):
+                raise TradingResearchError("pending order belongs to another workspace/run")
             if (
                 pending.order.approved_at > approved_at
                 or pending.order.approved_slice > approved_slice
@@ -215,9 +225,11 @@ class RiskEngine:
 
         return RiskApprovedOrder(
             approval_id=(
-                f"risk:{instrument_identity_sha256(intent.instrument)}:{intent.intent_id}"
+                f"risk:{order_authority_sha256(authority)}:"
+                f"{instrument_identity_sha256(intent.instrument)}"
             ),
             intent=intent,
+            authority=authority,
             approved_at=approved_at,
             approved_slice=approved_slice,
             policy=policy,
