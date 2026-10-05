@@ -44,6 +44,25 @@ def test_runtime_evidence_rejects_oversized_input(tmp_path: Path) -> None:
         _read_runtime_evidence_json(path, label="runtime evidence")
 
 
+def test_runtime_evidence_rejects_integer_above_digit_limit(tmp_path: Path) -> None:
+    path = tmp_path / "evidence.json"
+    path.write_bytes(b'{"value":' + b"9" * 1235 + b"}")
+
+    with pytest.raises(RuntimeError, match="invalid or oversized JSON"):
+        _read_runtime_evidence_json(path, label="runtime evidence")
+
+
+def test_runtime_evidence_enforces_integer_bit_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "evidence.json"
+    accepted = 1 << 4095
+    path.write_text(json.dumps({"value": accepted}), encoding="utf-8")
+    assert _read_runtime_evidence_json(path, label="runtime evidence") == {"value": accepted}
+
+    path.write_text('{"value":' + str(1 << 4096) + "}", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="invalid or oversized JSON"):
+        _read_runtime_evidence_json(path, label="runtime evidence")
+
+
 def test_runtime_evidence_rejects_excess_depth(tmp_path: Path) -> None:
     path = tmp_path / "evidence.json"
     path.write_text("[" * 65 + "0" + "]" * 65, encoding="utf-8")
