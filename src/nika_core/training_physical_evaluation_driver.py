@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import math
@@ -15,7 +16,13 @@ from typing import NoReturn
 
 from nika_core.artifacts import ArtifactRegistry
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.experiments import MetricRule, PromotionPolicy, SQLiteExperimentRepository
+from nika_core.experiments import (
+    ExperimentEngine,
+    ExperimentStatus,
+    MetricRule,
+    PromotionPolicy,
+    SQLiteExperimentRepository,
+)
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue, TaskRecord
 from nika_core.learning_package import FrozenLearningPackage
@@ -31,6 +38,7 @@ from nika_core.model_engineering import (
     EvaluationSet,
     ModelCandidate,
 )
+from nika_core.model_engineering.experiment_bridge import build_experiment_definition
 from nika_core.model_gateway.contracts import ModelMessage, PrivacyClass, ProviderKind
 from nika_core.training_evaluation_binding import bind_training_result_for_evaluation
 from nika_core.training_evaluation_champion import bind_champion_for_attested_evaluation
@@ -863,8 +871,136 @@ def _register_evaluator(
     return registry, command, executable_record.artifact_id, command_artifact_ids
 
 
+def _policy_payload(policy: PromotionPolicy) -> dict[str, object]:
+    if type(policy) is not PromotionPolicy:
+        raise TypeError("policy must be an exact PromotionPolicy")
+    PromotionPolicy.__post_init__(policy)
+    return {
+        "primary_metric": policy.primary_metric,
+        "minimum_improvement": float(policy.minimum_improvement),
+        "minimum_replays": policy.minimum_replays,
+        "primary_higher_is_better": policy.primary_higher_is_better,
+        "guardrails": [
+            {
+                "metric": item.metric,
+                "higher_is_better": item.higher_is_better,
+                "max_regression": float(item.max_regression),
+            }
+            for item in policy.guardrails
+        ],
+    }
+
+
+def _physical_attempt_id(
+    *,
+    requested_experiment_id: str,
+    pilot: PhysicalTrainingPilotReport,
+    training_binding_sha256: str,
+    champion_binding_sha256: str,
+    champion: ModelCandidate,
+    challenger: ModelCandidate,
+    evaluation_set: EvaluationSet,
+    execution_config: BenchmarkExecutionConfig,
+    policy: PromotionPolicy,
+    permission_fingerprint: str,
+    attestor_id: str,
+    attestor_sha256: str,
+) -> str:
+    payload = {
+        "schema": "nika-physical-old-new-attempt-v1",
+        "requested_experiment_id": _require_text(
+            requested_experiment_id,
+            name="requested_experiment_id",
+        ),
+        "physical_pilot_evidence_sha256": pilot.evidence_sha256,
+        "training_binding_sha256": _require_text(
+            training_binding_sha256,
+            name="training_binding_sha256",
+        ),
+        "champion_binding_sha256": _require_text(
+            champion_binding_sha256,
+            name="champion_binding_sha256",
+        ),
+        "champion_candidate_sha256": champion.evidence_sha256,
+        "challenger_candidate_sha256": challenger.evidence_sha256,
+        "evaluation_set_sha256": evaluation_set.content_sha256,
+        "execution_config_sha256": execution_config.evidence_sha256,
+        "policy": _policy_payload(policy),
+        "permission_fingerprint": _require_text(
+            permission_fingerprint,
+            name="permission_fingerprint",
+        ),
+        "attestor_id": _require_text(attestor_id, name="attestor_id"),
+        "attestor_sha256": _require_text(
+            attestor_sha256,
+            name="attestor_sha256",
+        ),
+    }
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return f"nika-physical-old-new-{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _claim_evaluation_attempt(
+    *,
+    repository: SQLiteExperimentRepository,
+    experiment_id: str,
+    champion: ModelCandidate,
+    challenger: ModelCandidate,
+    evaluation_set: EvaluationSet,
+    execution_config: BenchmarkExecutionConfig,
+    policy: PromotionPolicy,
+    permission_fingerprint: str,
+) -> None:
+    definition = build_experiment_definition(
+        experiment_id=experiment_id,
+        champion=champion,
+        challengers=(challenger,),
+        evaluation_set=evaluation_set,
+        execution_config=execution_config,
+        policy=policy,
+        permission_fingerprint=permission_fingerprint,
+    )
+    engine = ExperimentEngine(repository)
+    try:
+        engine.create(definition)
+    except ValueError as exc:
+        try:
+            existing = repository.get(experiment_id)
+        except KeyError:
+            raise PhysicalEvaluationDriverError(
+                "durable physical evaluation attempt could not be claimed"
+            ) from exc
+        if existing.definition != definition:
+            raise PhysicalEvaluationDriverError(
+                "durable physical evaluation attempt identity conflicts with existing state"
+            ) from exc
+        raise PhysicalEvaluationDriverError(
+            "durable physical evaluation attempt already exists; model-effect state "
+            "may be unknown, so this driver will not repeat champion/challenger effects; "
+            "preserve the pilot database and reconcile the attempt before any fresh run"
+        ) from exc
+    try:
+        snapshot = engine.start(experiment_id)
+    except (KeyError, RuntimeError, TypeError, ValueError) as exc:
+        raise PhysicalEvaluationDriverError(
+            "durable physical evaluation attempt was claimed but could not enter the "
+            "running state; preserve the pilot database and reconcile before retrying"
+        ) from exc
+    if snapshot.status is not ExperimentStatus.RUNNING or snapshot.observations:
+        raise PhysicalEvaluationDriverError(
+            "durable physical evaluation attempt claim is not a fresh running snapshot"
+        )
+
+
 def _canonical_report_payload(
     *,
+    requested_experiment_id: str,
     pilot: PhysicalTrainingPilotReport,
     evaluation_set: EvaluationSet,
     execution_config: BenchmarkExecutionConfig,
@@ -876,6 +1012,7 @@ def _canonical_report_payload(
         "schema_version": _REPORT_SCHEMA_VERSION,
         "schema": "nika-physical-old-new-evaluation-report-v1",
         "physical_pilot_evidence_sha256": pilot.evidence_sha256,
+        "requested_experiment_id": requested_experiment_id,
         "evaluation_set_sha256": evaluation_set.content_sha256,
         "execution_config_sha256": execution_config.evidence_sha256,
         "comparison_evidence_sha256": result.evidence_sha256,
@@ -1002,6 +1139,32 @@ async def _run_attested_comparison(
     ):
         _fail("champion and challenger evaluator commands do not share one attestor authority")
 
+    experiment_id = _physical_attempt_id(
+        requested_experiment_id=config.experiment_id,
+        pilot=pilot,
+        training_binding_sha256=training_binding.binding_sha256,
+        champion_binding_sha256=champion_binding.binding_sha256,
+        champion=champion,
+        challenger=challenger,
+        evaluation_set=evaluation_set,
+        execution_config=config.benchmark,
+        policy=config.policy,
+        permission_fingerprint=config.permission_fingerprint,
+        attestor_id=champion_attestor.attestor_id,
+        attestor_sha256=champion_attestor.attestor_sha256,
+    )
+    repository = SQLiteExperimentRepository(store)
+    _claim_evaluation_attempt(
+        repository=repository,
+        experiment_id=experiment_id,
+        champion=champion,
+        challenger=challenger,
+        evaluation_set=evaluation_set,
+        execution_config=config.benchmark,
+        policy=config.policy,
+        permission_fingerprint=config.permission_fingerprint,
+    )
+
     _verify_completed_checkpoint(store, task=task, report=pilot)
     champion_result = await run_attested_champion_benchmark(
         binding=champion_binding,
@@ -1036,8 +1199,8 @@ async def _run_attested_comparison(
         execution_config=config.benchmark,
         policy=config.policy,
         permission_fingerprint=config.permission_fingerprint,
-        experiment_id=config.experiment_id,
-        repository=SQLiteExperimentRepository(store),
+        experiment_id=experiment_id,
+        repository=repository,
     )
 
 
@@ -1189,6 +1352,7 @@ def run_physical_evaluation_from_config(
         )
     )
     payload = _canonical_report_payload(
+        requested_experiment_id=config.experiment_id,
         pilot=pilot,
         evaluation_set=evaluation_set,
         execution_config=config.benchmark,
