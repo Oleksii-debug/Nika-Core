@@ -365,13 +365,29 @@ def _is_reparse(value: os.stat_result) -> bool:
     return bool(attributes & reparse_flag)
 
 
-def _hash_model_directory_file(path: Path) -> tuple[str, int]:
+def _stable_stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _hash_model_directory_file(
+    path: Path,
+    *,
+    expected: os.stat_result | None = None,
+) -> tuple[str, int]:
     try:
         before = os.lstat(path)
     except OSError as exc:
         raise ValueError("model_dir entry is not accessible") from exc
     if stat.S_ISLNK(before.st_mode) or _is_reparse(before) or not stat.S_ISREG(before.st_mode):
         raise ValueError("model_dir must contain regular non-linked files only")
+    if expected is not None and _stable_stat_identity(before) != _stable_stat_identity(expected):
+        raise ValueError("model_dir entry changed before hashing")
 
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -411,31 +427,11 @@ def _hash_model_directory_file(path: Path) -> tuple[str, int]:
         current = os.lstat(path)
     except OSError as exc:
         raise ValueError("model_dir entry changed during hashing") from exc
-    identity = (
-        opened.st_dev,
-        opened.st_ino,
-        opened.st_size,
-        opened.st_mtime_ns,
-        opened.st_ctime_ns,
-    )
+    identity = _stable_stat_identity(opened)
     if (
         total != opened.st_size
-        or identity
-        != (
-            after.st_dev,
-            after.st_ino,
-            after.st_size,
-            after.st_mtime_ns,
-            after.st_ctime_ns,
-        )
-        or identity
-        != (
-            current.st_dev,
-            current.st_ino,
-            current.st_size,
-            current.st_mtime_ns,
-            current.st_ctime_ns,
-        )
+        or identity != _stable_stat_identity(after)
+        or identity != _stable_stat_identity(current)
         or stat.S_ISLNK(current.st_mode)
         or _is_reparse(current)
         or not stat.S_ISREG(current.st_mode)
@@ -459,15 +455,24 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
         or not stat.S_ISDIR(root_stat.st_mode)
     ):
         raise ValueError("model_dir must be a non-linked directory")
+    root_identity = _stable_stat_identity(root_stat)
 
-    entries: list[dict[str, object]] = []
-    total_files = 0
-    total_bytes = 0
     try:
         paths = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
     except OSError as exc:
         raise ValueError("model_dir could not be enumerated") from exc
-    for path in paths:
+    relative_paths = [path.relative_to(root).as_posix() for path in paths]
+
+    entries: list[dict[str, object]] = []
+    directory_identities: dict[str, tuple[int, int, int, int, int]] = {}
+    seen_paths: set[str] = set()
+    total_files = 0
+    total_bytes = 0
+    for path, relative in zip(paths, relative_paths, strict=True):
+        folded = relative.casefold()
+        if folded in seen_paths:
+            raise ValueError("model_dir contains case-fold path collisions")
+        seen_paths.add(folded)
         try:
             value = os.lstat(path)
         except OSError as exc:
@@ -475,15 +480,15 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
         if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
             raise ValueError("model_dir must not contain links or reparse points")
         if stat.S_ISDIR(value.st_mode):
+            directory_identities[relative] = _stable_stat_identity(value)
             continue
         if not stat.S_ISREG(value.st_mode):
             raise ValueError("model_dir must contain regular files only")
-        digest, size_bytes = _hash_model_directory_file(path)
+        digest, size_bytes = _hash_model_directory_file(path, expected=value)
         total_files += 1
         total_bytes += size_bytes
         if total_files > _MAX_MODEL_DIR_FILES or total_bytes > _MAX_MODEL_DIR_BYTES:
             raise ValueError("model_dir exceeds manifest bounds")
-        relative = path.relative_to(root).as_posix()
         entries.append(
             {
                 "path": relative,
@@ -493,6 +498,35 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
         )
     if not entries:
         raise ValueError("model_dir must not be empty")
+
+    try:
+        root_after = os.lstat(root)
+        paths_after = sorted(
+            root.rglob("*"),
+            key=lambda item: item.relative_to(root).as_posix(),
+        )
+    except OSError as exc:
+        raise ValueError("model_dir changed during manifest") from exc
+    if (
+        stat.S_ISLNK(root_after.st_mode)
+        or _is_reparse(root_after)
+        or not stat.S_ISDIR(root_after.st_mode)
+        or _stable_stat_identity(root_after) != root_identity
+        or [path.relative_to(root).as_posix() for path in paths_after] != relative_paths
+    ):
+        raise ValueError("model_dir changed during manifest")
+    for relative, identity in directory_identities.items():
+        try:
+            value = os.lstat(root / relative)
+        except OSError as exc:
+            raise ValueError("model_dir changed during manifest") from exc
+        if (
+            stat.S_ISLNK(value.st_mode)
+            or _is_reparse(value)
+            or not stat.S_ISDIR(value.st_mode)
+            or _stable_stat_identity(value) != identity
+        ):
+            raise ValueError("model_dir changed during manifest")
     encoded = json.dumps(
         entries,
         allow_nan=False,
