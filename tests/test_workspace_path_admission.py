@@ -44,6 +44,7 @@ def test_workspace_resolver_retains_unicode_and_nested_relative_paths(tmp_path: 
     expected = (tmp_path / "робоча папка" / "документи" / "звіт 1.txt").resolve()
 
     assert resolver.resolve("документи/звіт 1.txt") == expected
+    assert resolver.resolve(r"документи\звіт 1.txt") == expected
     assert resolver.resolve(".") == resolver.root
 
 
