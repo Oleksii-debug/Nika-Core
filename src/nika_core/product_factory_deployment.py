@@ -782,6 +782,10 @@ class DeploymentFabric:
         )
 
     def _record(self, intent_id: str) -> DeploymentRecord:
+        if type(intent_id) is not str or not intent_id.strip():
+            raise DeploymentFabricError(
+                "deployment intent id carrier must be exact non-empty text"
+            )
         try:
             return self._records[intent_id]
         except KeyError as exc:
