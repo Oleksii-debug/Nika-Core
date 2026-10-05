@@ -221,3 +221,22 @@ This candidate does **not** mark `WEB_API_CONTRACT_READY`,
 `MULTI_TENANT_SECURITY_READY`, `WEB_UI_FOUNDATION_READY` or
 `WEB_PRODUCTION_READY`. A later HTTP/SSE/WebSocket adapter must reuse this application boundary
 and canonical Nika application/domain services rather than copy Windows business logic.
+
+### Dependent HTTP transport candidate — 2026-10-05
+
+The `feature/web-http-transport-20261005` child adds a minimal framework-neutral HTTP transport
+projection over the application boundary:
+
+- the caller must provide an already-authenticated exact `WebPrincipal`; request headers/body are
+  never used to establish tenant/user/workspace/session authority;
+- request bytes are bounded before parsing, require strict UTF-8 JSON, reject duplicate keys and
+  non-finite/oversized numeric literals, and then reuse `WebApplicationBoundary` admission;
+- post-handler unknown outcomes map to an explicit reconciliation-required response and are never
+  automatically retried;
+- responses use canonical UTF-8 JSON with `Cache-Control: no-store` and
+  `X-Content-Type-Options: nosniff`; raw server exception text is not serialized.
+
+This is an adapter contract, not a network listener or authenticated production server. It adds no
+session/token validator, CSRF/CORS policy, abuse/rate limiting, SSE/WebSocket channel, TLS endpoint or
+deployment surface, and therefore does not mark `WEB_API_CONTRACT_READY`,
+`MULTI_TENANT_SECURITY_READY` or `WEB_PRODUCTION_READY`.
