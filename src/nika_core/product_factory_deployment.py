@@ -416,7 +416,7 @@ class DeploymentFabric:
         self._save(uncertain)
         try:
             result = _snapshot_provider_deployment_result(
-                self.provider.deploy(intent)
+                self.provider.deploy(_snapshot_deployment_intent(intent))
             )
         except Exception:  # noqa: BLE001
             # A provider may mutate the target before failing to return valid evidence.
@@ -451,7 +451,9 @@ class DeploymentFabric:
             previous_release=previous_release,
         )
         try:
-            health = _snapshot_health_evidence(self.provider.health(intent))
+            health = _snapshot_health_evidence(
+                self.provider.health(_snapshot_deployment_intent(intent))
+            )
         except Exception:  # noqa: BLE001
             # Invalid provider evidence after an applied effect is still uncertain.
             return self._mark_uncertain(record)
@@ -672,11 +674,24 @@ class DeploymentFabric:
             # multiple releases share source SHA. Do not issue that ambiguous effect.
             return self._mark_uncertain(record, health.evidence_refs)
         try:
+            provider_intent = _snapshot_deployment_intent(intent)
             if callable(rollback_exact):
-                rollback_result = rollback_exact(intent, record.previous_release)
+                previous_release = (
+                    None
+                    if record.previous_release is None
+                    else _snapshot_provider_release(
+                        record.previous_release,
+                        "rollback target",
+                    )
+                )
+                rollback_result = rollback_exact(
+                    provider_intent,
+                    previous_release,
+                )
             else:
                 rollback_result = self.provider.rollback(
-                    intent, record.previous_release_sha
+                    provider_intent,
+                    record.previous_release_sha,
                 )
             rollback = _snapshot_rollback_evidence(rollback_result)
         except Exception:  # noqa: BLE001
@@ -761,7 +776,10 @@ class DeploymentFabric:
         )
 
     def _inspect_provider(self, intent: DeploymentIntent) -> ProviderInspection:
-        return _snapshot_provider_inspection(self.provider.inspect(intent))
+        provider_intent = _snapshot_deployment_intent(intent)
+        return _snapshot_provider_inspection(
+            self.provider.inspect(provider_intent)
+        )
 
     def _record(self, intent_id: str) -> DeploymentRecord:
         try:
