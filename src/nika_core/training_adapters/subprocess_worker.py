@@ -21,6 +21,7 @@ from nika_core.artifacts import (
 )
 from nika_core.training_materials import ResolvedTrainingPackage, TrainingMaterialResolutionError
 from nika_core.training_runtime import (
+    ArtifactIdentity,
     TrainingJobSpec,
     TrainingStepResult,
     TrainingWorkerError,
