@@ -209,9 +209,10 @@ framework-neutral boundary for migration step 3 without changing the Windows/NVD
 - command and result carriers are detached, exact-type admitted, UTF-8/JSON resource-bounded and
   canonicalized before crossing presentation boundaries;
 - server authorization runs before command-handler effects and must return an exact Boolean;
-- the boundary calls the handler at most once and never treats transport/application failure as safe
-  to retry; state-changing handlers must reuse Nika's canonical durable idempotency/reconciliation
-  authority before external effects, and `request_id` alone is not completion evidence;
+- the boundary calls the handler at most once; any exception/invalid result after handler entry
+  becomes a typed `WebCommandOutcomeUnknownError` requiring reconciliation rather than blind retry;
+  state-changing handlers must reuse Nika's canonical durable idempotency/reconciliation authority
+  before external effects, and `request_id` alone is not completion evidence;
 - client-supplied tenant/user/workspace/session fields cannot become authority through the command;
 - the candidate adds no HTTP framework, account/session provider, entitlement service, secret store
   or parallel task/runtime semantics.
