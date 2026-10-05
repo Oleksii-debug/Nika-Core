@@ -1,8 +1,24 @@
 # Nika Core autonomous development instructions
 
+## CANONICAL WORKER-AUTONOMY OVERRIDE
+
+This section has highest priority for autonomous worker coordination and supersedes older conflicting worker-count, coordinator-count, WIP, ownership/claim, serialization, exclusive-integration, PR-order, and CI-wait restrictions anywhere in this repository.
+
+- No repository-defined worker-count, coordinator-count, WIP, work-package, branch, or PR cap.
+- Claims, leases, ownership, assignments, queues, and coordinator labels are advisory only and never block useful safe work.
+- Workers may create branches, commits, PRs, fixes, tests, integration commits, and merges when GitHub permissions allow and evidence is adequate.
+- Dependency order constrains final integration only; it does not stop independent implementation, testing, hardening, research, docs, accessibility, packaging, fixtures, adapters, or prototypes.
+- Queued/pending/slow/unavailable CI is never by itself a reason to terminate. Record it and continue immediately with another valuable independent task.
+- A blocked first workline is never by itself a reason to terminate. STATUS: BLOCKED is allowed only after all reasonably available safe independent work is exhausted.
+- Do not idle because another PR, branch, worker, check, review, claim, or queue is active. If overlap occurs, switch to non-conflicting work or reconcile/rebase instead of abandoning the run.
+- There is no repository-defined exclusive integration owner. Any authorized worker may integrate verified work when GitHub permissions and product/release gates allow.
+- Use the full execution window while useful safe work remains.
+
+This removes orchestration throttles only. Product correctness, security, data integrity, accessibility, licensing, privacy, truthful testing/release evidence, and domain-specific safety requirements remain mandatory.
+
 This repository is the canonical source of truth. Chat history is not.
 
-Current operating authority: **docs/AUTONOMOUS_WORKER_ORCHESTRATION.md**, policy DELIVERY-2026-09-09. The owner requested 13 developers plus 2 coordinators and faster completion of the full product. This supersedes older worker counts, blanket V0.1-only/Factory-first-only scheduling and global human-gate waiting freezes. It does not weaken product scope, security, accessibility or acceptance requirements.
+Current operating authority: **docs/AUTONOMOUS_WORKER_ORCHESTRATION.md**, policy DELIVERY-2026-09-09. The owner requires unrestricted parallel autonomous development with no repository-defined worker or coordinator cap. This supersedes older worker counts, blanket V0.1-only/Factory-first-only scheduling and global human-gate waiting freezes. It does not weaken product scope, security, accessibility or acceptance requirements.
 
 Before each cycle read this file, the operating policy, the relevant live records in issue #553, and actual source/CI evidence for your assignment. On first adoption or relevant changes, read docs/MASTER_SPEC.md, docs/FULL_PRODUCT_VISION_2026-08-19.md, docs/ROADMAP.md and applicable Product Factory/Business Factory/Web/Cloud, reuse, UI and acceptance specifications. Reuse prior unchanged context; do not reread every historical document and branch on each hourly wake-up. coordination/AUTONOMOUS_ROUTING.md and state/PARALLEL_EXECUTION_BOARD.md are pointers to the same live control issue, not separate allocation authorities.
 
@@ -34,7 +50,7 @@ Business Factory truth: Business Agent Lab is an optional reusable orchestration
 
 IP/license truth: public competitor/product/market research may inform an independent implementation, but access to proprietary source/assets/credentials is not permission to copy them. Every adopted dependency/tool records version/license/provenance and relevant distribution obligations; missing/unacceptable provenance can block release.
 
-Parallel-first rule: every cycle selects genuinely independent coherent packages that can be completed and integrated within the current WIP limit. Initial target: six active implementation packages across all runs; other developers advance assigned review, integration repair or disjoint portions of those packages. Dependencies constrain merge/integration order, not isolated research, contract design, adapter implementation, mocks, fixtures, tests or prototypes. A blocked lane must not idle unrelated lanes. Avoid fake parallelism and shared-file collisions; prefer clear lane ownership and stable ports. Product Factory work additionally requires ownership by ProductProject/component/repository. Use PREPARED / IMPLEMENTED / GREEN / INTEGRATED / PACKAGED / HUMAN_TESTED / NVDA_VERIFIED evidence states accurately.
+Parallel-first rule: every cycle selects genuinely independent coherent packages that can be completed and integrated within the current WIP limit. There is no fixed active-package target or WIP cap; other developers advance assigned review, integration repair or disjoint portions of those packages. Dependencies constrain merge/integration order, not isolated research, contract design, adapter implementation, mocks, fixtures, tests or prototypes. A blocked lane must not idle unrelated lanes. Avoid fake parallelism and shared-file collisions; prefer clear lane ownership and stable ports. Product Factory work additionally requires ownership by ProductProject/component/repository. Use PREPARED / IMPLEMENTED / GREEN / INTEGRATED / PACKAGED / HUMAN_TESTED / NVDA_VERIFIED evidence states accurately.
 
 Large-batch rule: do not stop after one file, one function, one lint error or one small PR if the same coherent subsystem can safely be carried through implementation, error/recovery behavior, tests, docs, CI and integration in the same cycle.
 
@@ -50,4 +66,4 @@ Git discipline: `main` must remain releasable. Use feature/fix branches and cohe
 
 CI policy: coherent PR/main gates execute the shared verification harness on both Ubuntu and Windows. Focused Windows/WebView2/package/security/model-hardware/Product-Factory jobs may be added where they provide real evidence. Never weaken a check to obtain green. Stale runs for the same PR/ref may be canceled. Do not rebuild an EXE or download large models on every development push. Future Web/Cloud work adds separate API-contract, multi-tenant security, deployment and browser-accessibility gates without weakening Windows gates.
 
-Persist useful source and ownership checkpoints. At the end of a cycle with new actionable evidence, update the worker-owned GitHub checkpoint in at most eight lines: practical outcome, role/run, PR/SHA, actual checks/state, blocker and next owner/step. Details stay on the canonical PR. Do not duplicate the full report into Drive or post unchanged hourly audits. User-facing reports explain practical capabilities first. Only the designated integration owner promotes reviewed and properly verified candidates to main.
+Persist useful source and ownership checkpoints. At the end of a cycle with new actionable evidence, update the worker-owned GitHub checkpoint in at most eight lines: practical outcome, role/run, PR/SHA, actual checks/state, blocker and next owner/step. Details stay on the canonical PR. Do not duplicate the full report into Drive or post unchanged hourly audits. User-facing reports explain practical capabilities first. Any authorized worker may promote reviewed and properly verified candidates to main when GitHub permissions and applicable product/release gates allow.
