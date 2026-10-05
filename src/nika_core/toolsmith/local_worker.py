@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import os
 import pathlib
 import shutil
@@ -61,6 +62,9 @@ _STATE_SCHEMA = "nika-contained-local-worker-v1"
 _MAX_EDIT_BYTES = 8 * 1024 * 1024
 _MAX_PLAN_BYTES = 32 * 1024 * 1024
 _MAX_STATE_BYTES = 1024 * 1024
+_MAX_STATE_JSON_DEPTH = 64
+_MAX_STATE_JSON_INTEGER_BITS = 4096
+_MAX_STATE_JSON_INTEGER_DECIMAL_CHARS = 1234
 
 
 class ContainedLocalWorkerError(RuntimeError):
@@ -542,6 +546,48 @@ def _strict_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     return result
 
 
+def _finite_state_json_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _bounded_state_json_int(raw: str) -> int:
+    digits = raw[1:] if raw.startswith("-") else raw
+    if len(digits) > _MAX_STATE_JSON_INTEGER_DECIMAL_CHARS:
+        raise ValueError("local worker state integer exceeds the digit limit")
+    value = int(raw)
+    if value.bit_length() > _MAX_STATE_JSON_INTEGER_BITS:
+        raise ValueError("local worker state integer exceeds the bit limit")
+    return value
+
+
+def _state_json_depth_is_bounded(raw: bytes) -> bool:
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                quoted = False
+        elif byte == 0x22:
+            quoted = True
+        elif byte in (0x5B, 0x7B):
+            depth += 1
+            if depth > _MAX_STATE_JSON_DEPTH:
+                return False
+        elif byte in (0x5D, 0x7D):
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def _reject_constant(value: str) -> object:
     raise ValueError(f"non-finite JSON value is forbidden: {value}")
 
@@ -648,6 +694,17 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             if result.failure is None or result.changed_files or result.artifacts:
                 raise ContainedLocalWorkerError(
                     "terminal no-candidate evidence contradicts the persisted result"
+                )
+            expected_diff_digest = self._terminal_diff_digest(
+                repository_id=evidence.repository_id,
+                base_sha=evidence.base_sha,
+                result_sha=evidence.result_sha,
+                tree_digest=None,
+                changed_files=(),
+            )
+            if evidence.diff_digest.casefold() != expected_diff_digest:
+                raise ContainedLocalWorkerError(
+                    "terminal no-candidate diff evidence is not replay-verifiable"
                 )
             return
         if not result.changed_files:
@@ -800,6 +857,18 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 raise ContainedLocalWorkerError(
                     "terminal changed-file evidence does not match current candidate bytes"
                 )
+
+        expected_diff_digest = self._terminal_diff_digest(
+            repository_id=evidence.repository_id,
+            base_sha=evidence.base_sha,
+            result_sha=evidence.result_sha,
+            tree_digest=tree.digest,
+            changed_files=tuple(changed_by_path.values()),
+        )
+        if evidence.diff_digest.casefold() != expected_diff_digest:
+            raise ContainedLocalWorkerError(
+                "terminal candidate diff evidence is not replay-verifiable"
+            )
 
     def candidate_worktree(self, job_id: str) -> pathlib.Path:
         evidence = self.execution_evidence(job_id)
@@ -1031,7 +1100,13 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 repository_id=job.repository.repository_id,
                 base_sha=job.repository.base_sha.casefold(),
                 result_sha=result_sha,
-                diff_digest=delta.digest,
+                diff_digest=self._terminal_diff_digest(
+                    repository_id=job.repository.repository_id,
+                    base_sha=job.repository.base_sha,
+                    result_sha=result_sha,
+                    tree_digest=after.digest,
+                    changed_files=changed,
+                ),
             )
             artifacts = self._candidate_artifacts(result_sha, after.digest)
 
@@ -1381,6 +1456,84 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
         return (matches[0], *command.argv[1:])
 
     @staticmethod
+    def _terminal_diff_digest(
+        *,
+        repository_id: str,
+        base_sha: str,
+        result_sha: str,
+        tree_digest: str | None,
+        changed_files: tuple[ChangedFile, ...],
+    ) -> str:
+        """Build replay-verifiable source evidence from terminal authorities."""
+
+        identity = _safe_text(repository_id, "repository_id")
+        normalized_base = base_sha.casefold()
+        normalized_result = result_sha.casefold()
+        for value, label in (
+            (normalized_base, "base_sha"),
+            (normalized_result, "result_sha"),
+        ):
+            if len(value) != 40 or any(char not in "0123456789abcdef" for char in value):
+                raise ContainedLocalWorkerError(
+                    f"terminal {label} is not a canonical Git commit identity"
+                )
+
+        if normalized_result == normalized_base:
+            if tree_digest is not None or changed_files:
+                raise ContainedLocalWorkerError(
+                    "no-change terminal evidence cannot carry candidate source state"
+                )
+            normalized_tree = "-"
+        else:
+            if (
+                type(tree_digest) is not str
+                or len(tree_digest) != 64
+                or any(
+                    char not in "0123456789abcdef"
+                    for char in tree_digest.casefold()
+                )
+            ):
+                raise ContainedLocalWorkerError(
+                    "terminal candidate tree digest is invalid"
+                )
+            if not changed_files:
+                raise ContainedLocalWorkerError(
+                    "terminal candidate diff evidence requires changed files"
+                )
+            normalized_tree = tree_digest.casefold()
+
+        hasher = hashlib.sha256()
+        hasher.update(b"nika-contained-terminal-diff-v1\0")
+        hasher.update(identity.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(normalized_base.encode("ascii"))
+        hasher.update(b"\0")
+        hasher.update(normalized_result.encode("ascii"))
+        hasher.update(b"\0")
+        hasher.update(normalized_tree.encode("ascii"))
+        hasher.update(b"\n")
+
+        seen: set[str] = set()
+        for item in sorted(changed_files, key=lambda value: value.path.casefold()):
+            if type(item) is not ChangedFile:
+                raise ContainedLocalWorkerError(
+                    "terminal diff evidence contains an invalid changed-file carrier"
+                )
+            folded = item.path.casefold()
+            if folded in seen:
+                raise ContainedLocalWorkerError(
+                    "terminal diff evidence repeats a path identity"
+                )
+            seen.add(folded)
+            hasher.update(item.path.encode("utf-8"))
+            hasher.update(b"\0")
+            hasher.update(item.sha256.casefold().encode("ascii"))
+            hasher.update(b"\0")
+            hasher.update(str(item.size_bytes).encode("ascii"))
+            hasher.update(b"\n")
+        return hasher.hexdigest()
+
+    @staticmethod
     def _candidate_artifacts(
         result_sha: str,
         tree_digest: str,
@@ -1445,7 +1598,13 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             repository_id=job.repository.repository_id,
             base_sha=job.repository.base_sha.casefold(),
             result_sha=job.repository.base_sha.casefold(),
-            diff_digest=self._no_change_digest(job),
+            diff_digest=self._terminal_diff_digest(
+                repository_id=job.repository.repository_id,
+                base_sha=job.repository.base_sha,
+                result_sha=job.repository.base_sha,
+                tree_digest=None,
+                changed_files=(),
+            ),
         )
         self._save_terminal(job, evidence, result)
 
@@ -1525,13 +1684,17 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             raw = handle.read(_MAX_STATE_BYTES + 1)
         if len(raw) > _MAX_STATE_BYTES:
             raise ContainedLocalWorkerError("local worker state exceeds the byte limit")
+        if not _state_json_depth_is_bounded(raw):
+            raise ContainedLocalWorkerError("local worker state is invalid")
         try:
             payload = json.loads(
                 raw.decode("utf-8"),
                 object_pairs_hook=_strict_object,
+                parse_float=_finite_state_json_float,
+                parse_int=_bounded_state_json_int,
                 parse_constant=_reject_constant,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (UnicodeDecodeError, ValueError, RecursionError) as exc:
             raise ContainedLocalWorkerError("local worker state is invalid") from exc
         if type(payload) is not dict:
             raise ContainedLocalWorkerError("local worker state root is invalid")
