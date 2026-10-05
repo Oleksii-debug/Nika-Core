@@ -306,7 +306,7 @@ class ToolEffectGuard:
                 ensure_ascii=False,
                 sort_keys=True,
             ).encode("utf-8")
-        except (TypeError, ValueError, RecursionError, UnicodeEncodeError) as exc:
+        except (TypeError, ValueError, RecursionError) as exc:
             # Never certify a result as COMPLETED if restart cannot reproduce it.
             # ToolExecutor will convert this finalize failure into UNCERTAIN.
             raise ValueError("durable tool result must be JSON-compatible") from exc
@@ -387,11 +387,12 @@ class ToolEffectGuard:
 
     @staticmethod
     def _reservation_text(value: object) -> str:
-        if type(value) is not str or not value:
+        try:
+            return _require_tool_identity(value, label="reservation authority")
+        except ValueError as exc:
             raise ToolEffectConflictError(
                 "tool effect finalization lacks reservation authority"
-            )
-        return value
+            ) from exc
 
     @staticmethod
     def _operation_key(*, task_id: str, call_id: str) -> str:

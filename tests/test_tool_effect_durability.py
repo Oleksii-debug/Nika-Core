@@ -295,6 +295,36 @@ def test_non_json_result_is_uncertain_instead_of_false_completed(tmp_path: Path)
     assert records[0].status is IdempotencyStatus.UNCERTAIN
 
 
+def test_invalid_utf8_result_is_uncertain_without_unicode_escape(tmp_path: Path) -> None:
+    guard, ledger = _guard(tmp_path / "state.db", "task-invalid-utf8")
+    calls = 0
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        nonlocal calls
+        calls += 1
+        return {"text": chr(0xD800)}
+
+    call = ToolCall(
+        call_id="invalid-utf8-call",
+        tool_id="publish",
+        task_id="task-invalid-utf8",
+        arguments={},
+        approved=True,
+    )
+    executor = ToolExecutor(approval_policy=_approve, effect_guard=guard)
+    executor.register(_external_spec(), handler)
+
+    first = asyncio.run(executor.execute(call))
+    replay = asyncio.run(executor.execute(call))
+
+    assert first.error == "tool result durability failed"
+    assert replay.error == "tool effect not safe to execute"
+    assert calls == 1
+    records = ledger.list_for_task("task-invalid-utf8")
+    assert len(records) == 1
+    assert records[0].status is IdempotencyStatus.UNCERTAIN
+
+
 def test_simultaneous_first_reservation_has_one_winner_and_no_sqlite_escape(tmp_path: Path) -> None:
     database = tmp_path / "state.db"
     left, left_ledger = _guard(database, "task-race")
