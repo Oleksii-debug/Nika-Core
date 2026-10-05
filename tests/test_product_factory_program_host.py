@@ -2065,10 +2065,14 @@ def test_reconcile_durable_results_preserves_concurrent_terminal_completion(tmp_
 
     host._ledger = CompleteOnFirstReadLedger(store)
 
-    assert host.reconcile_durable_results(
-        host_task_id=task_id,
-        coordinator=coordinator,
-    ) == ()
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="result disagrees with durable checkpoint",
+    ):
+        host.reconcile_durable_results(
+            host_task_id=task_id,
+            coordinator=coordinator,
+        )
 
     durable = IdempotencyLedger(store).require(operation_key)
     assert durable.status is IdempotencyStatus.COMPLETED
@@ -3356,4 +3360,68 @@ def test_manual_block_cannot_erase_completed_worker_evidence(tmp_path: Path) -> 
     assert IdempotencyLedger(store).require(
         f"pf-worker:{before.request.work_id}"
     ).status is IdempotencyStatus.COMPLETED
+
+def test_completed_result_divergence_blocks_review_and_restart(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host = ProductFactoryProgramHost(store, FakeProgramWorker())
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    before = _record(coordinator, "component-0")
+    assert before.result is not None
+    operation_key = f"pf-worker:{before.request.work_id}"
+    external_result = {"manual_reconciliation": "different terminal evidence"}
+    IdempotencyLedger(store).complete(operation_key, external_result)
+
+    decision = ReviewDecision(
+        reviewer_id="independent-reviewer",
+        accepted=True,
+        reason="would otherwise accept stale checkpoint evidence",
+        evidence_refs=("review:divergent-result",),
+    )
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="result disagrees with durable checkpoint",
+    ):
+        host.review_and_checkpoint(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            component_id="component-0",
+            decision=decision,
+        )
+
+    assert _record(coordinator, "component-0") == before
+    durable = IdempotencyLedger(store).require(operation_key)
+    assert durable.status is IdempotencyStatus.COMPLETED
+    assert durable.result == external_result
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted = ProductFactoryProgramHost(restarted_store, FakeProgramWorker())
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="result disagrees with durable checkpoint",
+    ):
+        restarted.restore_latest(host_task_id=task_id, binding=binding)
+
+    checkpoint = ProductFactoryCheckpointHost(restarted_store).latest(
+        host_task_id=task_id,
+        project_id=before.request.project_id,
+    )
+    assert checkpoint is not None
+    durable_record = next(
+        item
+        for item in checkpoint.checkpoint.coordinator.records
+        if item.request.component_id == before.request.component_id
+    )
+    assert durable_record == before
+    assert IdempotencyLedger(restarted_store).require(operation_key).result == external_result
 
