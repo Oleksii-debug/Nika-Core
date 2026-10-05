@@ -99,6 +99,16 @@ class _FakeGateway:
         )
 
 
+class _CountingGateway:
+    def __init__(self) -> None:
+        self.calls = 0
+        self._delegate = _FakeGateway()
+
+    async def complete(self, request):
+        self.calls += 1
+        return await self._delegate.complete(request)
+
+
 class _IdentityMismatchGateway:
     async def complete(self, request):
         return ModelResponse(
@@ -1281,3 +1291,32 @@ def test_runner_rejects_non_utf8_response_before_hashing() -> None:
 
     with pytest.raises(ModelBenchmarkError, match="response text must be valid UTF-8"):
         asyncio.run(runner.benchmark(_candidate(), evaluation))
+
+
+def test_benchmark_revalidates_mutated_message_before_provider_effect() -> None:
+    gateway = _CountingGateway()
+    evaluation = _evaluation_set()
+    message = evaluation.cases[0].messages[0]
+    object.__setattr__(message, "role", "forged-role")
+
+    with pytest.raises(ValueError, match="unsupported message role"):
+        asyncio.run(ModelBenchmarkRunner(gateway).benchmark(_candidate(), evaluation))
+
+    assert gateway.calls == 0
+
+
+def test_benchmark_suite_preflights_every_candidate_before_first_effect() -> None:
+    gateway = _CountingGateway()
+    first = _candidate(candidate_id="first")
+    second = _candidate(candidate_id="second")
+    object.__setattr__(second, "provider_id", " padded-provider ")
+
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        asyncio.run(
+            ModelBenchmarkRunner(gateway).benchmark_suite(
+                (first, second),
+                _evaluation_set(),
+            )
+        )
+
+    assert gateway.calls == 0

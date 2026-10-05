@@ -22,6 +22,8 @@ from nika_core.model_engineering.contracts import (
     EvaluationSet,
     ModelCandidate,
     benchmark_configuration_sha256,
+    validate_evaluation_set,
+    validate_model_candidate,
 )
 from nika_core.model_gateway.contracts import (
     ModelGatewayError,
@@ -111,10 +113,8 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> CandidateBenchmarkReport:
-        if type(candidate) is not ModelCandidate:
-            raise TypeError("candidate must be an exact ModelCandidate")
-        if type(evaluation_set) is not EvaluationSet:
-            raise TypeError("evaluation_set must be an exact EvaluationSet")
+        validate_model_candidate(candidate)
+        validate_evaluation_set(evaluation_set)
         execution_config = BenchmarkExecutionConfig(
             timeout_seconds=timeout_seconds,
             temperature=temperature,
@@ -158,14 +158,13 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> BenchmarkSuiteReport:
-        if type(evaluation_set) is not EvaluationSet:
-            raise TypeError("evaluation_set must be an exact EvaluationSet")
+        validate_evaluation_set(evaluation_set)
         if type(candidates) is not tuple:
             raise TypeError("benchmark suite candidates must be a canonical tuple")
         if not candidates:
             raise ValueError("benchmark suite requires at least one candidate")
-        if any(type(candidate) is not ModelCandidate for candidate in candidates):
-            raise TypeError("benchmark suite candidates must use exact ModelCandidate values")
+        for candidate in candidates:
+            validate_model_candidate(candidate)
         ids = [candidate.candidate_id for candidate in candidates]
         if len(ids) != len(set(ids)):
             raise ValueError("benchmark suite candidate IDs must be unique")
@@ -244,6 +243,7 @@ class ModelBenchmarkRunner:
                 candidate_id=candidate.candidate_id,
                 case_id=case.case_id,
                 evaluation_weight=float(case.weight),
+                pass_score=float(case.pass_score),
                 score=0.0,
                 passed=False,
                 completion_succeeded=False,
@@ -274,6 +274,7 @@ class ModelBenchmarkRunner:
             candidate_id=candidate.candidate_id,
             case_id=case.case_id,
             evaluation_weight=float(case.weight),
+            pass_score=float(case.pass_score),
             score=score,
             passed=score >= float(case.pass_score),
             completion_succeeded=True,

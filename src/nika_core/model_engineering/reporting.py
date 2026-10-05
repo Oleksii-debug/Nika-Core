@@ -31,6 +31,9 @@ def benchmark_report_sha256(report: CandidateBenchmarkReport) -> str:
 
 
 def benchmark_suite_json(report: BenchmarkSuiteReport) -> str:
+    if type(report) is not BenchmarkSuiteReport:
+        raise TypeError("report must be an exact BenchmarkSuiteReport")
+    BenchmarkSuiteReport.__post_init__(report)
     payload = {
         "schema": "nika-model-benchmark-suite-v1",
         "evaluation_set_id": report.evaluation_set_id,
@@ -256,6 +259,7 @@ def _case_payload(result: CaseBenchmarkResult) -> dict[str, Any]:
         "case_id": result.case_id,
         "score": result.score,
         "evaluation_weight": result.evaluation_weight,
+        "pass_score": result.pass_score,
         "passed": result.passed,
         "completion_succeeded": result.completion_succeeded,
         "latency_ms": result.latency_ms,

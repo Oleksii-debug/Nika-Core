@@ -311,6 +311,26 @@ class EvaluationSet:
         return hashlib.sha256(encoded).hexdigest()
 
 
+def validate_model_candidate(candidate: ModelCandidate) -> None:
+    """Revalidate an exact candidate carrier before trusted use."""
+
+    if type(candidate) is not ModelCandidate:
+        raise TypeError("candidate must be an exact ModelCandidate")
+    ModelCandidate.__post_init__(candidate)
+
+
+def validate_evaluation_set(evaluation_set: EvaluationSet) -> None:
+    """Revalidate the complete evaluation graph before execution or promotion."""
+
+    if type(evaluation_set) is not EvaluationSet:
+        raise TypeError("evaluation_set must be an exact EvaluationSet")
+    EvaluationSet.__post_init__(evaluation_set)
+    for case in evaluation_set.cases:
+        EvaluationCase.__post_init__(case)
+        for message in case.messages:
+            ModelMessage.__post_init__(message)
+
+
 @dataclass(frozen=True, slots=True)
 class AcceleratorSnapshot:
     utilization_percent: float | None = None
@@ -346,6 +366,7 @@ class CaseBenchmarkResult:
     accelerator_before: AcceleratorSnapshot | None
     accelerator_after: AcceleratorSnapshot | None
     evaluation_weight: float = 1.0
+    pass_score: float = 1.0
 
     def __post_init__(self) -> None:
         _identity(self.candidate_id, "candidate_id")
@@ -364,6 +385,11 @@ class CaseBenchmarkResult:
         evaluation_weight = float(self.evaluation_weight)
         if not isfinite(evaluation_weight) or evaluation_weight <= 0:
             raise ValueError("evaluation_weight must be finite and greater than zero")
+        if type(self.pass_score) not in (int, float):
+            raise TypeError("pass_score must be numeric")
+        pass_score = float(self.pass_score)
+        if not isfinite(pass_score) or not 0 <= pass_score <= 1:
+            raise ValueError("pass_score must be finite and in [0, 1]")
         if type(self.latency_ms) not in (int, float):
             raise TypeError("latency_ms must be numeric")
         latency = float(self.latency_ms)
@@ -380,8 +406,11 @@ class CaseBenchmarkResult:
             (self.accelerator_before, "accelerator_before"),
             (self.accelerator_after, "accelerator_after"),
         ):
-            if snapshot is not None and type(snapshot) is not AcceleratorSnapshot:
+            if snapshot is None:
+                continue
+            if type(snapshot) is not AcceleratorSnapshot:
                 raise TypeError(f"{name} must be an exact AcceleratorSnapshot")
+            AcceleratorSnapshot.__post_init__(snapshot)
         for value, name in (
             (self.input_tokens, "input_tokens"),
             (self.output_tokens, "output_tokens"),
@@ -389,11 +418,22 @@ class CaseBenchmarkResult:
         ):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer")
+        if (
+            self.total_tokens is not None
+            and self.input_tokens is not None
+            and self.output_tokens is not None
+            and self.total_tokens < self.input_tokens + self.output_tokens
+        ):
+            raise ValueError("total_tokens is smaller than known token components")
         if self.error_code is not None and not any(
             self.error_code is member for member in ModelErrorCode
         ):
             raise TypeError("error_code must be a ModelErrorCode")
         if self.completion_succeeded:
+            if self.passed is not (score >= pass_score):
+                raise ValueError(
+                    "passed must match successful score and pass_score evidence"
+                )
             if self.error_code is not None:
                 raise ValueError("successful completion cannot carry error_code")
             if self.response_sha256 is None:
@@ -501,7 +541,20 @@ def validate_candidate_benchmark_report(report: CandidateBenchmarkReport) -> Non
 
     if type(report) is not CandidateBenchmarkReport:
         raise TypeError("report must be an exact CandidateBenchmarkReport")
+    if type(report.candidate) is not ModelCandidate:
+        raise TypeError("candidate must be an exact ModelCandidate")
+    if type(report.run) is not BenchmarkRunEvidence:
+        raise TypeError("run must be an exact BenchmarkRunEvidence")
+    ModelCandidate.__post_init__(report.candidate)
+    BenchmarkRunEvidence.__post_init__(report.run)
+    CandidateBenchmarkReport.__post_init__(report)
     results = report.case_results
+    if type(results) is not tuple:
+        raise TypeError("case_results must be a canonical tuple")
+    for item in results:
+        if type(item) is not CaseBenchmarkResult:
+            raise TypeError("case_results must use exact CaseBenchmarkResult values")
+        CaseBenchmarkResult.__post_init__(item)
     total_weight = sum(float(item.evaluation_weight) for item in results)
     expected_quality = sum(
         float(item.score) * float(item.evaluation_weight)
