@@ -3,13 +3,15 @@ from __future__ import annotations
 import json
 import math
 import unicodedata
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
-from nika_core.memory.contracts import MemoryRecord, MemoryScope
+from nika_core.memory.contracts import MemoryConflictError, MemoryRecord, MemoryScope
 from nika_core.memory.minimization import minimize_for_persistence
+
+_UNCONDITIONAL = object()
 
 
 class MemoryService:
@@ -28,6 +30,54 @@ class MemoryService:
         user_approved: bool = False,
         expires_at: datetime | None = None,
     ) -> MemoryRecord:
+        """Write memory with the historical last-write-wins compatibility contract."""
+        return self._put(
+            scope=scope,
+            owner_id=owner_id,
+            namespace=namespace,
+            key=key,
+            value=value,
+            user_approved=user_approved,
+            expires_at=expires_at,
+            expected_updated_at=_UNCONDITIONAL,
+        )
+
+    def compare_and_put(
+        self,
+        *,
+        scope: MemoryScope,
+        owner_id: str,
+        namespace: str,
+        key: str,
+        value: Any,
+        expected_updated_at: datetime | None,
+        user_approved: bool = False,
+        expires_at: datetime | None = None,
+    ) -> MemoryRecord:
+        """Atomically write only when the caller's durable revision is current."""
+        return self._put(
+            scope=scope,
+            owner_id=owner_id,
+            namespace=namespace,
+            key=key,
+            value=value,
+            user_approved=user_approved,
+            expires_at=expires_at,
+            expected_updated_at=expected_updated_at,
+        )
+
+    def _put(
+        self,
+        *,
+        scope: MemoryScope,
+        owner_id: str,
+        namespace: str,
+        key: str,
+        value: Any,
+        user_approved: bool,
+        expires_at: datetime | None,
+        expected_updated_at: datetime | None | object,
+    ) -> MemoryRecord:
         scope = _require_scope(scope)
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)
@@ -38,7 +88,14 @@ class MemoryService:
             raise PermissionError("user long-term memory requires explicit approval")
         if expires_at is not None:
             expires_at = _as_utc(expires_at)
-        now = datetime.now(UTC)
+        if expected_updated_at is _UNCONDITIONAL:
+            expected: datetime | None | object = _UNCONDITIONAL
+        elif expected_updated_at is None:
+            expected = None
+        elif type(expected_updated_at) is datetime:
+            expected = _as_utc(expected_updated_at)
+        else:
+            raise ValueError("expected_updated_at must be a datetime or None")
         body = json.dumps(
             minimize_for_persistence(value),
             ensure_ascii=False,
@@ -51,18 +108,41 @@ class MemoryService:
         except UnicodeEncodeError as exc:
             raise ValueError("memory JSON contains invalid Unicode") from exc
         with self._store.connection() as conn:
+            if expected is not _UNCONDITIONAL:
+                conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
                 "AND namespace = ? AND memory_key = ?",
                 (scope.value, owner_id, namespace, key),
             ).fetchone()
-            if existing is not None:
-                # Replacement mutates durable evidence, so validate the complete
-                # incumbent carrier before allowing it to be overwritten.
-                _record_from_row(existing)
-                created_at = existing["created_at"]
-            else:
-                created_at = now.isoformat()
+            existing_record = _record_from_row(existing) if existing is not None else None
+            if expected is not _UNCONDITIONAL and existing_record is not None:
+                expiry = existing_record.expires_at
+                if expiry is not None and _as_utc(expiry) <= datetime.now(UTC):
+                    cursor = conn.execute(
+                        "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                        "AND namespace = ? AND memory_key = ? AND updated_at = ? "
+                        "AND expires_at = ?",
+                        (
+                            scope.value,
+                            owner_id,
+                            namespace,
+                            key,
+                            existing["updated_at"],
+                            existing["expires_at"],
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise MemoryConflictError(
+                            "memory record revision changed before expiry cleanup"
+                        )
+                    existing = None
+                    existing_record = None
+            _require_expected_revision(existing_record, expected)
+            now = _next_revision(
+                existing_record.updated_at if existing_record is not None else None
+            )
+            created_at = existing["created_at"] if existing is not None else now.isoformat()
             conn.execute(
                 """INSERT INTO memory_records(
                     scope, owner_id, namespace, memory_key, value_json, user_approved,
@@ -99,6 +179,7 @@ class MemoryService:
                         "key": key,
                         "expires": expires_at is not None,
                         "user_approved": user_approved,
+                        "conditional": expected is not _UNCONDITIONAL,
                     },
                 )
         record = self.get(scope=scope, owner_id=owner_id, namespace=namespace, key=key)
@@ -133,8 +214,16 @@ class MemoryService:
             if expires_at is not None and _as_utc(expires_at) <= current:
                 conn.execute(
                     "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
-                    "AND namespace = ? AND memory_key = ?",
-                    (scope.value, owner_id, namespace, key),
+                    "AND namespace = ? AND memory_key = ? AND updated_at = ? "
+                    "AND expires_at = ?",
+                    (
+                        scope.value,
+                        owner_id,
+                        namespace,
+                        key,
+                        row["updated_at"],
+                        row["expires_at"],
+                    ),
                 )
                 return None
         return record
@@ -203,6 +292,55 @@ class MemoryService:
                 )
         return deleted
 
+    def compare_and_delete(
+        self,
+        *,
+        scope: MemoryScope,
+        owner_id: str,
+        namespace: str,
+        key: str,
+        expected_updated_at: datetime,
+    ) -> bool:
+        """Atomically delete only the exact durable revision observed by the caller."""
+        scope = _require_scope(scope)
+        owner_id = _required("owner_id", owner_id)
+        namespace = _required("namespace", namespace)
+        key = _required("key", key)
+        if type(expected_updated_at) is not datetime:
+            raise ValueError("expected_updated_at must be a datetime")
+        expected = _as_utc(expected_updated_at)
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            existing = conn.execute(
+                "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND memory_key = ?",
+                (scope.value, owner_id, namespace, key),
+            ).fetchone()
+            record = _record_from_row(existing) if existing is not None else None
+            _require_expected_revision(record, expected)
+            cursor = conn.execute(
+                "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND memory_key = ? AND updated_at = ?",
+                (
+                    scope.value,
+                    owner_id,
+                    namespace,
+                    key,
+                    existing["updated_at"],
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise MemoryConflictError("memory record revision changed before delete")
+            if self._audit is not None:
+                self._audit.append_with_connection(
+                    conn,
+                    event_type="memory.deleted",
+                    entity_type="memory",
+                    entity_id=f"{scope.value}:{owner_id}:{namespace}:{key}",
+                    payload={"conditional": True},
+                )
+        return True
+
     def purge_expired(self, *, now: datetime | None = None) -> int:
         current = _as_utc(now) if now else datetime.now(UTC)
         with self._store.connection() as conn:
@@ -259,6 +397,32 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         raise ValueError("datetime must be timezone-aware")
     return value.astimezone(UTC)
+
+
+def _next_revision(existing: datetime | None) -> datetime:
+    now = datetime.now(UTC)
+    if existing is None:
+        return now
+    previous = _as_utc(existing)
+    return max(now, previous + timedelta(microseconds=1))
+
+
+def _require_expected_revision(
+    record: MemoryRecord | None,
+    expected: datetime | None | object,
+) -> None:
+    if expected is _UNCONDITIONAL:
+        return
+    if expected is None:
+        if record is not None:
+            raise MemoryConflictError("memory record already exists")
+        return
+    if record is None:
+        raise MemoryConflictError("memory record no longer exists")
+    if type(expected) is not datetime:
+        raise ValueError("expected_updated_at must be a datetime or None")
+    if _as_utc(record.updated_at) != expected:
+        raise MemoryConflictError("memory record revision changed")
 
 
 def _parse_optional(value: Any) -> datetime | None:
