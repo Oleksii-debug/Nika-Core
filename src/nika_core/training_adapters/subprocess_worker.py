@@ -40,6 +40,37 @@ _MAX_JSON_NODES = 4096
 _STREAM_JOIN_TIMEOUT_SECONDS = 1.0
 _READ_CHUNK_BYTES = 64 * 1024
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_FORBIDDEN_ENVIRONMENT_KEYS = frozenset(
+    {
+        "classpath",
+        "comspec",
+        "dotnet_additional_deps",
+        "dotnet_startup_hooks",
+        "dyld_framework_path",
+        "dyld_insert_libraries",
+        "dyld_library_path",
+        "java_tool_options",
+        "ld_library_path",
+        "ld_preload",
+        "node_options",
+        "path",
+        "pathext",
+        "perl5lib",
+        "perl5opt",
+        "rubyopt",
+        "_java_options",
+    }
+)
+_SECRET_ENVIRONMENT_MARKERS = (
+    "api_key",
+    "apikey",
+    "auth",
+    "credential",
+    "passwd",
+    "password",
+    "secret",
+    "token",
+)
 
 
 class TrainingSubprocessError(TrainingWorkerError):
@@ -231,6 +262,8 @@ def _validate_command_artifact_ids(
 def _command_sha256(
     command: tuple[str, ...],
     command_artifact_ids: Mapping[int, str],
+    *,
+    environment: Mapping[str, str],
 ) -> str:
     payload = {
         "argv": list(command),
@@ -238,6 +271,7 @@ def _command_sha256(
             str(index): command_artifact_ids[index]
             for index in sorted(command_artifact_ids)
         },
+        "environment": {key: environment[key] for key in sorted(environment)},
     }
     encoded = json.dumps(
         payload,
@@ -246,7 +280,7 @@ def _command_sha256(
         separators=(",", ":"),
         allow_nan=False,
     ).encode("utf-8")
-    return hashlib.sha256(b"nika-training-command-v1\x00" + encoded).hexdigest()
+    return hashlib.sha256(b"nika-training-command-v2\x00" + encoded).hexdigest()
 
 
 def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
@@ -261,6 +295,16 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
             raise ValueError("environment keys and values must be strings")
         if not key or "=" in key or "\x00" in key or "\x00" in value:
             raise ValueError("environment contains an invalid key or value")
+        normalized_key = key.casefold()
+        if (
+            normalized_key in _FORBIDDEN_ENVIRONMENT_KEYS
+            or normalized_key.startswith("python")
+            or normalized_key.startswith("ld_")
+            or normalized_key.startswith("dyld_")
+        ):
+            raise ValueError("environment may not alter runtime or loader authority")
+        if any(marker in normalized_key for marker in _SECRET_ENVIRONMENT_MARKERS):
+            raise ValueError("training environment must not contain credential material")
         if len(key.encode("utf-8")) > _MAX_ENVIRONMENT_FIELD_BYTES:
             raise ValueError("environment key exceeds the configured byte limit")
         if len(value.encode("utf-8")) > _MAX_ENVIRONMENT_FIELD_BYTES:
@@ -359,7 +403,7 @@ class SubprocessTrainingWorker:
     """Shell-free TrainingWorkerPort adapter for one Registry-authorized trainer command.
 
     Durable resume state binds the exact command vector, Registry-bound command artifacts,
-    trainer digest and frozen/material job identities. Absolute command-file arguments must
+    explicit sterile environment, trainer digest and frozen/material job identities. Absolute command-file arguments must
     have Artifact Registry authority; relative path arguments are forbidden. Physical training
     paths remain transient request data only. Immediately before spawn, the canonical Registry
     verifies every bound command artifact and ResolvedTrainingPackage re-binds all input bytes.
@@ -387,12 +431,13 @@ class SubprocessTrainingWorker:
             command_artifact_ids=command_artifact_ids,
         )
         self._trainer_artifact_id = self._command_artifact_ids[0]
+        self._environment = _validate_environment(environment)
         self._command_sha256 = _command_sha256(
             self._command,
             self._command_artifact_ids,
+            environment=self._environment,
         )
         self._timeout_seconds = _validate_timeout(timeout_seconds)
-        self._environment = _validate_environment(environment)
         self._max_request_bytes = _validate_positive_byte_limit(
             max_request_bytes, name="max_request_bytes"
         )
