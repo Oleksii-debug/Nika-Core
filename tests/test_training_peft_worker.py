@@ -174,6 +174,7 @@ def _config(tmp_path: Path, request: peft.ParsedRequest, base: bytes) -> peft.Tr
     output_root.mkdir()
     return peft.TrainerConfig(
         base_gguf=base_path,
+        base_gguf_sha256=_sha256(base),
         model_dir=model_dir,
         model_dir_manifest_sha256=peft.model_directory_manifest_sha256(model_dir),
         trainer_implementation_sha256=peft.trainer_implementation_sha256(),
@@ -397,6 +398,19 @@ def test_base_gguf_copy_is_digest_bound(tmp_path: Path) -> None:
     config.base_gguf.write_bytes(b"wrong")
     with pytest.raises(peft.PeftTrainerError, match="base_gguf_digest_mismatch"):
         peft._copy_verified_base(config, request, tmp_path / "other-job")
+
+
+def test_base_gguf_copy_rejects_logical_base_divergence_without_warm_start(
+    tmp_path: Path,
+) -> None:
+    raw_request, base = _request(tmp_path)
+    raw_request["job"]["base_artifact"]["sha256"] = "9" * 64
+    raw_request["training_materials"]["base_artifact_sha256"] = "9" * 64
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+
+    with pytest.raises(peft.PeftTrainerError, match="base_gguf_logical_base_mismatch"):
+        peft._copy_verified_base(config, request, peft._job_root(config, request))
 
 
 def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> None:
@@ -983,6 +997,7 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
         seed=99,
     )
 
+    assert environment["NIKA_TRAINER_BASE_GGUF_SHA256"] == _sha256(base)
     assert environment["NIKA_TRAINER_IMPLEMENTATION_SHA256"] == (
         peft.trainer_implementation_sha256()
     )
@@ -1003,6 +1018,7 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     for key, value in environment.items():
         monkeypatch.setenv(key, value)
     loaded = peft._read_config()
+    assert loaded.base_gguf_sha256 == environment["NIKA_TRAINER_BASE_GGUF_SHA256"]
     assert loaded.model_dir_manifest_sha256 == environment[
         "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"
     ]
@@ -1059,6 +1075,31 @@ def test_main_rejects_deployment_mismatch_before_config_effects(
     monkeypatch.setattr(peft, "_read_config", config_effect_must_not_run)
 
     assert peft.main() == 2
+
+
+def test_read_config_rejects_foundation_gguf_digest_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+        trainer_artifact=_trainer_artifact(tmp_path),
+    )
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    config.base_gguf.write_bytes(b"replacement-foundation")
+
+    with pytest.raises(peft.PeftTrainerError, match="base_gguf_digest_mismatch"):
+        peft._read_config()
 
 
 def test_environment_builder_rejects_invalid_torch_thread_count(

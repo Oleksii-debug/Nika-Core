@@ -83,6 +83,7 @@ class ParsedRequest:
 @dataclass(frozen=True, slots=True)
 class TrainerConfig:
     base_gguf: Path
+    base_gguf_sha256: str
     model_dir: Path
     model_dir_manifest_sha256: str
     trainer_implementation_sha256: str
@@ -721,6 +722,13 @@ def build_trainer_environment(
     if base.suffix.casefold() != ".gguf":
         raise ValueError("base_gguf must use the .gguf suffix")
     try:
+        base_gguf_sha256, _ = _hash_regular_snapshot(
+            base,
+            code="nika_trainer_base_gguf_changed",
+        )
+    except PeftTrainerError as exc:
+        raise ValueError("base_gguf could not be snapshotted") from exc
+    try:
         model_manifest = model_directory_manifest_sha256(model)
     except ValueError as exc:
         raise ValueError("model_dir is not a canonical local model directory") from exc
@@ -777,6 +785,7 @@ def build_trainer_environment(
         raise ValueError("output_root must be a non-linked directory")
     environment = {
         "NIKA_TRAINER_BASE_GGUF": os.fspath(base),
+        "NIKA_TRAINER_BASE_GGUF_SHA256": base_gguf_sha256,
         "NIKA_TRAINER_IMPLEMENTATION_SHA256": trainer_implementation_sha256(),
         "NIKA_TRAINER_LEARNING_RATE": format(learning_rate, ".17g"),
         "NIKA_TRAINER_LORA_ALPHA": str(lora_alpha),
@@ -1210,6 +1219,16 @@ def _read_config() -> TrainerConfig:
     base_gguf = _absolute_env_path("NIKA_TRAINER_BASE_GGUF", file=True)
     if base_gguf.suffix.casefold() != ".gguf":
         _fail("nika_trainer_base_gguf_invalid")
+    base_gguf_sha256 = _require_sha256(
+        os.environ.get("NIKA_TRAINER_BASE_GGUF_SHA256"),
+        field="nika_trainer_base_gguf_sha256",
+    )
+    observed_base_gguf_sha256, _ = _hash_regular_snapshot(
+        base_gguf,
+        code="nika_trainer_base_gguf_changed",
+    )
+    if observed_base_gguf_sha256 != base_gguf_sha256:
+        _fail("nika_trainer_base_gguf_digest_mismatch")
     model_dir = _absolute_env_path("NIKA_TRAINER_MODEL_DIR", file=False)
     model_dir_manifest_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"),
@@ -1252,6 +1271,7 @@ def _read_config() -> TrainerConfig:
 
     return TrainerConfig(
         base_gguf=base_gguf,
+        base_gguf_sha256=base_gguf_sha256,
         model_dir=model_dir,
         model_dir_manifest_sha256=model_dir_manifest_sha256,
         trainer_implementation_sha256=expected_implementation_sha256,
@@ -1362,7 +1382,13 @@ def _ensure_job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
 
 def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root: Path) -> Path:
     source = config.base_gguf
-    if _sha256_file(source) != request.base_artifact_sha256:
+    if request.base_artifact_sha256 != config.base_gguf_sha256:
+        _fail("base_gguf_logical_base_mismatch")
+    source_sha256, _ = _hash_regular_snapshot(
+        source,
+        code="base_gguf_digest_mismatch",
+    )
+    if source_sha256 != config.base_gguf_sha256:
         _fail("base_gguf_digest_mismatch")
     target_dir = _ensure_child_directory(
         job_root,
@@ -1371,25 +1397,35 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
     )
     target = target_dir / "base.gguf"
     if target.exists():
-        _require_regular_unlinked(target, code="staged_base_invalid")
-        if _sha256_file(target) != request.base_artifact_sha256:
+        target_sha256, _ = _hash_regular_snapshot(
+            target,
+            code="staged_base_invalid",
+        )
+        if target_sha256 != config.base_gguf_sha256:
             _fail("staged_base_digest_mismatch")
         return target
     temporary = target_dir / ".base.gguf.tmp"
     try:
-        with source.open("rb") as src, temporary.open("xb") as dst:
-            while True:
-                chunk = src.read(_READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                dst.write(chunk)
-            dst.flush()
-            os.fsync(dst.fileno())
-        if _sha256_file(temporary) != request.base_artifact_sha256:
+        source_stat = _require_regular_unlinked(
+            source,
+            code="base_gguf_digest_mismatch",
+        )
+        _copy_model_snapshot_file(
+            source,
+            temporary,
+            expected_size=source_stat.st_size,
+        )
+        temporary_sha256, _ = _hash_regular_snapshot(
+            temporary,
+            code="staged_base_digest_mismatch",
+        )
+        if temporary_sha256 != config.base_gguf_sha256:
             _fail("staged_base_digest_mismatch")
         os.replace(temporary, target)
     except FileExistsError:
         _fail("staged_base_conflict")
+    except PeftTrainerError:
+        raise
     except OSError:
         _fail("staged_base_copy_failed")
     finally:
