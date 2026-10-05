@@ -29,6 +29,7 @@ from nika_core.model_engineering import (
     build_experiment_definition,
 )
 from nika_core.kernel.task_queue import TaskQueue
+from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
 from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelResponse,
@@ -49,10 +50,24 @@ from nika_core.training_evaluation_attestation import (
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
 from nika_core.training_evaluation_comparison import run_attested_old_vs_new_comparison
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
+from nika_core.training_materials import TrainingMaterialEvidence, TrainingMaterialSetEvidence
 from nika_core.training_model_activation import (
     TrainingModelActivationError,
     activate_attested_training_promotion,
     rollback_attested_training_promotion,
+)
+from nika_core.training_scale import (
+    TrainingScalePlan,
+    TrainingScaleTier,
+    authorize_training_scale,
+    build_scale_progression_proof,
+)
+from nika_core.training_runtime import (
+    ArtifactIdentity,
+    TrainingJobSpec,
+    TrainingRunEvidence,
+    TrainingRunState,
+    training_job_fingerprint,
 )
 from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 
@@ -93,8 +108,55 @@ def _evaluation_set() -> EvaluationSet:
     )
 
 
+def _scale_material_evidence(
+    evaluation_set: EvaluationSet,
+    *,
+    base_sha256: str = _BASE_SHA256,
+    package_version: str = "1",
+    training_records: int = 1,
+) -> TrainingMaterialSetEvidence:
+    training_body = f"training-{package_version}".encode()
+    validation_body = b"validation"
+    shards = (
+        LearningShard(
+            split=LearningDataSplit.TRAINING,
+            artifact_sha256=_sha(training_body),
+            provenance_sha256=_sha(b"scale-training-provenance"),
+            license_evidence_sha256=_sha(b"scale-training-license"),
+            record_count=training_records,
+            byte_count=len(training_body),
+        ),
+        LearningShard(
+            split=LearningDataSplit.VALIDATION,
+            artifact_sha256=_sha(validation_body),
+            provenance_sha256=_sha(b"scale-validation-provenance"),
+            license_evidence_sha256=_sha(b"scale-validation-license"),
+            record_count=1,
+            byte_count=len(validation_body),
+        ),
+    )
+    package = FrozenLearningPackage.freeze(
+        package_id="comparison-scale-package",
+        package_version=package_version,
+        base_artifact_sha256=base_sha256,
+        selection_policy_sha256=_sha(b"scale-selection"),
+        verification_sha256=_sha(b"scale-verification"),
+        evaluation_set_sha256=evaluation_set.content_sha256,
+        shards=shards,
+    )
+    return TrainingMaterialSetEvidence.from_package(
+        package,
+        workspace_sha256=_sha(b"comparison-scale-workspace"),
+        materials=tuple(
+            TrainingMaterialEvidence.from_shard(shard)
+            for shard in shards
+        ),
+    )
+
+
 def _training_binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBinding:
     descriptor = _champion_descriptor()
+    material_evidence = _scale_material_evidence(evaluation_set)
     return TrainingEvaluationBinding(
         job_id="training-job-1",
         base_candidate_id="models/base",
@@ -106,7 +168,7 @@ def _training_binding(evaluation_set: EvaluationSet) -> TrainingEvaluationBindin
         base_sha256=_BASE_SHA256,
         challenger_sha256=_CHALLENGER_SHA256,
         candidate_artifact_ref="models/challenger",
-        frozen_package_sha256=_sha(b"package"),
+        frozen_package_sha256=material_evidence.package_manifest_sha256,
         execution_plan_sha256=_sha(b"training-execution-plan"),
         evaluation_set_sha256=evaluation_set.content_sha256,
         base_descriptor_digest=descriptor.descriptor_digest,
@@ -800,6 +862,115 @@ async def _promoted_comparison(tmp_path):
         experiment_id="training-job-1-activation",
         repository=InMemoryExperimentRepository(),
     )
+
+
+@pytest.mark.asyncio
+async def test_promoted_pilot_authorizes_exact_next_scale_tier(tmp_path) -> None:
+    evaluation = _evaluation_set()
+    pilot_materials = _scale_material_evidence(evaluation)
+    pilot_training = next(
+        item
+        for item in pilot_materials.materials
+        if item.split is LearningDataSplit.TRAINING
+    )
+    pilot_validation = next(
+        item
+        for item in pilot_materials.materials
+        if item.split is LearningDataSplit.VALIDATION
+    )
+    plan = TrainingScalePlan(
+        plan_id="comparison-scale",
+        evaluation_set_sha256=evaluation.content_sha256,
+        tiers=(
+            TrainingScaleTier(
+                tier_id="pilot",
+                max_training_records=pilot_training.record_count,
+                max_training_bytes=pilot_training.byte_count,
+                max_validation_records=pilot_validation.record_count,
+                max_validation_bytes=pilot_validation.byte_count,
+                max_steps=1,
+            ),
+            TrainingScaleTier(
+                tier_id="small",
+                max_training_records=8,
+                max_training_bytes=4096,
+                max_validation_records=8,
+                max_validation_bytes=4096,
+                max_steps=8,
+            ),
+        ),
+    )
+    execution_plan_sha256 = _sha(b"training-execution-plan")
+    pilot_authorization = authorize_training_scale(
+        plan=plan,
+        tier_id="pilot",
+        job_id="training-job-1",
+        base_artifact=ArtifactIdentity("models/base", _BASE_SHA256),
+        candidate_artifact_ref="models/challenger",
+        material_evidence=pilot_materials,
+        execution_plan_sha256=execution_plan_sha256,
+        max_steps=1,
+    )
+    pilot_spec = TrainingJobSpec(
+        job_id="training-job-1",
+        task_id="training-task-1",
+        project_id="project-1",
+        owner_id="owner-1",
+        base_artifact=pilot_authorization.base_artifact,
+        frozen_package_sha256=pilot_materials.package_manifest_sha256,
+        training_material_sha256=pilot_materials.training_material_sha256,
+        scale_authorization_sha256=pilot_authorization.authorization_sha256,
+        candidate_artifact_ref="models/challenger",
+        max_steps=1,
+    )
+    pilot_run = TrainingRunEvidence(
+        job_id=pilot_spec.job_id,
+        state=TrainingRunState.COMPLETED,
+        next_step=1,
+        base_artifact=pilot_spec.base_artifact,
+        frozen_package_sha256=pilot_spec.frozen_package_sha256,
+        training_material_sha256=pilot_spec.training_material_sha256,
+        scale_authorization_sha256=pilot_spec.scale_authorization_sha256,
+        execution_plan_sha256=execution_plan_sha256,
+        job_fingerprint=training_job_fingerprint(
+            pilot_spec,
+            execution_plan_sha256=execution_plan_sha256,
+        ),
+        candidate_artifact_ref=pilot_spec.candidate_artifact_ref,
+        candidate_sha256=_CHALLENGER_SHA256,
+        checkpoint_id="pilot-checkpoint",
+    )
+    comparison = await _promoted_comparison(tmp_path)
+    proof = build_scale_progression_proof(
+        plan=plan,
+        authorization=pilot_authorization,
+        run=pilot_run,
+        comparison=comparison,
+    )
+
+    next_materials = _scale_material_evidence(
+        evaluation,
+        base_sha256=_CHALLENGER_SHA256,
+        package_version="2",
+        training_records=2,
+    )
+    next_authorization = authorize_training_scale(
+        plan=plan,
+        tier_id="small",
+        job_id="training-job-2",
+        base_artifact=ArtifactIdentity("models/challenger", _CHALLENGER_SHA256),
+        candidate_artifact_ref="models/challenger-2",
+        material_evidence=next_materials,
+        execution_plan_sha256=_sha(b"next-training-plan"),
+        max_steps=4,
+        progression_proof=proof,
+    )
+
+    assert proof.tier_index == 0
+    assert proof.candidate_sha256 == _CHALLENGER_SHA256
+    assert next_authorization.tier_index == 1
+    assert next_authorization.progression_proof == proof
+    assert next_authorization.base_artifact.sha256 == _CHALLENGER_SHA256
 
 
 @pytest.mark.asyncio
