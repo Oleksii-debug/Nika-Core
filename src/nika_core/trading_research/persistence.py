@@ -23,6 +23,7 @@ class TradingStateRepository:
 
     def initialize(self) -> None:
         with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS trading_research_schema_migrations ("
                 "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
