@@ -191,6 +191,31 @@ def test_config_rejects_unbound_evaluator_arguments(
         driver.PhysicalEvaluationConfig.from_json(json.dumps(payload))
 
 
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("provenance_ref", r"C:\\private\\evaluator.exe"),
+        ("license_ref", "https://example.com/license?token=secret"),
+        ("provenance_ref", "env:EVALUATOR_SECRET"),
+    ),
+)
+def test_config_rejects_private_or_secret_evaluator_provenance(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    payload = _payload(tmp_path)
+    evaluator = payload["evaluator"]
+    assert isinstance(evaluator, dict)
+    evaluator[field] = value
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="public and secret-free",
+    ):
+        driver.PhysicalEvaluationConfig.from_json(json.dumps(payload))
+
 def test_evaluation_set_parser_preserves_held_out_identity() -> None:
     evaluation = driver._evaluation_set_from_json(
         json.dumps(_evaluation_payload(), ensure_ascii=False)
