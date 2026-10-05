@@ -31,7 +31,12 @@ from nika_core.trading_research.replay import (
     SimulationExecutionEngine,
     TimeSlice,
 )
-from nika_core.trading_research.risk import RiskEngine, RiskLimits, RiskState
+from nika_core.trading_research.risk import (
+    PendingRiskOrder,
+    RiskEngine,
+    RiskLimits,
+    RiskState,
+)
 
 _NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 _VENUE_A = Venue("SIM-A", "UTC")
@@ -104,12 +109,18 @@ def _approved(
     )
 
 
-def _fill(instrument: Instrument, fill_id: str) -> SimulatedFill:
+def _fill(
+    instrument: Instrument,
+    fill_id: str,
+    *,
+    workspace_id: str = "workspace",
+    run_id: str = "run",
+) -> SimulatedFill:
     return SimulatedFill(
         fill_id=fill_id,
         approval_id="approval",
         intent_id="intent",
-        authority=_authority(fill_id),
+        authority=_authority(fill_id, workspace_id=workspace_id, run_id=run_id),
         instrument=instrument,
         side=Side.BUY,
         quantity=Decimal(1),
@@ -377,8 +388,6 @@ def test_pending_risk_from_other_run_fails_closed() -> None:
         0,
     )
 
-    from nika_core.trading_research.risk import PendingRiskOrder
-
     with pytest.raises(TradingResearchError, match="another workspace/run"):
         engine.approve(
             candidate,
@@ -408,13 +417,22 @@ def test_persistence_records_complete_instrument_identity(tmp_path) -> None:
 
     with store.connection() as conn:
         row = conn.execute(
-            "SELECT venue_id, venue_timezone, instrument_id, currency "
-            "FROM trading_research_fills WHERE fill_id = ?",
-            (fill.fill_id,),
+            "SELECT workspace_id, run_id, order_id, venue_id, venue_timezone, "
+            "instrument_id, currency FROM trading_research_run_fills "
+            "WHERE workspace_id = ? AND run_id = ? AND fill_id = ?",
+            ("workspace", "run", fill.fill_id),
         ).fetchone()
-    assert tuple(row) == ("SIM-B", "Europe/Bratislava", "SAME", "USD")
+    assert tuple(row) == (
+        "workspace",
+        "run",
+        "fill-persist",
+        "SIM-B",
+        "Europe/Bratislava",
+        "SAME",
+        "USD",
+    )
 
-    payload = repo.account_payload()
+    payload = repo.account_payload("workspace", "run")
     assert payload is not None
     positions = payload["positions"]
     assert isinstance(positions, list)
@@ -424,16 +442,45 @@ def test_persistence_records_complete_instrument_identity(tmp_path) -> None:
     assert positions[0]["currency"] == "USD"
 
 
+
+def test_persistence_isolates_equal_fill_ids_and_accounts_between_runs(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    repo = TradingStateRepository(store)
+    repo.initialize()
+
+    fill_a = _fill(_INSTRUMENT_A, "same-fill", run_id="run-a")
+    fill_b = _fill(_INSTRUMENT_B, "same-fill", run_id="run-b")
+
+    ledger_a = PortfolioLedger(Decimal(1000))
+    ledger_a.apply_fill(fill_a)
+    snapshot_a = ledger_a.snapshot({instrument_identity(_INSTRUMENT_A): Decimal(100)})
+
+    ledger_b = PortfolioLedger(Decimal(2000))
+    ledger_b.apply_fill(fill_b)
+    snapshot_b = ledger_b.snapshot({instrument_identity(_INSTRUMENT_B): Decimal(100)})
+
+    assert repo.commit_fill_and_account(fill_a, snapshot_a)
+    assert repo.commit_fill_and_account(fill_b, snapshot_b)
+
+    assert repo.fill_count("workspace", "run-a") == 1
+    assert repo.fill_count("workspace", "run-b") == 1
+    assert repo.has_fill("workspace", "run-a", "same-fill")
+    assert repo.has_fill("workspace", "run-b", "same-fill")
+    assert repo.account_payload("workspace", "run-a")["cash"] == "900"
+    assert repo.account_payload("workspace", "run-b")["cash"] == "1900"
+
+
 def test_nonempty_v1_state_fails_closed_instead_of_inventing_venue(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     _install_v1_schema(store, with_rows=True)
 
-    with pytest.raises(RuntimeError, match="lacks venue identity"):
+    with pytest.raises(RuntimeError, match="lacks venue/run identity"):
         TradingStateRepository(store).initialize()
 
 
-def test_empty_v1_state_upgrades_additively_to_identity_schema(tmp_path) -> None:
+def test_empty_v1_state_upgrades_to_run_scoped_v3_schema(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     _install_v1_schema(store, with_rows=False)
@@ -442,18 +489,25 @@ def test_empty_v1_state_upgrades_additively_to_identity_schema(tmp_path) -> None
     repo.initialize()
 
     with store.connection() as conn:
-        rows = conn.execute("PRAGMA table_info(trading_research_fills)").fetchall()
-    columns = {str(row["name"]) for row in rows}
-    assert {"venue_id", "venue_timezone", "instrument_id", "currency"} <= columns
+        fill_rows = conn.execute(
+            "PRAGMA table_info(trading_research_run_fills)"
+        ).fetchall()
+        account_rows = conn.execute(
+            "PRAGMA table_info(trading_research_run_account_state)"
+        ).fetchall()
+    fill_columns = {str(row["name"]) for row in fill_rows}
+    account_columns = {str(row["name"]) for row in account_rows}
+    assert {
+        "workspace_id",
+        "run_id",
+        "order_id",
+        "venue_id",
+        "venue_timezone",
+        "instrument_id",
+        "currency",
+    } <= fill_columns
+    assert account_columns == {"workspace_id", "run_id", "payload", "last_fill_id"}
 
-
-@pytest.mark.parametrize(
-    ("side", "bid", "ask"),
-    (
-        (Side.BUY, "98", "99"),
-        (Side.SELL, "101", "102"),
-    ),
-)
 
 def test_bar_without_interval_authority_is_not_executable_market_data() -> None:
     order = _approved(_INSTRUMENT_A)
@@ -522,6 +576,14 @@ def test_source_sequence_is_explicit_same_timestamp_order_authority() -> None:
     assert update.fill.price == Decimal(101)
 
 
+@pytest.mark.parametrize(
+    ("side", "bid", "ask"),
+    (
+        (Side.BUY, "98", "99"),
+        (Side.SELL, "101", "102"),
+    ),
+)
+
 def test_adverse_slippage_never_crosses_limit_price(
     side: Side,
     bid: str,
@@ -543,6 +605,16 @@ def test_adverse_slippage_never_crosses_limit_price(
     assert update.fill is not None
     assert update.fill.price == Decimal(100)
 
+
+
+
+def test_nonempty_v2_state_fails_closed_without_run_scope(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    _install_v2_schema(store, with_rows=True)
+
+    with pytest.raises(RuntimeError, match="lacks workspace/run identity"):
+        TradingStateRepository(store).initialize()
 
 def _install_v1_schema(store: SQLiteStore, *, with_rows: bool) -> None:
     with store.connection() as conn:
@@ -587,4 +659,55 @@ def _install_v1_schema(store: SQLiteStore, *, with_rows: bool) -> None:
         conn.execute(
             "INSERT INTO trading_research_account_state(singleton, payload, last_fill_id) "
             "VALUES (1, '{}', 'legacy-fill')"
+        )
+
+
+def _install_v2_schema(store: SQLiteStore, *, with_rows: bool) -> None:
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE trading_research_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        conn.execute(
+            "CREATE TABLE trading_research_fills ("
+            "fill_id TEXT PRIMARY KEY, approval_id TEXT NOT NULL, intent_id TEXT NOT NULL, "
+            "venue_id TEXT NOT NULL, venue_timezone TEXT NOT NULL, instrument_id TEXT NOT NULL, "
+            "currency TEXT NOT NULL, side TEXT NOT NULL, quantity TEXT NOT NULL, "
+            "price TEXT NOT NULL, fee TEXT NOT NULL, filled_at TEXT NOT NULL, "
+            "filled_slice INTEGER NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE trading_research_account_state ("
+            "singleton INTEGER PRIMARY KEY CHECK(singleton = 1), payload TEXT NOT NULL, "
+            "last_fill_id TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO trading_research_schema_migrations(version) VALUES (2)"
+        )
+        if not with_rows:
+            return
+        conn.execute(
+            "INSERT INTO trading_research_fills("
+            "fill_id, approval_id, intent_id, venue_id, venue_timezone, instrument_id, "
+            "currency, side, quantity, price, fee, filled_at, filled_slice) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "legacy-v2-fill",
+                "approval",
+                "intent",
+                "SIM",
+                "UTC",
+                "SAME",
+                "USD",
+                "buy",
+                "1",
+                "100",
+                "0",
+                _NOW.isoformat(),
+                1,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO trading_research_account_state(singleton, payload, last_fill_id) "
+            "VALUES (1, '{}', 'legacy-v2-fill')"
         )
