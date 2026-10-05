@@ -36,9 +36,11 @@ from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
 from nika_core.ui.bridge_models import UIResult
+from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json_object
 
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
+_MAX_STORED_SELECTION_BYTES = 64 * 1024
 _SCHEMA_VERSION = 1
 _TASK_SELECTION_FIELD = "v01_model_selection"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
@@ -187,7 +189,10 @@ class ModelSelection(BaseModel):
             raise ValueError("configured API route requires provider, model, and endpoint")
         if self.provider_id in {"ollama", "foundry-local"}:
             raise ValueError("configured API route must not impersonate a local provider")
-        if self.credential_ref is None or _ENV_CREDENTIAL_REF.fullmatch(self.credential_ref) is None:
+        if (
+            self.credential_ref is None
+            or _ENV_CREDENTIAL_REF.fullmatch(self.credential_ref) is None
+        ):
             raise ValueError("configured API route requires an env credential reference")
         ApiModelRouteConfig(
             provider_id=self.provider_id,
@@ -232,8 +237,11 @@ class ModelSelection(BaseModel):
         try:
             if type(value) is not str:
                 raise TypeError("stored model selection must be text")
-            return cls.model_validate_json(value)
-        except (TypeError, ValueError, ValidationError) as exc:
+            decoded = load_persisted_json_object(
+                value, max_bytes=_MAX_STORED_SELECTION_BYTES
+            )
+            return cls.model_validate(decoded)
+        except (TypeError, ValueError, ValidationError, RecursionError) as exc:
             raise ModelSetupError(
                 "Збережені налаштування моделі пошкоджені або несумісні."
             ) from exc
@@ -304,7 +312,11 @@ class V01ModelSettings:
         if row is None or not isinstance(row["selection_json"], str):
             raise ModelSetupError("Збережену модель завдання не знайдено.")
         body = row["selection_json"]
-        if hashlib.sha256(body.encode("utf-8")).hexdigest() != selection_id:
+        try:
+            raw = bounded_stored_utf8(body, max_bytes=_MAX_STORED_SELECTION_BYTES)
+        except (TypeError, ValueError) as exc:
+            raise ModelSetupError("Збережену модель завдання не вдалося перевірити.") from exc
+        if hashlib.sha256(raw).hexdigest() != selection_id:
             raise ModelSetupError("Збережену модель завдання не вдалося перевірити.")
         return ModelSelection.from_stored(body)
 
@@ -381,7 +393,10 @@ class V01ModelSettings:
         except ModelSetupError as exc:
             message = str(exc)
         except (ValidationError, TypeError, ValueError):
-            message = "Перевірте режим, постачальника, модель, адресу, тайм-аут і параметри доступу."
+            message = (
+                "Перевірте режим, постачальника, модель, адресу, "
+                "тайм-аут і параметри доступу."
+            )
         except sqlite3.Error:
             message = "Не вдалося зберегти налаштування моделі."
         return UIResult(
