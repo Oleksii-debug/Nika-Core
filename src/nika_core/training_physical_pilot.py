@@ -330,6 +330,15 @@ def _candidate_manifest_evidence(
     )
     if not hmac.compare_digest(base_sha256, completed.base_artifact.sha256):
         _fail("PEFT candidate manifest changed base artifact digest")
+    foundation_model_sha256 = _require_sha256(
+        manifest.get("foundation_model_sha256"),
+        name="candidate manifest foundation_model_sha256",
+    )
+    if not hmac.compare_digest(
+        foundation_model_sha256,
+        completed.base_artifact.sha256,
+    ):
+        _fail("PEFT pilot candidate changed foundation model digest")
     if manifest.get("candidate_artifact_ref") != completed.candidate_artifact_ref:
         _fail("PEFT candidate manifest changed candidate artifact reference")
     manifest_job_fingerprint = _require_sha256(
