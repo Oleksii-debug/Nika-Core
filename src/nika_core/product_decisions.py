@@ -22,6 +22,7 @@ from nika_core.security import ActionIntent, ApprovalEvidence, ApprovalVerifier
 from nika_core.tools import ToolRisk
 
 _MAX_STORED_HANDOFF_BYTES = 1024 * 1024
+_SQLITE_INTEGER_MAX = (1 << 63) - 1
 
 
 def _reject_nonfinite_evidence(_value: str) -> None:
@@ -80,25 +81,77 @@ def _is_lock_contention(exc: sqlite3.OperationalError) -> bool:
 
 
 def _strict_int(value: Any, *, label: str, minimum: int) -> int:
-    if type(value) is not int or value < minimum:
+    if (
+        type(value) is not int
+        or value < minimum
+        or value > _SQLITE_INTEGER_MAX
+    ):
         raise ProductProjectError(
-            f"{label} must be an integer greater than or equal to {minimum}"
+            f"{label} must be an exact integer in range "
+            f"{minimum}..{_SQLITE_INTEGER_MAX}"
         )
     return value
 
 
-def _decode_id_list(raw: Any, *, label: str) -> tuple[str, ...]:
+def _validated_text(value: object, *, label: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise ProductProjectError(f"{label} must be non-empty text")
     try:
-        values = json.loads(raw)
-    except (TypeError, json.JSONDecodeError) as exc:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProductProjectError(f"{label} must be valid UTF-8 text") from exc
+    return value
+
+
+def _snapshot_decision(decision: object) -> ProductDecision:
+    if type(decision) is not ProductDecision:
+        raise ProductProjectError("product decision must be an exact ProductDecision")
+    try:
+        decision_id = decision.decision_id
+        option_id = decision.option_id
+        state = decision.state
+        rationale = decision.rationale
+        decided_by_ref = decision.decided_by_ref
+    except AttributeError as exc:
+        raise ProductProjectError("product decision is incomplete") from exc
+    if type(state) is not ProductDecisionState:
+        raise ProductProjectError("product decision state must be ProductDecisionState")
+    return ProductDecision(
+        decision_id=_validated_text(
+            decision_id,
+            label="product decision decision_id",
+        ),
+        option_id=_validated_text(
+            option_id,
+            label="product decision option_id",
+        ),
+        state=state,
+        rationale=_validated_text(
+            rationale,
+            label="product decision rationale",
+        ),
+        decided_by_ref=_validated_text(
+            decided_by_ref,
+            label="product decision decided_by_ref",
+        ),
+    )
+
+
+def _decode_id_list(raw: Any, *, label: str) -> tuple[str, ...]:
+    raw_text = _validated_text(raw, label=f"{label} JSON")
+    try:
+        values = json.loads(raw_text)
+    except (json.JSONDecodeError, RecursionError) as exc:
         raise ProductProjectError(f"{label} contains invalid JSON") from exc
-    if not isinstance(values, list) or not values:
+    if type(values) is not list or not values:
         raise ProductProjectError(f"{label} must be a non-empty list")
-    if any(not isinstance(value, str) or not value.strip() for value in values):
-        raise ProductProjectError(f"{label} must contain non-empty string identifiers")
-    if len(values) != len(set(values)):
+    items = tuple(
+        _validated_text(value, label=f"{label} item")
+        for value in values
+    )
+    if len(items) != len(set(items)):
         raise ProductProjectError(f"{label} must not contain duplicates")
-    return tuple(values)
+    return items
 
 
 def _decision_fingerprint(project_id: str, decision: ProductDecision) -> str:
@@ -164,7 +217,9 @@ class ProductDecisionRepository:
         idempotency_key: str,
     ) -> ActionIntent:
         """Build the exact trusted-host intent required for an APPROVED decision."""
-        self._validate_input(decision, idempotency_key)
+        project_id = _validated_text(project_id, label="project_id")
+        idempotency_key = _validated_text(idempotency_key, label="idempotency_key")
+        decision = _snapshot_decision(decision)
         if decision.state is not ProductDecisionState.APPROVED:
             raise ProductProjectError("approval intent requires an APPROVED product decision")
         expected_row_version = _strict_int(
@@ -217,7 +272,9 @@ class ProductDecisionRepository:
         approval: ApprovalEvidence | None = None,
         now: datetime | None = None,
     ) -> StoredProductDecision:
-        self._validate_input(decision, idempotency_key)
+        project_id = _validated_text(project_id, label="project_id")
+        idempotency_key = _validated_text(idempotency_key, label="idempotency_key")
+        decision = _snapshot_decision(decision)
         expected_row_version = _strict_int(
             expected_row_version,
             label="expected ProductProject row_version",
@@ -393,6 +450,8 @@ class ProductDecisionRepository:
             return stored
 
     def get(self, project_id: str, decision_id: str) -> StoredProductDecision:
+        project_id = _validated_text(project_id, label="project_id")
+        decision_id = _validated_text(decision_id, label="decision_id")
         with self.store.connection() as conn:
             decision = self._latest_conn(conn, project_id, decision_id)
             if decision is None:
@@ -400,6 +459,7 @@ class ProductDecisionRepository:
             return decision
 
     def list(self, project_id: str) -> tuple[StoredProductDecision, ...]:
+        project_id = _validated_text(project_id, label="project_id")
         with self.store.connection() as conn:
             if not conn.execute(
                 "SELECT 1 FROM product_projects WHERE project_id=?",
@@ -423,6 +483,8 @@ class ProductDecisionRepository:
         project_id: str,
         decision_id: str,
     ) -> tuple[StoredProductDecision, ...]:
+        project_id = _validated_text(project_id, label="project_id")
+        decision_id = _validated_text(decision_id, label="decision_id")
         with self.store.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM product_decisions WHERE project_id=? AND decision_id=? "
@@ -441,6 +503,9 @@ class ProductDecisionRepository:
         decision_id: str,
         expected_row_version: int,
     ) -> ProductProject:
+        project_id = _validated_text(project_id, label="project_id")
+        requirement_id = _validated_text(requirement_id, label="requirement_id")
+        decision_id = _validated_text(decision_id, label="decision_id")
         expected_row_version = _strict_int(
             expected_row_version,
             label="expected ProductProject row_version",
@@ -522,17 +587,6 @@ class ProductDecisionRepository:
             read_only_precondition=verify_current_evidence,
         )
 
-    @staticmethod
-    def _validate_input(decision: ProductDecision, idempotency_key: str) -> None:
-        if not idempotency_key.strip():
-            raise ProductProjectError("idempotency_key is required")
-        if not decision.decision_id.strip() or not decision.option_id.strip():
-            raise ProductProjectError("product decision requires decision_id and option_id")
-        if not isinstance(decision.state, ProductDecisionState):
-            raise ProductProjectError("product decision state must be ProductDecisionState")
-        if not decision.rationale.strip() or not decision.decided_by_ref.strip():
-            raise ProductProjectError("product decision requires rationale and decided_by_ref")
-
     def _replay_conn(
         self,
         conn: Any,
@@ -548,11 +602,27 @@ class ProductDecisionRepository:
         ).fetchone()
         if replay is None:
             return None
+        stored_project_id = _validated_text(
+            replay["project_id"],
+            label="persisted decision replay project_id",
+        )
+        stored_operation_kind = _validated_text(
+            replay["operation_kind"],
+            label="persisted decision replay operation_kind",
+        )
+        stored_entity_id = _validated_text(
+            replay["entity_id"],
+            label="persisted decision replay entity_id",
+        )
+        stored_fingerprint = _validated_text(
+            replay["input_fingerprint"],
+            label="persisted decision replay input_fingerprint",
+        )
         if (
-            replay["project_id"] != project_id
-            or replay["operation_kind"] != "product_decision.record"
-            or replay["entity_id"] != decision.decision_id
-            or replay["input_fingerprint"] != fingerprint
+            stored_project_id != project_id
+            or stored_operation_kind != "product_decision.record"
+            or stored_entity_id != decision.decision_id
+            or stored_fingerprint != fingerprint
         ):
             raise ProductProjectError(
                 "idempotency key was already used with different mutation input"
@@ -716,15 +786,42 @@ class ProductDecisionRepository:
 
     @staticmethod
     def _from_row(row: Any) -> StoredProductDecision:
-        return StoredProductDecision(
-            project_id=row["project_id"],
-            decision=ProductDecision(
-                decision_id=row["decision_id"],
-                option_id=row["option_id"],
-                state=ProductDecisionState(row["state"]),
-                rationale=row["rationale"],
-                decided_by_ref=row["decided_by_ref"],
+        project_id = _validated_text(
+            row["project_id"],
+            label="persisted product decision project_id",
+        )
+        raw_state = _validated_text(
+            row["state"],
+            label="persisted product decision state",
+        )
+        try:
+            state = ProductDecisionState(raw_state)
+        except ValueError as exc:
+            raise ProductProjectError(
+                "persisted product decision state is invalid"
+            ) from exc
+        decision = ProductDecision(
+            decision_id=_validated_text(
+                row["decision_id"],
+                label="persisted product decision decision_id",
             ),
+            option_id=_validated_text(
+                row["option_id"],
+                label="persisted product decision option_id",
+            ),
+            state=state,
+            rationale=_validated_text(
+                row["rationale"],
+                label="persisted product decision rationale",
+            ),
+            decided_by_ref=_validated_text(
+                row["decided_by_ref"],
+                label="persisted product decision decided_by_ref",
+            ),
+        )
+        return StoredProductDecision(
+            project_id=project_id,
+            decision=decision,
             decision_version=_strict_int(
                 row["decision_version"],
                 label="persisted product decision version",
@@ -734,7 +831,10 @@ class ProductDecisionRepository:
                 row["evidence_package_ids_json"],
                 label="persisted product decision evidence package ids",
             ),
-            created_at=row["created_at"],
+            created_at=_validated_text(
+                row["created_at"],
+                label="persisted product decision created_at",
+            ),
         )
 
     def _get_version_conn(
