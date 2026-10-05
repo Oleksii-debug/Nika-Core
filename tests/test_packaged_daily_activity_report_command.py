@@ -58,8 +58,8 @@ def _task_count(store: SQLiteStore) -> int:
         "Nika daily activity report",
         "щоденний звіт активності",
         "Покажи щоденний звіт активності!",
-        "звіт діяльності за сьогодні",
-        "Покажи звіт діяльності за сьогодні:",
+        "звіт діяльності Nika",
+        "Покажи звіт діяльності Nika:",
     ),
 )
 def test_daily_activity_report_recognizer_accepts_only_explicit_aliases(command: str) -> None:
@@ -74,6 +74,8 @@ def test_daily_activity_report_recognizer_accepts_only_explicit_aliases(command:
         "Підготуй звіт про цей текст",
         "Create report application",
         "daily report for another workspace",
+        "звіт діяльності за сьогодні",
+        "покажи звіт діяльності за сьогодні",
     ),
 )
 def test_daily_activity_report_recognizer_does_not_capture_generic_report_text(
