@@ -217,3 +217,57 @@ def test_preconsumed_response_fails_closed_without_crashing_probe() -> None:
     assert snapshot.model_present is ModelHealthFact.UNKNOWN
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
     assert calls == ["/api/tags"]
+
+class _ReadTimeoutBody(httpx.SyncByteStream):
+    def __init__(self) -> None:
+        self.closed = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield b'{"models":'
+        raise httpx.ReadTimeout("body stalled after HTTP response headers")
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_tags_body_read_timeout_preserves_http_reachability() -> None:
+    calls: list[str] = []
+    broken = _ReadTimeoutBody()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return httpx.Response(200, stream=broken)
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="selected:1",
+        client_factory=_client_factory(handler),
+    ).snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["/api/tags"]
+    assert broken.closed
+
+
+def test_running_body_read_timeout_preserves_catalog_presence() -> None:
+    calls: list[str] = []
+    broken = _ReadTimeoutBody()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/tags":
+            return _response([{"model": "selected:1"}])
+        return httpx.Response(200, stream=broken)
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="selected:1",
+        client_factory=_client_factory(handler),
+    ).snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["/api/tags", "/api/ps"]
+    assert broken.closed
+
