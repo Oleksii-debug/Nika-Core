@@ -805,6 +805,29 @@ def test_report_writer_preserves_foreign_destination_on_publish_race(
     assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
 
 
+def test_report_writer_preserves_competitor_hardlink_to_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "physical-old-new-evaluation-report.json"
+    real_link = driver.os.link
+
+    def competitor_link(source: Path, destination: Path) -> None:
+        real_link(source, destination)
+        raise FileExistsError("synthetic competitor linked staging first")
+
+    monkeypatch.setattr(driver.os, "link", competitor_link)
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="already exists",
+    ):
+        driver._write_report(path, {"schema": "test"})
+
+    assert path.read_bytes() == b'{"schema":"test"}\n'
+    assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
+
+
 def test_report_writer_rolls_back_only_owned_file_after_final_byte_drift(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
