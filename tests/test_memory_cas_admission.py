@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import sqlite3
+from collections.abc import Iterator
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event
 
 import pytest
 
@@ -225,3 +230,177 @@ def test_stale_conditional_write_preserves_newer_minimized_winner(tmp_path: Path
     assert row is not None
     assert "winner-secret" not in row["value_json"]
     assert "stale-secret" not in row["value_json"]
+
+
+class _ExpiryFetchallCursor:
+    def __init__(
+        self,
+        cursor: sqlite3.Cursor,
+        selected: Event,
+        writer_done: Event,
+    ) -> None:
+        self._cursor = cursor
+        self._selected = selected
+        self._writer_done = writer_done
+
+    def fetchall(self) -> list[sqlite3.Row]:
+        rows = self._cursor.fetchall()
+        self._selected.set()
+        if not self._writer_done.wait(timeout=5):
+            raise AssertionError("concurrent memory renewal did not reach its barrier")
+        return rows
+
+
+class _ExpiryFetchallConnection:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        selected: Event,
+        writer_done: Event,
+        select_marker: str,
+    ) -> None:
+        self._conn = conn
+        self._selected = selected
+        self._writer_done = writer_done
+        self._select_marker = select_marker
+
+    def execute(
+        self,
+        sql: str,
+        parameters: tuple[object, ...] = (),
+    ) -> sqlite3.Cursor | _ExpiryFetchallCursor:
+        cursor = self._conn.execute(sql, parameters)
+        if sql.lstrip().startswith("SELECT * FROM memory_records") and (
+            self._select_marker in sql
+        ):
+            return _ExpiryFetchallCursor(
+                cursor,
+                self._selected,
+                self._writer_done,
+            )
+        return cursor
+
+
+class _ExpiryFetchallStore:
+    def __init__(
+        self,
+        store: SQLiteStore,
+        selected: Event,
+        writer_done: Event,
+        select_marker: str,
+    ) -> None:
+        self._store = store
+        self._selected = selected
+        self._writer_done = writer_done
+        self._select_marker = select_marker
+
+    @contextmanager
+    def connection(self) -> Iterator[_ExpiryFetchallConnection]:
+        with self._store.connection() as conn:
+            yield _ExpiryFetchallConnection(
+                conn,
+                self._selected,
+                self._writer_done,
+                self._select_marker,
+            )
+
+
+def _seed_expired_generation(
+    store: SQLiteStore,
+    memory: MemoryService,
+) -> None:
+    memory.put(
+        **_identity(),
+        value={"generation": "expired"},
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+    )
+    with store.connection() as conn:
+        cursor = conn.execute(
+            "UPDATE memory_records SET expires_at = ? "
+            "WHERE scope = ? AND owner_id = ? AND namespace = ? AND memory_key = ?",
+            (
+                (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                "workspace",
+                "research",
+                "policy",
+                "ranking",
+            ),
+        )
+        assert cursor.rowcount == 1
+
+
+def test_namespace_expiry_cleanup_cannot_delete_concurrent_renewal(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    writer = MemoryService(store)
+    _seed_expired_generation(store, writer)
+    selected = Event()
+    writer_done = Event()
+    stale_reader = MemoryService(
+        _ExpiryFetchallStore(
+            store,
+            selected,
+            writer_done,
+            "ORDER BY memory_key",
+        )
+    )  # type: ignore[arg-type]
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        stale_read = pool.submit(
+            stale_reader.list_namespace,
+            scope=MemoryScope.WORKSPACE,
+            owner_id="research",
+            namespace="policy",
+        )
+        assert selected.wait(timeout=5), "namespace read never reached its barrier"
+        try:
+            renewed = writer.put(
+                **_identity(),
+                value={"generation": "renewed"},
+                expires_at=datetime.now(UTC) + timedelta(hours=2),
+            )
+        finally:
+            writer_done.set()
+
+        assert stale_read.result(timeout=5) == ()
+
+    durable = MemoryService(store).get(**_identity())
+    assert durable == renewed
+    assert durable is not None
+    assert durable.value == {"generation": "renewed"}
+
+
+def test_global_purge_cannot_delete_concurrent_renewal(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    writer = MemoryService(store)
+    _seed_expired_generation(store, writer)
+    selected = Event()
+    writer_done = Event()
+    stale_purger = MemoryService(
+        _ExpiryFetchallStore(
+            store,
+            selected,
+            writer_done,
+            "WHERE expires_at IS NOT NULL",
+        )
+    )  # type: ignore[arg-type]
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        purge = pool.submit(stale_purger.purge_expired)
+        assert selected.wait(timeout=5), "global purge never reached its barrier"
+        try:
+            renewed = writer.put(
+                **_identity(),
+                value={"generation": "renewed"},
+                expires_at=datetime.now(UTC) + timedelta(hours=2),
+            )
+        finally:
+            writer_done.set()
+
+        assert purge.result(timeout=5) == 0
+
+    durable = MemoryService(store).get(**_identity())
+    assert durable == renewed
+    assert durable is not None
+    assert durable.value == {"generation": "renewed"}
