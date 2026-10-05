@@ -952,6 +952,8 @@ def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path
             base_descriptor_digest=_sha(b"base-descriptor"),
             challenger_artifact_sha256=_sha(b"challenger-artifact"),
             challenger_descriptor_digest=_sha(b"challenger-descriptor"),
+            activation_request_sha256=_sha(b"activation-request"),
+            activation_attestation_sha256=_sha(b"activation-attestation"),
         )
 
     assert settings.snapshot()["model"] == "base-model"
@@ -1046,6 +1048,8 @@ def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path
             base_descriptor_digest=_sha(b"foundry-base-descriptor"),
             challenger_artifact_sha256=_sha(b"foundry-challenger-artifact"),
             challenger_descriptor_digest=_sha(b"foundry-challenger-descriptor"),
+            activation_request_sha256=_sha(b"foundry-activation-request"),
+            activation_attestation_sha256=_sha(b"foundry-activation-attestation"),
         )
 
     assert settings.snapshot()["model"] == "base-model"
