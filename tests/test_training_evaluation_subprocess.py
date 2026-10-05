@@ -167,6 +167,7 @@ def _adapter(
     timeout_seconds: float = 5.0,
     max_response_bytes: int = 64 * 1024,
     script_kind: str = "model_evaluator_command_file",
+    environment: dict[str, str] | None = None,
 ) -> tuple[
     RegistrySubprocessLoadedModelAttestor,
     ArtifactRegistry,
@@ -189,6 +190,7 @@ def _adapter(
         allowed_root=str(tmp_path.resolve()),
         timeout_seconds=timeout_seconds,
         max_response_bytes=max_response_bytes,
+        environment=environment,
     )
     return adapter, registry, script_id, descriptor
 
@@ -448,21 +450,25 @@ def test_absolute_evaluator_script_requires_registry_binding(tmp_path: Path) -> 
         )
 
 
-def test_parent_environment_allowlist_is_explicit_only(tmp_path: Path) -> None:
-    script = _success_script(tmp_path)
-    candidate_path, descriptor = _candidate(tmp_path)
-    registry, executable_id, script_id, executable = _registry(tmp_path, script)
-
-    adapter = RegistrySubprocessLoadedModelAttestor(
-        (str(executable), str(script)),
-        artifact_registry=registry,
-        evaluator_artifact_id=executable_id,
-        command_artifact_ids={1: script_id},
-        candidate_path=str(candidate_path.resolve()),
-        descriptor=descriptor,
-        allowed_root=str(tmp_path.resolve()),
-        environment={"NIKA_EVAL_ALLOWED": "1"},
+@pytest.mark.asyncio
+async def test_explicit_environment_allowlist_exposes_only_admitted_values(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("NIKA_EVAL_BLOCKED", "parent-secret")
+    script = _success_script(
+        tmp_path,
+        text_expression=(
+            'os.getenv("NIKA_EVAL_ALLOWED", "missing") + ":" + '
+            'str(os.getenv("NIKA_EVAL_BLOCKED") is not None).lower()'
+        ),
+    )
+    adapter, _, _, descriptor = _adapter(
+        tmp_path,
+        script,
+        environment={"NIKA_EVAL_ALLOWED": "yes"},
     )
 
-    assert len(adapter.attestor_sha256) == 64
-    assert os.environ.get("NIKA_EVAL_ALLOWED") is None
+    result = await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert result.response.text == "yes:false"
