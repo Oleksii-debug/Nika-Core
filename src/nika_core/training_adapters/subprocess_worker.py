@@ -89,6 +89,19 @@ _SECRET_ENVIRONMENT_TOKENS = frozenset(
         "token",
     }
 )
+_TRAINING_RUNTIME_MANIFEST_DOMAIN = b"nika-peft-runtime-manifest-v1\x00"
+_TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY = "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"
+_TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY = "NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"
+_TRAINING_RUNTIME_METADATA_PREFIX = "nika.training.runtime."
+_TRAINING_RUNTIME_BINDINGS = (
+    ("torch", "NIKA_TRAINER_TORCH_VERSION"),
+    ("transformers", "NIKA_TRAINER_TRANSFORMERS_VERSION"),
+    ("peft", "NIKA_TRAINER_PEFT_VERSION"),
+    ("accelerate", "NIKA_TRAINER_ACCELERATE_VERSION"),
+    ("gguf", "NIKA_TRAINER_GGUF_VERSION"),
+    ("safetensors", "NIKA_TRAINER_SAFETENSORS_VERSION"),
+)
+_MAX_TRAINING_RUNTIME_VERSION_BYTES = 256
 
 
 class TrainingSubprocessError(TrainingWorkerError):
@@ -367,6 +380,170 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
             raise ValueError("environment value exceeds the configured byte limit")
         result[key] = value
     return result
+
+
+def _normalize_training_runtime_versions(value: object) -> dict[str, str]:
+    expected = {distribution for distribution, _ in _TRAINING_RUNTIME_BINDINGS}
+    if type(value) is not dict or set(value) != expected:
+        raise ValueError("training runtime versions must contain the exact deployment set")
+    normalized: dict[str, str] = {}
+    for distribution, _ in _TRAINING_RUNTIME_BINDINGS:
+        version = value[distribution]
+        if (
+            type(version) is not str
+            or not version
+            or version != version.strip()
+            or any(ord(character) < 32 or ord(character) == 127 for character in version)
+        ):
+            raise ValueError("training runtime versions must be canonical text")
+        try:
+            encoded = version.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise ValueError("training runtime versions must be valid UTF-8") from exc
+        if len(encoded) > _MAX_TRAINING_RUNTIME_VERSION_BYTES:
+            raise ValueError("training runtime version exceeds the configured byte limit")
+        normalized[distribution] = version
+    return normalized
+
+
+def _training_runtime_manifest_sha256(versions: Mapping[str, str]) -> str:
+    normalized = _normalize_training_runtime_versions(dict(versions))
+    encoded = json.dumps(
+        normalized,
+        allow_nan=False,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(_TRAINING_RUNTIME_MANIFEST_DOMAIN + encoded).hexdigest()
+
+
+def training_runtime_registry_metadata(
+    runtime_versions: Mapping[str, str],
+) -> dict[str, str]:
+    """Build immutable Artifact Registry metadata for one trainer deployment runtime."""
+
+    normalized = _normalize_training_runtime_versions(dict(runtime_versions))
+    return {
+        _TRAINING_RUNTIME_METADATA_PREFIX + distribution + ".version": normalized[distribution]
+        for distribution, _ in _TRAINING_RUNTIME_BINDINGS
+    }
+
+
+def _training_runtime_environment_from_registry_metadata(
+    metadata: Mapping[str, str],
+) -> dict[str, str]:
+    runtime_keys = {
+        key
+        for key in metadata
+        if type(key) is str and key.startswith(_TRAINING_RUNTIME_METADATA_PREFIX)
+    }
+    if not runtime_keys:
+        return {}
+    expected_metadata_keys = {
+        _TRAINING_RUNTIME_METADATA_PREFIX + distribution + ".version"
+        for distribution, _ in _TRAINING_RUNTIME_BINDINGS
+    }
+    if runtime_keys != expected_metadata_keys:
+        raise ValueError("trainer runtime Registry metadata is incomplete or ambiguous")
+    versions = _normalize_training_runtime_versions(
+        {
+            distribution: metadata[
+                _TRAINING_RUNTIME_METADATA_PREFIX + distribution + ".version"
+            ]
+            for distribution, _ in _TRAINING_RUNTIME_BINDINGS
+        }
+    )
+    environment = {
+        environment_key: versions[distribution]
+        for distribution, environment_key in _TRAINING_RUNTIME_BINDINGS
+    }
+    environment[_TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY] = (
+        _training_runtime_manifest_sha256(versions)
+    )
+    return environment
+
+
+def _runtime_identity_environment(
+    environment: Mapping[str, str],
+) -> dict[str, str]:
+    runtime_keys = {
+        _TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY,
+        *(environment_key for _, environment_key in _TRAINING_RUNTIME_BINDINGS),
+    }
+    present = runtime_keys.intersection(environment)
+    if not present:
+        return {}
+    if present != runtime_keys:
+        raise ValueError("training runtime environment identity is incomplete")
+    versions = _normalize_training_runtime_versions(
+        {
+            distribution: environment[environment_key]
+            for distribution, environment_key in _TRAINING_RUNTIME_BINDINGS
+        }
+    )
+    manifest_sha256 = _validate_sha256(
+        environment[_TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY],
+        name="training_runtime_manifest_sha256",
+    )
+    if not hmac.compare_digest(
+        manifest_sha256,
+        _training_runtime_manifest_sha256(versions),
+    ):
+        raise ValueError("training runtime environment manifest digest is inconsistent")
+    return {
+        **{
+            environment_key: versions[distribution]
+            for distribution, environment_key in _TRAINING_RUNTIME_BINDINGS
+        },
+        _TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY: manifest_sha256,
+    }
+
+
+def _bind_registry_training_runtime_environment(
+    environment: Mapping[str, str],
+    trainer_record: ArtifactRecord,
+) -> dict[str, str]:
+    caller_environment = dict(environment)
+    caller_runtime = _runtime_identity_environment(caller_environment)
+    registry_runtime = _training_runtime_environment_from_registry_metadata(
+        trainer_record.metadata
+    )
+    caller_deployment_artifact_id = caller_environment.get(
+        _TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY
+    )
+    if caller_deployment_artifact_id is not None:
+        caller_deployment_artifact_id = _validate_sha256(
+            caller_deployment_artifact_id,
+            name="trainer_deployment_artifact_id",
+        )
+        if not hmac.compare_digest(
+            caller_deployment_artifact_id,
+            trainer_record.artifact_id,
+        ):
+            raise ValueError(
+                "trainer deployment artifact identity does not match Registry authority"
+            )
+    if caller_runtime and not registry_runtime:
+        raise ValueError(
+            "training runtime environment requires Registry-authoritative trainer metadata"
+        )
+    if caller_runtime and registry_runtime and caller_runtime != registry_runtime:
+        raise ValueError(
+            "training runtime environment does not match Registry-authoritative trainer metadata"
+        )
+    effective_runtime = registry_runtime or caller_runtime
+    if effective_runtime:
+        for key in effective_runtime:
+            caller_environment[key] = effective_runtime[key]
+        caller_environment[_TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY] = (
+            trainer_record.artifact_id
+        )
+    elif caller_deployment_artifact_id is not None:
+        raise ValueError(
+            "trainer deployment artifact identity requires Registry runtime authority"
+        )
+    return _validate_environment(caller_environment)
 
 
 def _job_identity(
@@ -685,7 +862,12 @@ class SubprocessTrainingWorker:
             command_artifact_ids=command_artifact_ids,
         )
         self._trainer_artifact_id = self._command_artifact_ids[0]
-        self._environment = _validate_environment(environment)
+        self._base_environment = _validate_environment(environment)
+        initial_command_records = self._get_command_records()
+        self._environment = _bind_registry_training_runtime_environment(
+            self._base_environment,
+            initial_command_records[0],
+        )
         self._command_sha256 = _command_sha256(
             self._command,
             self._command_artifact_ids,
@@ -700,7 +882,7 @@ class SubprocessTrainingWorker:
         )
         self._execution_plan_sha256 = _execution_plan_sha256(
             command_sha256=self._command_sha256,
-            command_records=self._get_command_records(),
+            command_records=initial_command_records,
             timeout_seconds=self._timeout_seconds,
             max_request_bytes=self._max_request_bytes,
             max_response_bytes=self._max_response_bytes,
@@ -735,8 +917,28 @@ class SubprocessTrainingWorker:
             )
 
         command_records = self._get_command_records()
+        try:
+            live_environment = _bind_registry_training_runtime_environment(
+                self._base_environment,
+                command_records[0],
+            )
+            live_command_sha256 = _command_sha256(
+                self._command,
+                self._command_artifact_ids,
+                environment=live_environment,
+            )
+        except (TypeError, ValueError):
+            raise _error(
+                "training_execution_plan_changed",
+                effect=TrainingWorkerFailureEffect.NO_EFFECT,
+            ) from None
+        if not hmac.compare_digest(live_command_sha256, self._command_sha256):
+            raise _error(
+                "training_execution_plan_changed",
+                effect=TrainingWorkerFailureEffect.NO_EFFECT,
+            )
         live_execution_plan_sha256 = _execution_plan_sha256(
-            command_sha256=self._command_sha256,
+            command_sha256=live_command_sha256,
             command_records=command_records,
             timeout_seconds=self._timeout_seconds,
             max_request_bytes=self._max_request_bytes,

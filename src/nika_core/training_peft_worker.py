@@ -43,6 +43,10 @@ _TRAINING_RUNTIME_DISTRIBUTIONS = (
     ("gguf", "NIKA_TRAINER_GGUF_VERSION"),
     ("safetensors", "NIKA_TRAINER_SAFETENSORS_VERSION"),
 )
+_TRAINING_RUNTIME_METADATA_KEYS = {
+    distribution: f"nika.training.runtime.{distribution}.version"
+    for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
+}
 _MAX_MODEL_DIR_FILES = 10_000
 _MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
 _MODEL_SNAPSHOT_DIR = "model-snapshot"
@@ -65,6 +69,7 @@ class ParsedRequest:
     step_id: str
     step_index: int
     job_fingerprint: str
+    trainer_artifact_id: str
     candidate_artifact_ref: str
     base_artifact_ref: str
     base_artifact_sha256: str
@@ -79,8 +84,6 @@ class TrainerConfig:
     base_gguf: Path
     model_dir: Path
     model_dir_manifest_sha256: str
-    trainer_implementation_sha256: str
-    training_runtime_versions: tuple[tuple[str, str], ...]
     output_root: Path
     max_records: int
     max_sequence_length: int
@@ -254,7 +257,10 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
     step_id = _require_sha256(value["step_id"], field="step_id")
     job_fingerprint = _require_sha256(value["job_fingerprint"], field="job_fingerprint")
     _require_sha256(value["command_sha256"], field="command_sha256")
-    _require_sha256(value["trainer_artifact_id"], field="trainer_artifact_id")
+    trainer_artifact_id = _require_sha256(
+        value["trainer_artifact_id"],
+        field="trainer_artifact_id",
+    )
     _require_sha256(value["trainer_sha256"], field="trainer_sha256")
 
     step_index = value["step_index"]
@@ -353,6 +359,7 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
         step_id=step_id,
         step_index=step_index,
         job_fingerprint=job_fingerprint,
+        trainer_artifact_id=trainer_artifact_id,
         candidate_artifact_ref=candidate_ref,
         base_artifact_ref=base_artifact_ref,
         base_artifact_sha256=base_sha256,
@@ -574,6 +581,34 @@ def _training_runtime_manifest_sha256(versions: dict[str, str]) -> str:
     return hashlib.sha256(_RUNTIME_MANIFEST_DOMAIN + encoded).hexdigest()
 
 
+def _training_runtime_versions_from_trainer_artifact(
+    trainer_artifact: object,
+) -> tuple[str, dict[str, str]]:
+    try:
+        from nika_core.artifacts import ArtifactLocationKind, ArtifactRecord
+    except ImportError as exc:
+        raise ValueError("artifact authority is unavailable") from exc
+    if type(trainer_artifact) is not ArtifactRecord:
+        raise TypeError("trainer_artifact must be an exact ArtifactRecord")
+    if (
+        trainer_artifact.kind != "training_executable"
+        or trainer_artifact.location_kind is not ArtifactLocationKind.LOCAL_FILE
+    ):
+        raise ValueError("trainer_artifact must authorize a local training executable")
+    metadata = dict(trainer_artifact.metadata)
+    expected_runtime_keys = set(_TRAINING_RUNTIME_METADATA_KEYS.values())
+    runtime_keys = {
+        key for key in metadata if key.startswith("nika.training.runtime.")
+    }
+    if runtime_keys != expected_runtime_keys:
+        raise ValueError("trainer artifact runtime metadata is incomplete or ambiguous")
+    versions = {
+        distribution: metadata[_TRAINING_RUNTIME_METADATA_KEYS[distribution]]
+        for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
+    }
+    return trainer_artifact.artifact_id, _normalize_training_runtime_versions(versions)
+
+
 def _installed_training_runtime_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
     for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS:
@@ -586,22 +621,38 @@ def _installed_training_runtime_versions() -> dict[str, str]:
     return _normalize_training_runtime_versions(versions)
 
 
-def _verify_training_runtime_versions() -> tuple[tuple[str, str], ...]:
+def _verify_training_runtime_versions() -> None:
+    try:
+        expected = _normalize_training_runtime_versions(
+            {
+                distribution: os.environ.get(environment_key)
+                for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS
+            }
+        )
+    except (UnicodeEncodeError, ValueError):
+        _fail("nika_trainer_runtime_manifest_invalid")
+    expected_manifest_sha256 = _require_sha256(
+        os.environ.get("NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"),
+        field="nika_trainer_runtime_manifest_sha256",
+    )
+    if _training_runtime_manifest_sha256(expected) != expected_manifest_sha256:
+        _fail("nika_trainer_runtime_manifest_mismatch")
     try:
         observed = _installed_training_runtime_versions()
     except (UnicodeEncodeError, ValueError):
         _fail("nika_trainer_runtime_versions_unavailable")
-    verified: list[tuple[str, str]] = []
-    for distribution, environment_key in _TRAINING_RUNTIME_DISTRIBUTIONS:
-        expected = _require_bounded_text(
-            os.environ.get(environment_key),
-            field=environment_key.lower(),
-            max_bytes=_MAX_RUNTIME_VERSION_BYTES,
-        )
-        if observed[distribution] != expected:
-            _fail("nika_trainer_runtime_version_mismatch")
-        verified.append((distribution, observed[distribution]))
-    return tuple(verified)
+    if observed != expected:
+        _fail("nika_trainer_runtime_version_mismatch")
+
+
+def _verify_trainer_deployment_identity(request: ParsedRequest) -> None:
+    expected_artifact_id = _require_sha256(
+        os.environ.get("NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"),
+        field="nika_trainer_deployment_artifact_id",
+    )
+    if request.trainer_artifact_id != expected_artifact_id:
+        _fail("nika_trainer_deployment_artifact_mismatch")
+
 
 def build_trainer_environment(
     *,
@@ -615,16 +666,15 @@ def build_trainer_environment(
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
     lora_target_modules: tuple[str, ...] = ("q_proj", "v_proj"),
-    runtime_versions: dict[str, str],
+    trainer_artifact: object,
     torch_num_threads: int = 1,
     seed: int = 1729,
 ) -> dict[str, str]:
-    """Build a sterile execution environment from deployment-authoritative runtime metadata.
+    """Build a sterile environment from one Registry-authorized trainer deployment.
 
-    The caller must supply the exact runtime-version manifest for the Registry-authorized
-    trainer deployment. This function intentionally never inspects the parent interpreter's
-    installed distributions; the child trainer self-verifies the supplied manifest before any
-    training backend import/effect.
+    Runtime versions come only from the exact local training_executable ArtifactRecord.
+    This function intentionally never inspects the parent interpreter's installed distributions;
+    the child trainer self-verifies the Registry-bound versions before backend effects.
     """
     base = Path(base_gguf)
     model = Path(model_dir)
@@ -671,9 +721,11 @@ def build_trainer_environment(
     ):
         raise ValueError("lora_target_modules is invalid")
     try:
-        deployment_runtime_versions = _normalize_training_runtime_versions(runtime_versions)
-    except (UnicodeEncodeError, ValueError) as exc:
-        raise ValueError("training runtime manifest is invalid") from exc
+        trainer_artifact_id, deployment_runtime_versions = (
+            _training_runtime_versions_from_trainer_artifact(trainer_artifact)
+        )
+    except (TypeError, UnicodeEncodeError, ValueError) as exc:
+        raise ValueError("trainer deployment runtime metadata is invalid") from exc
     output.mkdir(parents=True, exist_ok=True)
     try:
         output_stat = os.lstat(output)
@@ -698,6 +750,7 @@ def build_trainer_environment(
         "NIKA_TRAINER_MODEL_DIR": os.fspath(model),
         "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256": model_manifest,
         "NIKA_TRAINER_OUTPUT_ROOT": os.fspath(output),
+        "NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID": trainer_artifact_id,
         "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256": _training_runtime_manifest_sha256(
             deployment_runtime_versions
         ),
@@ -1108,7 +1161,7 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
 
 
 def _read_config() -> TrainerConfig:
-    training_runtime_versions = _verify_training_runtime_versions()
+    _verify_training_runtime_versions()
     expected_implementation_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_IMPLEMENTATION_SHA256"),
         field="nika_trainer_implementation_sha256",
@@ -1162,8 +1215,6 @@ def _read_config() -> TrainerConfig:
         base_gguf=base_gguf,
         model_dir=model_dir,
         model_dir_manifest_sha256=model_dir_manifest_sha256,
-        trainer_implementation_sha256=expected_implementation_sha256,
-        training_runtime_versions=training_runtime_versions,
         output_root=output_root,
         max_records=_env_int(
             "NIKA_TRAINER_MAX_RECORDS",
@@ -1918,8 +1969,6 @@ def _candidate_manifest_json(
         "consumed_materials_sha256": consumed.attestation_sha256,
         "job_fingerprint": request.job_fingerprint,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
-        "trainer_implementation_sha256": config.trainer_implementation_sha256,
-        "training_runtime_versions": dict(config.training_runtime_versions),
         "schema": "nika-peft-candidate-v1",
         "step_number": request.step_index + 1,
         "trainer_parameters": {
@@ -1949,8 +1998,6 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
-        "trainer_implementation_sha256",
-        "training_runtime_versions",
         "schema",
         "step_number",
         "trainer_parameters",
@@ -1985,29 +2032,8 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
-        "trainer_implementation_sha256",
     ):
         if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
-            _fail("candidate_manifest_invalid")
-
-    runtime_versions = value["training_runtime_versions"]
-    runtime_names = tuple(
-        distribution for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
-    )
-    if type(runtime_versions) is not dict or set(runtime_versions) != set(runtime_names):
-        _fail("candidate_manifest_invalid")
-    for distribution in runtime_names:
-        version = runtime_versions[distribution]
-        if type(version) is not str or not version or version != version.strip():
-            _fail("candidate_manifest_invalid")
-        try:
-            encoded_version = version.encode("utf-8", errors="strict")
-        except UnicodeEncodeError:
-            _fail("candidate_manifest_invalid")
-        if (
-            len(encoded_version) > _MAX_RUNTIME_VERSION_BYTES
-            or any(ord(character) < 32 or ord(character) == 127 for character in version)
-        ):
             _fail("candidate_manifest_invalid")
 
     step_number = value["step_number"]
@@ -2143,6 +2169,7 @@ def main() -> int:
     try:
         config = _read_config()
         request = _parse_request(_read_request())
+        _verify_trainer_deployment_identity(request)
         consumed = _consume_materials(request, max_records=config.max_records)
         resume_state, candidate_sha256 = _train_one_step(request, config, consumed)
         result = _response(request, consumed, resume_state, candidate_sha256)
