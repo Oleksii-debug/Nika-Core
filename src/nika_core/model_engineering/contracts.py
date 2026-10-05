@@ -17,6 +17,7 @@ from nika_core.model_gateway.contracts import (
 from nika_core.resources.contracts import ResourceSnapshot
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_RUN_ID_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 
 
 def _identity(value: str, name: str) -> str:
@@ -39,6 +40,50 @@ def _optional_sha256(value: str | None, name: str) -> str | None:
     if value is None:
         return None
     return _sha256(value, name)
+
+
+def _run_id(value: str) -> str:
+    if type(value) is not str:
+        raise TypeError("run_id must be canonical text")
+    if not _RUN_ID_RE.fullmatch(value):
+        raise ValueError("run_id must use 1..128 safe ASCII identity characters")
+    return value
+
+
+def benchmark_configuration_sha256(
+    *,
+    candidate_evidence_sha256: str,
+    evaluation_set_id: str,
+    evaluation_set_version: str,
+    evaluation_set_sha256: str,
+    execution_config_sha256: str,
+) -> str:
+    """Hash the comparable benchmark configuration, excluding per-attempt run identity."""
+
+    payload = {
+        "schema": "nika-model-benchmark-configuration-v1",
+        "candidate_evidence_sha256": _sha256(
+            candidate_evidence_sha256,
+            "candidate_evidence_sha256",
+        ),
+        "evaluation_set_id": _identity(evaluation_set_id, "evaluation_set_id"),
+        "evaluation_set_version": _identity(
+            evaluation_set_version,
+            "evaluation_set_version",
+        ),
+        "evaluation_set_sha256": _sha256(
+            evaluation_set_sha256,
+            "evaluation_set_sha256",
+        ),
+        "execution_config_sha256": _sha256(
+            execution_config_sha256,
+            "execution_config_sha256",
+        ),
+    }
+    encoded = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _bounded_percent(value: float | None, name: str) -> float | None:
@@ -92,6 +137,16 @@ class BenchmarkExecutionConfig:
             payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode("utf-8")
         return hashlib.sha256(encoded).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkRunEvidence:
+    run_id: str
+    configuration_sha256: str
+
+    def __post_init__(self) -> None:
+        _run_id(self.run_id)
+        _sha256(self.configuration_sha256, "configuration_sha256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -336,6 +391,7 @@ class CaseBenchmarkResult:
 @dataclass(frozen=True, slots=True)
 class CandidateBenchmarkReport:
     candidate: ModelCandidate
+    run: BenchmarkRunEvidence
     evaluation_set_id: str
     evaluation_set_version: str
     evaluation_set_sha256: str
@@ -356,10 +412,21 @@ class CandidateBenchmarkReport:
     def __post_init__(self) -> None:
         if type(self.candidate) is not ModelCandidate:
             raise TypeError("candidate must be an exact ModelCandidate")
+        if type(self.run) is not BenchmarkRunEvidence:
+            raise TypeError("run must be an exact BenchmarkRunEvidence")
         _identity(self.evaluation_set_id, "evaluation_set_id")
         _identity(self.evaluation_set_version, "evaluation_set_version")
         _sha256(self.evaluation_set_sha256, "evaluation_set_sha256")
         _sha256(self.execution_config_sha256, "execution_config_sha256")
+        expected_configuration = benchmark_configuration_sha256(
+            candidate_evidence_sha256=self.candidate.evidence_sha256,
+            evaluation_set_id=self.evaluation_set_id,
+            evaluation_set_version=self.evaluation_set_version,
+            evaluation_set_sha256=self.evaluation_set_sha256,
+            execution_config_sha256=self.execution_config_sha256,
+        )
+        if self.run.configuration_sha256 != expected_configuration:
+            raise ValueError("benchmark run configuration identity mismatch")
         if not any(self.evaluation_purpose is member for member in EvaluationPurpose):
             raise TypeError("evaluation_purpose must be an EvaluationPurpose")
         if type(self.case_results) is not tuple:
@@ -427,6 +494,9 @@ class BenchmarkSuiteReport:
         ids = [report.candidate.candidate_id for report in self.reports]
         if len(ids) != len(set(ids)):
             raise ValueError("benchmark suite candidate IDs must be unique")
+        run_ids = [report.run.run_id for report in self.reports]
+        if len(run_ids) != len(set(run_ids)):
+            raise ValueError("benchmark suite run IDs must be unique")
         for report in self.reports:
             if (
                 report.evaluation_set_id != self.evaluation_set_id
