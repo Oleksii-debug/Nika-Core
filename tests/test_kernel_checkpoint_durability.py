@@ -527,6 +527,45 @@ def test_latest_rejects_oversized_checkpoint_identity(tmp_path: Path) -> None:
         checkpoints.latest(task_id)
 
 
+def test_latest_rejects_blob_task_alias_instead_of_falling_back(
+    tmp_path: Path,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    older = checkpoints.save(task_id=task_id, stage="older", payload={"revision": 1})
+    newer = checkpoints.save(task_id=task_id, stage="newer", payload={"revision": 2})
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET task_id = ? WHERE checkpoint_id = ?",
+            (task_id.encode("utf-8"), newer.checkpoint_id),
+        )
+
+    with pytest.raises(TypeError, match="task_id storage must be SQLite TEXT"):
+        checkpoints.latest(task_id)
+
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT checkpoint_id FROM checkpoints WHERE checkpoint_id = ?",
+            (older.checkpoint_id,),
+        ).fetchone() is not None
+
+
+def test_latest_rejects_single_blob_task_alias_instead_of_not_found(
+    tmp_path: Path,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    saved = checkpoints.save(task_id=task_id, stage="only", payload={"revision": 1})
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET task_id = ? WHERE checkpoint_id = ?",
+            (task_id.encode("utf-8"), saved.checkpoint_id),
+        )
+
+    with pytest.raises(TypeError, match="task_id storage must be SQLite TEXT"):
+        checkpoints.latest(task_id)
+
+
 def test_latest_rejects_invalid_task_id_utf8_before_sql(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
