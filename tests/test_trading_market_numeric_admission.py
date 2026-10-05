@@ -85,6 +85,17 @@ def test_odds_rejects_invalid_values_with_domain_error(bad: object) -> None:
         OddsSnapshot(INSTRUMENT, TIME, {"home": bad})
 
 
+@pytest.mark.parametrize("key", (None, 1, True, "", " ", "\t"))
+def test_odds_rejects_nontext_or_blank_selection_identity(key: object) -> None:
+    with pytest.raises(TradingResearchError, match="selection keys"):
+        OddsSnapshot(INSTRUMENT, TIME, {key: Decimal("2")})
+
+
+def test_odds_does_not_silently_collapse_text_and_nontext_aliases() -> None:
+    with pytest.raises(TradingResearchError, match="selection keys"):
+        OddsSnapshot(INSTRUMENT, TIME, {1: Decimal("2"), "1": Decimal("3")})
+
+
 @pytest.mark.parametrize("bad", BAD_NUMBERS)
 def test_settlement_rejects_nonfinite_values(bad: str) -> None:
     with pytest.raises(TradingResearchError, match="finite Decimal"):
