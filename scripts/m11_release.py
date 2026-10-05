@@ -16,6 +16,10 @@ from contextlib import closing
 from pathlib import Path
 
 from nika_core.packaging.notices import build_third_party_notices, verify_third_party_notices
+from nika_core.packaging.pf11_evidence import (
+    PACKAGED_PF11_EVIDENCE_KEYS,
+    require_packaged_pf11_evidence,
+)
 from nika_core.packaging.release import (
     build_release_manifest,
     verify_release_manifest,
@@ -28,6 +32,7 @@ _PF11_EVIDENCE_NAME = "pf11-packaged-product-journey.json"
 _PACKAGED_INSTALLER_NAME = "install_nika_core.ps1"
 _DATA_ADOPTION_EVIDENCE_NAME = "packaged-data-adoption-proof.json"
 _RECOVERY_DIALOG_TITLE = "Nika Core — відновлення даних"
+_PF11_MAX_EVIDENCE_BYTES = 64 * 1024
 
 
 def project_version(project_root: Path) -> str:
@@ -64,11 +69,109 @@ def resolve_source_sha(requested: str | None) -> str:
     return candidate
 
 
-def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> int:
-    value = payload.get(field)
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise RuntimeError(f"packaged PF11 proof returned invalid {field}")
-    return value
+def _reject_duplicate_json_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise ValueError(f"duplicate JSON key: {key}")
+        payload[key] = value
+    return payload
+
+
+def _reject_nonfinite_json_constant(value: str) -> object:
+    raise ValueError(f"non-finite JSON constant is forbidden: {value}")
+
+
+def _pf11_stat_identity(snapshot: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        int(snapshot.st_dev),
+        int(snapshot.st_ino),
+        int(snapshot.st_size),
+        int(snapshot.st_mtime_ns),
+    )
+
+
+def _pf11_regular_snapshot(path: Path) -> os.stat_result:
+    try:
+        snapshot = path.lstat()
+    except OSError as exc:
+        raise RuntimeError("packaged PF11 proof evidence file is missing or unreadable") from exc
+    attributes = int(getattr(snapshot, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    if (
+        not stat.S_ISREG(snapshot.st_mode)
+        or stat.S_ISLNK(snapshot.st_mode)
+        or bool(attributes & reparse_flag)
+    ):
+        raise RuntimeError("packaged PF11 proof evidence must be a regular non-link file")
+    return snapshot
+
+
+def _read_pf11_evidence(path: Path) -> dict[str, object]:
+    before = _pf11_regular_snapshot(path)
+    if before.st_size > _PF11_MAX_EVIDENCE_BYTES:
+        raise RuntimeError("packaged PF11 proof evidence exceeds the size limit")
+
+    descriptor = -1
+    try:
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _pf11_stat_identity(opened) != _pf11_stat_identity(before)
+        ):
+            raise RuntimeError("packaged PF11 proof evidence changed before it was read")
+        if opened.st_size > _PF11_MAX_EVIDENCE_BYTES:
+            raise RuntimeError("packaged PF11 proof evidence exceeds the size limit")
+
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = -1
+            raw = handle.read(_PF11_MAX_EVIDENCE_BYTES + 1)
+            after = os.fstat(handle.fileno())
+
+        current = _pf11_regular_snapshot(path)
+        if (
+            len(raw) > _PF11_MAX_EVIDENCE_BYTES
+            or len(raw) != opened.st_size
+            or _pf11_stat_identity(after) != _pf11_stat_identity(opened)
+            or _pf11_stat_identity(current) != _pf11_stat_identity(opened)
+        ):
+            raise RuntimeError("packaged PF11 proof evidence changed while it was read")
+    except RuntimeError:
+        raise
+    except OSError as exc:
+        raise RuntimeError("packaged PF11 proof evidence could not be read safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+    try:
+        text_payload = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RuntimeError("packaged PF11 proof evidence must be valid UTF-8") from exc
+    try:
+        payload = json.loads(
+            text_payload,
+            object_pairs_hook=_reject_duplicate_json_pairs,
+            parse_constant=_reject_nonfinite_json_constant,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise RuntimeError("packaged PF11 proof did not emit strict JSON evidence") from exc
+    if type(payload) is not dict:
+        raise TypeError("packaged PF11 proof evidence must be a JSON object")
+    keys = frozenset(payload)
+    if keys != PACKAGED_PF11_EVIDENCE_KEYS:
+        missing = sorted(PACKAGED_PF11_EVIDENCE_KEYS - keys)
+        unexpected = sorted(keys - PACKAGED_PF11_EVIDENCE_KEYS)
+        raise RuntimeError(
+            "packaged PF11 proof evidence schema mismatch: "
+            f"missing={missing!r}, unexpected={unexpected!r}"
+        )
+    return payload
 
 
 def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
@@ -175,38 +278,15 @@ def prove_packaged_product_journey(bundle_dir: Path, *, source_sha: str) -> Path
                     f"packaged PF11 ProductProject proof failed on attempt {attempt}: "
                     f"exit {completed.returncode}"
                 )
-            try:
-                payload = json.loads(output.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-                raise RuntimeError("packaged PF11 proof did not emit valid JSON evidence") from exc
-            if not isinstance(payload, dict):
-                raise TypeError("packaged PF11 proof evidence must be a JSON object")
-            outputs.append(payload)
+            outputs.append(_read_pf11_evidence(output))
 
     first, second = outputs
     if first != second:
         raise RuntimeError("packaged PF11 ProductProject restart replay changed durable identity")
-    project_id = first.get("project_id")
-    if (
-        first.get("route") != "product_project"
-        or first.get("spec_version") != 1
-        or not isinstance(project_id, str)
-        or not project_id.strip()
-        or first.get("command_center_state_proven") is not True
-        or first.get("bounded_projection_proven") is not True
-        or first.get("bridge_state_project_id") != project_id
-        or first.get("bridge_state_spec_version") != 1
-    ):
-        raise RuntimeError("packaged PF11 ProductProject proof returned invalid route evidence")
-    status_count = _require_exact_nonnegative_int(first, "bridge_state_status_count")
-    decision_count = _require_exact_nonnegative_int(first, "bridge_state_decision_count")
-    for forbidden_true in (
-        "human_tested",
-        "nvda_verified",
-        "production_release_ready",
-    ):
-        if first.get(forbidden_true) is not False:
-            raise RuntimeError(f"packaged PF11 proof may not set {forbidden_true}=true")
+    first = require_packaged_pf11_evidence(first)
+    project_id = first["project_id"]
+    status_count = first["bridge_state_status_count"]
+    decision_count = first["bridge_state_decision_count"]
 
     target = bundle_dir / _PF11_EVIDENCE_NAME
     evidence = {
@@ -288,13 +368,7 @@ def _run_packaged_pf11(
     )
     if completed.returncode != 0:
         raise RuntimeError("packaged data-adoption proof executable exited unsuccessfully")
-    try:
-        payload = json.loads(output.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("packaged data-adoption proof did not emit JSON") from exc
-    if not isinstance(payload, dict) or payload.get("route") != "product_project":
-        raise RuntimeError("packaged data-adoption proof returned invalid PF11 evidence")
-    return payload
+    return require_packaged_pf11_evidence(_read_pf11_evidence(output))
 
 
 def _close_packaged_recovery_dialog(
