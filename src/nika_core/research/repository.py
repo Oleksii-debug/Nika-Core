@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import unicodedata
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -69,6 +70,12 @@ class ResearchRepository:
         ):
             if type(value) is not str or not value.strip():
                 raise ValueError(f"{label} must be nonempty text")
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(f"{label} must be valid UTF-8 text") from exc
+        if any(unicodedata.category(character) == "Cc" for character in source.locator):
+            raise ValueError("locator must not contain control characters")
         now = _now()
         with self._store.connection() as conn:
             result = conn.execute(
