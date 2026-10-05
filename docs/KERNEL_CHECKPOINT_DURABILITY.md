@@ -10,9 +10,10 @@ This contract reuses the existing SQLite `checkpoints` table and public `Checkpo
 
 1. A successfully inserted checkpoint is ordered by SQLite insertion order for restart selection. Wall-clock `created_at` is metadata and is not restart authority. A backward system-clock adjustment therefore cannot make an older inserted checkpoint become `latest()`.
 2. Checkpoint payloads are canonical UTF-8 JSON objects: object keys are sorted, insignificant whitespace is removed, Unicode is retained, and non-finite numbers (`NaN`, positive infinity, negative infinity) are rejected before any checkpoint row is written.
-3. A durable read verifies the SHA-256 checksum before parsing payload bytes.
-4. A durable read fails closed when payload bytes are malformed JSON, decode to a non-object value, contain a non-finite number, or do not match the canonical representation produced by the service.
-5. Existing finite object payloads written by the prior service remain byte-compatible because the prior writer already used sorted keys, UTF-8 Unicode, and compact separators.
+3. Durable `payload_json` and `checksum_sha256` carriers must be real SQLite TEXT values. SQLite affinity does not prevent a corrupt row from storing BLOB or other storage classes, so restart reads reject those carriers before hashing or parsing.
+4. A durable read verifies the SHA-256 checksum before parsing payload bytes.
+5. A durable read fails closed when payload bytes are malformed JSON, recurse beyond the JSON decoder/encoder safety boundary, decode to a non-object value, contain a non-finite number, or do not match the canonical representation produced by the service.
+6. Existing finite object payloads written by the prior service remain byte-compatible because the prior writer already used sorted keys, UTF-8 Unicode, and compact separators.
 
 ## Threat model
 
@@ -35,6 +36,8 @@ The focused regression family is `tests/test_kernel_checkpoint_durability.py` an
 - non-canonical durable payload rejection even with a matching checksum;
 - checksum tamper rejection;
 - corrupt-newest fail-closed behavior with no stale fallback;
-- Unicode/nested finite payload round-trip after reopening the service.
+- Unicode/nested finite payload round-trip after reopening the service;
+- BLOB `payload_json` and BLOB checksum storage-class rejection;
+- controlled rejection of excessive JSON nesting on both write and restart read.
 
 Repository Core CI and applicable integrated workflows remain authoritative for merge credit. `HUMAN_TESTED` and `NVDA_VERIFIED` are not established by these automated tests.
