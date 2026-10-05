@@ -212,6 +212,33 @@ def test_secret_assignment_across_scan_chunk_boundary_is_detected(tmp_path: Path
     )
 
 
+@pytest.mark.parametrize("quote", [b'"', b"'"])
+def test_oversized_quoted_secret_assignment_is_rejected(
+    tmp_path: Path,
+    quote: bytes,
+) -> None:
+    value = CANARY.encode() + b"x" * 5000
+    content = b"\nrefresh_token=" + quote + value + quote + b"\n"
+    bundle = _bundle(tmp_path, "oauth.conf", content)
+
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:oauth.conf",
+    )
+
+
+def test_oversized_quoted_secret_across_scan_chunk_boundary_is_rejected(
+    tmp_path: Path,
+) -> None:
+    prefix = b"x" * (64 * 1024 - 32)
+    value = CANARY.encode() + b"x" * 5000
+    content = prefix + b'\nrefresh_token="' + value + b'"\n'
+    bundle = _bundle(tmp_path, "oauth.conf", content)
+
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:oauth.conf",
+    )
+
+
 def test_stream_window_boundary_is_not_treated_as_a_new_key_boundary(tmp_path: Path) -> None:
     second_window_start = (64 * 1024) - (8 * 1024)
     content = b"x" * second_window_start + b"api_key=public\n"
