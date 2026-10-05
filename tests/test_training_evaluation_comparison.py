@@ -1028,8 +1028,19 @@ async def _activate_with_manifests(
     )
 
 
+def _activation_port(text: str = "activation-ok") -> _ChallengerPort:
+    return _ChallengerPort(
+        text,
+        provider_manifest_sha256=_CHALLENGER_PROVIDER_MANIFEST_SHA256,
+    )
+
+
 async def _promoted_comparison(tmp_path):
-    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    evaluation, champion_result, challenger_result = await _attested_results(
+        tmp_path,
+        champion_provider_manifest_sha256=_BASE_PROVIDER_MANIFEST_SHA256,
+        challenger_provider_manifest_sha256=_CHALLENGER_PROVIDER_MANIFEST_SHA256,
+    )
     return run_attested_old_vs_new_comparison(
         champion_result=champion_result,
         challenger_result=challenger_result,
@@ -1055,7 +1066,7 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         payload=settings.prepare_task_payload({"command": "keep old route"}),
     )
 
-    activation_port = _ChallengerPort("activation-ok")
+    activation_port = _activation_port()
     receipt = await _activate_with_manifests(
         result=result,
         store=store,
@@ -1240,7 +1251,7 @@ async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) 
         store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
 
     promoted_payload = settings.prepare_task_payload({"command": "promoted task"})
@@ -1325,7 +1336,7 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
         store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
     task = TaskQueue(store).create(
         workspace_id="default",
@@ -1378,7 +1389,7 @@ async def test_runtime_factory_fails_closed_when_promoted_manifest_mapping_is_mi
         store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
     task = TaskQueue(store).create(
         workspace_id="default",
@@ -1404,6 +1415,93 @@ async def test_runtime_factory_fails_closed_when_promoted_manifest_mapping_is_mi
 
 
 @pytest.mark.asyncio
+async def test_activation_rejects_prepared_manifest_that_differs_from_evaluation(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    args = _promotion_manifest_args(result, store)
+    challenger = args["challenger_prepared_model"]
+    assert isinstance(challenger, OllamaPreparedModelBinding)
+    args["challenger_prepared_model"] = _prepared_ollama_binding(
+        model_id=challenger.route_model_id,
+        artifact_sha256=challenger.artifact_sha256,
+        descriptor_digest=challenger.descriptor_digest,
+        manifest_sha256=_sha(b"substituted-provider-manifest"),
+    )
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="prepared Ollama manifests do not match evaluated",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=1,
+            effect_port=_activation_port(),
+            **args,
+        )
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_activation_rejects_fresh_manifest_that_differs_from_prepared_authority(
+    tmp_path,
+) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    wrong_effect = _ChallengerPort(
+        "activation-ok",
+        provider_manifest_sha256=_sha(b"fresh-substituted-provider-manifest"),
+    )
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="fresh loaded-model provider manifest does not match prepared",
+    ):
+        await _activate_with_manifests(
+            result=result,
+            store=store,
+            settings=settings,
+            expected_revision=1,
+            effect_port=wrong_effect,
+        )
+    assert wrong_effect.calls == 1
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_activation_rejects_legacy_comparison_without_provider_manifests(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:legacy-activation",
+        experiment_id="training-job-1-legacy-activation",
+        repository=InMemoryExperimentRepository(),
+    )
+    store, settings = _configured_model_settings(tmp_path)
+    with pytest.raises(
+        TrainingModelActivationError,
+        match="comparison lacks provider manifest evidence",
+    ):
+        await _activate_with_manifests(
+            result=result,
+            store=store,
+            settings=settings,
+            expected_revision=1,
+            effect_port=_activation_port(),
+        )
+    assert settings.snapshot()["model"] == "base-model"
+    assert settings.snapshot()["revision"] == 1
+
+
+@pytest.mark.asyncio
 async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
     tmp_path,
 ) -> None:
@@ -1421,7 +1519,10 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
                 ),
             )
 
-    port = _SwappedArtifactPort("activation-ok")
+    port = _SwappedArtifactPort(
+        "activation-ok",
+        provider_manifest_sha256=_CHALLENGER_PROVIDER_MANIFEST_SHA256,
+    )
     with pytest.raises(
         TrainingModelActivationError,
         match="fresh loaded-model activation attestation failed",
@@ -1448,7 +1549,7 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
         store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
     manual = settings.configure(
         {
@@ -1573,7 +1674,7 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
         store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
     assert original.activated_revision == 2
 
@@ -1678,7 +1779,7 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
         store=store,
         settings=settings,
         expected_revision=1,
-        effect_port=_ChallengerPort("activation-ok"),
+        effect_port=_activation_port(),
     )
     with store.connection() as conn:
         conn.execute(
