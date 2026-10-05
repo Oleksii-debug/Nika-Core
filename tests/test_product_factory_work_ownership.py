@@ -136,6 +136,140 @@ def test_public_authority_rejects_behavioral_primitive_subclasses_before_use(tmp
     ) == lease
 
 
+@pytest.mark.parametrize("field", ("project_id", "work_id", "owner_id"))
+@pytest.mark.parametrize(
+    "value",
+    (
+        "worker\nunsafe",
+        "worker\x7funsafe",
+        "\ud800",
+        "a" * 4097,
+        "€" * 1366,
+    ),
+)
+def test_public_identity_admission_rejects_unsafe_text_before_mutation(
+    tmp_path,
+    field: str,
+    value: str,
+) -> None:
+    service, _ = _service(tmp_path)
+    arguments = {
+        "project_id": "project-1",
+        "work_id": "work-1",
+        "owner_id": "worker-a",
+    }
+    arguments[field] = value
+
+    with pytest.raises(WorkOwnershipError, match="exact canonical bounded"):
+        service.acquire(**arguments)
+
+    with sqlite3.connect(tmp_path / "nika.db") as connection:
+        count = connection.execute(
+            "SELECT COUNT(*) FROM product_factory_work_ownership"
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_public_identity_admission_accepts_exact_4096_byte_boundary(tmp_path) -> None:
+    service, _ = _service(tmp_path)
+    project_id = "п" * 2048
+    work_id = "w" * 4096
+    owner_id = "😀" * 1024
+    assert len(project_id.encode("utf-8")) == 4096
+    assert len(work_id.encode("utf-8")) == 4096
+    assert len(owner_id.encode("utf-8")) == 4096
+
+    lease = service.acquire(
+        project_id=project_id,
+        work_id=work_id,
+        owner_id=owner_id,
+        lease_seconds=60,
+    )
+
+    assert service.current(project_id=project_id, work_id=work_id) == lease
+
+
+@pytest.mark.parametrize(
+    "owner_id",
+    (
+        "worker\nunsafe",
+        "worker\x7funsafe",
+        "a" * 4097,
+        "т" * 2049,
+    ),
+)
+def test_persisted_noncanonical_owner_fails_closed_without_takeover(
+    tmp_path,
+    owner_id: str,
+) -> None:
+    service, _ = _service(tmp_path)
+    database = tmp_path / "nika.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO product_factory_work_ownership "
+            "(project_id, work_id, owner_id, fence, issued_at, expires_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                "project-1",
+                "work-1",
+                owner_id,
+                7,
+                "2026-09-11T12:00:00+00:00",
+                "2026-09-11T12:01:00+00:00",
+            ),
+        )
+
+    with pytest.raises(WorkOwnershipError, match="corrupt work ownership record"):
+        service.current(project_id="project-1", work_id="work-1")
+    with pytest.raises(WorkOwnershipError, match="corrupt work ownership record"):
+        service.acquire(
+            project_id="project-1",
+            work_id="work-1",
+            owner_id="worker-b",
+        )
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT owner_id, fence FROM product_factory_work_ownership "
+            "WHERE project_id = ? AND work_id = ?",
+            ("project-1", "work-1"),
+        ).fetchone()
+    assert row == (owner_id, 7)
+
+
+def test_persisted_invalid_utf8_owner_is_normalized_without_takeover(tmp_path) -> None:
+    service, _ = _service(tmp_path)
+    database = tmp_path / "nika.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "INSERT INTO product_factory_work_ownership "
+            "(project_id, work_id, owner_id, fence, issued_at, expires_at) "
+            "VALUES ('project-1', 'work-1', CAST(X'80' AS TEXT), 7, ?, ?)",
+            (
+                "2026-09-11T12:00:00+00:00",
+                "2026-09-11T12:01:00+00:00",
+            ),
+        )
+
+    with pytest.raises(WorkOwnershipError, match="corrupt work ownership record"):
+        service.current(project_id="project-1", work_id="work-1")
+    with pytest.raises(WorkOwnershipError, match="corrupt work ownership record"):
+        service.acquire(
+            project_id="project-1",
+            work_id="work-1",
+            owner_id="worker-b",
+        )
+
+    with sqlite3.connect(database) as connection:
+        row = connection.execute(
+            "SELECT typeof(owner_id), hex(CAST(owner_id AS BLOB)), fence "
+            "FROM product_factory_work_ownership "
+            "WHERE project_id = ? AND work_id = ?",
+            ("project-1", "work-1"),
+        ).fetchone()
+    assert row == ("text", "80", 7)
+
+
 def test_clock_rejects_behavioral_datetime_subclass_before_timezone_use(tmp_path) -> None:
     clock = lambda: BehavioralDateTime(2026, 9, 11, 12, 0, tzinfo=UTC)
     service = ProductFactoryWorkOwnership(_store(tmp_path), clock=clock)
