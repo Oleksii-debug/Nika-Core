@@ -1215,7 +1215,6 @@ def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path
     assert settings.snapshot()["revision"] == 1
 
 
-
 def test_direct_promotion_retry_keeps_first_committed_activation_proof(tmp_path) -> None:
     _, settings = _configured_model_settings(tmp_path)
     decision_sha256 = _sha(b"race-decision")
@@ -1262,7 +1261,6 @@ def test_direct_promotion_retry_keeps_first_committed_activation_proof(tmp_path)
     assert retried.activation_request_sha256 == first_request
     assert retried.activation_attestation_sha256 == first_attestation
     assert settings.snapshot()["revision"] == 2
-
 
 
 @pytest.mark.asyncio
@@ -1425,7 +1423,6 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
-
 
 
 def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path) -> None:
