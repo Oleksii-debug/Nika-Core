@@ -296,3 +296,43 @@ def test_newest_matching_checksum_noncanonical_checkpoint_fails_closed(tmp_path)
         match="not canonical JSON",
     ):
         host.latest_snapshot(host_task_id=task_id, project_id="p1")
+
+
+class _BehavioralCheckpointIdentity(str):
+    def strip(self, chars=None):
+        raise AssertionError("behavioral checkpoint identity strip must not execute")
+
+
+def test_durable_constructor_rejects_behavioral_checkpoint_identity(
+    tmp_path,
+) -> None:
+    store, task_id = _setup(tmp_path)
+    host = ProductFactoryDeploymentCheckpointHost(store)
+
+    with pytest.raises(
+        ProductFactoryDeploymentCheckpointError,
+        match="exact non-empty text",
+    ):
+        DurableDeploymentFabric(
+            HealthyProvider(),
+            checkpoint_host=host,
+            host_task_id=_BehavioralCheckpointIdentity(task_id),
+            project_id="p1",
+        )
+
+
+def test_checkpoint_host_rejects_behavioral_identity_before_database_access(
+    tmp_path,
+) -> None:
+    store, task_id = _setup(tmp_path)
+    host = ProductFactoryDeploymentCheckpointHost(store)
+
+    with pytest.raises(
+        ProductFactoryDeploymentCheckpointError,
+        match="exact non-empty text",
+    ):
+        host.latest_snapshot(
+            host_task_id=_BehavioralCheckpointIdentity(task_id),
+            project_id="p1",
+        )
+
