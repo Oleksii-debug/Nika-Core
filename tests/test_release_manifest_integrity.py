@@ -644,3 +644,184 @@ def test_snapshot_rejects_nonregular_descriptor_before_read(
         is None
     )
 
+class _BehavioralText(str):
+    def strip(self, *args: object, **kwargs: object) -> str:
+        raise AssertionError("behavioral text method must not execute")
+
+    def casefold(self) -> str:
+        raise AssertionError("behavioral text method must not execute")
+
+    def __eq__(self, other: object) -> bool:
+        raise AssertionError("behavioral text comparison must not execute")
+
+    def __ne__(self, other: object) -> bool:
+        raise AssertionError("behavioral text comparison must not execute")
+
+
+def test_manifest_verifier_rejects_noncanonical_runtime_carriers(
+    tmp_path: Path,
+) -> None:
+    bundle, valid = _bundle(tmp_path)
+
+    assert verify_release_manifest(bundle, object()) == (  # type: ignore[arg-type]
+        "manifest:type",
+    )
+
+    product = ReleaseManifest(
+        product=_BehavioralText("NikaCore"),
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+        files=(valid,),
+    )
+    assert verify_release_manifest(bundle, product) == ("manifest:product",)
+
+    version = ReleaseManifest(
+        product="NikaCore",
+        version=_BehavioralText("1.0.0"),
+        source_sha=SOURCE_SHA,
+        files=(valid,),
+    )
+    assert verify_release_manifest(bundle, version) == ("manifest:product-version",)
+
+    source = ReleaseManifest(
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=_BehavioralText(SOURCE_SHA),
+        files=(valid,),
+    )
+    assert verify_release_manifest(bundle, source) == ("manifest:source-sha",)
+
+    path_manifest = ReleaseManifest(
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+        files=(
+            ReleaseFile(
+                path=_BehavioralText(valid.path),
+                size=valid.size,
+                sha256=valid.sha256,
+            ),
+        ),
+    )
+    assert verify_release_manifest(bundle, path_manifest) == ("manifest:path:0",)
+
+    digest = ReleaseManifest(
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+        files=(
+            ReleaseFile(
+                path=valid.path,
+                size=valid.size,
+                sha256=_BehavioralText(valid.sha256),
+            ),
+        ),
+    )
+    assert verify_release_manifest(bundle, digest) == ("manifest:sha256-format:0",)
+
+
+def test_manifest_builder_rejects_behavioral_identity_text_without_execution(
+    tmp_path: Path,
+) -> None:
+    bundle, _ = _bundle(tmp_path)
+
+    with pytest.raises(ValueError, match="manifest:product"):
+        build_release_manifest(
+            bundle,
+            product=_BehavioralText("NikaCore"),
+            version="1.0.0",
+            source_sha=SOURCE_SHA,
+        )
+
+    with pytest.raises(ValueError, match="manifest:product-version"):
+        build_release_manifest(
+            bundle,
+            product="NikaCore",
+            version=_BehavioralText("1.0.0"),
+            source_sha=SOURCE_SHA,
+        )
+
+
+def test_release_verifiers_require_exact_trusted_identity_text(
+    tmp_path: Path,
+) -> None:
+    from nika_core.packaging.release import (
+        verify_distributable_evidence,
+        verify_release_archive,
+    )
+
+    _, artifact = _valid_release_zip(tmp_path)
+    assert verify_release_archive(
+        artifact,
+        source_sha=_BehavioralText(SOURCE_SHA),
+    ) == ("archive:source-sha-format",)
+    assert verify_release_archive(
+        artifact,
+        source_sha=f" {SOURCE_SHA}",
+    ) == ("archive:source-sha-format",)
+    assert verify_release_archive(
+        artifact,
+        source_sha=SOURCE_SHA,
+        expected_product=_BehavioralText("NikaCore"),
+    ) == ("archive:expected-product-format",)
+    assert verify_release_archive(
+        artifact,
+        source_sha=SOURCE_SHA,
+        expected_product_version=_BehavioralText(PRODUCT_VERSION),
+    ) == ("archive:expected-product-version-format",)
+
+    evidence = tmp_path / "evidence.json"
+    _write_outer_evidence(evidence, artifact)
+    assert verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=_BehavioralText(SOURCE_SHA),
+        artifact_reference="./dist/NikaCore-1.0.0-windows-x64.zip",
+        expected_product_version=PRODUCT_VERSION,
+    ) == ("distributable:source-sha-format",)
+    assert verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=f"{SOURCE_SHA} ",
+        artifact_reference="./dist/NikaCore-1.0.0-windows-x64.zip",
+        expected_product_version=PRODUCT_VERSION,
+    ) == ("distributable:source-sha-format",)
+    assert verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=SOURCE_SHA,
+        artifact_reference=_BehavioralText(
+            "./dist/NikaCore-1.0.0-windows-x64.zip"
+        ),
+        expected_product_version=PRODUCT_VERSION,
+    ) == ("distributable:artifact-reference-format",)
+    assert verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=SOURCE_SHA,
+        artifact_reference="./dist/NikaCore-1.0.0-windows-x64.zip",
+        expected_product_version=_BehavioralText(PRODUCT_VERSION),
+    ) == ("distributable:expected-product-version-format",)
+
+
+def test_release_verifiers_keep_canonical_casefolded_source_sha(
+    tmp_path: Path,
+) -> None:
+    from nika_core.packaging.release import (
+        verify_distributable_evidence,
+        verify_release_archive,
+    )
+
+    _, artifact = _valid_release_zip(tmp_path)
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA.upper()) == ()
+
+    evidence = tmp_path / "evidence.json"
+    _write_outer_evidence(evidence, artifact)
+    assert verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=SOURCE_SHA.upper(),
+        artifact_reference="./dist/NikaCore-1.0.0-windows-x64.zip",
+        expected_product_version=PRODUCT_VERSION,
+    ) == ()
+
