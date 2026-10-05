@@ -654,7 +654,10 @@ def build_scale_progression_proof(
         raise TrainingScaleError("training run evidence is incomplete") from exc
     if run.state is not TrainingRunState.COMPLETED:
         raise TrainingScaleError("scale progression requires completed training")
-    if type(run.next_step) is not int or not 1 <= run.next_step <= authorization.max_steps:
+    if (
+        type(run.next_step) is not int
+        or not 1 <= run.next_step <= canonical_authorization.max_steps
+    ):
         raise TrainingScaleError("completed training carries an invalid step boundary")
     if (
         job_id != canonical_authorization.job_id
@@ -697,6 +700,8 @@ def build_scale_progression_proof(
         or binding.challenger_sha256 != candidate_sha256
         or binding.candidate_artifact_ref != candidate_artifact_ref
         or binding.frozen_package_sha256 != frozen_package_sha256
+        or binding.scale_authorization_sha256
+        != canonical_authorization.authorization_sha256
         or binding.execution_plan_sha256 != execution_plan_sha256
         or binding.evaluation_set_sha256 != canonical_plan.evaluation_set_sha256
     ):
