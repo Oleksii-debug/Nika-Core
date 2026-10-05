@@ -5,6 +5,14 @@ from typing import Protocol
 from nika_core.web_api.contracts import WebCommand, WebCommandResult, WebPrincipal
 
 
+class WebCommandOutcomeUnknownError(RuntimeError):
+    """The handler may have applied an effect; callers must reconcile before retry."""
+
+    def __init__(self, request_id: str) -> None:
+        self.request_id = request_id
+        super().__init__("Web command outcome is unknown and requires reconciliation")
+
+
 class WebAuthorizationPort(Protocol):
     """Server-side authority decision for one already-admitted Web command."""
 
@@ -50,15 +58,20 @@ class WebApplicationBoundary:
                 message="Дію заборонено поточними серверними повноваженнями.",
             )
 
-        result = self._handler.handle(principal, admitted)
-        if type(result) is not WebCommandResult:
-            raise RuntimeError("Web command handler returned an invalid result carrier")
-        if result.request_id != admitted.request_id:
-            raise RuntimeError("Web command handler changed the request identity")
-        return WebCommandResult.create(
-            request_id=result.request_id,
-            status=result.status,
-            code=result.code,
-            message=result.message,
-            data=result.data,
-        )
+        try:
+            result = self._handler.handle(principal, admitted)
+            if type(result) is not WebCommandResult:
+                raise RuntimeError("Web command handler returned an invalid result carrier")
+            if result.request_id != admitted.request_id:
+                raise RuntimeError("Web command handler changed the request identity")
+            return WebCommandResult.create(
+                request_id=result.request_id,
+                status=result.status,
+                code=result.code,
+                message=result.message,
+                data=result.data,
+            )
+        except WebCommandOutcomeUnknownError:
+            raise
+        except Exception as exc:
+            raise WebCommandOutcomeUnknownError(admitted.request_id) from exc
