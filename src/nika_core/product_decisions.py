@@ -203,6 +203,10 @@ def _decode_id_list(raw: Any, *, label: str) -> tuple[str, ...]:
         raise ProductProjectError(f"{label} contains invalid JSON") from exc
     if type(values) is not list or not values:
         raise ProductProjectError(f"{label} must be a non-empty list")
+    if any(type(value) is not str or not value.strip() for value in values):
+        raise ProductProjectError(
+            f"{label} must contain non-empty string identifiers"
+        )
     items = tuple(
         _validated_text(value, label=f"{label} item")
         for value in values
@@ -1037,7 +1041,8 @@ class ProductDecisionRepository:
                     or row_package_id not in package_ids
                 ):
                     raise ProductProjectError(
-                        "stored product option evidence is malformed"
+                        "stored product option evidence is malformed: evidence package "
+                        "ids must be non-empty strings, unique, and include the owning package"
                     )
                 if option["option_id"] == option_id:
                     matches.append(tuple(package_ids))
