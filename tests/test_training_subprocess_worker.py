@@ -245,6 +245,7 @@ sys.stdout.write(json.dumps(response))
     record = registry.get(artifact_id)
     assert observed["protocol_version"] == 3
     assert len(worker.execution_plan_sha256) == 64
+    assert worker.protocol_job_fingerprint(spec) == observed["job_fingerprint"]
     assert observed["trainer_artifact_id"] == artifact_id
     assert observed["trainer_sha256"] == record.sha256
     assert observed["command_sha256"] == observed["job"]["command_sha256"]
