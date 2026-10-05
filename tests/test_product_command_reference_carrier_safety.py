@@ -49,3 +49,18 @@ def test_public_evidence_returns_detached_builtin_str_for_benign_subclass() -> N
 
     assert sanitized == raw
     assert type(sanitized) is str
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "//operator:raw-password@service.invalid/evidence",
+        "%2F%2Foperator%3Araw-password%40service.invalid%2Fevidence",
+        "//[invalid-host/evidence",
+    ),
+)
+def test_public_evidence_hashes_network_path_userinfo(reference: str) -> None:
+    protected = safe_evidence_reference(reference)
+
+    assert protected.startswith("evidence-sha256:")
+    assert reference not in protected
