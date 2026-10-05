@@ -2568,3 +2568,104 @@ def test_fenced_recovery_accepts_exact_4096_byte_text_boundary(tmp_path: Path) -
     assert IdempotencyLedger(store).require(
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.COMPLETED
+
+
+def test_dispatch_worker_cannot_mutate_coordinator_request_authority(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    original = coordinator.ready_requests()[0]
+    original_work_id = original.work_id
+    original_base_sha = original.base_sha
+    original_acceptance = original.acceptance_commands
+
+    class MutatingRequestWorker(FakeProgramWorker):
+        async def dispatch(self, request):
+            self.dispatch_calls.append(request)
+            object.__setattr__(request, "work_id", "forged-work")
+            object.__setattr__(request, "base_sha", SHA_B)
+            object.__setattr__(
+                request,
+                "acceptance_commands",
+                (("python", "-m", "pytest"),),
+            )
+            return _envelope(request, 701)
+
+    worker = MutatingRequestWorker()
+    host = ProductFactoryProgramHost(store, worker)
+
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    assert outcomes[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    durable = _record(coordinator, original.component_id)
+    assert durable.request.work_id == original_work_id
+    assert durable.request.base_sha == original_base_sha
+    assert durable.request.acceptance_commands == original_acceptance
+    assert worker.dispatch_calls[0] is not original
+    assert original.work_id == original_work_id
+    ledger = IdempotencyLedger(store)
+    operation = ledger.require(f"pf-worker:{original_work_id}")
+    assert operation.status is IdempotencyStatus.UNCERTAIN
+    assert ledger.get("pf-worker:forged-work") is None
+
+
+def test_recovery_worker_cannot_mutate_coordinator_request_authority(tmp_path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    original = coordinator.ready_requests()[0]
+    original_work_id = original.work_id
+    original_base_sha = original.base_sha
+
+    class MutatingRecoveryWorker(FakeProgramWorker):
+        async def recover(self, request, state):
+            self.recover_calls.append((request, state))
+            object.__setattr__(request, "work_id", "forged-recovery-work")
+            object.__setattr__(request, "base_sha", SHA_B)
+            return _envelope(request, 702)
+
+    worker = MutatingRecoveryWorker()
+    worker.fail_dispatch.add(original.component_id)
+    worker.recovery_states[original_work_id] = RecoveryState(
+        "interrupted",
+        "resume",
+    )
+    host = ProductFactoryProgramHost(store, worker)
+
+    first = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert first[0].disposition is ProgramWorkDisposition.UNCERTAIN
+
+    recovered = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+
+    assert recovered[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    durable = _record(coordinator, original.component_id)
+    assert durable.request.work_id == original_work_id
+    assert durable.request.base_sha == original_base_sha
+    assert worker.recover_calls[0][0] is not original
+    assert original.work_id == original_work_id
+    ledger = IdempotencyLedger(store)
+    operation = ledger.require(f"pf-worker:{original_work_id}")
+    assert operation.status is IdempotencyStatus.UNCERTAIN
+    with store.connection() as connection:
+        claim_count = connection.execute(
+            "SELECT COUNT(*) FROM product_factory_recovery_claims "
+            "WHERE operation_key = ?",
+            (f"pf-worker:{original_work_id}",),
+        ).fetchone()[0]
+    assert claim_count == 0
