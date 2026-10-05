@@ -11,7 +11,6 @@ import httpx
 
 from nika_core.diagnostics.health import HealthCheck, HealthStatus
 
-
 # Metadata probes must not let a local HTTP responder exhaust the desktop process.
 _MAX_CATALOG_BYTES = 1024 * 1024
 _MAX_CATALOG_MODELS = 4096

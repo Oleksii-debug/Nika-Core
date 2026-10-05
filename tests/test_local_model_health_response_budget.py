@@ -8,7 +8,6 @@ import pytest
 
 from nika_core.diagnostics import ModelHealthFact, OllamaModelHealthProbe
 
-
 LIMIT = 1024 * 1024
 
 

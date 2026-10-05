@@ -196,9 +196,11 @@ def test_task_get_is_write_fenced_before_binding(
         record = original_get(queue, task_id)
         # A second SQLite connection must be unable to delete/reuse the task
         # between the canonical task read and the source-binding write.
-        with sqlite3.connect(store.path, timeout=0) as competing:
-            with pytest.raises(sqlite3.OperationalError):
-                competing.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
+        with (
+            sqlite3.connect(store.path, timeout=0) as competing,
+            pytest.raises(sqlite3.OperationalError),
+        ):
+            competing.execute("DELETE FROM tasks WHERE task_id = ?", (task_id,))
         observed.append(task_id)
         return record
 
