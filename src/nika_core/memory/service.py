@@ -12,6 +12,9 @@ from nika_core.memory.contracts import MemoryConflictError, MemoryRecord, Memory
 from nika_core.memory.minimization import minimize_for_persistence
 
 _UNCONDITIONAL = object()
+_MAX_STORED_MEMORY_JSON_DEPTH = 64
+_MAX_STORED_MEMORY_INTEGER_BITS = 4096
+_MAX_STORED_MEMORY_INTEGER_DECIMAL_CHARS = 1234
 
 
 class MemoryService:
@@ -496,6 +499,41 @@ def _stored_required(name: str, value: Any) -> str:
     return normalized
 
 
+def _stored_memory_depth_is_bounded(body: str) -> bool:
+    depth = 0
+    quoted = False
+    escaped = False
+    for character in body:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                quoted = False
+        elif character == '"':
+            quoted = True
+        elif character in "[{":
+            depth += 1
+            if depth > _MAX_STORED_MEMORY_JSON_DEPTH:
+                return False
+        elif character in "]}":
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
+def _bounded_memory_int(number: str) -> int:
+    digits = number[1:] if number.startswith("-") else number
+    if len(digits) > _MAX_STORED_MEMORY_INTEGER_DECIMAL_CHARS:
+        raise ValueError("stored memory JSON integer exceeds the digit limit")
+    value = int(number)
+    if value.bit_length() > _MAX_STORED_MEMORY_INTEGER_BITS:
+        raise ValueError("stored memory JSON integer exceeds the bit limit")
+    return value
+
+
 def _reject_memory_constant(value: str) -> None:
     raise ValueError(f"invalid stored memory JSON constant: {value}")
 
@@ -551,10 +589,18 @@ def _record_from_row(row: Any) -> MemoryRecord:
     body = row["value_json"]
     if type(body) is not str:
         raise ValueError("stored memory JSON must be text")
-    value = json.loads(
-        body, parse_constant=_reject_memory_constant, parse_float=_finite_memory_float,
-        object_pairs_hook=_unique_memory_pairs
-    )
+    if not _stored_memory_depth_is_bounded(body):
+        raise ValueError("stored memory JSON exceeds the depth limit")
+    try:
+        value = json.loads(
+            body,
+            parse_constant=_reject_memory_constant,
+            parse_float=_finite_memory_float,
+            parse_int=_bounded_memory_int,
+            object_pairs_hook=_unique_memory_pairs,
+        )
+    except RecursionError as exc:
+        raise ValueError("invalid stored memory JSON") from exc
     _validate_scalar_unicode(value)
     return MemoryRecord(
         scope=scope,
