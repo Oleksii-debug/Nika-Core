@@ -328,9 +328,7 @@ def _identity(*values: str) -> None:
         try:
             encoded = value.encode("utf-8")
         except UnicodeEncodeError as exc:
-            raise WorkOwnershipError(
-                "work ownership identity must be exact canonical bounded non-empty text"
-            ) from exc
+            raise WorkOwnershipError(_IDENTITY_ERROR) from exc
         if (
             len(encoded) > _MAX_IDENTITY_UTF8_BYTES
             or any(ord(character) < 32 or ord(character) == 127 for character in value)
