@@ -18,6 +18,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from uuid import uuid4
 
+from nika_core.data.experience_ledger_schema import EXPERIENCE_LEDGER_SCHEMA_VERSION
 from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VERSION
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
@@ -29,6 +30,7 @@ from nika_core.research.knowledge_schema import KNOWLEDGE_SCHEMA_VERSION
 _RECEIPT_TABLE = "legacy_database_adoption_v1"
 _EMPTY_TABLES = {
     "schema_migrations",
+    "experience_ledger_schema_migrations",
     "multi_agent_state_schema_migrations",
     "product_project_schema_migrations",
     "knowledge_schema_migrations",
@@ -114,6 +116,7 @@ def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
             )
         ]
         for name, supported in (
+            ("experience_ledger_schema_migrations", EXPERIENCE_LEDGER_SCHEMA_VERSION),
             ("multi_agent_state_schema_migrations", MULTI_AGENT_STATE_SCHEMA_VERSION),
             ("product_project_schema_migrations", PRODUCT_PROJECT_SCHEMA_VERSION),
             ("knowledge_schema_migrations", KNOWLEDGE_SCHEMA_VERSION),
