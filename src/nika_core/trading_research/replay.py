@@ -8,7 +8,7 @@ from enum import IntEnum
 from .accounting import PortfolioLedger
 from .contracts import Bar, MarketEvent, Quote, TradingResearchError, require_aware_utc
 from .dataset import event_sort_key
-from .identity import instrument_identity, instrument_identity_sha256
+from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
 from .orders import (
     OrderState,
     OrderType,
@@ -188,12 +188,16 @@ def _legal_fill_price(order: RiskApprovedOrder, market_price: Decimal) -> Decima
     return max(slipped, limit)
 
 
+def _replay_order_key(order: RiskApprovedOrder) -> tuple[str, InstrumentIdentity]:
+    return order.approval_id, instrument_identity(order.intent.instrument)
+
+
 @dataclass(slots=True)
 class ReplayBook:
     ledger: PortfolioLedger
     execution: SimulationExecutionEngine
-    _remaining: dict[str, Decimal]
-    _terminal: dict[str, OrderUpdate]
+    _remaining: dict[tuple[str, InstrumentIdentity], Decimal]
+    _terminal: dict[tuple[str, InstrumentIdentity], OrderUpdate]
 
     def __init__(self, ledger: PortfolioLedger) -> None:
         self.ledger = ledger
@@ -202,23 +206,25 @@ class ReplayBook:
         self._terminal = {}
 
     def process_existing_order(self, order: RiskApprovedOrder, time_slice: TimeSlice) -> OrderUpdate:
-        terminal = self._terminal.get(order.approval_id)
+        key = _replay_order_key(order)
+        terminal = self._terminal.get(key)
         if terminal is not None:
             return terminal
-        remaining = self._remaining.get(order.approval_id, order.intent.quantity)
+        remaining = self._remaining.get(key, order.intent.quantity)
         update = self.execution.execute(order, time_slice, remaining_quantity=remaining)
-        self._remaining[order.approval_id] = update.remaining_quantity
+        self._remaining[key] = update.remaining_quantity
         if update.fill is not None:
             self.ledger.apply_fill(update.fill)
         if update.state in {OrderState.FILLED, OrderState.EXPIRED, OrderState.CANCELLED}:
-            self._terminal[order.approval_id] = update
+            self._terminal[key] = update
         return update
 
     def cancel(self, order: RiskApprovedOrder, reason: str = "cancelled by simulation") -> OrderUpdate:
-        terminal = self._terminal.get(order.approval_id)
+        key = _replay_order_key(order)
+        terminal = self._terminal.get(key)
         if terminal is not None:
             return terminal
-        remaining = self._remaining.get(order.approval_id, order.intent.quantity)
+        remaining = self._remaining.get(key, order.intent.quantity)
         update = OrderUpdate(order.approval_id, OrderState.CANCELLED, remaining, reason=reason)
-        self._terminal[order.approval_id] = update
+        self._terminal[key] = update
         return update
