@@ -4,7 +4,7 @@ from nika_core.research.delta_schema import RESEARCH_DELTA_MIGRATION_13
 from nika_core.research.network_schema import RESEARCH_NETWORK_MIGRATION_11
 from nika_core.research.profile_schema import RESEARCH_PROFILE_MIGRATION_12
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -400,4 +400,11 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
     11: RESEARCH_NETWORK_MIGRATION_11,
     12: RESEARCH_PROFILE_MIGRATION_12,
     13: RESEARCH_DELTA_MIGRATION_13,
+    14: (
+        """ALTER TABLE idempotency_records
+            ADD COLUMN reservation_generation TEXT""",
+        """UPDATE idempotency_records
+            SET reservation_generation = lower(hex(randomblob(16)))
+            WHERE reservation_generation IS NULL OR reservation_generation = ''""",
+    ),
 }
