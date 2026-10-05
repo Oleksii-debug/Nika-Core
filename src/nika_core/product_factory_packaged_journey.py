@@ -116,11 +116,16 @@ class PackagedProductSelectionStore:
     def load(self) -> str | None:
         with self._store.connection() as conn:
             row = conn.execute(
-                "SELECT project_id FROM packaged_product_selection WHERE slot = 1"
+                "SELECT typeof(project_id) AS id_type, "
+                "CAST(project_id AS BLOB) AS raw_id "
+                "FROM packaged_product_selection WHERE slot = 1"
             ).fetchone()
-        if row is None:
+        if row is None or row["id_type"] != "text":
             return None
-        project_id = row["project_id"]
+        try:
+            project_id = row["raw_id"].decode("utf-8")
+        except UnicodeDecodeError:
+            return None
         return project_id if _valid_selection_id(project_id) else None
 
     def select(self, project_id: str) -> None:
