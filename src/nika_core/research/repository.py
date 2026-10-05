@@ -78,6 +78,10 @@ class ResearchRepository:
             raise ValueError("locator must not contain control characters")
         now = _now()
         with self._store.connection() as conn:
+            # Serialize the cross-table ownership read with this local-source write.
+            # The canonical HTTP writer must use the same write reservation so that
+            # exactly one source kind can claim a source_id under concurrency.
+            conn.execute("BEGIN IMMEDIATE")
             http_collision = conn.execute(
                 "SELECT 1 FROM research_http_sources WHERE source_id=?",
                 (source.source_id,),
