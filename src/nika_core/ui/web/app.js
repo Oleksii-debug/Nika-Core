@@ -1141,6 +1141,7 @@
       appendLog(result.message);
     } catch {
       result = null;
+      document.documentElement.dataset.nikaReady = "false";
       announce("Немає підтвердження зміни моделі. Перечитайте збережені налаштування перед повтором.", true);
       appendLog("Немає підтвердження зміни моделі; автоматичний повтор не виконується.");
     } finally {
@@ -1159,7 +1160,12 @@
         focusTarget.disabled = false;
       }
       const focusApplied = focusId ? focusElementById(focusId) : false;
-      if (!await refreshState({ announceTeamTransitions: false, requireCurrentGeneration: result === null })) {
+      const stateReady = await refreshState({
+        announceTeamTransitions: false,
+        requireCurrentGeneration: result === null,
+      });
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
         renderModelSettings(null);
       }
       if (!focusApplied) {
@@ -1224,11 +1230,17 @@
     } catch {
       // The OS write may have completed before the bridge disconnected. No blind retry.
       uncertain = true;
+      document.documentElement.dataset.nikaReady = "false";
       announce("Немає підтвердження зміни автозапуску. Перечитайте стан перед повтором.", true);
     } finally {
       autostartPending = false;
       autostartGeneration += 1;
-      if (!await refreshState({ announceTeamTransitions: false, requireCurrentGeneration: uncertain })) {
+      const stateReady = await refreshState({
+        announceTeamTransitions: false,
+        requireCurrentGeneration: uncertain,
+      });
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
         renderAutostart(null);
       }
       if (!autostartInput.disabled) autostartInput.focus();
@@ -1369,6 +1381,7 @@
     inFlightActions.add(lockKey);
     let keepLocked = false;
     const reconcileUncertain = async (message) => {
+      document.documentElement.dataset.nikaReady = "false";
       announce(message, true);
       appendLog(message);
       let stateReady = false;
