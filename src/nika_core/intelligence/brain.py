@@ -55,7 +55,7 @@ class _StateObservationFailure:
 
 def _require_run_identity(value: object, *, name: str) -> None:
     """Reject ambiguous or non-UTF-8 task/call identities before durable effects."""
-    if type(value) is not str or not value or value != value.strip():
+    if type(value) is not str or not value or len(value) > 512 or value != value.strip():
         raise ValueError(f"{name} must be canonical bounded UTF-8 text")
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ValueError(f"{name} must be canonical bounded UTF-8 text")

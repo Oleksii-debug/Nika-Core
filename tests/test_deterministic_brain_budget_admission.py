@@ -104,8 +104,8 @@ def test_finite_integral_and_float_timeouts_preserve_success(seconds: float) -> 
 @pytest.mark.parametrize(
     "value",
     [
-        None, True, 0, "", " ", " leading", "trailing ", "line\\nbreak",
-        "\\x00", "\\ud800", "x" * 513, "😀" * 200,
+        None, True, 0, "", " ", " leading", "trailing ", "line\nbreak",
+        "\x00", "\ud800", "x" * 513, "x" * 1_000_000, "😀" * 200,
     ],
 )
 def test_invalid_identity_never_reaches_planner_or_journal(
