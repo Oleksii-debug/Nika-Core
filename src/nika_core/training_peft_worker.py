@@ -652,6 +652,16 @@ def _model_directory_snapshot(config: TrainerConfig, job_root: Path) -> Path:
     return target
 
 
+def _require_directory_unlinked(path: Path, *, code: str) -> os.stat_result:
+    try:
+        value = os.lstat(path)
+    except OSError:
+        _fail(code)
+    if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISDIR(value.st_mode):
+        _fail(code)
+    return value
+
+
 def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     before = _require_regular_unlinked(path, code=code)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -1009,12 +1019,40 @@ def _job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     return config.output_root / _candidate_key(request.candidate_artifact_ref)
 
 
+def _ensure_child_directory(parent: Path, name: str, *, code: str) -> Path:
+    parent_before = _require_directory_unlinked(parent, code=code)
+    child = parent / name
+    try:
+        child.mkdir(parents=False, exist_ok=True)
+    except OSError:
+        _fail(code)
+    _require_directory_unlinked(child, code=code)
+    parent_after = _require_directory_unlinked(parent, code=code)
+    if (parent_before.st_dev, parent_before.st_ino) != (
+        parent_after.st_dev,
+        parent_after.st_ino,
+    ):
+        _fail(code)
+    return child
+
+
+def _ensure_job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
+    return _ensure_child_directory(
+        config.output_root,
+        _candidate_key(request.candidate_artifact_ref),
+        code="job_output_root_failed",
+    )
+
+
 def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root: Path) -> Path:
     source = config.base_gguf
     if _sha256_file(source) != request.base_artifact_sha256:
         _fail("base_gguf_digest_mismatch")
-    target_dir = job_root / "base"
-    target_dir.mkdir(parents=True, exist_ok=True)
+    target_dir = _ensure_child_directory(
+        job_root,
+        "base",
+        code="staged_base_directory_invalid",
+    )
     target = target_dir / "base.gguf"
     if target.exists():
         _require_regular_unlinked(target, code="staged_base_invalid")
@@ -1330,11 +1368,7 @@ def _train_one_step(
     ) = _import_training_stack()
 
     set_seed(config.seed)
-    job_root = _job_root(config, request)
-    try:
-        job_root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        _fail("job_output_root_failed")
+    job_root = _ensure_job_root(config, request)
     staged_base = _copy_verified_base(config, request, job_root)
     staged_model_dir = _model_directory_snapshot(config, job_root)
     previous_checkpoint = _resume_checkpoint(job_root, request)
@@ -1393,7 +1427,16 @@ def _train_one_step(
             config.max_sequence_length,
         )
         collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-        trainer_root = job_root / "trainer"
+        trainer_root = _ensure_child_directory(
+            job_root,
+            "trainer",
+            code="trainer_output_directory_invalid",
+        )
+        _ensure_child_directory(
+            trainer_root,
+            f"checkpoint-{request.step_index + 1}",
+            code="trainer_checkpoint_directory_invalid",
+        )
         arguments = TrainingArguments(
             output_dir=os.fspath(trainer_root),
             per_device_train_batch_size=1,
@@ -1460,16 +1503,12 @@ def _train_one_step(
         return resume_state, None
 
     candidate = candidate_artifact_path(config.output_root, request.candidate_artifact_ref)
-    try:
-        candidate.parent.mkdir(parents=True, exist_ok=True)
-        parent_stat = os.lstat(candidate.parent)
-    except OSError:
-        _fail("candidate_publish_failed")
-    if (
-        stat.S_ISLNK(parent_stat.st_mode)
-        or _is_reparse(parent_stat)
-        or not stat.S_ISDIR(parent_stat.st_mode)
-    ):
+    candidate_parent = _ensure_child_directory(
+        job_root,
+        "candidate",
+        code="candidate_publish_failed",
+    )
+    if candidate.parent != candidate_parent:
         _fail("candidate_publish_failed")
     if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
         _fail("checkpoint_payload_changed_before_candidate")
