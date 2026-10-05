@@ -4,7 +4,8 @@ import hashlib
 import json
 import re
 import sqlite3
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -304,27 +305,72 @@ class StandingPermissionStore:
         scope: StandingPermissionScope,
     ) -> StoredStandingPermission:
         """Persist a root scope already granted through canonical user authority."""
+        material = self._grant_material(permission_id=permission_id, scope=scope)
+        with self._store.connection() as conn:
+            return self._grant_with_connection(
+                conn,
+                permission_id=permission_id,
+                material=material,
+            )
+
+    @contextmanager
+    def grant_transaction(
+        self,
+        *,
+        permission_id: str,
+        scope: StandingPermissionScope,
+    ) -> Iterator[tuple[sqlite3.Connection, StoredStandingPermission]]:
+        """Grant and expose the same serialized transaction for one dependent binding write.
+
+        Any exception raised by the caller while the context is active rolls back both the
+        standing-permission grant/audit and the dependent write. The store, not the caller,
+        owns the SQLite connection so authority cannot be accidentally split across databases.
+        """
+
+        material = self._grant_material(permission_id=permission_id, scope=scope)
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            record = self._grant_with_connection(
+                conn,
+                permission_id=permission_id,
+                material=material,
+            )
+            yield conn, record
+
+    @staticmethod
+    def _grant_material(
+        *,
+        permission_id: str,
+        scope: StandingPermissionScope,
+    ) -> _ScopeRecord:
         _permission_id(permission_id)
         if type(scope) is not StandingPermissionScope:
             raise TypeError("grant scope must be an exact StandingPermissionScope value")
-        material = _material(scope)
-        with self._store.connection() as conn:
-            existing = self._get(conn, permission_id)
-            if existing is not None:
-                return self._same_authority_or_conflict(
-                    existing,
-                    parent_permission_id=None,
-                    scope_fingerprint=material.fingerprint,
-                )
-            record, created = self._insert(conn, permission_id, None, material)
-            record = self._same_authority_or_conflict(
-                record,
+        return _material(scope)
+
+    def _grant_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        permission_id: str,
+        material: _ScopeRecord,
+    ) -> StoredStandingPermission:
+        existing = self._get(conn, permission_id)
+        if existing is not None:
+            return self._same_authority_or_conflict(
+                existing,
                 parent_permission_id=None,
                 scope_fingerprint=material.fingerprint,
             )
-            if created:
-                self._audit(conn, "standing_permission.granted", record)
-            return record
+        record, created = self._insert(conn, permission_id, None, material)
+        record = self._same_authority_or_conflict(
+            record,
+            parent_permission_id=None,
+            scope_fingerprint=material.fingerprint,
+        )
+        if created:
+            self._audit(conn, "standing_permission.granted", record)
+        return record
 
     def delegate(
         self,
