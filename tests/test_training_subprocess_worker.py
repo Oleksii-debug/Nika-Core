@@ -9,6 +9,7 @@ import pytest
 from nika_core.training_adapters import SubprocessTrainingWorker, TrainingSubprocessError
 from nika_core.training_runtime import ArtifactIdentity, TrainingJobSpec
 
+
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -113,7 +114,6 @@ sys.stdout.write(json.dumps(response))
     assert isinstance(replay_envelope, dict)
     assert first_envelope["last_step_id"] == replay_envelope["last_step_id"]
     assert first_envelope["trainer_sha256"] == _sha256(trainer)
-
 
 
 def test_resume_rejects_different_trainer_artifact_before_process_effect(
@@ -408,7 +408,6 @@ sys.stdout.write(json.dumps(response))
 
     with pytest.raises(TrainingSubprocessError, match="does not match the current job"):
         worker.step(spec=changed, step_index=1, resume_state=first.resume_state)
-
 
 
 def test_configured_trainer_digest_must_match_executed_artifact(
