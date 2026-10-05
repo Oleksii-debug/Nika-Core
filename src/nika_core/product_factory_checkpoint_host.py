@@ -1077,11 +1077,17 @@ def _encode_envelope(envelope: WorkerResultEnvelope) -> dict[str, object]:
         "result_sha": envelope.result_sha,
         "diff_digest": envelope.diff_digest,
         "coding_result": _encode_coding_result(envelope.coding_result),
+        "producer_actor_id": envelope.producer_actor_id,
     }
 
 
 def _decode_envelope(payload: Any) -> WorkerResultEnvelope:
     data = _dict(payload, "worker result envelope")
+    producer_actor_id = data.get("producer_actor_id")
+    if producer_actor_id is not None and (
+        type(producer_actor_id) is not str or not producer_actor_id.strip()
+    ):
+        raise ValueError("producer_actor_id must be exact non-empty text or null")
     return WorkerResultEnvelope(
         work_id=_text(data, "work_id"),
         component_id=_text(data, "component_id"),
@@ -1090,6 +1096,7 @@ def _decode_envelope(payload: Any) -> WorkerResultEnvelope:
         result_sha=_text(data, "result_sha"),
         diff_digest=_text(data, "diff_digest"),
         coding_result=_decode_coding_result(data["coding_result"]),
+        producer_actor_id=producer_actor_id,
     )
 
 
