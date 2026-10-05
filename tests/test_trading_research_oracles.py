@@ -9,6 +9,7 @@ import pytest
 
 from nika_core.trading_research.accounting import AccountSnapshot, PortfolioLedger
 from nika_core.trading_research.contracts import Instrument, Venue
+from nika_core.trading_research.identity import instrument_identity
 from nika_core.trading_research.orders import (
     ExecutionPolicy,
     OrderIntent,
@@ -85,7 +86,7 @@ def _assert_account_oracle(case: dict[str, object]) -> None:
                 filled_slice=index + 1,
             )
         )
-    snapshot = ledger.snapshot({INSTRUMENT.instrument_id: Decimal(str(case["mark"]))})
+    snapshot = ledger.snapshot({instrument_identity(INSTRUMENT): Decimal(str(case["mark"]))})
     position = ledger.position(INSTRUMENT)
     expected = case["expected"]
     assert isinstance(expected, dict)
