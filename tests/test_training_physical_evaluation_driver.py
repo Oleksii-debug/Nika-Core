@@ -152,6 +152,8 @@ def _pilot_report(
         candidate_manifest_sha256="a" * 64,
         consumed_materials_sha256="b" * 64,
         model_dir_manifest_sha256="c" * 64,
+        previous_adapter_tensors_sha256="1" * 64,
+        trained_adapter_tensors_sha256="2" * 64,
         trainer_artifact_id="d" * 64,
         trainer_deployment_sha256="e" * 64,
         trainer_implementation_sha256="f" * 64,
