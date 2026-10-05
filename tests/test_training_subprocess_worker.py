@@ -15,7 +15,11 @@ from nika_core.artifacts import ArtifactRegistry
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
 from nika_core.research.blobs import ContentAddressedBlobStore
-from nika_core.training_adapters import SubprocessTrainingWorker, TrainingSubprocessError
+from nika_core.training_adapters import (
+    SubprocessTrainingWorker,
+    TrainingSubprocessError,
+    training_runtime_registry_metadata,
+)
 from nika_core.training_materials import (
     ResolvedTrainingPackage,
     TrainingMaterialEvidence,
@@ -30,6 +34,32 @@ from nika_core.training_runtime import (
 _WORKSPACE_ID = "subprocess-training"
 _TRAINING_BODY = b'{"prompt":"train","response":"ok"}\n'
 _VALIDATION_BODY = b'{"prompt":"validate","response":"ok"}\n'
+_RUNTIME_VERSIONS = {
+    "torch": "2.14.1",
+    "transformers": "5.18.2",
+    "peft": "0.21.2",
+    "accelerate": "1.15.3",
+    "gguf": "0.19.1",
+    "safetensors": "0.8.2",
+}
+
+
+def _runtime_environment(
+    versions: dict[str, str] | None = None,
+) -> dict[str, str]:
+    selected = dict(_RUNTIME_VERSIONS if versions is None else versions)
+    metadata = training_runtime_registry_metadata(selected)
+    return {
+        "NIKA_TRAINER_TORCH_VERSION": selected["torch"],
+        "NIKA_TRAINER_TRANSFORMERS_VERSION": selected["transformers"],
+        "NIKA_TRAINER_PEFT_VERSION": selected["peft"],
+        "NIKA_TRAINER_ACCELERATE_VERSION": selected["accelerate"],
+        "NIKA_TRAINER_GGUF_VERSION": selected["gguf"],
+        "NIKA_TRAINER_SAFETENSORS_VERSION": selected["safetensors"],
+        "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256": metadata[
+            "nika.training.runtime.manifest_sha256"
+        ],
+    }
 
 
 def _sha256(payload: bytes) -> str:
@@ -112,6 +142,8 @@ def _spec(
 def _registry_for_python(
     tmp_path: Path,
     script: Path | None = None,
+    *,
+    trainer_metadata: dict[str, str] | None = None,
 ) -> tuple[ArtifactRegistry, str, Path, str | None]:
     executable = Path(sys.executable).resolve()
     roots = [executable.parent]
@@ -126,6 +158,7 @@ def _registry_for_python(
         idempotency_key="python-executable",
         path=executable,
         kind="training_executable",
+        metadata={} if trainer_metadata is None else dict(trainer_metadata),
     )
     script_artifact_id: str | None = None
     if script is not None:
@@ -142,11 +175,14 @@ def _registry_for_python(
 def _worker(
     tmp_path: Path,
     script: Path,
+    *,
+    trainer_metadata: dict[str, str] | None = None,
     **kwargs: object,
 ) -> tuple[SubprocessTrainingWorker, ArtifactRegistry, str]:
     registry, artifact_id, executable, script_artifact_id = _registry_for_python(
         tmp_path,
         script,
+        trainer_metadata=trainer_metadata,
     )
     assert script_artifact_id is not None
     worker = SubprocessTrainingWorker(
@@ -1427,6 +1463,173 @@ sys.stdout.write(json.dumps(response))
     trainer_state = envelope["trainer_state"]
     assert isinstance(trainer_state, dict)
     assert trainer_state["allowed"] == "yes"
+
+
+def test_runtime_environment_requires_registry_authority(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError, match="Registry-authoritative trainer metadata"):
+        _worker(
+            tmp_path,
+            trainer,
+            environment=_runtime_environment(),
+        )
+
+
+def test_registry_runtime_identity_is_injected_into_child_process(tmp_path: Path) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import os
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
+    "protocol_version": request["protocol_version"],
+    "resume_state": {
+        "torch": os.getenv("NIKA_TRAINER_TORCH_VERSION"),
+        "transformers": os.getenv("NIKA_TRAINER_TRANSFORMERS_VERSION"),
+        "manifest": os.getenv("NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"),
+        "allowed": os.getenv("NIKA_ALLOWED"),
+    },
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    worker, _, _ = _worker(
+        tmp_path,
+        trainer,
+        trainer_metadata=metadata,
+        environment={"NIKA_ALLOWED": "yes"},
+    )
+    materials = _resolved_materials(tmp_path)
+
+    result = worker.step(
+        spec=_spec(materials),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    envelope = result.resume_state["_nika_subprocess"]
+    assert isinstance(envelope, dict)
+    trainer_state = envelope["trainer_state"]
+    assert isinstance(trainer_state, dict)
+    assert trainer_state["torch"] == _RUNTIME_VERSIONS["torch"]
+    assert trainer_state["transformers"] == _RUNTIME_VERSIONS["transformers"]
+    assert trainer_state["manifest"] == metadata[
+        "nika.training.runtime.manifest_sha256"
+    ]
+    assert trainer_state["allowed"] == "yes"
+
+
+def test_runtime_environment_must_match_registry_authority(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    drifted = dict(_RUNTIME_VERSIONS)
+    drifted["transformers"] = "5.18.3"
+
+    with pytest.raises(ValueError, match="does not match Registry-authoritative"):
+        _worker(
+            tmp_path,
+            trainer,
+            trainer_metadata=metadata,
+            environment=_runtime_environment(drifted),
+        )
+
+
+def test_runtime_registry_metadata_must_be_complete(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    del metadata["nika.training.runtime.torch"]
+
+    with pytest.raises(ValueError, match="incomplete or ambiguous"):
+        _worker(
+            tmp_path,
+            trainer,
+            trainer_metadata=metadata,
+        )
+
+
+def test_runtime_registry_manifest_digest_must_match_versions(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    metadata["nika.training.runtime.manifest_sha256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="manifest digest is inconsistent"):
+        _worker(
+            tmp_path,
+            trainer,
+            trainer_metadata=metadata,
+        )
+
+
+def test_runtime_registry_metadata_drift_fails_before_process_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    worker, registry, artifact_id = _worker(
+        tmp_path,
+        trainer,
+        trainer_metadata=metadata,
+        environment=_runtime_environment(),
+    )
+    real_get = registry.get
+    original = real_get(artifact_id)
+    drifted_versions = dict(_RUNTIME_VERSIONS)
+    drifted_versions["torch"] = "2.14.2"
+    drifted_record = original.model_copy(
+        update={"metadata": training_runtime_registry_metadata(drifted_versions)}
+    )
+
+    def changed_get(requested_artifact_id: str) -> object:
+        if requested_artifact_id == artifact_id:
+            return drifted_record
+        return real_get(requested_artifact_id)
+
+    monkeypatch.setattr(registry, "get", changed_get)
+    materials = _resolved_materials(tmp_path)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_execution_plan_changed"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_training_runtime_registry_metadata_rejects_invalid_versions() -> None:
+    missing = dict(_RUNTIME_VERSIONS)
+    del missing["gguf"]
+    with pytest.raises(ValueError, match="exact deployment set"):
+        training_runtime_registry_metadata(missing)
+
+    malformed = dict(_RUNTIME_VERSIONS)
+    malformed["torch"] = " 2.14.1"
+    with pytest.raises(ValueError, match="canonical text"):
+        training_runtime_registry_metadata(malformed)
 
 
 def test_resume_identity_binds_runtime_execution_limits(tmp_path: Path) -> None:
