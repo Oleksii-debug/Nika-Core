@@ -25,8 +25,8 @@ from nika_core.training_runtime import (
 )
 from nika_core.training_scale import TrainingScaleAuthorization
 
-_SCHEMA_VERSION = 1
-_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v1\x00"
+_SCHEMA_VERSION = 2
+_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v2\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_TEXT_BYTES = 1024
 _MAX_STEPS = 1_000_000
@@ -45,6 +45,7 @@ _REQUIRED_REPORT_FIELDS = {
     "job_fingerprint",
     "job_id",
     "paused_checkpoint_id",
+    "restart_checkpoint_id",
     "platform",
     "scale_authorization_sha256",
     "schema_version",
@@ -171,6 +172,7 @@ class PhysicalTrainingPilotReport:
     execution_plan_sha256: str
     job_fingerprint: str
     paused_checkpoint_id: str
+    restart_checkpoint_id: str
     completed_checkpoint_id: str
     candidate_artifact_ref: str
     candidate_descriptor_sha256: str
@@ -189,6 +191,7 @@ class PhysicalTrainingPilotReport:
         for value, name in (
             (self.job_id, "job_id"),
             (self.paused_checkpoint_id, "paused_checkpoint_id"),
+            (self.restart_checkpoint_id, "restart_checkpoint_id"),
             (self.completed_checkpoint_id, "completed_checkpoint_id"),
             (self.candidate_artifact_ref, "candidate_artifact_ref"),
         ):
@@ -205,8 +208,14 @@ class PhysicalTrainingPilotReport:
             (self.candidate_sha256, "candidate_sha256"),
         ):
             _require_sha256(value, name=name)
-        if self.paused_checkpoint_id == self.completed_checkpoint_id:
-            _fail("pause and completion must have distinct durable checkpoints")
+        if len(
+            {
+                self.paused_checkpoint_id,
+                self.restart_checkpoint_id,
+                self.completed_checkpoint_id,
+            }
+        ) != 3:
+            _fail("pause, restart probe, and completion need distinct durable checkpoints")
         if (
             type(self.candidate_byte_count) is not int
             or self.candidate_byte_count <= 0
@@ -235,6 +244,7 @@ class PhysicalTrainingPilotReport:
             "job_fingerprint": self.job_fingerprint,
             "job_id": self.job_id,
             "paused_checkpoint_id": self.paused_checkpoint_id,
+            "restart_checkpoint_id": self.restart_checkpoint_id,
             "platform": self.platform,
             "scale_authorization_sha256": self.scale_authorization_sha256,
             "schema_version": self.schema_version,
@@ -279,6 +289,7 @@ class PhysicalTrainingPilotReport:
             execution_plan_sha256=value["execution_plan_sha256"],
             job_fingerprint=value["job_fingerprint"],
             paused_checkpoint_id=value["paused_checkpoint_id"],
+            restart_checkpoint_id=value["restart_checkpoint_id"],
             completed_checkpoint_id=value["completed_checkpoint_id"],
             candidate_artifact_ref=value["candidate_artifact_ref"],
             candidate_descriptor_sha256=value["candidate_descriptor_sha256"],
@@ -373,6 +384,7 @@ def _snapshot_run_evidence(
 def build_physical_training_pilot_report(
     *,
     paused: TrainingRunEvidence,
+    restart_probe: TrainingRunEvidence,
     completed: TrainingRunEvidence,
     candidate_path: Path,
     candidate_descriptor: ModelArtifactDescriptor,
@@ -385,6 +397,11 @@ def build_physical_training_pilot_report(
         state=TrainingRunState.PAUSED,
         label="paused run",
     )
+    restart_probe = _snapshot_run_evidence(
+        restart_probe,
+        state=TrainingRunState.PAUSED,
+        label="restart probe",
+    )
     completed = _snapshot_run_evidence(
         completed,
         state=TrainingRunState.COMPLETED,
@@ -392,14 +409,21 @@ def build_physical_training_pilot_report(
     )
     if paused.next_step != 1:
         _fail("physical pilot must pause exactly after its first trainer step")
+    if restart_probe.next_step != 1:
+        _fail("restarted runtime did not reopen the one-step durable checkpoint")
     if completed.next_step < 2:
         _fail("physical pilot must complete after the restart boundary")
-    if paused.candidate_sha256 is not None:
-        _fail("paused pilot must not already publish candidate evidence")
-    if paused.checkpoint_id is None or completed.checkpoint_id is None:
-        _fail("physical pilot requires durable pause and completion checkpoints")
-    if paused.checkpoint_id == completed.checkpoint_id:
-        _fail("physical pilot did not advance durable checkpoint identity")
+    if paused.candidate_sha256 is not None or restart_probe.candidate_sha256 is not None:
+        _fail("paused pilot evidence must not already publish a candidate")
+    checkpoint_ids = (
+        paused.checkpoint_id,
+        restart_probe.checkpoint_id,
+        completed.checkpoint_id,
+    )
+    if any(checkpoint_id is None for checkpoint_id in checkpoint_ids):
+        _fail("physical pilot requires pause, restart-probe, and completion checkpoints")
+    if len(set(checkpoint_ids)) != 3:
+        _fail("physical pilot did not advance all durable checkpoint identities")
 
     identity_fields = (
         "job_id",
@@ -412,7 +436,10 @@ def build_physical_training_pilot_report(
         "candidate_artifact_ref",
     )
     for name in identity_fields:
-        if getattr(paused, name) != getattr(completed, name):
+        paused_value = getattr(paused, name)
+        if getattr(restart_probe, name) != paused_value:
+            _fail(f"restart probe changed {name} across reopen")
+        if getattr(completed, name) != paused_value:
             _fail(f"physical pilot changed {name} across restart")
     if completed.candidate_sha256 is None:
         _fail("completed pilot is missing candidate digest evidence")
@@ -434,6 +461,7 @@ def build_physical_training_pilot_report(
         execution_plan_sha256=completed.execution_plan_sha256,
         job_fingerprint=completed.job_fingerprint,
         paused_checkpoint_id=paused.checkpoint_id,
+        restart_checkpoint_id=restart_probe.checkpoint_id,
         completed_checkpoint_id=completed.checkpoint_id,
         candidate_artifact_ref=completed.candidate_artifact_ref,
         candidate_descriptor_sha256=receipt.descriptor_digest,
@@ -509,6 +537,20 @@ def run_physical_training_pilot(
     if resumed_worker.execution_plan_sha256 != worker.execution_plan_sha256:
         _fail("trainer execution plan changed across restart")
 
+    restart_probe = resumed_runtime.run(
+        spec,
+        resumed_worker,
+        scale_authorization=scale_authorization,
+        control=lambda: TrainingControl.PAUSE,
+    )
+    restart_probe = _snapshot_run_evidence(
+        restart_probe,
+        state=TrainingRunState.PAUSED,
+        label="restart probe",
+    )
+    if restart_probe.next_step != 1:
+        _fail("restarted runtime did not reopen the one-step durable checkpoint")
+
     completed = resumed_runtime.run(
         spec,
         resumed_worker,
@@ -516,6 +558,7 @@ def run_physical_training_pilot(
     )
     return build_physical_training_pilot_report(
         paused=paused,
+        restart_probe=restart_probe,
         completed=completed,
         candidate_path=candidate_path,
         candidate_descriptor=candidate_descriptor,
