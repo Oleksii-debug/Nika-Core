@@ -878,3 +878,98 @@ def test_layered_percent_encoded_metadata_credentials_are_rejected(
             metadata=metadata,
         )
 
+
+
+def test_record_rehydration_rejects_rebound_deterministic_identity(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    registry = ArtifactRegistry.from_store(store)
+    record = registry.register_reference(
+        workspace_id="workspace-a",
+        idempotency_key="artifact-a",
+        reference="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+        kind="evidence",
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT record_json FROM artifact_registry_records WHERE artifact_id = ?",
+            (record.artifact_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["record_json"])
+        payload["workspace_id"] = "workspace-rebound"
+        conn.execute(
+            "UPDATE artifact_registry_records SET workspace_id = ?, record_json = ? "
+            "WHERE artifact_id = ?",
+            ("workspace-rebound", json.dumps(payload), record.artifact_id),
+        )
+
+    with pytest.raises(ArtifactRegistryError, match="deterministic identity"):
+        registry.get(record.artifact_id)
+
+
+def test_verification_rehydration_rejects_actual_evidence_identity_drift(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    registry = ArtifactRegistry.from_store(store)
+    record = registry.register_reference(
+        workspace_id="workspace-a",
+        idempotency_key="artifact-a",
+        reference="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+        kind="evidence",
+    )
+    verification = registry.verify(record.artifact_id)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT verification_json FROM artifact_registry_verifications "
+            "WHERE verification_id = ?",
+            (verification.verification_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["verification_json"])
+        payload["actual_sha256"] = "f" * 64
+        payload["actual_size_bytes"] = 7
+        conn.execute(
+            "UPDATE artifact_registry_verifications SET verification_json = ? "
+            "WHERE verification_id = ?",
+            (json.dumps(payload), verification.verification_id),
+        )
+
+    with pytest.raises(ArtifactRegistryError, match="deterministic identity"):
+        registry.verification_history(record.artifact_id)
+
+
+def test_verification_rehydration_rejects_expected_metadata_drift(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    registry = ArtifactRegistry.from_store(store)
+    record = registry.register_reference(
+        workspace_id="workspace-a",
+        idempotency_key="artifact-a",
+        reference="blob:artifact-a",
+        sha256="a" * 64,
+        size_bytes=1,
+        kind="evidence",
+    )
+    verification = registry.verify(record.artifact_id)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT verification_json FROM artifact_registry_verifications "
+            "WHERE verification_id = ?",
+            (verification.verification_id,),
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(row["verification_json"])
+        payload["expected_sha256"] = "f" * 64
+        payload["expected_size_bytes"] = 99
+        conn.execute(
+            "UPDATE artifact_registry_verifications SET verification_json = ? "
+            "WHERE verification_id = ?",
+            (json.dumps(payload), verification.verification_id),
+        )
+
+    with pytest.raises(ArtifactRegistryError, match="expected metadata"):
+        registry.verification_history(record.artifact_id)
