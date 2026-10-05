@@ -203,6 +203,26 @@ def test_rollback_must_restore_exact_requested_previous_release() -> None:
     assert extravars["nika_previous_release_sha"] == previous
 
 
+@pytest.mark.parametrize(
+    "previous_release_sha",
+    [
+        True,
+        1.0,
+        "not-a-sha",
+        "A" * 40,
+        "0" * 39,
+        "0" * 41,
+    ],
+)
+def test_rollback_rejects_invalid_previous_release_before_runner_call(
+    previous_release_sha: object,
+) -> None:
+    adapter, runner = _adapter()
+    with pytest.raises(StagingAdapterError, match="previous_release_sha"):
+        adapter.rollback(_intent(), previous_release_sha)  # type: ignore[arg-type]
+    assert runner.calls == []
+
+
 def test_rollback_rejects_wrong_restored_sha() -> None:
     adapter, _ = _adapter(
         _execution("rollback", {"succeeded": True, "restored_release_sha": _sha(8)})
@@ -435,7 +455,7 @@ def test_runner_execution_rejects_boolean_rc_at_canonical_carrier() -> None:
 
 
 def test_runner_execution_snapshots_mutable_contract() -> None:
-    contract = {"applied": True}
+    contract = {"applied": True, "meta": {"release": "one"}}
     execution = RunnerExecution(
         "successful",
         0,
@@ -443,7 +463,10 @@ def test_runner_execution_snapshots_mutable_contract() -> None:
         "ansible-runner:evidence-deploy",
     )
     contract["applied"] = False
-    assert execution.contract == {"applied": True}
+    meta = contract["meta"]
+    assert isinstance(meta, dict)
+    meta["release"] = "two"
+    assert execution.contract == {"applied": True, "meta": {"release": "one"}}
 
 
 def test_adapter_revalidates_tampered_runner_execution() -> None:
