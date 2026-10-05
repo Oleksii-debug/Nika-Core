@@ -1,0 +1,24 @@
+{
+  "base_model_root": "C:\\NikaTraining\\pilot-base",
+  "device": "cpu",
+  "gradient_accumulation_steps": 1,
+  "learning_rate": "0.0002",
+  "lora_alpha": 8,
+  "lora_dropout": "0.05",
+  "lora_rank": 4,
+  "max_sequence_length": 256,
+  "micro_batch_size": 1,
+  "output_root": "C:\\NikaTraining\\runs",
+  "peft_version": "0.21.0",
+  "prompt_separator": "\n",
+  "schema_version": 1,
+  "seed": 17,
+  "target_modules": [
+    "q_proj",
+    "v_proj"
+  ],
+  "torch_num_threads": 4,
+  "torch_version": "2.7.0",
+  "transformers_version": "5.17.0",
+  "weight_decay": "0"
+}
