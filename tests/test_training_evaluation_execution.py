@@ -123,6 +123,10 @@ class _AttestedEffectPort:
                 provider_id=binding.challenger_provider_id,
                 failure_effect=ModelFailureEffect.NO_EFFECT,
             )
+        if self.mode == "untyped-provider-failure":
+            raise RuntimeError("raw provider secret must not escape")
+        if self.mode == "mutate-effect-request":
+            object.__setattr__(request, "request_id", "substituted-request")
         attestation = LoadedModelArtifactAttestation(
             request_id=request.request_id,
             binding_sha256=binding.binding_sha256,
@@ -222,6 +226,31 @@ async def test_provider_failure_aborts_without_flattening_or_secret_text() -> No
     assert exc_info.value.code is ModelErrorCode.UNAVAILABLE
     assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
     assert "private provider detail" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_untyped_provider_failure_aborts_once_and_is_secret_free() -> None:
+    port = _AttestedEffectPort(mode="untyped-provider-failure")
+
+    with pytest.raises(TrainingEvaluationExecutionError) as exc_info:
+        await _run(port)
+
+    assert port.calls == 1
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert "raw provider secret" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_provider_input_mutation_aborts_before_second_case() -> None:
+    port = _AttestedEffectPort(mode="mutate-effect-request")
+
+    with pytest.raises(TrainingEvaluationExecutionError) as exc_info:
+        await _run(port)
+
+    assert port.calls == 1
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
 
 
 @pytest.mark.asyncio
