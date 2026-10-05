@@ -7,6 +7,7 @@ import os
 import re
 import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
@@ -31,6 +32,9 @@ _CHECKPOINT_MARKER = "nika_checkpoint.json"
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
+_MAX_MODEL_DIR_FILES = 10_000
+_MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
+_MODEL_SNAPSHOT_DIR = "model-snapshot"
 
 
 class PeftTrainerError(RuntimeError):
@@ -498,6 +502,154 @@ def _require_regular_unlinked(path: Path, *, code: str) -> os.stat_result:
     if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISREG(value.st_mode):
         _fail(code)
     return value
+
+
+def _copy_model_snapshot_file(
+    source: Path,
+    destination: Path,
+    *,
+    expected_size: int,
+) -> None:
+    before = _require_regular_unlinked(source, code="model_dir_source_changed")
+    if before.st_size != expected_size:
+        _fail("model_dir_source_changed")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(source, flags)
+    except OSError:
+        _fail("model_dir_source_changed")
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size != expected_size
+        ):
+            _fail("model_dir_source_changed")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("xb") as target:
+            while True:
+                chunk = os.read(fd, _READ_CHUNK_BYTES)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > expected_size or total > _MAX_MODEL_DIR_BYTES:
+                    _fail("model_dir_source_changed")
+                target.write(chunk)
+            target.flush()
+            os.fsync(target.fileno())
+        after = os.fstat(fd)
+    except PeftTrainerError:
+        raise
+    except OSError:
+        _fail("model_dir_snapshot_failed")
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        current = os.lstat(source)
+    except OSError:
+        _fail("model_dir_source_changed")
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    if (
+        total != expected_size
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+    ):
+        _fail("model_dir_source_changed")
+
+
+def _model_directory_snapshot(config: TrainerConfig, job_root: Path) -> Path:
+    target = job_root / _MODEL_SNAPSHOT_DIR
+    if target.exists():
+        try:
+            digest = model_directory_manifest_sha256(target)
+        except ValueError:
+            _fail("model_dir_snapshot_invalid")
+        if digest != config.model_dir_manifest_sha256:
+            _fail("model_dir_snapshot_mismatch")
+        return target
+
+    try:
+        root_stat = os.lstat(config.model_dir)
+    except OSError:
+        _fail("model_dir_source_changed")
+    if (
+        stat.S_ISLNK(root_stat.st_mode)
+        or _is_reparse(root_stat)
+        or not stat.S_ISDIR(root_stat.st_mode)
+    ):
+        _fail("model_dir_source_changed")
+    try:
+        paths = sorted(
+            config.model_dir.rglob("*"),
+            key=lambda item: item.relative_to(config.model_dir).as_posix(),
+        )
+        temporary = Path(
+            tempfile.mkdtemp(
+                prefix=".model-snapshot-",
+                dir=os.fspath(job_root),
+            )
+        )
+    except OSError:
+        _fail("model_dir_snapshot_failed")
+
+    seen_paths: set[str] = set()
+    file_count = 0
+    total_bytes = 0
+    for source in paths:
+        relative = source.relative_to(config.model_dir)
+        normalized = relative.as_posix()
+        folded = normalized.casefold()
+        if folded in seen_paths:
+            _fail("model_dir_snapshot_path_collision")
+        seen_paths.add(folded)
+        try:
+            value = os.lstat(source)
+        except OSError:
+            _fail("model_dir_source_changed")
+        if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+            _fail("model_dir_snapshot_link_forbidden")
+        destination = temporary / relative
+        if stat.S_ISDIR(value.st_mode):
+            try:
+                destination.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                _fail("model_dir_snapshot_failed")
+            continue
+        if not stat.S_ISREG(value.st_mode):
+            _fail("model_dir_snapshot_invalid")
+        file_count += 1
+        total_bytes += value.st_size
+        if file_count > _MAX_MODEL_DIR_FILES or total_bytes > _MAX_MODEL_DIR_BYTES:
+            _fail("model_dir_snapshot_bounds_exceeded")
+        _copy_model_snapshot_file(source, destination, expected_size=value.st_size)
+    if file_count == 0:
+        _fail("model_dir_snapshot_empty")
+    try:
+        snapshot_digest = model_directory_manifest_sha256(temporary)
+    except ValueError:
+        _fail("model_dir_snapshot_invalid")
+    if snapshot_digest != config.model_dir_manifest_sha256:
+        _fail("model_dir_snapshot_mismatch")
+    try:
+        os.rename(temporary, target)
+    except OSError:
+        if not target.exists():
+            _fail("model_dir_snapshot_publish_failed")
+        try:
+            existing_digest = model_directory_manifest_sha256(target)
+        except ValueError:
+            _fail("model_dir_snapshot_publish_failed")
+        if existing_digest != config.model_dir_manifest_sha256:
+            _fail("model_dir_snapshot_publish_failed")
+    return target
 
 
 def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
@@ -1151,11 +1303,12 @@ def _train_one_step(
     except OSError:
         _fail("job_output_root_failed")
     staged_base = _copy_verified_base(config, request, job_root)
+    staged_model_dir = _model_directory_snapshot(config, job_root)
     previous_checkpoint = _resume_checkpoint(job_root, request)
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(
-            os.fspath(config.model_dir),
+            os.fspath(staged_model_dir),
             gguf_file=os.fspath(staged_base),
             local_files_only=True,
             trust_remote_code=False,
@@ -1165,14 +1318,14 @@ def _train_one_step(
                 _fail("tokenizer_padding_unavailable")
             tokenizer.pad_token = tokenizer.eos_token
         model = AutoModelForCausalLM.from_pretrained(
-            os.fspath(config.model_dir),
+            os.fspath(staged_model_dir),
             gguf_file=os.fspath(staged_base),
             local_files_only=True,
             trust_remote_code=False,
             dtype="auto",
         )
         try:
-            after_load_manifest = model_directory_manifest_sha256(config.model_dir)
+            after_load_manifest = model_directory_manifest_sha256(staged_model_dir)
         except ValueError:
             _fail("model_dir_changed_during_load")
         if after_load_manifest != config.model_dir_manifest_sha256:
