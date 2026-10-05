@@ -1393,16 +1393,19 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
         "target_modules": list(config.lora_target_modules),
         "task_type": "CAUSAL_LM",
     }
+    published_tensor_bytes = b"canonical-published-tensor-state"
+    trained_tensor_sha256 = hashlib.sha256(published_tensor_bytes).hexdigest()
     raw = peft._candidate_manifest_json(
         request=request,
         config=config,
         consumed=consumed,
         adapter_config=adapter_config,
         previous_adapter_tensors_sha256=None,
-        trained_adapter_tensors_sha256="9" * 64,
+        trained_adapter_tensors_sha256=trained_tensor_sha256,
     )
     candidate = tmp_path / "candidate.safetensors"
     candidate.write_bytes(b"persisted-candidate")
+    tensor = object()
 
     class Reader:
         def __enter__(self) -> "Reader":
@@ -1414,6 +1417,10 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
         def keys(self) -> list[str]:
             return ["lora.weight"]
 
+        def get_tensor(self, name: str) -> object:
+            assert name == "lora.weight"
+            return tensor
+
         def metadata(self) -> dict[str, str]:
             return {"nika_adapter_manifest": raw}
 
@@ -1423,14 +1430,24 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
         assert device == "cpu"
         return Reader()
 
+    def safe_serialize(tensors: dict[str, object]) -> bytes:
+        assert list(tensors) == ["lora.weight"]
+        assert tensors["lora.weight"] is tensor
+        return published_tensor_bytes
+
     monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(safe_open=safe_open))
+    monkeypatch.setitem(
+        sys.modules,
+        "safetensors.torch",
+        SimpleNamespace(save=safe_serialize),
+    )
 
     manifest = peft.candidate_adapter_manifest(candidate.resolve())
 
     assert manifest["trainer_artifact_id"] == request.trainer_artifact_id
     assert manifest["trainer_sha256"] == request.trainer_sha256
     assert manifest["previous_adapter_tensors_sha256"] is None
-    assert manifest["trained_adapter_tensors_sha256"] == "9" * 64
+    assert manifest["trained_adapter_tensors_sha256"] == trained_tensor_sha256
     assert manifest["training_runtime_versions"] == _RUNTIME_VERSIONS
 
     class EmptyReader(Reader):
@@ -1451,6 +1468,73 @@ def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
     with pytest.raises(peft.PeftTrainerError, match="candidate_safetensors_empty"):
         peft.candidate_adapter_manifest(candidate.resolve())
 
+
+def test_candidate_manifest_reader_rejects_tensor_payload_digest_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    declared_tensor_sha256 = hashlib.sha256(b"declared-tensor-state").hexdigest()
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+        previous_adapter_tensors_sha256=None,
+        trained_adapter_tensors_sha256=declared_tensor_sha256,
+    )
+    candidate = tmp_path / "candidate-mismatch.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+    tensor = object()
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def keys(self) -> list[str]:
+            return ["lora.weight"]
+
+        def get_tensor(self, name: str) -> object:
+            assert name == "lora.weight"
+            return tensor
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": raw}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    def safe_serialize(tensors: dict[str, object]) -> bytes:
+        assert list(tensors) == ["lora.weight"]
+        assert tensors["lora.weight"] is tensor
+        return b"actual-published-tensor-state"
+
+    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(safe_open=safe_open))
+    monkeypatch.setitem(
+        sys.modules,
+        "safetensors.torch",
+        SimpleNamespace(save=safe_serialize),
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_tensor_state_mismatch"):
+        peft.candidate_adapter_manifest(candidate.resolve())
 
 def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
     tmp_path: Path,

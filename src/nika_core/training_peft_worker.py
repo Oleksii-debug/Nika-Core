@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import importlib.metadata
 import json
 import math
@@ -1664,6 +1665,25 @@ def _import_training_stack() -> tuple[Any, ...]:
     )
 
 
+def _canonical_adapter_tensor_sha256(
+    tensors: dict[str, Any],
+    *,
+    safe_serialize: Any,
+) -> str:
+    """Hash canonical adapter tensor state independently of safetensors metadata."""
+    if type(tensors) is not dict or not tensors:
+        _fail("adapter_candidate_empty")
+    try:
+        serialized = safe_serialize(
+            {name: tensors[name] for name in sorted(tensors)}
+        )
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _fail("adapter_tensor_digest_failed")
+    if type(serialized) is not bytes or not serialized:
+        _fail("adapter_tensor_digest_failed")
+    return hashlib.sha256(serialized).hexdigest()
+
+
 def _adapter_tensor_sha256(
     path: Path,
     *,
@@ -1673,20 +1693,19 @@ def _adapter_tensor_sha256(
     """Hash canonical adapter tensor state independently of safetensors metadata."""
     _require_regular_unlinked(path, code="adapter_candidate_invalid")
     try:
-        with safe_open(os.fspath(path), framework="pt", device="cpu") as source:
-            names = tuple(sorted(source.keys()))
+        with safe_open(os.fspath(path), framework="pt", device="cpu") as source_handle:
+            names = tuple(sorted(source_handle.keys()))
             if not names:
                 _fail("adapter_candidate_empty")
-            tensors = {name: source.get_tensor(name) for name in names}
-        serialized = safe_serialize(tensors)
+            tensors = {name: source_handle.get_tensor(name) for name in names}
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("adapter_tensor_digest_failed")
-    if type(serialized) is not bytes or not serialized:
-        _fail("adapter_tensor_digest_failed")
-    return hashlib.sha256(serialized).hexdigest()
-
+    return _canonical_adapter_tensor_sha256(
+        tensors,
+        safe_serialize=safe_serialize,
+    )
 
 def _validate_serialized_adapter_weights(
     path: Path,
@@ -2338,6 +2357,7 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
     """Read and strictly validate the self-contained manifest bound into a PEFT candidate."""
     try:
         from safetensors import safe_open
+        from safetensors.torch import save as safe_serialize
     except ImportError:
         _fail("training_dependencies_unavailable")
     path = Path(candidate_path)
@@ -2348,13 +2368,25 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
         with safe_open(os.fspath(path), framework="pt", device="cpu") as handle:
             metadata = handle.metadata()
             tensor_keys = tuple(handle.keys())
+            if not tensor_keys or any(
+                type(name) is not str
+                or not name
+                or len(name.encode("utf-8")) > 4096
+                for name in tensor_keys
+            ):
+                _fail("candidate_safetensors_empty")
+            tensors = {
+                name: handle.get_tensor(name)
+                for name in sorted(tensor_keys)
+            }
+    except PeftTrainerError:
+        raise
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_safetensors_invalid")
-    if not tensor_keys or any(
-        type(name) is not str or not name or len(name.encode("utf-8")) > 4096
-        for name in tensor_keys
-    ):
-        _fail("candidate_safetensors_empty")
+    published_tensor_sha256 = _canonical_adapter_tensor_sha256(
+        tensors,
+        safe_serialize=safe_serialize,
+    )
     if type(metadata) is not dict or set(metadata) != {"nika_adapter_manifest"}:
         _fail("candidate_manifest_missing")
     raw = metadata["nika_adapter_manifest"]
@@ -2373,8 +2405,16 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
         _fail("candidate_manifest_invalid")
     if _canonical_json_bytes(value).decode("utf-8") != raw:
         _fail("candidate_manifest_not_canonical")
-    return _validate_candidate_manifest_payload(value)
-
+    validated = _validate_candidate_manifest_payload(value)
+    expected_trained_sha256 = validated.get("trained_adapter_tensors_sha256")
+    if type(expected_trained_sha256) is not str:
+        _fail("candidate_manifest_invalid")
+    if not hmac.compare_digest(
+        published_tensor_sha256,
+        expected_trained_sha256,
+    ):
+        _fail("candidate_tensor_state_mismatch")
+    return validated
 
 def _response(
     request: ParsedRequest,
