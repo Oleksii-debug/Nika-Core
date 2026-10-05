@@ -8,6 +8,7 @@ from typing import Any
 import httpx
 import pytest
 
+import nika_core.v01_model_settings as v01_model_settings_module
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
@@ -1255,6 +1256,19 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     monkeypatch.setattr(settings, "artifact_pin_for_task", unexpected_legacy_read)
     monkeypatch.setattr(TaskQueue, "get", unexpected_legacy_read)
 
+    observed_manifest_pins: list[str | None] = []
+    canonical_ollama_provider = v01_model_settings_module.OllamaProvider
+
+    def recording_ollama_provider(**kwargs):
+        observed_manifest_pins.append(kwargs.get("expected_manifest_sha256"))
+        return canonical_ollama_provider(**kwargs)
+
+    monkeypatch.setattr(
+        v01_model_settings_module,
+        "OllamaProvider",
+        recording_ollama_provider,
+    )
+
     factory = V01BoundModelRuntimeFactory(
         store=store,
         definitions=AgentDefinitionRepository(store),
@@ -1262,6 +1276,7 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     )
 
     assert factory.for_task(task.task_id) is not None
+    assert observed_manifest_pins == [_CHALLENGER_MANIFEST_SHA256]
 
 
 @pytest.mark.asyncio
