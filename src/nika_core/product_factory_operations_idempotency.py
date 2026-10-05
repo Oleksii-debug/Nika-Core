@@ -220,7 +220,7 @@ class RuntimeIdempotencyMaintenanceJournal:
         if value["schema"] != _RESULT_SCHEMA:
             raise ProductOperationsError("durable maintenance result schema is unsupported")
         evidence_refs = value["evidence_refs"]
-        if not isinstance(evidence_refs, list) or any(
+        if type(evidence_refs) is not list or any(
             type(item) is not str for item in evidence_refs
         ):
             raise ProductOperationsError("durable maintenance result evidence is invalid")
