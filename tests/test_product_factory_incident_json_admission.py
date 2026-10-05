@@ -7,6 +7,9 @@ import pytest
 from nika_core.product_factory_incident_contracts import (
     INCIDENT_LIFECYCLE_SCHEMA,
     IncidentLifecycleSnapshot,
+    IncidentKind,
+    IncidentSeverity,
+    IncidentTrigger,
     ProductIncidentError,
 )
 from nika_core.product_factory_incident_persistence import (
@@ -145,3 +148,42 @@ def test_quoted_brackets_and_escaped_quotes_do_not_count_as_json_depth() -> None
 def test_invalid_structure_is_rejected_before_record_hydration(payload: str) -> None:
     with pytest.raises(ProductIncidentError, match="invalid JSON"):
         load_incident_snapshot(payload)
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    (
+        "0001-01-01T00:00:00+14:00",
+        "9999-12-31T23:59:59-14:00",
+    ),
+)
+def test_direct_incident_trigger_rejects_utc_overflow(observed_at: str) -> None:
+    from datetime import datetime
+
+    with pytest.raises(ProductIncidentError, match="representable in UTC"):
+        IncidentTrigger(
+            "project-a",
+            "api",
+            "prod-eu",
+            "1" * 40,
+            IncidentKind.HEALTH,
+            IncidentSeverity.HIGH,
+            ("health://degraded",),
+            "approval://incident",
+            datetime.fromisoformat(observed_at),
+        )
+
+
+def test_direct_incident_trigger_rejects_nondatetime_without_attribute_error() -> None:
+    with pytest.raises(ProductIncidentError, match="timezone-aware datetime"):
+        IncidentTrigger(
+            "project-a",
+            "api",
+            "prod-eu",
+            "1" * 40,
+            IncidentKind.HEALTH,
+            IncidentSeverity.HIGH,
+            ("health://degraded",),
+            "approval://incident",
+            "2026-10-05T12:00:00+00:00",  # type: ignore[arg-type]
+        )
