@@ -275,6 +275,7 @@ def test_latest_normalizes_decoder_recursion_error(
     with pytest.raises(ValueError, match="invalid JSON"):
         checkpoints.latest(task_id)
 
+
 def _nested_payload(depth: int) -> dict[str, object]:
     value: object = 0
     for _ in range(depth - 1):
