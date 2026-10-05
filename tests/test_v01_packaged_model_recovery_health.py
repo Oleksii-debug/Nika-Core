@@ -44,6 +44,47 @@ class _UnexpectedHealthFactory:
         )
 
 
+class _BehavioralHealthFactory:
+    def __init__(self, probe: _FixedHealthProbe) -> None:
+        self.probe = probe
+        self.calls = 0
+
+    def __bool__(self) -> bool:
+        raise AssertionError("health factory truthiness must not execute")
+
+    def __call__(self, _selection: ModelSelection) -> _FixedHealthProbe:
+        self.calls += 1
+        return self.probe
+
+
+class _RawHealthProbe:
+    def __init__(self, snapshot: object) -> None:
+        self._snapshot = snapshot
+        self.calls = 0
+
+    def snapshot(self) -> object:
+        self.calls += 1
+        return self._snapshot
+
+
+class _BehavioralSnapshot:
+    def __init__(self, accesses: list[str]) -> None:
+        object.__setattr__(self, "_accesses", accesses)
+
+    def __getattribute__(self, name: str):
+        if name in {
+            "configured",
+            "reachable",
+            "model_present",
+            "model_ready",
+            "inference_proven",
+        }:
+            accesses = object.__getattribute__(self, "_accesses")
+            accesses.append(name)
+            raise AssertionError("noncanonical health carrier behavior must not execute")
+        return object.__getattribute__(self, name)
+
+
 class _TrackingRuntime(V01PackagedThreeAgentRuntime):
     def __init__(self, **kwargs: object) -> None:
         super().__init__(**kwargs)
@@ -163,6 +204,116 @@ def test_ollama_resume_probe_requires_exact_route_health_ready(tmp_path) -> None
     assert health.selections[0].provider_id == "ollama"
     assert health.selections[0].model == "qwen3:8b"
     assert health.selections[0].base_url == "http://localhost:11434"
+
+
+def test_health_factory_selection_does_not_execute_caller_truthiness(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "factory-truthiness" / "nika.db")
+    store.initialize()
+    settings, _queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    probe = _FixedHealthProbe(_snapshot(ready=ModelHealthFact.YES))
+    factory = _BehavioralHealthFactory(probe)
+    runtime = _runtime(store, settings, factory)
+    thread_id = f"desktop-{task_id}"
+
+    result = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=runtime.initial_resume_token(
+                task_id=task_id,
+                thread_id=thread_id,
+            ),
+        )
+    )
+
+    assert result.status is RuntimeResumeProbeStatus.READY
+    assert factory.calls == 1
+    assert probe.calls == 1
+
+
+def test_noncanonical_health_carrier_is_rejected_before_attribute_behavior(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "behavioral-snapshot" / "nika.db")
+    store.initialize()
+    settings, _queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    accesses: list[str] = []
+    probe = _RawHealthProbe(_BehavioralSnapshot(accesses))
+    runtime = _runtime(store, settings, lambda _selection: probe)
+    thread_id = f"desktop-{task_id}"
+
+    result = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=runtime.initial_resume_token(
+                task_id=task_id,
+                thread_id=thread_id,
+            ),
+        )
+    )
+
+    assert result.status is RuntimeResumeProbeStatus.UNVERIFIABLE
+    assert result.checkpoint_id is None
+    assert accesses == []
+    assert probe.calls == 1
+
+
+def test_mutated_exact_health_snapshot_is_revalidated_before_ready(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mutated-snapshot" / "nika.db")
+    store.initialize()
+    settings, _queue, task_id = _task_with_selection(
+        store,
+        payload={
+            "route_kind": "ollama",
+            "provider_id": "ollama",
+            "model": "qwen3:8b",
+            "base_url": "http://localhost:11434",
+            "credential_ref": None,
+            "private_data_allowed": True,
+            "timeout_seconds": 60,
+        },
+    )
+    snapshot = _snapshot(ready=ModelHealthFact.YES)
+    object.__setattr__(snapshot, "reachable", ModelHealthFact.NO)
+    health = _HealthFactory(snapshot)
+    runtime = _runtime(store, settings, health)
+    thread_id = f"desktop-{task_id}"
+
+    result = asyncio.run(
+        runtime.probe_resume(
+            task_id=task_id,
+            thread_id=thread_id,
+            resume_token=runtime.initial_resume_token(
+                task_id=task_id,
+                thread_id=thread_id,
+            ),
+        )
+    )
+
+    assert result.status is RuntimeResumeProbeStatus.UNVERIFIABLE
+    assert result.checkpoint_id is None
+    assert health.probe.calls == 1
 
 
 def test_foundry_resume_remains_unverifiable_without_route_health_authority(tmp_path) -> None:
