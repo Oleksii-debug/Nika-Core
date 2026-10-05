@@ -8,10 +8,11 @@ from threading import Barrier
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 import nika_core.data.sqlite as sqlite_store_module
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
-from nika_core.security import ApprovalAuthority
 from nika_core.product_project import (
     EvidenceRef,
     ProductDecision,
@@ -28,51 +29,6 @@ from nika_core.product_project_schema import (
     PRODUCT_PROJECT_MIGRATIONS,
     PRODUCT_PROJECT_SCHEMA_VERSION,
 )
-
-
-_TEST_APPROVAL_SECRET = b"nika-product-decision-test-authority-seed-0001"
-
-
-class _AuthorizingProductDecisionRepository(ProductDecisionRepository):
-    def __init__(self, store: SQLiteStore) -> None:
-        self._authority = ApprovalAuthority(
-            issuer_id="test-product-owner-authority",
-            secret=_TEST_APPROVAL_SECRET,
-        )
-        super().__init__(store, approval_verifier=self._authority.verifier())
-
-    def record(
-        self,
-        project_id: str,
-        decision: ProductDecision,
-        *,
-        expected_row_version: int,
-        idempotency_key: str,
-    ):
-        if decision.state is ProductDecisionState.PROPOSED:
-            return super().record(
-                project_id,
-                decision,
-                expected_row_version=expected_row_version,
-                idempotency_key=idempotency_key,
-            )
-        task_id = f"test-product-decision:{decision.decision_id}"
-        intent = self.approval_intent(
-            project_id,
-            decision,
-            expected_row_version=expected_row_version,
-            task_id=task_id,
-        )
-        request = self._authority.request(intent)
-        approval = self._authority.approve(request.request_id)
-        return super().record(
-            project_id,
-            decision,
-            expected_row_version=expected_row_version,
-            idempotency_key=idempotency_key,
-            approval=approval,
-            approval_task_id=task_id,
-        )
 
 
 def _spec() -> ProductProjectSpec:
@@ -99,7 +55,7 @@ def _repos(tmp_path) -> tuple[SQLiteStore, ProductProjectRepository, ProductDeci
         spec=_spec(),
         idempotency_key="create:p1",
     )
-    return store, projects, _AuthorizingProductDecisionRepository(store)
+    return store, projects, AuthorizingProductDecisionRepository(store)
 
 
 def _handoff(
@@ -301,7 +257,7 @@ def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_pa
     barrier = Barrier(2)
 
     def write() -> tuple[int, str, tuple[str, ...]]:
-        repository = _AuthorizingProductDecisionRepository(store)
+        repository = AuthorizingProductDecisionRepository(store)
         barrier.wait()
         stored = repository.record(
             "p1",
@@ -322,7 +278,7 @@ def test_concurrent_identical_decision_write_replays_one_canonical_result(tmp_pa
     assert results[0][0] == 1
     assert results[0][2] == ("research-1",)
     assert projects.get("p1").row_version == 1
-    assert len(_AuthorizingProductDecisionRepository(store).history("p1", "decision-1")) == 1
+    assert len(AuthorizingProductDecisionRepository(store).history("p1", "decision-1")) == 1
 
 
 def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) -> None:
@@ -331,7 +287,7 @@ def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) 
     barrier = Barrier(2)
 
     def write(rationale: str) -> str:
-        repository = _AuthorizingProductDecisionRepository(store)
+        repository = AuthorizingProductDecisionRepository(store)
         barrier.wait()
         try:
             repository.record(
@@ -350,7 +306,7 @@ def test_concurrent_conflicting_reuse_of_idempotency_key_fails_closed(tmp_path) 
 
     assert sorted(results) == ["conflict", "recorded"]
     assert projects.get("p1").row_version == 1
-    assert len(_AuthorizingProductDecisionRepository(store).history("p1", "decision-1")) == 1
+    assert len(AuthorizingProductDecisionRepository(store).history("p1", "decision-1")) == 1
 
 
 def test_writer_lock_contention_is_normalized_without_partial_mutation(
@@ -370,7 +326,7 @@ def test_writer_lock_contention_is_normalized_without_partial_mutation(
     monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", short_timeout_connect)
     try:
         with pytest.raises(ProductProjectError, match="temporarily busy"):
-            _AuthorizingProductDecisionRepository(store).record(
+            AuthorizingProductDecisionRepository(store).record(
                 "p1",
                 _decision(),
                 expected_row_version=0,
@@ -424,7 +380,7 @@ def test_reader_lock_commit_contention_is_normalized_without_partial_mutation(
     monkeypatch.setattr(sqlite_store_module.sqlite3, "connect", short_timeout_connect)
     try:
         with pytest.raises(ProductProjectError, match="temporarily busy"):
-            _AuthorizingProductDecisionRepository(store).record(
+            AuthorizingProductDecisionRepository(store).record(
                 "p1",
                 _decision(),
                 expected_row_version=0,
@@ -494,7 +450,7 @@ def test_non_lock_commit_operational_error_is_not_reclassified(
 
     monkeypatch.setattr(store, "connection", failing_connection)
     with pytest.raises(sqlite3.OperationalError, match="synthetic non-lock commit failure"):
-        _AuthorizingProductDecisionRepository(store).record(
+        AuthorizingProductDecisionRepository(store).record(
             "p1",
             _decision(),
             expected_row_version=0,
