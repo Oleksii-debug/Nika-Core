@@ -96,14 +96,14 @@ class V01CloudModelPermissionService:
             raise CloudModelPermissionDenied(
                 "Неможливо безпечно підтвердити зовнішню модель для зміненого завдання."
             )
-        if self._bound_permission_id(record.task_id, strict=True) is not None:
+        if self._bound_permission_id(current.task_id, strict=True) is not None:
             raise CloudModelPermissionDenied(
                 "Для нового завдання вже існує неочікуваний дозвіл зовнішньої моделі."
             )
-        selection = self._cloud_selection(record.task_id)
+        selection = self._cloud_selection(current.task_id)
         if selection is None:
             return
-        self._confirm_and_grant(record, selection)
+        self._confirm_and_grant(current, selection)
 
     def admit_resumed_task(self, record: TaskRecord) -> None:
         """Refresh finite authority before a PAUSED task is submitted for resume."""
@@ -113,14 +113,14 @@ class V01CloudModelPermissionService:
             raise CloudModelPermissionDenied(
                 "Неможливо безпечно підтвердити зовнішню модель для зміненого продовження."
             )
-        selection = self._cloud_selection(record.task_id)
+        selection = self._cloud_selection(current.task_id)
         if selection is None:
             return
-        self._bound_permission_id(record.task_id, strict=True)
+        self._bound_permission_id(current.task_id, strict=True)
         now = self._utc_now()
-        if self._active_bound_permission(record.task_id, now=now) is not None:
+        if self._active_bound_permission(current.task_id, now=now) is not None:
             return
-        self._confirm_and_grant(record, selection, now=now)
+        self._confirm_and_grant(current, selection, now=now)
 
     def execution_authority_for_task(
         self,
