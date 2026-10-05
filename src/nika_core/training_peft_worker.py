@@ -351,6 +351,85 @@ def _is_reparse(value: os.stat_result) -> bool:
     return bool(attributes & reparse_flag)
 
 
+def _hash_model_directory_file(path: Path) -> tuple[str, int]:
+    try:
+        before = os.lstat(path)
+    except OSError as exc:
+        raise ValueError("model_dir entry is not accessible") from exc
+    if stat.S_ISLNK(before.st_mode) or _is_reparse(before) or not stat.S_ISREG(before.st_mode):
+        raise ValueError("model_dir must contain regular non-linked files only")
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError("model_dir entry changed before hashing") from exc
+
+    digest = hashlib.sha256()
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or opened.st_size != before.st_size
+        ):
+            raise ValueError("model_dir entry changed before hashing")
+        while True:
+            chunk = os.read(fd, _READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _MAX_MODEL_DIR_BYTES:
+                raise ValueError("model_dir exceeds manifest bounds")
+            digest.update(chunk)
+        after = os.fstat(fd)
+    except OSError as exc:
+        raise ValueError("model_dir entry could not be hashed") from exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    try:
+        current = os.lstat(path)
+    except OSError as exc:
+        raise ValueError("model_dir entry changed during hashing") from exc
+    identity = (
+        opened.st_dev,
+        opened.st_ino,
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+    )
+    if (
+        total != opened.st_size
+        or identity
+        != (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        or identity
+        != (
+            current.st_dev,
+            current.st_ino,
+            current.st_size,
+            current.st_mtime_ns,
+            current.st_ctime_ns,
+        )
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        raise ValueError("model_dir entry changed during hashing")
+    return digest.hexdigest(), total
+
+
 def model_directory_manifest_sha256(model_dir: Path) -> str:
     """Hash the exact local tokenizer/config directory used around GGUF loading."""
     root = Path(model_dir)
@@ -385,16 +464,17 @@ def model_directory_manifest_sha256(model_dir: Path) -> str:
             continue
         if not stat.S_ISREG(value.st_mode):
             raise ValueError("model_dir must contain regular files only")
+        digest, size_bytes = _hash_model_directory_file(path)
         total_files += 1
-        total_bytes += value.st_size
-        if total_files > 10_000 or total_bytes > 16 * 1024 * 1024 * 1024:
+        total_bytes += size_bytes
+        if total_files > _MAX_MODEL_DIR_FILES or total_bytes > _MAX_MODEL_DIR_BYTES:
             raise ValueError("model_dir exceeds manifest bounds")
         relative = path.relative_to(root).as_posix()
         entries.append(
             {
                 "path": relative,
-                "sha256": _sha256_file(path),
-                "size_bytes": value.st_size,
+                "sha256": digest,
+                "size_bytes": size_bytes,
             }
         )
     if not entries:
