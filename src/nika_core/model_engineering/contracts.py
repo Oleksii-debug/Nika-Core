@@ -5,7 +5,8 @@ import json
 import re
 from dataclasses import dataclass
 from enum import StrEnum
-from math import isfinite
+from math import ceil, isfinite
+from statistics import fmean
 from typing import Protocol
 
 from nika_core.model_gateway.contracts import (
@@ -344,6 +345,8 @@ class CaseBenchmarkResult:
     resource_after: ResourceSnapshot | None
     accelerator_before: AcceleratorSnapshot | None
     accelerator_after: AcceleratorSnapshot | None
+    evaluation_weight: float = 1.0
+    pass_score: float = 1.0
 
     def __post_init__(self) -> None:
         _identity(self.candidate_id, "candidate_id")
@@ -367,8 +370,26 @@ class CaseBenchmarkResult:
             (self.resource_before, "resource_before"),
             (self.resource_after, "resource_after"),
         ):
-            if snapshot is not None and type(snapshot) is not ResourceSnapshot:
+            if snapshot is None:
+                continue
+            if type(snapshot) is not ResourceSnapshot:
                 raise TypeError(f"{name} must be an exact ResourceSnapshot")
+            _bounded_percent(snapshot.cpu_percent, f"{name}.cpu_percent")
+            _bounded_percent(snapshot.memory_percent, f"{name}.memory_percent")
+            if (
+                type(snapshot.available_memory_bytes) is not int
+                or snapshot.available_memory_bytes < 0
+            ):
+                raise ValueError(
+                    f"{name}.available_memory_bytes must be a non-negative integer"
+                )
+            if snapshot.process_rss_bytes is not None and (
+                type(snapshot.process_rss_bytes) is not int
+                or snapshot.process_rss_bytes < 0
+            ):
+                raise ValueError(
+                    f"{name}.process_rss_bytes must be a non-negative integer"
+                )
         for snapshot, name in (
             (self.accelerator_before, "accelerator_before"),
             (self.accelerator_after, "accelerator_after"),
@@ -382,6 +403,19 @@ class CaseBenchmarkResult:
         ):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer")
+        if type(self.evaluation_weight) not in (int, float):
+            raise TypeError("evaluation_weight must be numeric")
+        evaluation_weight = float(self.evaluation_weight)
+        if not isfinite(evaluation_weight) or evaluation_weight <= 0:
+            raise ValueError("evaluation_weight must be finite and greater than zero")
+        if type(self.pass_score) not in (int, float):
+            raise TypeError("pass_score must be numeric")
+        pass_score = float(self.pass_score)
+        if not isfinite(pass_score) or not 0 <= pass_score <= 1:
+            raise ValueError("pass_score must be finite and in [0, 1]")
+        expected_passed = self.completion_succeeded and score >= pass_score
+        if self.passed is not expected_passed:
+            raise ValueError("passed must match completion, score and pass_score")
         if self.error_code is not None and not any(
             self.error_code is member for member in ModelErrorCode
         ):
@@ -403,6 +437,128 @@ class CaseBenchmarkResult:
                 for value in (self.input_tokens, self.output_tokens, self.total_tokens)
             ):
                 raise ValueError("failed completion cannot carry token evidence")
+
+
+def _require_number_metric(
+    actual: float | int | None,
+    expected: float | int | None,
+    name: str,
+) -> None:
+    if actual is None or expected is None:
+        if actual is not None or expected is not None:
+            raise ValueError(f"{name} does not match case evidence")
+        return
+    if float(actual) != float(expected):
+        raise ValueError(f"{name} does not match case evidence")
+
+
+def _require_integer_metric(
+    actual: int | None,
+    expected: int | None,
+    name: str,
+) -> None:
+    if actual != expected:
+        raise ValueError(f"{name} does not match case evidence")
+
+
+def _nearest_rank(values: tuple[float, ...], percentile: float) -> float:
+    ordered = sorted(values)
+    index = max(0, ceil(percentile * len(ordered)) - 1)
+    return ordered[index]
+
+
+def _validate_report_aggregates(report: "CandidateBenchmarkReport") -> None:
+    results = report.case_results
+    total_weight = sum(float(item.evaluation_weight) for item in results)
+    weighted_quality = sum(
+        float(item.score) * float(item.evaluation_weight) for item in results
+    ) / total_weight
+    pass_rate = sum(item.passed for item in results) / len(results)
+    completion_rate = sum(item.completion_succeeded for item in results) / len(results)
+    latencies = tuple(
+        float(item.latency_ms) for item in results if item.completion_succeeded
+    )
+    mean_latency = fmean(latencies) if latencies else None
+    p95_latency = _nearest_rank(latencies, 0.95) if latencies else None
+
+    resource_snapshots = tuple(
+        snapshot
+        for item in results
+        for snapshot in (item.resource_before, item.resource_after)
+        if snapshot is not None
+    )
+    accelerator_snapshots = tuple(
+        snapshot
+        for item in results
+        for snapshot in (item.accelerator_before, item.accelerator_after)
+        if snapshot is not None
+    )
+    accelerator_utilization = tuple(
+        float(snapshot.utilization_percent)
+        for snapshot in accelerator_snapshots
+        if snapshot.utilization_percent is not None
+    )
+    accelerator_memory = tuple(
+        snapshot.memory_used_bytes
+        for snapshot in accelerator_snapshots
+        if snapshot.memory_used_bytes is not None
+    )
+
+    _require_number_metric(
+        report.weighted_quality_score,
+        weighted_quality,
+        "weighted_quality_score",
+    )
+    _require_number_metric(report.task_pass_rate, pass_rate, "task_pass_rate")
+    _require_number_metric(
+        report.completion_rate,
+        completion_rate,
+        "completion_rate",
+    )
+    _require_number_metric(
+        report.mean_latency_ms,
+        mean_latency,
+        "mean_latency_ms",
+    )
+    _require_number_metric(
+        report.p95_latency_ms,
+        p95_latency,
+        "p95_latency_ms",
+    )
+    _require_number_metric(
+        report.peak_cpu_percent,
+        max(
+            (float(snapshot.cpu_percent) for snapshot in resource_snapshots),
+            default=None,
+        ),
+        "peak_cpu_percent",
+    )
+    _require_number_metric(
+        report.peak_memory_percent,
+        max(
+            (float(snapshot.memory_percent) for snapshot in resource_snapshots),
+            default=None,
+        ),
+        "peak_memory_percent",
+    )
+    _require_integer_metric(
+        report.min_available_memory_bytes,
+        min(
+            (snapshot.available_memory_bytes for snapshot in resource_snapshots),
+            default=None,
+        ),
+        "min_available_memory_bytes",
+    )
+    _require_number_metric(
+        report.peak_accelerator_percent,
+        max(accelerator_utilization, default=None),
+        "peak_accelerator_percent",
+    )
+    _require_integer_metric(
+        report.peak_accelerator_memory_bytes,
+        max(accelerator_memory, default=None),
+        "peak_accelerator_memory_bytes",
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -487,6 +643,7 @@ class CandidateBenchmarkReport:
         ):
             if value is not None and (type(value) is not int or value < 0):
                 raise ValueError(f"{name} must be a non-negative integer")
+        _validate_report_aggregates(self)
 
 
 @dataclass(frozen=True, slots=True)
