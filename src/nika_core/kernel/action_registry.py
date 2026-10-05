@@ -20,6 +20,22 @@ _MODIFIER_ALIASES = {
 _MODIFIER_ORDER = {"ctrl": 0, "alt": 1, "shift": 2, "win": 3}
 _MODIFIER_DISPLAY = {"ctrl": "Ctrl", "alt": "Alt", "shift": "Shift", "win": "Win"}
 
+_MAX_KEYMAP_IMPORT_BYTES = 1_048_576
+
+
+def _unique_json_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate keymap JSON member")
+        result[key] = value
+    return result
+
+
+def _reject_json_noninteger(_value: str) -> object:
+    raise ValueError("keymap JSON must not contain floating-point or non-finite numbers")
+
+
 
 @dataclass(frozen=True, slots=True)
 class ActionDefinition:
@@ -139,16 +155,40 @@ class Keymap:
         return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
 
     def import_json(self, data: str) -> None:
-        raw = json.loads(data)
-        if raw.get("format_version") != self.FORMAT_VERSION:
+        # Imported settings are untrusted. Admit them before opening a transaction.
+        if type(data) is not str:
+            raise TypeError("keymap import must be text")
+        if len(data) > _MAX_KEYMAP_IMPORT_BYTES:
+            raise ValueError("keymap import exceeds the byte limit")
+        try:
+            byte_count = len(data.encode("utf-8"))
+        except UnicodeEncodeError:
+            raise ValueError("keymap import must contain valid UTF-8") from None
+        if byte_count > _MAX_KEYMAP_IMPORT_BYTES:
+            raise ValueError("keymap import exceeds the byte limit")
+        try:
+            raw = json.loads(
+                data,
+                object_pairs_hook=_unique_json_members,
+                parse_float=_reject_json_noninteger,
+                parse_constant=_reject_json_noninteger,
+            )
+        except RecursionError:
+            raise ValueError("keymap JSON is too deeply nested") from None
+        if type(raw) is not dict:
+            raise TypeError("keymap document must be an object")
+        if (
+            type(raw.get("format_version")) is not int
+            or raw["format_version"] != self.FORMAT_VERSION
+        ):
             raise ValueError("unsupported keymap format version")
         bindings = raw.get("bindings")
-        if not isinstance(bindings, dict):
+        if type(bindings) is not dict:
             raise TypeError("keymap bindings must be an object")
         proposed: dict[str, str | None] = {}
         for action_id, binding in bindings.items():
             action = self._actions.get(action_id)
-            if binding is not None and not isinstance(binding, str):
+            if binding is not None and type(binding) is not str:
                 raise ValueError(f"invalid binding for {action_id}")
             cleaned = _clean_binding(binding)
             if cleaned is None and not action.may_be_unbound:
