@@ -246,6 +246,10 @@ sys.stdout.write(json.dumps(response))
     assert observed["protocol_version"] == 3
     assert len(worker.execution_plan_sha256) == 64
     assert worker.protocol_job_fingerprint(spec) == observed["job_fingerprint"]
+    assert worker.verified_trainer_deployment_identity() == ArtifactIdentity(
+        artifact_id,
+        record.sha256,
+    )
     assert observed["trainer_artifact_id"] == artifact_id
     assert observed["trainer_sha256"] == record.sha256
     assert observed["command_sha256"] == observed["job"]["command_sha256"]
