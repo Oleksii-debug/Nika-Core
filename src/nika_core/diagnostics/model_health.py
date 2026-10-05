@@ -232,6 +232,7 @@ class OllamaModelHealthProbe:
             or parsed.fragment
             or parsed.path not in {"", "/"}
             or port is None
+            or port == 0
         ):
             return ModelHealthFact.NO
         return ModelHealthFact.YES
