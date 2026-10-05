@@ -103,3 +103,5 @@ def test_corrupt_workspace_enabled_does_not_become_truthy(tmp_path: Path) -> Non
         registry.get("research")
     with pytest.raises(ValueError, match="invalid persisted workspace enabled flag"):
         registry.list_latest()
+    with pytest.raises(ValueError, match="invalid persisted workspace enabled flag"):
+        registry.register(WorkspaceDefinition("research", "Research", 2))
