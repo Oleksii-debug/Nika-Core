@@ -922,6 +922,16 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
 
     with pytest.raises(
         TrainingModelActivationError,
+        match="rejected by the active route authority",
+    ):
+        await activate_attested_training_promotion(
+            result=result,
+            settings=settings,
+            expected_revision=3,
+        )
+
+    with pytest.raises(
+        TrainingModelActivationError,
         match="rollback was rejected",
     ):
         rollback_attested_training_promotion(
