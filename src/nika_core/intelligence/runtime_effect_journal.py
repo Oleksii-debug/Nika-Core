@@ -27,7 +27,7 @@ class RuntimeIdempotencyEffectJournal:
     def __init__(self, ledger: IdempotencyLedger) -> None:
         self._ledger = ledger
         self._reservation_lock = Lock()
-        self._owned_reservations: dict[str, tuple[str, str, str]] = {}
+        self._owned_reservations: dict[str, tuple[str, str, str, str]] = {}
 
     def unresolved_operation_keys(self, *, task_id: str) -> tuple[str, ...]:
         if not task_id.strip():
@@ -85,6 +85,7 @@ class RuntimeIdempotencyEffectJournal:
                         task_id=record.task_id,
                         operation_type=record.operation_type,
                         input_fingerprint=record.input_fingerprint,
+                        created_at=record.created_at,
                     )
                 except (IdempotencyConflictError, KeyError) as exc:
                     raise DeterministicEffectConflictError(
@@ -100,13 +101,14 @@ class RuntimeIdempotencyEffectJournal:
         )
 
     def complete(self, operation_key: str) -> None:
-        task_id, operation_type, fingerprint = self._owned_identity(operation_key)
+        task_id, operation_type, fingerprint, created_at = self._owned_identity(operation_key)
         try:
             self._ledger.complete_pending_if_matches(
                 operation_key=operation_key,
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=fingerprint,
+                created_at=created_at,
             )
         except (IdempotencyConflictError, KeyError) as exc:
             raise DeterministicEffectConflictError(
@@ -115,13 +117,14 @@ class RuntimeIdempotencyEffectJournal:
         self._forget_reservation(operation_key)
 
     def mark_uncertain(self, operation_key: str) -> None:
-        task_id, operation_type, fingerprint = self._owned_identity(operation_key)
+        task_id, operation_type, fingerprint, created_at = self._owned_identity(operation_key)
         try:
             self._ledger.mark_pending_uncertain_if_matches(
                 operation_key=operation_key,
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=fingerprint,
+                created_at=created_at,
             )
         except (IdempotencyConflictError, KeyError) as exc:
             raise DeterministicEffectConflictError(
@@ -130,13 +133,14 @@ class RuntimeIdempotencyEffectJournal:
         self._forget_reservation(operation_key)
 
     def release_pending(self, operation_key: str) -> None:
-        task_id, operation_type, fingerprint = self._owned_identity(operation_key)
+        task_id, operation_type, fingerprint, created_at = self._owned_identity(operation_key)
         try:
             self._ledger.release_pending_if_matches(
                 operation_key=operation_key,
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=fingerprint,
+                created_at=created_at,
             )
         except (IdempotencyConflictError, KeyError) as exc:
             raise DeterministicEffectConflictError(
@@ -145,11 +149,16 @@ class RuntimeIdempotencyEffectJournal:
         self._forget_reservation(operation_key)
 
     def _remember_reservation(self, record: IdempotencyRecord) -> None:
-        identity = (record.task_id, record.operation_type, record.input_fingerprint)
+        identity = (
+            record.task_id,
+            record.operation_type,
+            record.input_fingerprint,
+            record.created_at,
+        )
         with self._reservation_lock:
             self._owned_reservations[record.operation_key] = identity
 
-    def _owned_identity(self, operation_key: str) -> tuple[str, str, str]:
+    def _owned_identity(self, operation_key: str) -> tuple[str, str, str, str]:
         with self._reservation_lock:
             identity = self._owned_reservations.get(operation_key)
         if identity is None:
