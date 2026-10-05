@@ -588,6 +588,11 @@ class DeterministicBrain:
             if result.error in {"approval required", "unknown tool"}:
                 try:
                     journal.release_pending(reservation.operation_key)
+                except DeterministicEffectConflictError as exc:
+                    return _ToolExecutionFailure(
+                        DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT,
+                        str(exc),
+                    )
                 except Exception as exc:  # noqa: BLE001 - do not hide a broken durable ledger.
                     return _ToolExecutionFailure(
                         DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
@@ -600,10 +605,18 @@ class DeterministicBrain:
 
             try:
                 journal.mark_uncertain(reservation.operation_key)
+            except DeterministicEffectConflictError as exc:
+                return _ToolExecutionFailure(
+                    DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT,
+                    str(exc),
+                )
             except Exception as exc:  # noqa: BLE001 - PENDING still blocks replay fail-closed.
                 return _ToolExecutionFailure(
                     DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
-                    f"tool failed and durable uncertainty could not be recorded: {type(exc).__name__}",
+                    (
+                        "tool failed and durable uncertainty could not be recorded: "
+                        f"{type(exc).__name__}"
+                    ),
                 )
             return _ToolExecutionFailure(
                 DeterministicErrorCode.SIDE_EFFECT_RECONCILIATION_REQUIRED,
@@ -612,6 +625,11 @@ class DeterministicBrain:
 
         try:
             journal.complete(reservation.operation_key)
+        except DeterministicEffectConflictError as exc:
+            return _ToolExecutionFailure(
+                DeterministicErrorCode.SIDE_EFFECT_IDENTITY_CONFLICT,
+                str(exc),
+            )
         except Exception as exc:  # noqa: BLE001 - effect happened; reservation remains fail-closed.
             return _ToolExecutionFailure(
                 DeterministicErrorCode.SIDE_EFFECT_RECORD_FAILED,
