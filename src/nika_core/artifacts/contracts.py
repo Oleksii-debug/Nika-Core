@@ -25,6 +25,7 @@ class ArtifactVerificationState(StrEnum):
 
 
 _MAX_ARTIFACT_METADATA_ITEMS = 256
+_MAX_PERCENT_DECODE_PASSES = 8
 
 _FORBIDDEN_SECRET_KEYS = {
     "access_token",
@@ -51,6 +52,26 @@ _CREDENTIAL_ASSIGNMENT = re.compile(
 )
 
 
+def _require_utf8_text(value: str, *, field_name: str) -> str:
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 text") from exc
+    return value
+
+
+def _decode_percent_layers(value: str) -> str:
+    current = value
+    for _ in range(_MAX_PERCENT_DECODE_PASSES):
+        decoded = unquote(current)
+        if decoded == current:
+            return current
+        current = decoded
+    if unquote(current) != current:
+        raise ValueError("artifact text exceeds the percent-decoding safety bound")
+    return current
+
+
 def _validate_utc(value: datetime, field_name: str) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware")
@@ -58,12 +79,12 @@ def _validate_utc(value: datetime, field_name: str) -> datetime:
 
 
 def _normalize_secret_key(value: str) -> str:
-    decoded = unquote(value).strip().lower()
+    decoded = _decode_percent_layers(value).strip().lower()
     return re.sub(r"[^a-z0-9]+", "_", decoded).strip("_")
 
 
 def _contains_credential_assignment(value: str) -> bool:
-    decoded = unquote(value)
+    decoded = _decode_percent_layers(value)
     return bool(_CREDENTIAL_ASSIGNMENT.search(decoded)) or "bearer " in decoded.lower()
 
 
@@ -91,6 +112,22 @@ class ArtifactRecord(FrozenModel):
     producer_id: str | None = Field(default=None, max_length=300)
     metadata: dict[str, str] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
+
+    @field_validator(
+        "idempotency_key",
+        "workspace_id",
+        "kind",
+        "display_name",
+        "locator",
+        "media_type",
+        "producer_type",
+        "producer_id",
+    )
+    @classmethod
+    def reject_invalid_utf8_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return _require_utf8_text(value, field_name="artifact text")
 
     @field_validator("idempotency_key", "workspace_id", "kind")
     @classmethod
@@ -124,6 +161,8 @@ class ArtifactRecord(FrozenModel):
     @classmethod
     def reject_secret_metadata(cls, value: dict[str, str]) -> dict[str, str]:
         for key, item in value.items():
+            _require_utf8_text(key, field_name="artifact metadata key")
+            _require_utf8_text(item, field_name="artifact metadata value")
             normalized = _normalize_secret_key(key)
             if normalized in _FORBIDDEN_SECRET_KEYS:
                 raise ValueError(f"artifact metadata key is reserved for secret material: {key}")
@@ -151,6 +190,11 @@ class ArtifactVerification(FrozenModel):
     actual_size_bytes: int | None = Field(default=None, strict=True, ge=0)
     checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     detail: str = Field(default="", max_length=500)
+
+    @field_validator("detail")
+    @classmethod
+    def reject_invalid_detail_utf8(cls, value: str) -> str:
+        return _require_utf8_text(value, field_name="artifact verification detail")
 
     @field_validator("checked_at")
     @classmethod

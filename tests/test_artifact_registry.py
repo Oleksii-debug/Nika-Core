@@ -779,3 +779,102 @@ def test_verify_rejects_post_registration_symlink_substitution(tmp_path: Path) -
 
     with pytest.raises(ArtifactRegistryError, match="link|substitution|escapes"):
         registry.verify(record.artifact_id)
+
+@pytest.mark.parametrize("field", ("workspace_id", "idempotency_key"))
+def test_registry_rejects_invalid_utf8_identity_before_persistence(
+    tmp_path: Path,
+    field: str,
+) -> None:
+    registry = _registry(tmp_path / "state.sqlite3")
+    arguments = {
+        "workspace_id": "workspace-a",
+        "idempotency_key": "artifact-a",
+        "reference": "blob:safe",
+        "sha256": "a" * 64,
+        "size_bytes": 1,
+        "kind": "evidence",
+    }
+    arguments[field] = "\ud800"
+
+    with pytest.raises(ArtifactRegistryError, match="UTF-8"):
+        registry.register_reference(**arguments)
+
+    assert registry.list() == ()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("locator", "blob:\ud800"),
+        ("display_name", "report-\ud800"),
+        ("producer_id", "agent-\ud800"),
+        ("metadata", {"note": "\ud800"}),
+        ("metadata", {"key-\ud800": "value"}),
+    ),
+)
+def test_artifact_record_rejects_non_utf8_durable_text(
+    field: str,
+    value: object,
+) -> None:
+    arguments = {
+        "artifact_id": "a" * 64,
+        "idempotency_key": "idempotent",
+        "workspace_id": "workspace",
+        "kind": "report",
+        "location_kind": ArtifactLocationKind.OPAQUE_REFERENCE,
+        "locator": "blob:safe",
+        "sha256": "b" * 64,
+        "size_bytes": 1,
+    }
+    arguments[field] = value
+
+    with pytest.raises(ValidationError, match="UTF-8"):
+        ArtifactRecord(**arguments)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    (
+        "https://example.test/object?api_key%253Dcanary",
+        "https://example.test/object?client%255Fsecret%253Dcanary",
+        "blob:%2542earer%2520top-secret",
+    ),
+)
+def test_layered_percent_encoded_credential_locators_are_rejected(reference: str) -> None:
+    common = {
+        "artifact_id": "a" * 64,
+        "idempotency_key": "idempotent",
+        "workspace_id": "workspace",
+        "kind": "report",
+        "location_kind": ArtifactLocationKind.OPAQUE_REFERENCE,
+        "sha256": "b" * 64,
+        "size_bytes": 1,
+    }
+
+    with pytest.raises(ValidationError, match="credential material"):
+        ArtifactRecord(**common, locator=reference)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    (
+        {"api%255Fkey": "canary"},
+        {"note": "%2542earer%2520top-secret"},
+    ),
+)
+def test_layered_percent_encoded_metadata_credentials_are_rejected(
+    metadata: dict[str, str],
+) -> None:
+    with pytest.raises(ValidationError, match="secret material|credential material"):
+        ArtifactRecord(
+            artifact_id="a" * 64,
+            idempotency_key="idempotent",
+            workspace_id="workspace",
+            kind="report",
+            location_kind=ArtifactLocationKind.OPAQUE_REFERENCE,
+            locator="blob:safe",
+            sha256="b" * 64,
+            size_bytes=1,
+            metadata=metadata,
+        )
+

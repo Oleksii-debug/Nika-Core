@@ -25,9 +25,10 @@ bytes or metadata fails closed with `ArtifactConflictError`.
 
 Artifact rows are immutable. Verification observations are append-only records. This separates
 "what was registered" from "what was observed later" and makes missing/tampered files auditable.
-Durable record/evidence JSON is bounded to 1 MiB before parsing or persistence, and artifact
-metadata is limited to 256 entries, so corrupted or excessive payloads fail closed instead of
-turning durable rehydration into an unbounded resource-consumption path.
+Durable record/evidence JSON is bounded to 1 MiB before parsing or persistence, artifact metadata
+is limited to 256 entries, and durable text must be valid UTF-8. Corrupted, malformed-Unicode, or
+excessive payloads therefore fail closed instead of escaping through serialization or turning
+durable rehydration into an unbounded resource-consumption path.
 
 ## SQLite ownership
 
@@ -52,8 +53,9 @@ Two location kinds are supported:
    Verification returns `unavailable` rather than claiming evidence it cannot obtain.
 
 The registry rejects obvious credential material in locators, reserved secret metadata keys, and
-metadata values containing credential markers. Callers must pass references to credentials, never
-credential values.
+metadata values containing credential markers. Credential detection follows bounded layered percent
+decoding so encoded secret assignments cannot bypass the durable secret fence. Callers must pass
+references to credentials, never credential values.
 
 Local file reads are least-privilege. `ArtifactRegistry.from_store(..., local_file_roots=(...))`
 must receive one or more existing directories before `register_file()` is allowed. The source is

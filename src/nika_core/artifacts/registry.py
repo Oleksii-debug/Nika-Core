@@ -23,7 +23,11 @@ Clock = Callable[[], datetime]
 
 
 def _sha256_text(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ArtifactRegistryError("artifact identity material must be valid UTF-8 text") from exc
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _artifact_id(workspace_id: str, idempotency_key: str) -> str:
