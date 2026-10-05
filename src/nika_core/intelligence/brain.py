@@ -14,10 +14,12 @@ from nika_core.intelligence.contracts import (
     DeterministicGoal,
     DeterministicPlan,
     DeterministicPlanner,
+    PlanStep,
     DeterministicPlanningError,
     WorldState,
     WorldStateObserver,
 )
+from nika_core.intelligence.plan_provenance import seal_plan_provenance
 from nika_core.tools import ToolCall, ToolExecutor, ToolRisk, ToolSpec
 
 
@@ -88,6 +90,48 @@ def _positive_finite_seconds(value: object, *, name: str) -> float:
     return seconds
 
 
+def _snapshot_fact_set(value: object, *, name: str) -> frozenset[str]:
+    if type(value) is not frozenset:
+        raise TypeError(f"{name} must be an exact frozenset")
+    if any(type(item) is not str for item in value):
+        raise TypeError(f"{name} must contain exact text values")
+    return frozenset(value)
+
+
+def _snapshot_world_state(value: object, *, name: str) -> WorldState:
+    if type(value) is not WorldState:
+        raise TypeError(f"{name} must use the exact WorldState carrier")
+    facts = _snapshot_fact_set(value.facts, name=f"{name}.facts")
+    return WorldState(facts=facts)
+
+
+def _snapshot_goal(value: object) -> DeterministicGoal:
+    if type(value) is not DeterministicGoal:
+        raise TypeError("goal must use the exact DeterministicGoal carrier")
+    required = _snapshot_fact_set(value.required, name="goal.required")
+    forbidden = _snapshot_fact_set(value.forbidden, name="goal.forbidden")
+    return DeterministicGoal(required=required, forbidden=forbidden)
+
+
+def _snapshot_plan(value: object) -> DeterministicPlan:
+    if type(value) is not DeterministicPlan:
+        raise TypeError("planner must return the exact DeterministicPlan carrier")
+    if type(value.steps) is not tuple:
+        raise TypeError("deterministic plan steps must be an exact tuple")
+    steps: list[PlanStep] = []
+    for step in value.steps:
+        if type(step) is not PlanStep:
+            raise TypeError("deterministic plan step must use the exact PlanStep carrier")
+        action_id = step.action_id
+        tool_id = step.tool_id
+        if type(action_id) is not str or not action_id.strip():
+            raise TypeError("deterministic plan action_id must be exact non-empty text")
+        if tool_id is not None and type(tool_id) is not str:
+            raise TypeError("deterministic plan tool_id must be exact text or None")
+        steps.append(PlanStep(action_id=action_id, tool_id=tool_id))
+    return DeterministicPlan(steps=tuple(steps))
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -138,6 +182,17 @@ class DeterministicBrain:
         # evidence and must never turn into ToolCall.approved=True.
         del approved_action_ids
 
+        state = _snapshot_world_state(state, name="state")
+        goal = _snapshot_goal(goal)
+        if type(actions) is not tuple:
+            raise TypeError("actions must be an exact tuple")
+        actions = tuple(DeterministicAction.detached_copy(action) for action in actions)
+        if type(previously_completed_action_ids) is not tuple:
+            raise TypeError("previously_completed_action_ids must be an exact tuple")
+        if any(type(action_id) is not str for action_id in previously_completed_action_ids):
+            raise TypeError("previously_completed_action_ids must contain exact text values")
+        previously_completed_action_ids = tuple(previously_completed_action_ids)
+
         action_map = {action.action_id: action for action in actions}
         if len(action_map) != len(actions):
             raise ValueError("duplicate deterministic action_id")
@@ -169,7 +224,13 @@ class DeterministicBrain:
                 unresolved = journal.unresolved_operation_keys(task_id=task_id)
             except Exception as exc:  # noqa: BLE001 - fail closed before planning or effects.
                 return self._failure(
-                    plan=DeterministicPlan(steps=()),
+                    plan=self._seal_plan(
+                        DeterministicPlan(steps=()),
+                        state=current_state,
+                        goal=goal,
+                        actions=actions,
+                        planner_invoked=False,
+                    ),
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -182,7 +243,13 @@ class DeterministicBrain:
                 )
             if unresolved:
                 return self._failure(
-                    plan=DeterministicPlan(steps=()),
+                    plan=self._seal_plan(
+                        DeterministicPlan(steps=()),
+                        state=current_state,
+                        goal=goal,
+                        actions=actions,
+                        planner_invoked=False,
+                    ),
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -200,8 +267,19 @@ class DeterministicBrain:
         while True:
             remaining_steps = max_steps - executed_steps
             if remaining_steps <= 0:
+                plan = (
+                    history[-1]
+                    if history
+                    else self._seal_plan(
+                        DeterministicPlan(steps=()),
+                        state=current_state,
+                        goal=goal,
+                        actions=actions,
+                        planner_invoked=False,
+                    )
+                )
                 return self._failure(
-                    plan=history[-1] if history else DeterministicPlan(steps=()),
+                    plan=plan,
                     completed=completed,
                     state=current_state,
                     history=history,
@@ -213,11 +291,21 @@ class DeterministicBrain:
             available_actions = tuple(
                 action for action in actions if action.action_id not in completed_set
             )
-            plan = await self._plan(
+            plan = _snapshot_plan(
+                await self._plan(
+                    state=current_state,
+                    goal=goal,
+                    actions=available_actions,
+                    planning_deadline=planning_deadline,
+                )
+            )
+            # Treat planner-provided provenance as untrusted input. Recompute it from Nika-owned
+            # state/goal/rule contracts and the exact returned steps before validation/execution.
+            plan = self._seal_plan(
+                plan,
                 state=current_state,
                 goal=goal,
-                actions=available_actions,
-                planning_deadline=planning_deadline,
+                actions=actions,
             )
             history.append(plan)
 
@@ -395,6 +483,24 @@ class DeterministicBrain:
                 code=DeterministicErrorCode.GOAL_UNSATISFIED,
                 message="plan completed without satisfying the goal",
             )
+
+    def _seal_plan(
+        self,
+        plan: DeterministicPlan,
+        *,
+        state: WorldState,
+        goal: DeterministicGoal,
+        actions: tuple[DeterministicAction, ...],
+        planner_invoked: bool = True,
+    ) -> DeterministicPlan:
+        return seal_plan_provenance(
+            plan,
+            state=state,
+            goal=goal,
+            actions=actions,
+            planner=self._planner,
+            planner_invoked=planner_invoked,
+        )
 
     async def _execute_tool_action(
         self,
@@ -595,12 +701,14 @@ class DeterministicBrain:
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
                 f"world-state observation failed: {type(exc).__name__}",
             )
-        if not isinstance(observed, WorldState):
+        try:
+            observed_state = _snapshot_world_state(observed, name="observed state")
+        except (TypeError, ValueError):
             return None, _StateObservationFailure(
                 DeterministicErrorCode.STATE_OBSERVATION_FAILED,
-                "world-state observer returned an invalid state type",
+                "world-state observer returned an invalid state carrier",
             )
-        return observed, None
+        return observed_state, None
 
     async def _plan(
         self,
