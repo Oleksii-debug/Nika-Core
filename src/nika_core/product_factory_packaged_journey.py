@@ -4,6 +4,7 @@ import hashlib
 import re
 import unicodedata
 from collections import Counter
+from uuid import UUID
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -20,6 +21,7 @@ from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 ActivityReportHandler = Callable[[], UIResult]
+TrainingStatusHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -48,6 +50,14 @@ _DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
         "покажи звіт діяльності nika",
     }
 )
+_TRAINING_STATUS_PREFIXES = (
+    "show training status",
+    "training status",
+    "покажи статус навчання",
+    "статус навчання",
+)
+
+
 
 
 class PackagedProductJourneyError(ValueError):
@@ -108,6 +118,36 @@ def packaged_daily_activity_report_command(command: str) -> bool:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :.!?")
     return normalized in _DAILY_ACTIVITY_REPORT_COMMANDS
+
+
+def packaged_training_status_target(command: str) -> str | None:
+    """Return the canonical task UUID for an explicit read-only training-status command."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).strip(" :.!?")
+    lowered = normalized.casefold()
+    prefix = next(
+        (
+            item
+            for item in _TRAINING_STATUS_PREFIXES
+            if lowered == item or lowered.startswith(item + " ")
+        ),
+        None,
+    )
+    if prefix is None:
+        return None
+    task_id = normalized[len(prefix) :].strip(" :#")
+    try:
+        parsed = UUID(task_id)
+    except (ValueError, AttributeError) as exc:
+        raise PackagedProductJourneyError(
+            "Вкажіть task_id після команди статусу навчання у канонічному UUID-форматі."
+        ) from exc
+    if str(parsed) != task_id:
+        raise PackagedProductJourneyError(
+            "Вкажіть task_id після команди статусу навчання у канонічному UUID-форматі."
+        )
+    return task_id
 
 
 def _valid_selection_id(value: object) -> bool:
@@ -176,7 +216,7 @@ class PackagedProductCommandRouter:
     """Route packaged command input to durable ProductProject, read-only report, or task handling.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
-    Explicit daily-report intent may call one injected read-only canonical report handler.
+    Explicit daily-report and training-status intents may call injected read-only handlers.
     This boundary deliberately does not dispatch workers, deploy providers, Toolsmith, or any
     high-impact external action. Those remain downstream explicit factory/security boundaries.
     """
@@ -187,11 +227,13 @@ class PackagedProductCommandRouter:
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
         activity_report_handler: ActivityReportHandler | None = None,
+        training_status_handler: TrainingStatusHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
         self._activity_report_handler = activity_report_handler
+        self._training_status_handler = training_status_handler
         self._selection_store = selection_store
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
@@ -281,6 +323,14 @@ class PackagedProductCommandRouter:
                     "Щоденний звіт активності недоступний у цьому запуску."
                 )
             return self._activity_report_handler()
+
+        training_task_id = packaged_training_status_target(command)
+        if training_task_id is not None:
+            if self._training_status_handler is None:
+                raise PackagedProductJourneyError(
+                    "Статус навчання недоступний у цьому запуску."
+                )
+            return self._training_status_handler(training_task_id)
 
         if packaged_current_product_command(command):
             return self._describe_current_project()
