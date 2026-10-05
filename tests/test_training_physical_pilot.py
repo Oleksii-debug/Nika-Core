@@ -289,6 +289,53 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     assert report.completed_checkpoint_id == "checkpoint-completed"
 
 
+def test_build_report_accepts_warm_start_v3_with_distinct_foundation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _candidate_manifest()
+    manifest["schema"] = "nika-peft-candidate-v3"
+    manifest["foundation_model_sha256"] = "b" * 64
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", lambda _: manifest)
+
+    report = _build_report(tmp_path)
+
+    assert report.schema_version == 4
+    assert len(report.candidate_manifest_sha256) == 64
+
+
+def test_build_report_rejects_v3_without_foundation_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _candidate_manifest()
+    manifest["schema"] = "nika-peft-candidate-v3"
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", lambda _: manifest)
+
+    with pytest.raises(
+        PhysicalTrainingPilotError,
+        match="foundation_model_sha256",
+    ):
+        _build_report(tmp_path)
+
+
+def test_build_report_rejects_legacy_v1_candidate_manifest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = _candidate_manifest()
+    manifest["schema"] = "nika-peft-candidate-v1"
+    manifest.pop("previous_adapter_tensors_sha256")
+    manifest.pop("trained_adapter_tensors_sha256")
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", lambda _: manifest)
+
+    with pytest.raises(
+        PhysicalTrainingPilotError,
+        match="invalid evidence",
+    ):
+        _build_report(tmp_path)
+
+
 def test_report_round_trip_is_canonical_and_digest_stable(tmp_path: Path) -> None:
     report = _build_report(tmp_path)
 
