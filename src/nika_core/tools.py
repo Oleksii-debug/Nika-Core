@@ -4,7 +4,6 @@ import asyncio
 import hashlib
 import json
 import sqlite3
-import unicodedata
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
@@ -35,10 +34,15 @@ class ToolSpec:
     input_schema: dict[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if not self.tool_id.strip():
-            raise ValueError("tool_id must not be empty")
-        if self.timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be greater than zero")
+        _require_tool_identity(self.tool_id, label="tool_id")
+        if type(self.risk) is not ToolRisk:
+            raise ValueError("risk must be a ToolRisk value")
+        # Tool calls must have a real deadline; NaN, infinity and bool bypass <= 0.
+        if (
+            type(self.timeout_seconds) not in (int, float)
+            or not 0 < self.timeout_seconds <= 86_400
+        ):
+            raise ValueError("timeout_seconds must be finite and between 0 and 86400")
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,55 +77,86 @@ class ToolAuthorization:
             self.effect_fingerprint,
             self.approval_fingerprint,
         )
-        if any(not value.strip() for value in required):
-            raise ValueError("tool authorization fingerprints must not be empty")
+        if type(self.risk) is not ToolRisk:
+            raise ValueError("authorization risk must be a ToolRisk value")
+        for value in required:
+            if type(value) is not str or not value.strip():
+                raise ValueError("tool authorization identities must be nonempty text")
+            try:
+                encoded = value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError("tool authorization must use valid UTF-8") from exc
+            if len(encoded) > 512:
+                raise ValueError("tool authorization identity exceeds 512 UTF-8 bytes")
 
     def matches(self, *, spec: ToolSpec, call: ToolCall) -> bool:
-        return (
-            self.tool_id == spec.tool_id == call.tool_id
-            and self.task_id == call.task_id
-            and self.risk is spec.risk
-            and self.arguments_fingerprint == tool_arguments_fingerprint(call.arguments)
-        )
+        try:
+            admitted = _snapshot_tool_authorization(self)
+        except (TypeError, ValueError):
+            return False
+        if not (
+            admitted.tool_id == spec.tool_id == call.tool_id
+            and admitted.task_id == call.task_id
+            and admitted.risk is spec.risk
+        ):
+            return False
+        try:
+            return admitted.arguments_fingerprint == tool_arguments_fingerprint(call.arguments)
+        except (TypeError, ValueError):
+            # Malformed model/tool arguments are never affirmative authorization.
+            return False
 
 
-def _normalize_tool_json(value: object, *, path: str = "arguments") -> object:
-    if value is None or isinstance(value, (bool, int)):
-        return value
-    if isinstance(value, float):
-        if not (float("-inf") < value < float("inf")):
-            raise ValueError(f"{path} must not contain NaN or infinity")
-        return value
-    if isinstance(value, str):
-        return unicodedata.normalize("NFC", value)
-    if isinstance(value, (list, tuple)):
-        return [
-            _normalize_tool_json(item, path=f"{path}[{index}]")
-            for index, item in enumerate(value)
-        ]
-    if isinstance(value, Mapping):
-        normalized: dict[str, object] = {}
-        for raw_key, raw_value in value.items():
-            if not isinstance(raw_key, str):
-                raise TypeError(f"{path} keys must be strings")
-            key = unicodedata.normalize("NFC", raw_key)
-            if key in normalized:
-                raise ValueError(f"{path} contains duplicate normalized key {key!r}")
-            normalized[key] = _normalize_tool_json(raw_value, path=f"{path}.{key}")
-        return normalized
-    raise ValueError(f"{path} contains unsupported value type {type(value).__name__}")
+def _snapshot_tool_authorization(value: ToolAuthorization) -> ToolAuthorization:
+    """Revalidate and detach an authorization token at every trust boundary."""
+    if type(value) is not ToolAuthorization:
+        raise ValueError("invalid tool authorization carrier")
+    return ToolAuthorization(
+        tool_id=value.tool_id,
+        task_id=value.task_id,
+        risk=value.risk,
+        arguments_fingerprint=value.arguments_fingerprint,
+        effect_fingerprint=value.effect_fingerprint,
+        approval_fingerprint=value.approval_fingerprint,
+    )
+
+
+def _canonical_tool_arguments(arguments: Mapping[str, object]) -> str:
+    # Reuse ActionIntent's bounded NFC authority; never retain caller-owned containers.
+    from nika_core.security.policy import _canonical_arguments
+
+    try:
+        encoded, _frozen = _canonical_arguments(arguments)
+    except (TypeError, ValueError):
+        raise
+    except Exception as exc:
+        raise ValueError("tool arguments must be deterministic JSON-compatible data") from exc
+    return encoded
 
 
 def tool_arguments_fingerprint(arguments: Mapping[str, object]) -> str:
-    normalized = _normalize_tool_json(arguments)
-    encoded = json.dumps(
-        normalized,
-        allow_nan=False,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    return hashlib.sha256(_canonical_tool_arguments(arguments).encode("utf-8")).hexdigest()
+
+
+def _snapshot_tool_arguments(arguments: Mapping[str, object]) -> dict[str, object]:
+    # The canonical encoder has already detached and normalized all nested caller data.
+    snapshot = json.loads(_canonical_tool_arguments(arguments))
+    assert type(snapshot) is dict
+    return snapshot
+
+
+def _require_tool_identity(value: object, *, label: str) -> str:
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{label} must be nonempty text")
+    if len(value) > 512:
+        raise ValueError(f"{label} exceeds maximum UTF-8 byte length")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{label} must be valid UTF-8") from exc
+    if len(encoded) > 512:
+        raise ValueError(f"{label} exceeds maximum UTF-8 byte length")
+    return value
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,14 +206,29 @@ class ToolEffectGuard:
         self._ledger = ledger
 
     def reserve(self, *, spec: ToolSpec, call: ToolCall) -> ToolEffectReservation:
-        task_id = call.task_id or ""
-        if not task_id.strip():
-            raise ValueError("external tool call requires task_id")
-        if not call.call_id.strip():
-            raise ValueError("call_id must not be empty")
+        task_id = _require_tool_identity(call.task_id, label="task_id")
+        call_id = _require_tool_identity(call.call_id, label="call_id")
+        tool_id = _require_tool_identity(call.tool_id, label="tool_id")
+        if tool_id != spec.tool_id:
+            raise ValueError("tool_id does not match registered tool specification")
+        try:
+            # A direct guard caller gets the same bounded, detached argument boundary.
+            admitted_call = replace(
+                call, arguments=_snapshot_tool_arguments(call.arguments)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("durable tool arguments must be JSON-compatible") from exc
+        if admitted_call.authorization is not None:
+            try:
+                approved = _snapshot_tool_authorization(admitted_call.authorization)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("invalid durable host authorization") from exc
+            admitted_call = replace(admitted_call, authorization=approved)
+            if not approved.matches(spec=spec, call=admitted_call):
+                raise ValueError("durable tool arguments do not match host authorization")
 
-        operation_key = self._operation_key(task_id=task_id, call_id=call.call_id)
-        input_fingerprint = self._fingerprint(spec=spec, call=call)
+        operation_key = self._operation_key(task_id=task_id, call_id=call_id)
+        input_fingerprint = self._fingerprint(spec=spec, call=admitted_call)
         try:
             record, created = self._ledger.reserve_once(
                 operation_key=operation_key,
@@ -208,16 +258,41 @@ class ToolEffectGuard:
                 ) from exc
             except sqlite3.Error as exc:
                 raise ToolEffectConflictError("tool effect reservation failed closed") from exc
+            except RuntimeError as exc:
+                # Strict ledger readers reject corrupt persisted evidence with
+                # RuntimeError. Do not leak it or let a handler run after it.
+                raise ToolEffectConflictError("tool effect evidence is invalid") from exc
         except sqlite3.Error as exc:
             raise ToolEffectConflictError("tool effect reservation failed closed") from exc
+        except RuntimeError as exc:
+            raise ToolEffectConflictError("tool effect evidence is invalid") from exc
 
         if created:
             return self._reservation_from_record(record)
         if record.status is IdempotencyStatus.COMPLETED:
-            completed = dict(record.result or {})
+            # A corrupt/missing SQLite result must never become an affirmative
+            # replay with output=None. Only the canonical finalize envelope is
+            # evidence that this exact external effect finished durably.
+            completed = record.result
+            if (
+                type(completed) is not dict
+                or completed.get("completed") is not True
+                or "output" not in completed
+            ):
+                raise ToolEffectConflictError(
+                    "completed tool effect has invalid durable result evidence"
+                )
+            try:
+                json.dumps(
+                    completed, allow_nan=False, ensure_ascii=False, sort_keys=True
+                ).encode("utf-8")
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ToolEffectConflictError(
+                    "completed tool effect has invalid durable result evidence"
+                ) from exc
             return self._reservation_from_record(
                 record,
-                completed_result=completed,
+                completed_result=dict(completed),
             )
         raise ToolEffectConflictError(
             f"tool effect is unresolved: {record.status.value}"
@@ -225,8 +300,13 @@ class ToolEffectGuard:
 
     def complete(self, reservation: ToolEffectReservation, output: object) -> None:
         try:
-            json.dumps(output, allow_nan=False, ensure_ascii=False, sort_keys=True)
-        except (TypeError, ValueError) as exc:
+            json.dumps(
+                output,
+                allow_nan=False,
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode("utf-8")
+        except (TypeError, ValueError, RecursionError, UnicodeEncodeError) as exc:
             # Never certify a result as COMPLETED if restart cannot reproduce it.
             # ToolExecutor will convert this finalize failure into UNCERTAIN.
             raise ValueError("durable tool result must be JSON-compatible") from exc
@@ -338,6 +418,9 @@ class ToolEffectGuard:
             "tool_id": spec.tool_id,
         }
         try:
+            # Direct ToolEffectGuard.reserve is also a public admission path:
+            # bound the arguments before assembling the durable payload.
+            tool_arguments_fingerprint(call.arguments)
             encoded = json.dumps(
                 payload,
                 allow_nan=False,
@@ -348,6 +431,13 @@ class ToolEffectGuard:
         except (TypeError, ValueError) as exc:
             raise ValueError("durable tool arguments must be JSON-compatible") from exc
         return hashlib.sha256(encoded).hexdigest()
+
+
+def _snapshot_tool_spec(spec: ToolSpec) -> ToolSpec:
+    """Detach authority metadata and schema from a boundary's caller."""
+    # Reuse the bounded, UTF-8-safe JSON authority already applied to tool effects.
+    # deepcopy alone accepts cycles, hostile objects and unbounded schemas.
+    return replace(spec, input_schema=_snapshot_tool_arguments(spec.input_schema))
 
 
 class ToolExecutor:
@@ -364,15 +454,27 @@ class ToolExecutor:
         self._effect_guard = effect_guard
 
     def register(self, spec: ToolSpec, handler: ToolHandler) -> None:
-        if spec.tool_id in self._tools:
-            raise ValueError(f"duplicate tool_id: {spec.tool_id}")
-        self._tools[spec.tool_id] = (spec, handler)
+        # A frozen dataclass can still be changed through object.__setattr__, and
+        # input_schema contains mutable nested data. Never let a caller's original
+        # spec change the registered risk, identity or deadline after admission.
+        admitted = _snapshot_tool_spec(spec)
+        if admitted.tool_id in self._tools:
+            raise ValueError(f"duplicate tool_id: {admitted.tool_id}")
+        self._tools[admitted.tool_id] = (admitted, handler)
 
     def specs(self) -> tuple[ToolSpec, ...]:
-        return tuple(spec for spec, _handler in self._tools.values())
+        # Catalog consumers must not receive the authority-bearing registry objects.
+        return tuple(
+            _snapshot_tool_spec(spec)
+            for spec, _handler in self._tools.values()
+        )
 
     async def execute(self, call: ToolCall) -> ToolResult:
-        registered = self._tools.get(call.tool_id)
+        try:
+            tool_id = _require_tool_identity(call.tool_id, label="tool_id")
+        except ValueError:
+            return ToolResult(call_id=call.call_id, tool_id="", error="invalid tool id")
+        registered = self._tools.get(tool_id)
         if registered is None:
             return ToolResult(call_id=call.call_id, tool_id=call.tool_id, error="unknown tool")
         spec, handler = registered
@@ -384,7 +486,7 @@ class ToolExecutor:
             authorization: ToolAuthorization | None = None
             if self._approval_policy is not None:
                 try:
-                    decision = await self._approval_policy(spec, call)
+                    decision = await self._approval_policy(_snapshot_tool_spec(spec), call)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:  # noqa: BLE001 - trusted boundary fails closed.
@@ -400,15 +502,32 @@ class ToolExecutor:
                         error="approval required",
                     )
                 if isinstance(decision, ToolAuthorization):
-                    if decision.matches(spec=spec, call=call):
-                        authorization = decision
-                    else:
+                    try:
+                        # Snapshot only once from caller-owned data after policy returns.
+                        # Both approval matching and later execution use this snapshot.
+                        approved_authorization = _snapshot_tool_authorization(decision)
+                        approved_arguments = _snapshot_tool_arguments(call.arguments)
+                    except (TypeError, ValueError):
                         self._audit(
                             "tool.denied",
                             call,
                             spec,
-                            {"reason": "exact_authorization_mismatch"},
+                            {"reason": "invalid_arguments"},
                         )
+                    else:
+                        authorized_call = replace(
+                            call, arguments=approved_arguments,
+                            authorization=approved_authorization
+                        )
+                        if approved_authorization.matches(spec=spec, call=authorized_call):
+                            authorization = approved_authorization
+                        else:
+                            self._audit(
+                                "tool.denied",
+                                call,
+                                spec,
+                                {"reason": "exact_authorization_mismatch"},
+                            )
                 elif decision:
                     self._audit(
                         "tool.denied",
@@ -431,11 +550,16 @@ class ToolExecutor:
                     error="durable effect guard required",
                 )
             try:
-                authorized_call = replace(call, authorization=authorization)
-                reservation = self._effect_guard.reserve(
-                    spec=spec,
-                    call=authorized_call,
+                # The guard receives a separate detached copy: even an instrumented
+                # reservation cannot replace the handler's approved arguments.
+                guard_call = replace(
+                    authorized_call,
+                    arguments=_snapshot_tool_arguments(authorized_call.arguments),
                 )
+                reservation = self._effect_guard.reserve(
+                    spec=_snapshot_tool_spec(spec), call=guard_call
+                )
+                call = authorized_call
             except (ToolEffectConflictError, ValueError) as exc:
                 self._audit("tool.denied", call, spec, {"reason": type(exc).__name__})
                 return ToolResult(
@@ -509,9 +633,14 @@ class ToolExecutor:
             return
         payload: dict[str, object] = {"tool_id": spec.tool_id, "risk": spec.risk.value}
         payload.update(extra)
+        try:
+            entity_id = _require_tool_identity(call.call_id, label="call_id")
+        except ValueError:
+            # Rejection itself must remain auditable even for invalid UTF-8 carriers.
+            entity_id = "invalid-tool-call-id"
         self._audit_log.append(
             event_type=event_type,
             entity_type="tool_call",
-            entity_id=call.call_id,
+            entity_id=entity_id,
             payload=payload,
         )
