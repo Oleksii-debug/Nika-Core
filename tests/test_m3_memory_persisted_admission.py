@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.audit import AuditLog
 from nika_core.memory import MemoryScope, MemoryService
 
 
@@ -577,6 +578,7 @@ def test_purge_does_not_delete_expired_record_before_full_carrier_validation(
             "SELECT COUNT(*) FROM memory_records WHERE memory_key = 'entry'"
         ).fetchone()[0] == 1
 
+
 @pytest.mark.parametrize(
     ("scope", "column", "stored", "message"),
     [
@@ -630,4 +632,30 @@ def test_explicit_delete_preserves_corrupt_durable_record(
         ).fetchone()
     assert row is not None
     assert row[column] == stored
+
+def test_rejected_explicit_delete_does_not_emit_deleted_audit(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    audit = AuditLog(store)
+    memory = MemoryService(store, audit)
+    _put(memory)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE memory_records SET value_json = 'NaN' "
+            "WHERE memory_key = 'entry'"
+        )
+
+    with pytest.raises(ValueError, match="invalid stored memory JSON constant"):
+        memory.delete(
+            scope=MemoryScope.TASK,
+            owner_id="owner",
+            namespace="scratch",
+            key="entry",
+        )
+
+    events = audit.list_for(
+        entity_type="memory",
+        entity_id="task:owner:scratch:entry",
+    )
+    assert [event.event_type for event in events] == ["memory.upserted"]
 
