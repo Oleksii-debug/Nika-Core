@@ -100,3 +100,36 @@ def test_direct_surrogate_in_dump_and_load_is_a_controlled_error() -> None:
     payload = dump_incident_snapshot(_empty_snapshot("project-a"))
     with pytest.raises(ProductIncidentError, match="valid UTF-8"):
         load_incident_snapshot(payload.replace("project-a", malformed))
+
+
+@pytest.mark.parametrize(
+    "observed_at",
+    ("0001-01-01T00:00:00+14:00", "9999-12-31T23:59:59-14:00"),
+)
+def test_unrepresentable_utc_incident_time_fails_with_domain_error(
+    observed_at: str,
+) -> None:
+    payload = json.loads(dump_incident_snapshot(_empty_snapshot("project-a")))
+    payload["incidents"] = [
+        {
+            "incident_id": "incident-1",
+            "trigger": {
+                "project_id": "project-a",
+                "service_id": "api",
+                "environment_id": "prod-eu",
+                "release_sha": "1" * 40,
+                "kind": "health",
+                "severity": "high",
+                "evidence_refs": ["health://degraded"],
+                "approval_ref": "approval://incident",
+                "observed_at": observed_at,
+                "advisory": None,
+            },
+            "state": "open",
+            "work_order": None,
+            "candidates": [],
+            "release_events": [],
+        }
+    ]
+    with pytest.raises(ProductIncidentError, match="ISO-8601 datetime text"):
+        load_incident_snapshot(json.dumps(payload))
