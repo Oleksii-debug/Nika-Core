@@ -353,6 +353,11 @@ class ModelBenchmarkRunner:
             raise ModelBenchmarkError("resource observer returned invalid memory percent")
         if type(available) is not int or available < 0:
             raise ModelBenchmarkError("resource observer returned invalid available memory")
+        process_rss = snapshot.process_rss_bytes
+        if process_rss is not None and (
+            type(process_rss) is not int or process_rss < 0
+        ):
+            raise ModelBenchmarkError("resource observer returned invalid process RSS")
         return snapshot
 
     def _accelerator_snapshot(self) -> AcceleratorSnapshot | None:
