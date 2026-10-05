@@ -435,7 +435,6 @@ def test_noncanonical_persisted_key_is_not_returned(tmp_path: Path) -> None:
         )
 
 
-
 def test_corrupt_created_at_blocks_put_before_mutation(tmp_path: Path) -> None:
     store, memory = _memory(tmp_path)
     _put(memory)
@@ -461,7 +460,6 @@ def test_corrupt_created_at_blocks_put_before_mutation(tmp_path: Path) -> None:
         ).fetchone()
         assert row["value_json"] == '{"safe":true}'
         assert row["created_at"] == "2038-01-01T00:00:00"
-
 
 
 @pytest.mark.parametrize(
