@@ -162,9 +162,9 @@ nika-peft-physical-pilot "C:\NikaData\physical-pilot.json"
 A successful invocation prints the canonical path-free report JSON and atomically creates
 `physical-pilot-report.json` plus the durable pilot SQLite state inside the fresh
 `output_root`. The candidate descriptor is created only after completion, then cross-checks
-the embedded safetensors manifest against the completed job fingerprint, base/candidate
-identity, exact Registry trainer artifact/digest, and completed step number before canonical
-physical candidate verification.
+the embedded safetensors manifest against the trainer-protocol job fingerprint,
+base/candidate identity, exact Registry trainer artifact/digest, and completed step number
+before canonical physical candidate verification.
 
 The driver never auto-discovers runtime versions and never stores API keys, tokens, cookies,
 browser profiles, or other credentials. Runtime versions in the manifest are the explicit

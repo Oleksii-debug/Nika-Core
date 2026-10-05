@@ -322,6 +322,50 @@ def test_duplicate_json_field_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(driver.PhysicalPilotDriverError, match="invalid JSON"):
         driver.PhysicalPilotConfig.from_json(duplicate)
 
+
+def test_candidate_descriptor_defers_trainer_protocol_fingerprint_to_canonical_pilot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    candidate_path = tmp_path / "adapter_model.safetensors"
+    candidate_path.write_bytes(b"candidate-bytes")
+    completed = SimpleNamespace(
+        base_artifact=SimpleNamespace(sha256="2" * 64),
+        candidate_artifact_ref=config.candidate_artifact_ref,
+        candidate_sha256="9" * 64,
+        job_fingerprint="6" * 64,
+        next_step=2,
+    )
+    trainer_record = SimpleNamespace(
+        artifact_id="3" * 64,
+        sha256="4" * 64,
+    )
+    monkeypatch.setattr(
+        driver,
+        "candidate_adapter_manifest",
+        lambda _: {
+            "base_artifact_ref": config.base_artifact_ref,
+            "base_artifact_sha256": completed.base_artifact.sha256,
+            "candidate_artifact_ref": completed.candidate_artifact_ref,
+            "job_fingerprint": "f" * 64,
+            "trainer_artifact_id": trainer_record.artifact_id,
+            "trainer_sha256": trainer_record.sha256,
+            "step_number": completed.next_step,
+        },
+    )
+
+    descriptor = driver._candidate_descriptor(
+        config=config,
+        candidate_path=candidate_path,
+        completed=completed,
+        trainer_record=trainer_record,
+    )
+
+    assert descriptor.sha256 == completed.candidate_sha256
+
+
+
 def _report() -> driver.PhysicalTrainingPilotReport:
     return driver.PhysicalTrainingPilotReport(
         job_id="pilot-job",
