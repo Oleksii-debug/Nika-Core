@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from nika_core.diagnostics.health import HealthCheck, HealthStatus
+from nika_core.model_gateway.foundry_local import FoundryLocalProvider, FoundryModelEvidence
 
 _MAX_HEALTH_TIMEOUT_SECONDS = 30.0
 _MAX_MODEL_ID_CHARS = 512
@@ -117,6 +118,84 @@ class ModelInferenceEvidencePort(Protocol):
         model_id: str,
         route_identity: str,
     ) -> bool | None: ...
+
+
+class FoundryLocalModelHealthProbe:
+    """Metadata-only Foundry Local recovery health.
+
+    A cached model is locally available for the provider's existing load-before-inference
+    path. The probe never downloads, loads, unloads, or runs inference.
+    """
+
+    def __init__(
+        self,
+        *,
+        model_id: str,
+        provider_id: str = "foundry-local",
+        provider_factory: Callable[..., FoundryLocalProvider] = FoundryLocalProvider,
+    ) -> None:
+        self._model_id = model_id
+        self._provider_id = provider_id
+        self._provider_factory = provider_factory
+
+    def snapshot(self) -> ModelHealthSnapshot:
+        configured = self._configured()
+        unknown = ModelHealthFact.UNKNOWN
+        if configured is not ModelHealthFact.YES:
+            return ModelHealthSnapshot(
+                configured=configured,
+                reachable=unknown,
+                model_present=unknown,
+                model_ready=unknown,
+                inference_proven=unknown,
+            )
+        try:
+            provider = self._provider_factory(
+                default_model=self._model_id,
+                allow_download=False,
+            )
+            evidence = provider.inspect_model(self._model_id)
+        except Exception:  # noqa: BLE001 - optional native SDK/catalog boundary
+            return ModelHealthSnapshot(
+                configured=configured,
+                reachable=unknown,
+                model_present=unknown,
+                model_ready=unknown,
+                inference_proven=unknown,
+            )
+        if (
+            type(evidence) is not FoundryModelEvidence
+            or type(evidence.alias) is not str
+            or evidence.alias != self._model_id
+            or type(evidence.cached) is not bool
+        ):
+            return ModelHealthSnapshot(
+                configured=configured,
+                reachable=unknown,
+                model_present=unknown,
+                model_ready=unknown,
+                inference_proven=unknown,
+            )
+        return ModelHealthSnapshot(
+            configured=configured,
+            reachable=ModelHealthFact.YES,
+            model_present=ModelHealthFact.YES,
+            model_ready=(
+                ModelHealthFact.YES if evidence.cached else ModelHealthFact.NO
+            ),
+            inference_proven=unknown,
+        )
+
+    def _configured(self) -> ModelHealthFact:
+        if (
+            self._provider_id != "foundry-local"
+            or not OllamaModelHealthProbe._valid_route_text(
+                self._model_id,
+                max_chars=_MAX_MODEL_ID_CHARS,
+            )
+        ):
+            return ModelHealthFact.NO
+        return ModelHealthFact.YES
 
 
 class OllamaModelHealthProbe:
