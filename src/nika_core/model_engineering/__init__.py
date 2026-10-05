@@ -20,6 +20,10 @@ from nika_core.model_engineering.experiment_bridge import (
     benchmark_observations,
     build_experiment_definition,
 )
+from nika_core.model_engineering.physical_candidate import (
+    PhysicalCandidateEvaluationError,
+    PhysicalCandidateGateway,
+)
 from nika_core.model_engineering.reporting import (
     benchmark_accessible_report_json,
     benchmark_accessible_report_payload,
@@ -57,6 +61,8 @@ __all__ = [
     "ModelBenchmarkIdentityError",
     "ModelBenchmarkRunner",
     "ModelCandidate",
+    "PhysicalCandidateEvaluationError",
+    "PhysicalCandidateGateway",
     "ModelCompletionPort",
     "ModelScoringPort",
     "benchmark_accessible_report_json",
