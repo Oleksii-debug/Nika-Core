@@ -164,6 +164,11 @@ def test_statement_bounds_and_control_characters_fail_closed() -> None:
         _candidate(statement="unsafe\x00statement")
 
 
+def test_statement_rejects_lone_surrogate_before_identity_hashing() -> None:
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        _candidate(statement="\ud800")
+
+
 def test_oversized_statement_is_rejected_before_unicode_normalization(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
