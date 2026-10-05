@@ -8,6 +8,11 @@ import threading
 from typing import Self
 
 
+_PROCESS_SET_QUOTA = 0x0100
+_PROCESS_TERMINATE = 0x0001
+_PROCESS_ASSIGN_JOB_ACCESS = _PROCESS_SET_QUOTA | _PROCESS_TERMINATE
+
+
 class ProcessContainmentError(RuntimeError):
     """Raised when the OS process-tree containment boundary cannot be established."""
 
@@ -97,6 +102,31 @@ class WindowsJob:
         with self._lock:
             self._handle = int(job)
 
+    def assign_pid(self, pid: int) -> None:
+        """Assign one already-spawned Windows process by PID to this Job Object."""
+        if os.name != "nt":
+            return
+        if type(pid) is not int or pid <= 0:
+            raise ProcessContainmentError("process PID must be a positive integer")
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
+        open_process.restype = ctypes.c_void_p
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (ctypes.c_void_p,)
+        close_handle.restype = ctypes.c_int
+
+        process_handle = open_process(_PROCESS_ASSIGN_JOB_ACCESS, False, pid)
+        if not process_handle:
+            raise ProcessContainmentError(
+                f"OpenProcess failed with Win32 error {ctypes.get_last_error()}"
+            )
+        try:
+            self.assign(int(process_handle))
+        finally:
+            close_handle(process_handle)
+
     def close(self) -> None:
         with self._lock:
             handle = self._handle
@@ -120,6 +150,21 @@ def process_group_popen_options() -> tuple[int, bool]:
     return 0, True
 
 
+def terminate_process_group(pid: int) -> bool:
+    """Terminate one POSIX process group. Return whether group termination was attempted."""
+    if os.name == "nt":
+        return False
+    if type(pid) is not int or pid <= 0:
+        return False
+    try:
+        os.killpg(pid, signal.SIGKILL)
+        return True
+    except ProcessLookupError:
+        return True
+    except OSError:
+        return False
+
+
 def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) -> None:
     """Terminate the contained process tree without raising cleanup-only failures."""
     if os.name == "nt" and job.active:
@@ -127,14 +172,8 @@ def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) ->
         return
     if process.poll() is not None:
         return
-    if os.name != "nt":
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-            return
-        except ProcessLookupError:
-            return
-        except OSError:
-            pass
+    if terminate_process_group(process.pid):
+        return
     try:
         process.kill()
     except OSError:
