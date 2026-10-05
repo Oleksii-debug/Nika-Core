@@ -235,7 +235,8 @@ async function main() {
   const logFactory = new Function("context", `
     const {
       document, statusNode, activityLog, renderProductProjectUnavailable,
-      renderTeamTaskUnavailable, productProjectUnavailableMessage,
+      renderTeamTaskUnavailable, renderStartupRecovery, renderModelSettings,
+      productProjectUnavailableMessage,
     } = context;
     let stateUnavailableReported = false;
     const maxActivityItems = 200;
@@ -250,6 +251,8 @@ async function main() {
     statusNode, activityLog,
     renderProductProjectUnavailable: () => {},
     renderTeamTaskUnavailable: () => {},
+    renderStartupRecovery: () => {},
+    renderModelSettings: () => {},
     productProjectUnavailableMessage: "Стан недоступний",
   });
   uiLog.appendLog("same message");
