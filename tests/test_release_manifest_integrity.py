@@ -257,6 +257,32 @@ def _valid_release_zip(tmp_path: Path) -> tuple[Path, Path]:
     return bundle, artifact
 
 
+def test_nested_manifest_named_asset_is_manifest_bound(tmp_path: Path) -> None:
+    bundle = tmp_path / "Nika Core"
+    (bundle / "assets").mkdir(parents=True)
+    (bundle / "NikaCore.exe").write_bytes(b"exe")
+    nested = bundle / "assets" / "release-manifest.json"
+    nested.write_bytes(b"nested")
+
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
+    assert {item.path for item in manifest.files} == {
+        "NikaCore.exe",
+        "assets/release-manifest.json",
+    }
+    write_release_manifest(bundle, manifest)
+    assert verify_release_manifest(bundle, manifest) == ()
+
+    nested.write_bytes(b"modified")
+    assert verify_release_manifest(bundle, manifest) == (
+        "size:assets/release-manifest.json",
+    )
+
+
 def test_release_archive_verifies_embedded_manifest(tmp_path: Path) -> None:
     from nika_core.packaging.release import verify_release_archive
 
