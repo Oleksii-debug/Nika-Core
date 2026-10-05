@@ -279,6 +279,49 @@ def test_task_change_during_confirmation_rolls_back_grant_and_does_not_bind(
     assert audit_count == 0
 
 
+def test_confirmation_cannot_retarget_grant_to_caller_mutated_task_record(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    source = _task(store, settings)
+    victim = _task(store, settings)
+    source_id = source.task_id
+    victim_id = victim.task_id
+    prompts: list[CloudModelGrantRequest] = []
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        object.__setattr__(source, "task_id", victim.task_id)
+        object.__setattr__(source, "workspace_id", victim.workspace_id)
+        object.__setattr__(source, "agent_id", victim.agent_id)
+        object.__setattr__(source, "state", victim.state)
+        object.__setattr__(source, "payload", victim.payload)
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: NOW,
+    )
+
+    service.admit_created_task(source)
+
+    assert [prompt.task_id for prompt in prompts] == [source_id]
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT task_id FROM v01_cloud_model_permission_bindings ORDER BY task_id"
+        ).fetchall()
+    assert [row["task_id"] for row in rows] == [source_id]
+    assert victim_id not in {row["task_id"] for row in rows}
+
+    queue = TaskQueue(store)
+    queue.transition(source_id, TaskState.READY)
+    queue.transition(source_id, TaskState.RUNNING)
+    _authorize(service, source_id)
+
+
 @pytest.mark.parametrize(
     ("field", "mutated"),
     (
