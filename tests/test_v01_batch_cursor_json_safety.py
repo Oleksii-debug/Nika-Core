@@ -71,7 +71,9 @@ def _deep(depth: int) -> object:
     ],
 )
 def test_untrusted_json_values_fail_closed(bad: dict[str, object]) -> None:
-    with pytest.raises(BatchCursorStateError, match="JSON-serializable"):
+    with pytest.raises(
+        BatchCursorStateError, match="JSON-serializable|valid UTF-8 JSON text"
+    ):
         _json_copy(bad)
 
 
