@@ -25,6 +25,8 @@ _INSTALLER_NAME = "install_nika_core.ps1"
 _UPGRADE_PROBE_NAME = "m12-byte-distinct-upgrade-proof.txt"
 _MAX_RUNTIME_EVIDENCE_JSON_BYTES = 1024 * 1024
 _MAX_RUNTIME_EVIDENCE_JSON_DEPTH = 64
+_MAX_RUNTIME_EVIDENCE_JSON_INTEGER_BITS = 4096
+_MAX_RUNTIME_EVIDENCE_JSON_INTEGER_DECIMAL_CHARS = 1234
 
 
 def parser() -> argparse.ArgumentParser:
@@ -54,6 +56,16 @@ def _finite_runtime_json_float(raw: str) -> float:
     value = float(raw)
     if not math.isfinite(value):
         raise ValueError("non-finite JSON number")
+    return value
+
+
+def _bounded_runtime_json_int(raw: str) -> int:
+    digits = raw[1:] if raw.startswith("-") else raw
+    if len(digits) > _MAX_RUNTIME_EVIDENCE_JSON_INTEGER_DECIMAL_CHARS:
+        raise ValueError("runtime evidence integer exceeds the digit limit")
+    value = int(raw)
+    if value.bit_length() > _MAX_RUNTIME_EVIDENCE_JSON_INTEGER_BITS:
+        raise ValueError("runtime evidence integer exceeds the bit limit")
     return value
 
 
@@ -96,6 +108,7 @@ def _read_runtime_evidence_json(path: Path, *, label: str) -> object:
             content.decode("utf-8-sig"),
             object_pairs_hook=_unique_runtime_json_object,
             parse_float=_finite_runtime_json_float,
+            parse_int=_bounded_runtime_json_int,
             parse_constant=_reject_runtime_json_constant,
         )
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
