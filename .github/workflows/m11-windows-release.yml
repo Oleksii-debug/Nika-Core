@@ -7,6 +7,8 @@ on:
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "src/nika_core/runtime/**"
+      - "src/nika_core/diagnostics/**"
+      - "src/nika_core/v01_packaged_team_runtime.py"
       - "src/nika_core/v01_model_settings.py"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
@@ -22,6 +24,7 @@ on:
       - "tests/test_v01_durable_pause_resume_authority_ordering.py"
       - "tests/test_v01_durable_pause_resume_race.py"
       - "tests/test_windows_desktop_active_pause.py"
+      - "tests/test_v01_packaged_model_recovery_health.py"
       - "tests/test_v01_model_settings.py"
       - "tests/test_pf11_proof_precommand.py"
       - "tests/test_windows_packaging_input_safety.py"
@@ -38,6 +41,8 @@ on:
       - "src/nika_core/qa/**"
       - "src/nika_core/ui/**"
       - "src/nika_core/runtime/**"
+      - "src/nika_core/diagnostics/**"
+      - "src/nika_core/v01_packaged_team_runtime.py"
       - "src/nika_core/v01_model_settings.py"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
@@ -53,6 +58,7 @@ on:
       - "tests/test_v01_durable_pause_resume_authority_ordering.py"
       - "tests/test_v01_durable_pause_resume_race.py"
       - "tests/test_windows_desktop_active_pause.py"
+      - "tests/test_v01_packaged_model_recovery_health.py"
       - "tests/test_v01_model_settings.py"
       - "tests/test_pf11_proof_precommand.py"
       - "tests/test_windows_packaging_input_safety.py"
@@ -108,6 +114,7 @@ jobs:
           tests/test_v01_durable_pause_resume_authority_ordering.py
           tests/test_v01_durable_pause_resume_race.py
           tests/test_windows_desktop_active_pause.py
+          tests/test_v01_packaged_model_recovery_health.py
           tests/test_v01_model_settings.py
           tests/test_pf11_proof_precommand.py
           tests/test_windows_packaging_input_safety.py

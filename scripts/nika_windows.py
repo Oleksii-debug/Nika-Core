@@ -160,6 +160,7 @@ def build_windows_session(config: AppConfig) -> WindowsBridgeSession:
         store=store,
         config=config,
         source_settings=source_settings,
+        model_settings=model_settings,
     )
     backend = DesktopBackend(
         queue=TaskQueue(store),
