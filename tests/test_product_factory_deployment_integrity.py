@@ -399,3 +399,72 @@ def test_rollback_post_construction_mutation_cannot_authorize_success() -> None:
     assert first.state is DeploymentState.HEALTHY
     assert second.state is DeploymentState.UNCERTAIN
 
+
+@dataclass
+class _CountingIntentProvider(FakeProvider):
+    deploy_calls: int = 0
+
+    def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
+        self.deploy_calls += 1
+        return super().deploy(intent)
+
+
+def test_mutated_environment_tier_is_rejected_before_provider_effect() -> None:
+    provider = _CountingIntentProvider()
+    fabric = DeploymentFabric(provider)
+    intent = _intent("project-a", "mutated-tier", 1)
+    object.__setattr__(intent.environment, "tier", "production")
+
+    with pytest.raises(DeploymentFabricError, match="tier carrier is invalid"):
+        fabric.deploy(intent)
+
+    assert provider.deploy_calls == 0
+    assert fabric.snapshot().records == ()
+
+
+def test_deploy_detaches_caller_owned_intent_graph() -> None:
+    provider = FakeProvider()
+    fabric = DeploymentFabric(provider)
+    intent = _intent("project-a", "detached-intent", 1)
+
+    accepted = fabric.deploy(intent)
+    object.__setattr__(intent.release, "version", "tampered-after-deploy")
+
+    assert accepted.intent.release.version == "release-1"
+    stored = fabric.snapshot().records[0]
+    assert stored.intent.release.version == "release-1"
+
+
+def test_snapshot_is_detached_from_internal_deployment_authority() -> None:
+    provider = FakeProvider()
+    fabric = DeploymentFabric(provider)
+    fabric.deploy(_intent("project-a", "detached-snapshot", 1))
+
+    snapshot = fabric.snapshot()
+    object.__setattr__(
+        snapshot.records[0].intent.release,
+        "version",
+        "tampered-snapshot-view",
+    )
+
+    fresh = fabric.snapshot()
+    assert fresh.records[0].intent.release.version == "release-1"
+
+
+def test_restore_detaches_caller_owned_snapshot_graph() -> None:
+    provider = FakeProvider()
+    original = DeploymentFabric(provider)
+    original.deploy(_intent("project-a", "detached-restore", 1))
+    snapshot = original.snapshot()
+
+    restored = DeploymentFabric(provider)
+    restored.restore(snapshot)
+    object.__setattr__(
+        snapshot.records[0].intent.release,
+        "version",
+        "tampered-after-restore",
+    )
+
+    fresh = restored.snapshot()
+    assert fresh.records[0].intent.release.version == "release-1"
+
