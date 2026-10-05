@@ -143,6 +143,12 @@ def _snapshot_manifest(manifest: PluginManifest) -> PluginManifest:
     return snapshot
 
 
+def _exact_text_tuple(value: object, *, label: str) -> tuple[str, ...]:
+    if type(value) is not tuple or any(type(item) is not str for item in value):
+        raise ValueError(f"{label} must be an exact tuple of strings")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class PluginLoadFailure:
     descriptor: EntrypointDescriptor
@@ -316,6 +322,14 @@ class PluginRuntime:
         permission_ids: tuple[str, ...] | None = None,
         approval_refs: tuple[str, ...] = (),
     ) -> PluginAdapter:
+        if type(plugin_id) is not str or not plugin_id:
+            raise ValueError("plugin_id must be exact non-empty text")
+        if permission_ids is not None:
+            permission_ids = _exact_text_tuple(
+                permission_ids,
+                label="permission_ids",
+            )
+        approval_refs = _exact_text_tuple(approval_refs, label="approval_refs")
         with self._registry_lock:
             if plugin_id in self._deactivating:
                 raise RuntimeError("plugin deactivation is still in progress")
