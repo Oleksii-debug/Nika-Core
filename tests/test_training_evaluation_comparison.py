@@ -57,6 +57,7 @@ from nika_core.training_model_activation import (
     rollback_attested_training_promotion,
 )
 from nika_core.training_scale import (
+    TrainingScaleError,
     TrainingScalePlan,
     TrainingScaleTier,
     authorize_training_scale,
@@ -993,6 +994,70 @@ async def test_promoted_pilot_authorizes_exact_next_scale_tier(tmp_path) -> None
     assert next_authorization.tier_index == 1
     assert next_authorization.progression_proof == proof
     assert next_authorization.base_artifact.sha256 == _CHALLENGER_SHA256
+
+
+@pytest.mark.asyncio
+async def test_scale_progression_rejects_retrofitted_authorization(tmp_path) -> None:
+    evaluation = _evaluation_set()
+    pilot_materials = _scale_material_evidence(evaluation)
+    canonical_plan = _comparison_scale_plan(evaluation, pilot_materials)
+    alternate_plan = TrainingScalePlan(
+        plan_id="alternate-scale-plan",
+        evaluation_set_sha256=canonical_plan.evaluation_set_sha256,
+        tiers=canonical_plan.tiers,
+    )
+    execution_plan_sha256 = _sha(b"training-execution-plan")
+    alternate_authorization = authorize_training_scale(
+        plan=alternate_plan,
+        tier_id="pilot",
+        job_id="training-job-1",
+        base_artifact=ArtifactIdentity("models/base", _BASE_SHA256),
+        candidate_artifact_ref="models/challenger",
+        material_evidence=pilot_materials,
+        execution_plan_sha256=execution_plan_sha256,
+        max_steps=1,
+    )
+    alternate_spec = TrainingJobSpec(
+        job_id="training-job-1",
+        task_id="training-task-retrofit",
+        project_id="project-1",
+        owner_id="owner-1",
+        base_artifact=alternate_authorization.base_artifact,
+        frozen_package_sha256=pilot_materials.package_manifest_sha256,
+        training_material_sha256=pilot_materials.training_material_sha256,
+        scale_authorization_sha256=alternate_authorization.authorization_sha256,
+        candidate_artifact_ref="models/challenger",
+        max_steps=1,
+    )
+    alternate_run = TrainingRunEvidence(
+        job_id=alternate_spec.job_id,
+        state=TrainingRunState.COMPLETED,
+        next_step=1,
+        base_artifact=alternate_spec.base_artifact,
+        frozen_package_sha256=alternate_spec.frozen_package_sha256,
+        training_material_sha256=alternate_spec.training_material_sha256,
+        scale_authorization_sha256=alternate_spec.scale_authorization_sha256,
+        execution_plan_sha256=execution_plan_sha256,
+        job_fingerprint=training_job_fingerprint(
+            alternate_spec,
+            execution_plan_sha256=execution_plan_sha256,
+        ),
+        candidate_artifact_ref=alternate_spec.candidate_artifact_ref,
+        candidate_sha256=_CHALLENGER_SHA256,
+        checkpoint_id="retrofit-checkpoint",
+    )
+    comparison = await _promoted_comparison(tmp_path)
+
+    with pytest.raises(
+        TrainingScaleError,
+        match="promotion evidence does not match",
+    ):
+        build_scale_progression_proof(
+            plan=alternate_plan,
+            authorization=alternate_authorization,
+            run=alternate_run,
+            comparison=comparison,
+        )
 
 
 @pytest.mark.asyncio
