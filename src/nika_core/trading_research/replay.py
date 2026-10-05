@@ -163,7 +163,6 @@ class SimulationExecutionEngine:
         return market_price >= limit
 
 
-
 def _validate_same_slice_chronology(events: tuple[MarketEvent, ...]) -> None:
     seen: dict[tuple[InstrumentIdentity, datetime, datetime, int], bytes] = {}
     for event in events:
