@@ -1128,3 +1128,60 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
     assert exc_info.value.code == "command_artifact_kind_mismatch"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
     assert not marker.exists()
+
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["NIKA_AUTHOR_MODE", "TOKENIZER_MODE", "AUTHORITY_MODE"],
+)
+def test_environment_allows_noncredential_substring_names(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    worker, _, _ = _worker(tmp_path, trainer, environment={key: "enabled"})
+
+    assert worker is not None
+
+
+def test_environment_rejects_case_insensitive_duplicate_keys(tmp_path: Path) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError, match="unique ignoring case"):
+        _worker(
+            tmp_path,
+            trainer,
+            environment={"NIKA_MODE": "one", "nika_mode": "two"},
+        )
+
+
+@pytest.mark.parametrize(
+    "environment",
+    [
+        {"NIKA_\ud800": "value"},
+        {"NIKA_MODE": "\ud800"},
+        {"NIKA\nMODE": "value"},
+        {"NIKA_MODE": "line\nbreak"},
+    ],
+)
+def test_environment_rejects_noncanonical_text(
+    tmp_path: Path,
+    environment: dict[str, str],
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+
+    with pytest.raises(ValueError):
+        _worker(tmp_path, trainer, environment=environment)
+
+
+def test_command_rejects_noncanonical_text_before_registry_access(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError):
+        SubprocessTrainingWorker(
+            (str(tmp_path / "trainer"), "\ud800"),
+            artifact_registry=object(),  # type: ignore[arg-type]
+            trainer_artifact_id="0" * 64,
+        )
