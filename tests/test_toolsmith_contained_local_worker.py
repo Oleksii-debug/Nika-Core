@@ -621,6 +621,7 @@ def test_post_init_tampered_resource_budget_is_rejected_before_planner(
     assert result.failure.kind is WorkerFailureKind.INVALID_REQUEST
     assert planner.calls == 0
 
+
 def test_terminal_replay_rejects_diff_digest_tamper(
     tmp_path: pathlib.Path,
 ) -> None:
