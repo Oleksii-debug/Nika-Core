@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import UTC, datetime
 from enum import StrEnum
 
@@ -21,6 +22,9 @@ from .product_factory_incident_contracts import (
     SupplyChainAdvisory,
 )
 from .product_factory_incidents import IncidentRepairReleaseCoordinator
+
+
+MAX_INCIDENT_SNAPSHOT_BYTES = 2 * 1024 * 1024
 
 
 def dump_incident_snapshot(snapshot: IncidentLifecycleSnapshot) -> str:
@@ -45,9 +49,25 @@ def load_incident_snapshot(
 
     if not isinstance(payload, str) or not payload.strip():
         raise ProductIncidentError("incident snapshot payload must be non-empty JSON text")
+    # The durable boundary must reject oversized and ill-formed text before decoding.
+    if len(payload) > MAX_INCIDENT_SNAPSHOT_BYTES:
+        raise ProductIncidentError("incident snapshot payload exceeds byte limit")
     try:
-        raw = json.loads(payload)
-    except json.JSONDecodeError as exc:
+        encoded = payload.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProductIncidentError("incident snapshot payload must be valid UTF-8") from exc
+    if len(encoded) > MAX_INCIDENT_SNAPSHOT_BYTES:
+        raise ProductIncidentError("incident snapshot payload exceeds byte limit")
+    try:
+        raw = json.loads(
+            payload,
+            object_pairs_hook=_unique_pairs,
+            parse_constant=_reject_nonfinite,
+            parse_float=_finite_float,
+        )
+    except ProductIncidentError:
+        raise
+    except (ValueError, RecursionError) as exc:
         raise ProductIncidentError("incident snapshot payload is invalid JSON") from exc
     root = _mapping(
         raw,
@@ -387,6 +407,10 @@ def _list(raw: object, label: str) -> list[object]:
 def _text(raw: object, label: str) -> str:
     if not isinstance(raw, str) or not raw.strip():
         raise ProductIncidentError(f"{label} must be non-empty text")
+    try:
+        raw.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ProductIncidentError(f"{label} must be valid UTF-8") from exc
     return raw
 
 
@@ -420,12 +444,39 @@ def _enum(enum_type: type[StrEnum], raw: object, label: str) -> StrEnum:
 
 
 def _canonical(payload: object) -> bytes:
-    return json.dumps(
-        payload,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ProductIncidentError("incident snapshot cannot be serialized") from exc
+    if len(encoded) > MAX_INCIDENT_SNAPSHOT_BYTES:
+        raise ProductIncidentError("incident snapshot payload exceeds byte limit")
+    return encoded
+
+
+def _unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ProductIncidentError("incident snapshot contains duplicate JSON keys")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(_value: str) -> object:
+    raise ProductIncidentError("incident snapshot contains non-finite JSON numbers")
+
+
+def _finite_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ProductIncidentError("incident snapshot contains non-finite JSON numbers")
+    return parsed
 
 
 def _aware_json(value: datetime) -> datetime:
