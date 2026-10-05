@@ -18,6 +18,7 @@ from nika_core.training_physical_pilot import (
     PhysicalTrainingPilotReport,
     build_physical_training_pilot_report,
     run_physical_training_pilot,
+    write_physical_training_pilot_report,
 )
 from nika_core.training_runtime import (
     ArtifactIdentity,
@@ -552,6 +553,59 @@ def test_build_report_holds_candidate_stable_during_manifest_read(
     assert replacement.exists()
     os.replace(replacement, candidate)
     assert candidate.read_bytes() == b"replacement"
+
+
+
+
+def test_report_publication_round_trips_exact_canonical_bytes(tmp_path: Path) -> None:
+    report = _build_report(tmp_path)
+    output = (tmp_path / "evidence.json").resolve()
+
+    write_physical_training_pilot_report(report, output)
+
+    payload = output.read_bytes()
+    assert payload == report.to_json().encode("utf-8")
+    restored = PhysicalTrainingPilotReport.from_json(payload)
+    assert restored == report
+
+
+def test_report_publication_refuses_to_clobber_existing_evidence(tmp_path: Path) -> None:
+    report = _build_report(tmp_path)
+    output = (tmp_path / "evidence.json").resolve()
+    output.write_bytes(b"existing-evidence")
+
+    with pytest.raises(PhysicalTrainingPilotError, match="already exists"):
+        write_physical_training_pilot_report(report, output)
+
+    assert output.read_bytes() == b"existing-evidence"
+
+
+def test_report_publication_cleans_temporary_file_on_publish_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _build_report(tmp_path)
+    output = (tmp_path / "evidence.json").resolve()
+    original_link = os.link
+
+    def fail_link(_: object, __: object) -> None:
+        raise OSError("simulated publish failure")
+
+    monkeypatch.setattr(os, "link", fail_link)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="published atomically"):
+        write_physical_training_pilot_report(report, output)
+
+    monkeypatch.setattr(os, "link", original_link)
+    assert not output.exists()
+    assert not tuple(tmp_path.glob(".evidence.json.*.tmp"))
+
+
+def test_report_publication_requires_absolute_canonical_parent(tmp_path: Path) -> None:
+    report = _build_report(tmp_path)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="absolute canonical"):
+        write_physical_training_pilot_report(report, Path("evidence.json"))
 
 
 def test_build_report_rejects_non_windows_builder(
