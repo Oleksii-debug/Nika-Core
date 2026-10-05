@@ -281,6 +281,7 @@ class CheckpointService:
 
     def latest(self, task_id: str) -> Checkpoint | None:
         task_id = _require_text(task_id, "task_id")
+        task_id_bytes = task_id.encode("utf-8")
         with self.store.connection() as conn:
             row = conn.execute(
                 """
@@ -300,7 +301,12 @@ class CheckpointService:
                        length(CAST(checksum_sha256 AS BLOB)) AS checksum_byte_length,
                        substr(CAST(checksum_sha256 AS BLOB), 1, ?) AS checksum_blob
                 FROM checkpoints
-                WHERE task_id = ?
+                WHERE (typeof(task_id) = 'text' AND task_id = ?)
+                   OR (
+                       typeof(task_id) <> 'text'
+                       AND length(CAST(task_id AS BLOB)) = ?
+                       AND substr(CAST(task_id AS BLOB), 1, ?) = ?
+                   )
                 ORDER BY rowid DESC
                 LIMIT 1
                 """,
@@ -311,6 +317,9 @@ class CheckpointService:
                     _JSON_MAX_BYTES + 1,
                     _CHECKSUM_HEX_LENGTH + 1,
                     task_id,
+                    len(task_id_bytes),
+                    _TEXT_MAX_BYTES + 1,
+                    task_id_bytes,
                 ),
             ).fetchone()
         if row is None:
