@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from typing import Final
 
@@ -14,6 +15,8 @@ from nika_core.web_api.contracts import WebCommandResult, WebPrincipal
 _MAX_HTTP_BODY_BYTES: Final = 256 * 1024
 _MAX_HTTP_RESPONSE_BYTES: Final = 80 * 1024
 _JSON_CONTENT_TYPE: Final = "application/json; charset=utf-8"
+_MAX_JSON_INT_DIGITS: Final = 1300
+_MAX_JSON_FLOAT_CHARS: Final = 256
 
 
 def _json_content_type(value: object) -> bool:
@@ -47,6 +50,22 @@ def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
 
 def _reject_json_constant(_value: str) -> object:
     raise ValueError("non-finite JSON constant")
+
+
+def _bounded_json_int(value: str) -> int:
+    digits = value[1:] if value.startswith("-") else value
+    if len(digits) > _MAX_JSON_INT_DIGITS:
+        raise ValueError("JSON integer literal exceeds transport limit")
+    return int(value)
+
+
+def _bounded_json_float(value: str) -> float:
+    if len(value) > _MAX_JSON_FLOAT_CHARS:
+        raise ValueError("JSON float literal exceeds transport limit")
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("JSON float must be finite")
+    return parsed
 
 
 def _encode_payload(payload: dict[str, object]) -> bytes:
@@ -129,6 +148,8 @@ class HttpCommandAdapter:
                 text,
                 object_pairs_hook=_unique_object,
                 parse_constant=_reject_json_constant,
+                parse_float=_bounded_json_float,
+                parse_int=_bounded_json_int,
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError, RecursionError):
             return self._error(400, "invalid_json", "Request body must be valid JSON UTF-8.")
