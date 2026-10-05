@@ -269,6 +269,29 @@ def test_non_object_carriers_fail_before_effect_completion_or_uncertainty(
     assert cursor.state.targets[0].attempt_state is AttemptState.IN_FLIGHT
 
 
+@pytest.mark.parametrize("bad_version", [True, 1.0, "1"])
+def test_persisted_cursor_version_requires_exact_integer(
+    tmp_path: Path,
+    bad_version: object,
+) -> None:
+    memory, ledger, task_id = _services(tmp_path)
+    state = _cursor(memory, ledger, task_id=task_id).state.model_dump(mode="json")
+    state["version"] = bad_version
+
+    with pytest.raises(ValueError, match="cursor version must be an exact integer"):
+        BatchCursorState.model_validate(state)
+
+
+def test_persisted_cursor_version_preserves_exact_integer(tmp_path: Path) -> None:
+    memory, ledger, task_id = _services(tmp_path)
+    state = _cursor(memory, ledger, task_id=task_id).state.model_dump(mode="json")
+    state["version"] = 1
+
+    restored = BatchCursorState.model_validate(state)
+    assert type(restored.version) is int
+    assert restored.version == 1
+
+
 def test_persisted_input_count_does_not_drive_range_allocation() -> None:
     with pytest.raises(ValueError, match="input positions do not match input_count"):
         BatchCursorState.model_validate(

@@ -8,7 +8,15 @@ from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from nika_core.memory import MemoryScope, MemoryService
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
@@ -132,6 +140,13 @@ class BatchCursorState(BaseModel):
     plan_fingerprint: StrictStr
     targets: list[TargetCursor]
     next_scheduled_intent: ScheduledIntent | None = None
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def require_exact_version_type(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("cursor version must be an exact integer")
+        return value
 
     @model_validator(mode="after")
     def validate_plan(self) -> BatchCursorState:
