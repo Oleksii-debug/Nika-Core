@@ -64,6 +64,87 @@ authority rather than implementing another verifier.
 Keep generated report JSON outside Git when it contains run-specific operational identifiers.
 A report can be shared as evidence after reviewing it for the intended run.
 
+## Repository-native Windows driver
+
+The installed `nika-peft-physical-pilot` command composes the existing authorities above; it
+does not add a second trainer or checkpoint format. It requires one local UTF-8 JSON manifest.
+The manifest is local configuration and must not be committed when it contains private local
+paths.
+
+The driver fails before durable side effects on non-Windows hosts. On Windows it preflights the
+frozen package/material bytes, requires a fresh non-linked output directory, registers the exact
+local `training_executable` with explicit six-package runtime metadata, uses a one-concurrent
+`model_training` resource budget, derives a two-step pilot scale tier from the exact frozen
+training/validation counts and byte bounds, and re-resolves the same training bytes when the
+runtime is reopened.
+
+Example manifest shape (replace every path, digest, public provenance reference, and exact
+installed runtime version with values for the intended run):
+
+```json
+{
+  "schema_version": 1,
+  "workspace_id": "pilot-workspace",
+  "project_id": "pilot-project",
+  "owner_id": "pilot-owner",
+  "job_id": "pilot-job-001",
+  "blob_store_root": "C:\\NikaData\\blobs",
+  "frozen_package_path": "C:\\NikaData\\pilot-package.json",
+  "frozen_package_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "trainer_executable": "C:\\NikaVenv\\Scripts\\nika-peft-trainer.exe",
+  "base_artifact_ref": "models/base",
+  "base_gguf_path": "C:\\NikaModels\\base.gguf",
+  "model_dir": "C:\\NikaModels\\transformers-base",
+  "output_root": "C:\\NikaRuns\\pilot-001",
+  "candidate_artifact_ref": "models/pilot-candidate-001",
+  "candidate_descriptor": {
+    "model_id": "nika-pilot-adapter",
+    "source_reference": "https://example.invalid/model-provenance",
+    "license_reference": "https://example.invalid/model-license"
+  },
+  "runtime_versions": {
+    "torch": "EXACT_INSTALLED_VERSION",
+    "transformers": "EXACT_INSTALLED_VERSION",
+    "peft": "EXACT_INSTALLED_VERSION",
+    "accelerate": "EXACT_INSTALLED_VERSION",
+    "gguf": "EXACT_INSTALLED_VERSION",
+    "safetensors": "EXACT_INSTALLED_VERSION"
+  },
+  "resource_budget": {
+    "max_cpu_percent": 95,
+    "max_memory_percent": 90
+  },
+  "trainer_parameters": {
+    "max_sequence_length": 256,
+    "learning_rate": 0.0002,
+    "lora_r": 8,
+    "lora_alpha": 16,
+    "lora_dropout": 0.05,
+    "lora_target_modules": ["q_proj", "v_proj"],
+    "torch_num_threads": 2,
+    "seed": 1729
+  }
+}
+```
+
+Run from the same installed environment as the registered trainer executable:
+
+```powershell
+nika-peft-physical-pilot "C:\NikaData\physical-pilot.json"
+```
+
+A successful invocation prints the canonical path-free report JSON and atomically creates
+`physical-pilot-report.json` plus the durable pilot SQLite state inside the fresh
+`output_root`. The candidate descriptor is created only after completion, then cross-checks
+the embedded safetensors manifest against the completed job fingerprint, base/candidate
+identity, exact Registry trainer artifact/digest, and completed step number before canonical
+physical candidate verification.
+
+The driver never auto-discovers runtime versions and never stores API keys, tokens, cookies,
+browser profiles, or other credentials. Runtime versions in the manifest are the explicit
+Registry authority; the child trainer independently verifies the installed distributions match
+those declared versions before training effects.
+
 ## Example control flow
 
 The application or acceptance driver should perform the equivalent of:
