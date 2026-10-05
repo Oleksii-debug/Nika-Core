@@ -180,7 +180,10 @@ class DeploymentWaveCoordinator:
     def restore(self, snapshot: DeploymentWaveSnapshot) -> None:
         if type(snapshot) is not DeploymentWaveSnapshot:
             raise DeploymentWaveError("invalid rollout snapshot")
-        if type(snapshot.plans) is not tuple or type(snapshot.execution) is not DeploymentExecutionSnapshot:
+        if (
+            type(snapshot.plans) is not tuple
+            or type(snapshot.execution) is not DeploymentExecutionSnapshot
+        ):
             raise DeploymentWaveError("invalid rollout snapshot structure")
         if any(type(record) is not DeploymentWaveRecord for record in snapshot.plans):
             raise DeploymentWaveError("invalid rollout snapshot plan record")
