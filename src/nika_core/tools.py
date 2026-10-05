@@ -155,6 +155,10 @@ class ToolEffectConflictError(RuntimeError):
 class ToolEffectReservation:
     operation_key: str
     completed_result: Mapping[str, object] | None = None
+    task_id: str | None = None
+    operation_type: str | None = None
+    input_fingerprint: str | None = None
+    created_at: str | None = None
 
 
 class ToolEffectGuard:
@@ -207,11 +211,11 @@ class ToolEffectGuard:
             raise ToolEffectConflictError("tool effect reservation failed closed") from exc
 
         if created:
-            return ToolEffectReservation(operation_key=operation_key)
+            return self._reservation_from_record(record)
         if record.status is IdempotencyStatus.COMPLETED:
             completed = dict(record.result or {})
-            return ToolEffectReservation(
-                operation_key=operation_key,
+            return self._reservation_from_record(
+                record,
                 completed_result=completed,
             )
         raise ToolEffectConflictError(
@@ -225,15 +229,72 @@ class ToolEffectGuard:
             # Never certify a result as COMPLETED if restart cannot reproduce it.
             # ToolExecutor will convert this finalize failure into UNCERTAIN.
             raise ValueError("durable tool result must be JSON-compatible") from exc
-        self._ledger.complete(
-            reservation.operation_key,
-            {"completed": True, "output": output},
+
+        task_id, operation_type, input_fingerprint, created_at = self._reservation_identity(
+            reservation
         )
+        try:
+            self._ledger.complete_pending_if_matches(
+                operation_key=reservation.operation_key,
+                task_id=task_id,
+                operation_type=operation_type,
+                input_fingerprint=input_fingerprint,
+                created_at=created_at,
+                result={"completed": True, "output": output},
+            )
+        except (IdempotencyConflictError, KeyError) as exc:
+            raise ToolEffectConflictError(
+                "tool effect reservation changed before completion"
+            ) from exc
 
     def mark_uncertain(self, reservation: ToolEffectReservation) -> None:
-        record = self._ledger.require(reservation.operation_key)
-        if record.status is IdempotencyStatus.PENDING:
-            self._ledger.mark_uncertain(reservation.operation_key)
+        task_id, operation_type, input_fingerprint, created_at = self._reservation_identity(
+            reservation
+        )
+        try:
+            self._ledger.mark_pending_uncertain_if_matches(
+                operation_key=reservation.operation_key,
+                task_id=task_id,
+                operation_type=operation_type,
+                input_fingerprint=input_fingerprint,
+                created_at=created_at,
+            )
+        except (IdempotencyConflictError, KeyError) as exc:
+            raise ToolEffectConflictError(
+                "tool effect reservation changed before uncertainty recording"
+            ) from exc
+
+    @staticmethod
+    def _reservation_from_record(
+        record,
+        *,
+        completed_result: Mapping[str, object] | None = None,
+    ) -> ToolEffectReservation:
+        return ToolEffectReservation(
+            operation_key=record.operation_key,
+            completed_result=completed_result,
+            task_id=record.task_id,
+            operation_type=record.operation_type,
+            input_fingerprint=record.input_fingerprint,
+            created_at=record.created_at,
+        )
+
+    @staticmethod
+    def _reservation_identity(
+        reservation: ToolEffectReservation,
+    ) -> tuple[str, str, str, str]:
+        values = (
+            reservation.task_id,
+            reservation.operation_type,
+            reservation.input_fingerprint,
+            reservation.created_at,
+        )
+        if any(type(value) is not str or not value for value in values):
+            raise ToolEffectConflictError(
+                "tool effect finalization lacks reservation authority"
+            )
+        task_id, operation_type, input_fingerprint, created_at = values
+        return task_id, operation_type, input_fingerprint, created_at
 
     @staticmethod
     def _operation_key(*, task_id: str, call_id: str) -> str:
