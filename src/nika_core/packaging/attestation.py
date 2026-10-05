@@ -87,6 +87,7 @@ def _read_verification(path: Path) -> list[dict[str, Any]]:
         raise ValueError("attestation verification result entries must be objects")
     return payload
 
+
 def _has_matching_slsa_subject(
     verification: list[dict[str, Any]],
     *,
