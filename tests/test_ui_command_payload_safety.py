@@ -110,3 +110,22 @@ def test_reused_noncyclic_container_counts_each_occurrence() -> None:
 def test_valid_float_extremes_and_boundary_integer() -> None:
     payload = {"max_float": math.nextafter(float("inf"), 0.0), "number": (1 << 4095)}
     assert command(payload).payload == payload
+
+def test_admitted_command_detaches_nested_caller_containers() -> None:
+    shared = {"steps": ["safe", {"attempts": 2}]}
+    original = {"first": shared, "second": shared}
+    accepted = command(original)
+
+    assert accepted.payload == original
+    assert accepted.payload is not original
+    assert accepted.payload["first"] is not shared
+    assert accepted.payload["first"] is not accepted.payload["second"]
+
+    original["first"]["steps"].append({"unvalidated": object()})
+    original["second"]["steps"][1]["attempts"] = float("nan")
+    original["extra"] = {"huge": "x" * 1_048_576}
+
+    assert accepted.payload == {
+        "first": {"steps": ["safe", {"attempts": 2}]},
+        "second": {"steps": ["safe", {"attempts": 2}]},
+    }

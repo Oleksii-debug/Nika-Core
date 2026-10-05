@@ -86,4 +86,8 @@ def validate_ui_payload(payload: object) -> dict[str, Any]:
         else:
             raise ValueError("UI command payload contains a non-JSON value")
 
-    return payload
+    # Admission bounds depth, nodes and bytes before this snapshot. A separate
+    # JSON tree prevents callers from changing nested dicts/lists after validation.
+    return json.loads(
+        json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    )
