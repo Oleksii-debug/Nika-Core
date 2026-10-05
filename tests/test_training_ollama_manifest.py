@@ -219,6 +219,38 @@ async def test_control_response_byte_limit_fails_closed() -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_prepare_rejects_ambiguous_catalog_identity() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "HEAD":
+            return httpx.Response(200)
+        if request.url.path == "/api/create":
+            return httpx.Response(200, json={"status": "success"})
+        if request.url.path == "/api/tags":
+            return httpx.Response(
+                200,
+                json={
+                    "models": [
+                        {
+                            "name": "candidate:latest",
+                            "model": "other:latest",
+                            "digest": MANIFEST_SHA,
+                        }
+                    ]
+                },
+            )
+        raise AssertionError(request.url)
+
+    authority = OllamaManifestAuthority(client_factory=_client_factory(handler))
+
+    with pytest.raises(OllamaManifestAuthorityError, match="ambiguous identity"):
+        await authority.prepare_existing_gguf_blob(
+            model_id="candidate",
+            artifact_sha256=ARTIFACT_SHA,
+            descriptor_digest=DESCRIPTOR_SHA,
+        )
+
+
 def test_manifest_authority_rejects_non_loopback_endpoint() -> None:
     with pytest.raises(ValueError, match="loopback"):
         OllamaManifestAuthority(base_url="https://example.test:11434")
