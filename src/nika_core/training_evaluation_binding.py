@@ -33,6 +33,21 @@ from nika_core.training_runtime import (
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_IDENTITY_BYTES = 512
+
+
+def _validated_identity_text(value: object, *, name: str) -> str:
+    if type(value) is not str or not value or value != value.strip():
+        raise ValueError(f"{name} must be non-empty canonical text")
+    if any(not character.isprintable() for character in value):
+        raise ValueError(f"{name} must not contain control characters")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
+    if len(encoded) > _MAX_IDENTITY_BYTES:
+        raise ValueError(f"{name} exceeds the configured byte limit")
+    return value
 
 
 class TrainingEvaluationBindingError(RuntimeError):
@@ -73,8 +88,7 @@ class TrainingEvaluationBinding:
             (self.challenger_model_id, "challenger_model_id"),
             (self.candidate_artifact_ref, "candidate_artifact_ref"),
         ):
-            if type(value) is not str or not value or value != value.strip():
-                raise ValueError(f"{name} must be non-empty canonical text")
+            _validated_identity_text(value, name=name)
         for value, name in (
             (self.base_sha256, "base_sha256"),
             (self.challenger_sha256, "challenger_sha256"),
@@ -154,15 +168,10 @@ def _require_sha256(value: object, *, name: str) -> str:
 
 
 def _require_identity_text(value: object, *, name: str) -> str:
-    if type(value) is not str or not value or value != value.strip():
-        raise TrainingEvaluationBindingError(
-            f"{name} must be non-empty canonical text"
-        )
-    if any(not character.isprintable() for character in value):
-        raise TrainingEvaluationBindingError(
-            f"{name} must not contain control characters"
-        )
-    return value
+    try:
+        return _validated_identity_text(value, name=name)
+    except ValueError as exc:
+        raise TrainingEvaluationBindingError(str(exc)) from exc
 
 
 def _snapshot_spec(spec: TrainingJobSpec) -> TrainingJobSpec:
