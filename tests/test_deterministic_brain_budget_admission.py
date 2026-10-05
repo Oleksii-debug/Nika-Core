@@ -37,12 +37,12 @@ class GuardedJournal:
 
 
 def _run(brain: DeterministicBrain, **overrides: object):
-    arguments = dict(
-        run_id="finite-budget-proof",
-        state=WorldState(),
-        goal=DeterministicGoal(),
-        actions=(),
-    )
+    arguments = {
+        "run_id": "finite-budget-proof",
+        "state": WorldState(),
+        "goal": DeterministicGoal(),
+        "actions": (),
+    }
     arguments.update(overrides)
     return asyncio.run(brain.run(**arguments))
 
@@ -76,7 +76,7 @@ def test_invalid_replan_budgets_never_call_planner(value: object) -> None:
     "value",
     [
         None, True, False, "2", 0, -1, float("nan"), float("inf"),
-        -float("inf"), 10**500, Decimal("1"), object(),
+        -float("inf"), 10**500, Decimal(1), object(),
     ],
 )
 def test_invalid_time_budgets_fail_before_planning_and_journal(
