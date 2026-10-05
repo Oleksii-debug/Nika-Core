@@ -215,20 +215,27 @@ def _canonical_directory(path: Path, *, name: str) -> Path:
     return resolved
 
 
-def _read_regular_file(path: Path, *, name: str, max_bytes: int) -> bytes:
+def _canonical_file(path: Path, *, name: str) -> os.stat_result:
     try:
         resolved = path.resolve(strict=True)
-        before = os.lstat(path)
+        snapshot = os.lstat(path)
     except OSError as exc:
         raise PhysicalEvaluationDriverError(f"{name} is unavailable") from exc
     if (
         resolved != path
-        or stat.S_ISLNK(before.st_mode)
-        or _is_reparse(before)
-        or not stat.S_ISREG(before.st_mode)
+        or stat.S_ISLNK(snapshot.st_mode)
+        or _is_reparse(snapshot)
+        or not stat.S_ISREG(snapshot.st_mode)
     ):
         _fail(f"{name} must be a canonical non-linked regular file")
-    if before.st_size < 1 or before.st_size > max_bytes:
+    if snapshot.st_size < 1:
+        _fail(f"{name} must not be empty")
+    return snapshot
+
+
+def _read_regular_file(path: Path, *, name: str, max_bytes: int) -> bytes:
+    before = _canonical_file(path, name=name)
+    if before.st_size > max_bytes:
         _fail(f"{name} size is outside the admitted range")
     try:
         with path.open("rb") as handle:
@@ -682,14 +689,7 @@ def _verify_completed_checkpoint(
 
 
 def _model_size(path: Path, *, name: str) -> int:
-    _read_regular_file(path, name=name, max_bytes=1 << 40)
-    try:
-        size = os.lstat(path).st_size
-    except OSError as exc:
-        raise PhysicalEvaluationDriverError(f"{name} size is unavailable") from exc
-    if size <= 0:
-        _fail(f"{name} must not be empty")
-    return int(size)
+    return int(_canonical_file(path, name=name).st_size)
 
 
 def _base_descriptor(
@@ -775,22 +775,12 @@ def _register_evaluator(
     evaluator: EvaluatorConfig,
 ) -> tuple[ArtifactRegistry, tuple[str, ...], str, dict[int, str]]:
     executable = Path(evaluator.executable)
-    _read_regular_file(
-        executable,
-        name="evaluator executable",
-        max_bytes=2 * 1024 * 1024 * 1024,
-    )
+    _canonical_file(executable, name="evaluator executable")
     if executable.suffix.casefold() != ".exe":
         _fail("evaluator executable must be a Windows .exe file")
-    command_files = tuple(
-        path
-        for path in evaluator.command_files
-        if _read_regular_file(
-            path,
-            name="evaluator command file",
-            max_bytes=256 * 1024 * 1024,
-        )
-    )
+    command_files = evaluator.command_files
+    for path in command_files:
+        _canonical_file(path, name="evaluator command file")
     roots = tuple(
         dict.fromkeys(
             (
@@ -1018,11 +1008,7 @@ def run_physical_evaluation_from_config(
         _fail("physical evaluation report already exists; refusing to repeat model effects")
 
     database_path = output_root / "physical-pilot.sqlite3"
-    _read_regular_file(
-        database_path,
-        name="physical pilot database",
-        max_bytes=16 * 1024 * 1024 * 1024,
-    )
+    _canonical_file(database_path, name="physical pilot database")
     pilot = _physical_report(output_root)
     if pilot.completed_steps != 2:
         _fail("repository-native physical pilot evaluation requires the canonical two-step pilot")
