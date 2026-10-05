@@ -132,6 +132,29 @@ class ResourceManager:
         active.add(request_id)
         return ResourceDecision(True, "granted")
 
+    def revalidate(self, *, scope: str, owner_id: str, request_id: str) -> ResourceDecision:
+        """Recheck a live grant against current resource limits without changing queue state."""
+        if not request_id.strip():
+            raise ValueError("request_id must not be empty")
+        key = (scope, owner_id)
+        active = self._active.setdefault(key, set())
+        if request_id not in active:
+            return ResourceDecision(False, "not_granted")
+
+        budget = self.get_budget(scope=scope, owner_id=owner_id)
+        if len(active) > budget.max_concurrent:
+            return ResourceDecision(False, "concurrency_limit")
+
+        snapshot = self._observer.snapshot()
+        if budget.max_cpu_percent is not None and snapshot.cpu_percent > budget.max_cpu_percent:
+            return ResourceDecision(False, "cpu_limit")
+        if (
+            budget.max_memory_percent is not None
+            and snapshot.memory_percent > budget.max_memory_percent
+        ):
+            return ResourceDecision(False, "memory_limit")
+        return ResourceDecision(True, "still_granted")
+
     def release(self, *, scope: str, owner_id: str, request_id: str) -> bool:
         key = (scope, owner_id)
         active = self._active.setdefault(key, set())
