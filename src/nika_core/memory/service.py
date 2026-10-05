@@ -50,7 +50,11 @@ class MemoryService:
                 "AND namespace = ? AND memory_key = ?",
                 (scope.value, owner_id, namespace, key),
             ).fetchone()
-            created_at = existing["created_at"] if existing else now.isoformat()
+            if existing is not None:
+                _parse_stored_datetime("created_at", existing["created_at"])
+                created_at = existing["created_at"]
+            else:
+                created_at = now.isoformat()
             conn.execute(
                 """INSERT INTO memory_records(
                     scope, owner_id, namespace, memory_key, value_json, user_approved,
