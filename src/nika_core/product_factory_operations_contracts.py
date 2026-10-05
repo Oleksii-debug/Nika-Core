@@ -5,7 +5,6 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
 
-
 _MAX_TEXT_UTF8_BYTES = 4096
 _MAX_REFERENCE_COUNT = 4096
 _SINGLE_LINE_FORBIDDEN = frozenset(("\x85", "\u2028", "\u2029"))
