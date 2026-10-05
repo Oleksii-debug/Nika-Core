@@ -192,7 +192,6 @@ def test_config_rejects_unbound_evaluator_arguments(
         driver.PhysicalEvaluationConfig.from_json(json.dumps(payload))
 
 
-
 @pytest.mark.parametrize(
     ("field", "value"),
     (
