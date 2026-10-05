@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import stat
 import tempfile
@@ -15,6 +16,8 @@ _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MANIFEST_VERSION = 2
 _RELEASE_MANIFEST_NAME = "release-manifest.json"
 _MAX_RELEASE_MANIFEST_BYTES = 4 * 1024 * 1024
+_MAX_PREHUMAN_EVIDENCE_BYTES = 1024 * 1024
+_MAX_RELEASE_JSON_DEPTH = 64
 _MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
@@ -404,10 +407,51 @@ def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
+def _finite_json_float(raw: str) -> float:
+    value = float(raw)
+    if not math.isfinite(value):
+        raise ValueError("non-finite JSON number")
+    return value
+
+
+def _reject_json_constant(_raw: str) -> None:
+    raise ValueError("non-JSON numeric constant")
+
+
+def _bounded_json_depth(content: bytes) -> bool:
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in content:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                quoted = False
+        elif byte == 0x22:
+            quoted = True
+        elif byte in (0x5B, 0x7B):
+            depth += 1
+            if depth > _MAX_RELEASE_JSON_DEPTH:
+                return False
+        elif byte in (0x5D, 0x7D):
+            depth -= 1
+            if depth < 0:
+                return False
+    return depth == 0
+
+
 def _decode_json_object(content: str) -> dict[str, Any] | None:
     try:
-        payload = json.loads(content, object_pairs_hook=_unique_json_object)
-    except (UnicodeError, json.JSONDecodeError, _DuplicateJsonKey):
+        payload = json.loads(
+            content,
+            object_pairs_hook=_unique_json_object,
+            parse_float=_finite_json_float,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, ValueError, RecursionError):
         return None
     if not isinstance(payload, dict):
         return None
@@ -416,13 +460,22 @@ def _decode_json_object(content: str) -> dict[str, Any] | None:
 
 def _read_evidence_object(evidence_path: Path) -> dict[str, Any] | None:
     try:
-        content = evidence_path.read_text(encoding="utf-8-sig")
-    except (OSError, UnicodeError):
+        with evidence_path.open("rb") as handle:
+            content = handle.read(_MAX_PREHUMAN_EVIDENCE_BYTES + 1)
+    except OSError:
         return None
-    return _decode_json_object(content)
+    if len(content) > _MAX_PREHUMAN_EVIDENCE_BYTES or not _bounded_json_depth(content):
+        return None
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeError:
+        return None
+    return _decode_json_object(text)
 
 
 def _decode_release_manifest(content: bytes) -> ReleaseManifest | None:
+    if len(content) > _MAX_RELEASE_MANIFEST_BYTES or not _bounded_json_depth(content):
+        return None
     try:
         text = content.decode("utf-8-sig")
     except UnicodeError:
