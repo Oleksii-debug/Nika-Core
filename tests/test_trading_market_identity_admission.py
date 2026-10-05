@@ -13,6 +13,8 @@ from nika_core.trading_research import (
     OddsSnapshot,
     OutcomeSettlement,
     Provenance,
+    Quote,
+    Tick,
     TradingResearchError,
     Venue,
 )
@@ -148,3 +150,23 @@ def test_valid_market_evidence_preserves_unicode_and_detaches_mapping() -> None:
     assert snapshot.selections["перемога"] == Decimal("2.25")
     assert instrument.currency == "UAH"
     assert Provenance("Джерело", source_uri=None, acquired_at=NOW).source_id == "Джерело"
+
+@pytest.mark.parametrize("event", ("bar", "tick", "quote", "odds", "settlement"))
+@pytest.mark.parametrize("field,bad", (("instrument", None), ("instrument", "sim"),
+                                      ("time", None), ("time", "2026-01-01")))
+def test_market_events_reject_invalid_nested_authorities(
+    event: str, field: str, bad: object
+) -> None:
+    instrument = bad if field == "instrument" else INSTRUMENT
+    time = bad if field == "time" else TIME
+    with pytest.raises(TradingResearchError, match=f"event {field}"):
+        if event == "bar":
+            Bar(instrument, time, Decimal(10), Decimal(11), Decimal(9), Decimal(10), Decimal(1))
+        elif event == "tick":
+            Tick(instrument, time, Decimal(10), Decimal(1))
+        elif event == "quote":
+            Quote(instrument, time, Decimal(9), Decimal(11))
+        elif event == "odds":
+            OddsSnapshot(instrument, time, {"home": Decimal(2)})
+        else:
+            OutcomeSettlement(instrument, time, "home", Decimal(0))
