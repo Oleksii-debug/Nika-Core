@@ -495,6 +495,103 @@ class V01ModelSettings:
             raise ModelSetupError(f"{field} має бути точним SHA-256.")
         return value
 
+    def _promotion_pin_for_revision(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        selection_id: str,
+        revision: int,
+    ) -> TaskModelArtifactPin | None:
+        rows = conn.execute(
+            "SELECT * FROM v01_model_promotions WHERE "
+            "(activated_revision = ? AND activated_selection_id = ?) OR "
+            "(rollback_revision = ? AND previous_selection_id = ?)",
+            (revision, selection_id, revision, selection_id),
+        ).fetchall()
+        if len(rows) > 1:
+            raise ModelSetupError(
+                "Збережена модель має неоднозначний запис просування."
+            )
+        if not rows:
+            return None
+        receipt = self._promotion_receipt(rows[0])
+        if (
+            receipt.activated_revision == revision
+            and receipt.activated_selection_id == selection_id
+        ):
+            return TaskModelArtifactPin(
+                decision_sha256=receipt.decision_sha256,
+                binding_sha256=receipt.binding_sha256,
+                role="challenger",
+                route_revision=revision,
+                artifact_sha256=receipt.challenger_artifact_sha256,
+                descriptor_digest=receipt.challenger_descriptor_digest,
+            )
+        if (
+            receipt.rollback_revision == revision
+            and receipt.previous_selection_id == selection_id
+        ):
+            return TaskModelArtifactPin(
+                decision_sha256=receipt.decision_sha256,
+                binding_sha256=receipt.binding_sha256,
+                role="rollback",
+                route_revision=revision,
+                artifact_sha256=receipt.base_artifact_sha256,
+                descriptor_digest=receipt.base_descriptor_digest,
+            )
+        raise ModelSetupError(
+            "Збережений запис просування не відповідає поточному маршруту."
+        )
+
+    def _task_artifact_pin(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        payload: Mapping[str, Any],
+        selection_id: str,
+    ) -> TaskModelArtifactPin | None:
+        raw = payload.get(_TASK_ARTIFACT_PIN_FIELD)
+        if raw is None:
+            return None
+        try:
+            pin = TaskModelArtifactPin.from_payload(raw)
+        except (TypeError, ValueError) as exc:
+            raise ModelSetupError(
+                "Посилання на артефакт моделі завдання пошкоджене."
+            ) from exc
+        row = conn.execute(
+            "SELECT * FROM v01_model_promotions WHERE decision_sha256 = ?",
+            (pin.decision_sha256,),
+        ).fetchone()
+        if row is None:
+            raise ModelSetupError(
+                "Запис просування для моделі завдання не знайдено."
+            )
+        receipt = self._promotion_receipt(row)
+        if receipt.binding_sha256 != pin.binding_sha256:
+            raise ModelSetupError(
+                "Артефакт моделі не збігається з навчальним доказом."
+            )
+        if pin.role == "challenger":
+            valid = (
+                selection_id == receipt.activated_selection_id
+                and pin.route_revision == receipt.activated_revision
+                and pin.artifact_sha256 == receipt.challenger_artifact_sha256
+                and pin.descriptor_digest == receipt.challenger_descriptor_digest
+            )
+        else:
+            valid = (
+                selection_id == receipt.previous_selection_id
+                and pin.route_revision == receipt.rollback_revision
+                and pin.artifact_sha256 == receipt.base_artifact_sha256
+                and pin.descriptor_digest == receipt.base_descriptor_digest
+            )
+        if not valid:
+            raise ModelSetupError(
+                "Артефакт моделі не відповідає прийнятому маршруту завдання."
+            )
+        return pin
+
     def activate_promoted_local_model(
         self,
         *,
