@@ -7,6 +7,7 @@ import pytest
 from nika_core.web_api import (
     WebApplicationBoundary,
     WebCommand,
+    WebCommandAdmissionError,
     WebCommandResult,
     WebCommandOutcomeUnknownError,
     WebPrincipal,
@@ -138,6 +139,17 @@ def test_payload_rejects_excessive_canonical_bytes() -> None:
                 }
             )
         )
+
+
+
+def test_dispatch_wraps_client_admission_without_exposing_raw_error() -> None:
+    boundary = WebApplicationBoundary(authorization=_Allow(True), handler=_Handler())
+    bad = _command()
+    bad["payload"] = {"value": math.nan}
+    with pytest.raises(WebCommandAdmissionError) as caught:
+        boundary.dispatch(principal=_principal(), command=bad)
+    assert str(caught.value) == "Web command was rejected by boundary admission"
+    assert isinstance(caught.value.__cause__, ValueError)
 
 
 def test_authorization_denial_never_reaches_handler() -> None:
