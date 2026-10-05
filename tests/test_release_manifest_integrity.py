@@ -309,6 +309,32 @@ def _write_outer_evidence(evidence: Path, artifact: Path) -> None:
     )
 
 
+def test_outer_evidence_fails_closed_when_artifact_snapshot_is_unstable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "NikaCore-1.0.0-windows-x64.zip"
+    artifact.write_bytes(b"candidate")
+    evidence = tmp_path / "evidence.json"
+    _write_outer_evidence(evidence, artifact)
+    original = release_module._stable_release_file_snapshot
+
+    def unstable(path: Path, *, scan_secrets: bool):
+        if path == artifact:
+            return None
+        return original(path, scan_secrets=scan_secrets)
+
+    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
+
+    assert release_module.verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=SOURCE_SHA,
+        artifact_reference="./dist/NikaCore-1.0.0-windows-x64.zip",
+        expected_product_version=PRODUCT_VERSION,
+    ) == ("distributable:unstable-artifact",)
+
+
 def _valid_release_zip(tmp_path: Path) -> tuple[Path, Path]:
     bundle, _ = _bundle(tmp_path)
     manifest = build_release_manifest(
