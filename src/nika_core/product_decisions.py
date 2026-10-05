@@ -33,6 +33,12 @@ def _is_lock_contention(exc: sqlite3.OperationalError) -> bool:
     }
 
 
+def _require_expected_row_version(value: object) -> int:
+    if type(value) is not int or value < 0:
+        raise ProductProjectError("expected_row_version must be a non-negative integer")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class StoredProductDecision:
     project_id: str
@@ -57,6 +63,7 @@ class ProductDecisionRepository:
         expected_row_version: int,
         idempotency_key: str,
     ) -> StoredProductDecision:
+        expected_row_version = _require_expected_row_version(expected_row_version)
         self._validate_input(decision, idempotency_key)
         fingerprint = hashlib.sha256(
             _canonical(
@@ -248,6 +255,7 @@ class ProductDecisionRepository:
         decision_id: str,
         expected_row_version: int,
     ) -> ProductProject:
+        expected_row_version = _require_expected_row_version(expected_row_version)
         project = self.projects.get(project_id)
         matching = [
             (index, requirement)
