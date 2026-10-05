@@ -225,6 +225,13 @@ consumed-material attestation, strict candidate-manifest digest, Registry traine
 trainer/runtime provenance, and three durable checkpoint identities remain in the same evidence
 object.
 
+## Schema-v5 migration boundary
+
+Schema-v4 physical reports are intentionally not upgraded in place. They do not contain the
+previous/trained adapter tensor-state identities now required by the physical evidence hash.
+Re-run the canonical two-step Windows physical pilot to produce fresh schema-v5 evidence; do not
+copy, infer, or synthesize the missing digests from an older report.
+
 ## Evidence boundaries
 
 A unit test, green CI run, or merely constructing a report is not physical-training proof.
