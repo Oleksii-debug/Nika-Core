@@ -45,7 +45,10 @@ def _bounded_metadata_value(value: object, *, field: str) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
-        raise RuntimeError(f"Runtime distribution {field} metadata is invalid")
+        # Runtime metadata corruption is a release-evidence failure, not caller misuse.
+        raise RuntimeError(  # noqa: TRY004
+            f"Runtime distribution {field} metadata is invalid"
+        )
     text = value.strip()
     if not text:
         return None
