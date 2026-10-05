@@ -2,12 +2,21 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import NoReturn
 
 from nika_core.data.sqlite import SQLiteStore
+
+
+_JSON_MAX_BYTES = 1024 * 1024
+_JSON_MAX_DEPTH = 64
+_JSON_MAX_NODES = 10_000
+_JSON_MAX_INTEGER_BITS = 4096
+_CHECKSUM_HEX_LENGTH = 64
+_HEX_DIGITS = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True, slots=True)
@@ -19,17 +28,79 @@ class Checkpoint:
     checksum_sha256: str
 
 
-def _canonical_json(payload: dict[str, object]) -> str:
+def _utf8_size(value: str) -> int:
     try:
-        return json.dumps(
+        return len(value.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        raise ValueError("Checkpoint payload text must be valid UTF-8") from exc
+
+
+def _validate_payload_resources(payload: object) -> None:
+    nodes = 0
+    raw_utf8_bytes = 0
+    stack: list[tuple[object, int]] = [(payload, 1)]
+
+    while stack:
+        value, depth = stack.pop()
+        nodes += 1
+        if nodes > _JSON_MAX_NODES:
+            raise ValueError("Checkpoint payload exceeds the JSON node limit")
+        if depth > _JSON_MAX_DEPTH:
+            raise ValueError("Checkpoint payload exceeds the JSON depth limit")
+
+        if value is None or type(value) is bool:
+            continue
+        if type(value) is int:
+            if value.bit_length() > _JSON_MAX_INTEGER_BITS:
+                raise ValueError("Checkpoint payload integer exceeds the bit limit")
+            continue
+        if type(value) is float:
+            if not math.isfinite(value):
+                raise ValueError("Checkpoint payload must contain finite numbers")
+            continue
+        if type(value) is str:
+            raw_utf8_bytes += _utf8_size(value)
+            if raw_utf8_bytes > _JSON_MAX_BYTES:
+                raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
+            continue
+        if isinstance(value, dict):
+            if len(value) > _JSON_MAX_NODES - nodes:
+                raise ValueError("Checkpoint payload exceeds the JSON node limit")
+            for key, item in value.items():
+                if type(key) is str:
+                    raw_utf8_bytes += _utf8_size(key)
+                    if raw_utf8_bytes > _JSON_MAX_BYTES:
+                        raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
+                elif type(key) is int:
+                    if key.bit_length() > _JSON_MAX_INTEGER_BITS:
+                        raise ValueError("Checkpoint payload integer key exceeds the bit limit")
+                elif type(key) is float and not math.isfinite(key):
+                    raise ValueError("Checkpoint payload must contain finite key values")
+                stack.append((item, depth + 1))
+            continue
+        if isinstance(value, (list, tuple)):
+            if len(value) > _JSON_MAX_NODES - nodes:
+                raise ValueError("Checkpoint payload exceeds the JSON node limit")
+            for item in value:
+                stack.append((item, depth + 1))
+
+
+def _canonical_json(payload: dict[str, object]) -> str:
+    _validate_payload_resources(payload)
+    try:
+        body = json.dumps(
             payload,
             allow_nan=False,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
         )
-    except (RecursionError, TypeError, ValueError) as exc:
+        body_bytes = body.encode("utf-8")
+    except (RecursionError, TypeError, UnicodeEncodeError, ValueError) as exc:
         raise ValueError("Checkpoint payload must be a JSON object with finite values") from exc
+    if len(body_bytes) > _JSON_MAX_BYTES:
+        raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
+    return body
 
 
 def _reject_non_finite(_value: str) -> NoReturn:
@@ -42,10 +113,26 @@ def _require_sqlite_text(value: object, field_name: str) -> str:
     return value
 
 
+def _require_checksum(checksum_sha256: object) -> str:
+    checksum_text = _require_sqlite_text(checksum_sha256, "checksum")
+    if (
+        len(checksum_text) != _CHECKSUM_HEX_LENGTH
+        or any(char not in _HEX_DIGITS for char in checksum_text)
+    ):
+        raise ValueError("Checkpoint checksum is invalid")
+    return checksum_text
+
+
 def _decode_payload(payload_json: object, checksum_sha256: object) -> dict[str, object]:
     payload_text = _require_sqlite_text(payload_json, "payload")
-    checksum_text = _require_sqlite_text(checksum_sha256, "checksum")
-    expected = hashlib.sha256(payload_text.encode("utf-8")).hexdigest()
+    try:
+        payload_bytes = payload_text.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("Checkpoint payload is invalid UTF-8") from exc
+    if len(payload_bytes) > _JSON_MAX_BYTES:
+        raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
+    checksum_text = _require_checksum(checksum_sha256)
+    expected = hashlib.sha256(payload_bytes).hexdigest()
     if expected != checksum_text:
         raise ValueError("Checkpoint checksum mismatch")
     try:
@@ -57,6 +144,42 @@ def _decode_payload(payload_json: object, checksum_sha256: object) -> dict[str, 
     if _canonical_json(payload) != payload_text:
         raise ValueError("Checkpoint payload is not canonical JSON")
     return payload
+
+
+def _decode_persisted_payload(
+    *,
+    payload_storage_type: object,
+    payload_byte_length: object,
+    payload_blob: object,
+    checksum_storage_type: object,
+    checksum_byte_length: object,
+    checksum_blob: object,
+) -> dict[str, object]:
+    if payload_storage_type != "text":
+        raise TypeError("Checkpoint payload storage must be SQLite TEXT")
+    if type(payload_byte_length) is not int:
+        raise TypeError("Checkpoint payload byte length must be an integer")
+    if payload_byte_length > _JSON_MAX_BYTES:
+        raise ValueError("Checkpoint payload exceeds the UTF-8 byte limit")
+    if type(payload_blob) is not bytes or len(payload_blob) != payload_byte_length:
+        raise ValueError("Checkpoint payload bytes are incomplete")
+    try:
+        payload_text = payload_blob.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Checkpoint payload is invalid UTF-8") from exc
+
+    if checksum_storage_type != "text":
+        raise TypeError("Checkpoint checksum storage must be SQLite TEXT")
+    if checksum_byte_length != _CHECKSUM_HEX_LENGTH:
+        raise ValueError("Checkpoint checksum is invalid")
+    if type(checksum_blob) is not bytes or len(checksum_blob) != _CHECKSUM_HEX_LENGTH:
+        raise ValueError("Checkpoint checksum bytes are incomplete")
+    try:
+        checksum_text = checksum_blob.decode("ascii")
+    except UnicodeDecodeError as exc:
+        raise ValueError("Checkpoint checksum is invalid") from exc
+
+    return _decode_payload(payload_text, checksum_text)
 
 
 class CheckpointService:
@@ -88,21 +211,36 @@ class CheckpointService:
         with self.store.connection() as conn:
             row = conn.execute(
                 """
-                SELECT checkpoint_id, task_id, stage, payload_json, checksum_sha256
+                SELECT checkpoint_id,
+                       task_id,
+                       stage,
+                       typeof(payload_json) AS payload_storage_type,
+                       length(CAST(payload_json AS BLOB)) AS payload_byte_length,
+                       substr(CAST(payload_json AS BLOB), 1, ?) AS payload_blob,
+                       typeof(checksum_sha256) AS checksum_storage_type,
+                       length(CAST(checksum_sha256 AS BLOB)) AS checksum_byte_length,
+                       substr(CAST(checksum_sha256 AS BLOB), 1, ?) AS checksum_blob
                 FROM checkpoints
                 WHERE task_id = ?
                 ORDER BY rowid DESC
                 LIMIT 1
                 """,
-                (task_id,),
+                (_JSON_MAX_BYTES + 1, _CHECKSUM_HEX_LENGTH + 1, task_id),
             ).fetchone()
         if row is None:
             return None
-        payload = _decode_payload(row["payload_json"], row["checksum_sha256"])
+        payload = _decode_persisted_payload(
+            payload_storage_type=row["payload_storage_type"],
+            payload_byte_length=row["payload_byte_length"],
+            payload_blob=row["payload_blob"],
+            checksum_storage_type=row["checksum_storage_type"],
+            checksum_byte_length=row["checksum_byte_length"],
+            checksum_blob=row["checksum_blob"],
+        )
         return Checkpoint(
             row["checkpoint_id"],
             row["task_id"],
             row["stage"],
             payload,
-            row["checksum_sha256"],
+            row["checksum_blob"].decode("ascii"),
         )
