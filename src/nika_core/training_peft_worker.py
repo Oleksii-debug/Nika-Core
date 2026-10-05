@@ -5,7 +5,6 @@ import json
 import math
 import os
 import re
-import shutil
 import stat
 import sys
 from dataclasses import dataclass
@@ -850,7 +849,6 @@ def _checkpoint_payload_sha256(checkpoint: Path) -> str:
         )
     except OSError:
         _fail("checkpoint_payload_invalid")
-
     entries: list[dict[str, object]] = []
     total_bytes = 0
     for path in paths:
@@ -886,7 +884,6 @@ def _checkpoint_payload_sha256(checkpoint: Path) -> str:
         ):
             _fail("checkpoint_payload_changed")
         entries.append({"path": relative, "sha256": digest, "size_bytes": before.st_size})
-
     if not entries:
         _fail("checkpoint_payload_empty")
     encoded = _canonical_json_bytes(entries)
@@ -1214,7 +1211,7 @@ def _train_one_step(
     if candidate.exists():
         _fail("candidate_publish_conflict")
     temporary = candidate.parent / f".{_CANDIDATE_FILE}.tmp"
-    adapter_config = _adapter_config_snapshot(adapter_dir, request)
+    adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
         config=config,
@@ -1247,7 +1244,34 @@ def _train_one_step(
     return resume_state, candidate_sha256
 
 
-def _adapter_config_snapshot(path: Path, request: ParsedRequest) -> dict[str, object]:
+def _looks_like_private_local_path(value: str) -> bool:
+    lowered = value.casefold()
+    return (
+        value.startswith(("/", "\\"))
+        or re.match(r"^[A-Za-z]:[\\\\/]", value) is not None
+        or lowered.startswith("file:")
+    )
+
+
+def _reject_private_adapter_config_paths(value: object) -> None:
+    if type(value) is str:
+        if _looks_like_private_local_path(value):
+            _fail("adapter_config_private_path")
+        return
+    if type(value) is list:
+        for item in value:
+            _reject_private_adapter_config_paths(item)
+        return
+    if type(value) is dict:
+        for item in value.values():
+            _reject_private_adapter_config_paths(item)
+
+
+def _adapter_config_snapshot(
+    path: Path,
+    request: ParsedRequest,
+    config: TrainerConfig,
+) -> dict[str, object]:
     config_path = path / "adapter_config.json"
     _require_regular_unlinked(config_path, code="adapter_config_missing")
     try:
@@ -1268,9 +1292,23 @@ def _adapter_config_snapshot(path: Path, request: ParsedRequest) -> dict[str, ob
         _fail("adapter_config_invalid")
     if type(value) is not dict:
         _fail("adapter_config_invalid")
+    expected_targets = set(config.lora_target_modules)
+    observed_targets = value.get("target_modules")
+    if (
+        value.get("r") != config.lora_r
+        or value.get("lora_alpha") != config.lora_alpha
+        or value.get("lora_dropout") != config.lora_dropout
+        or value.get("bias") != "none"
+        or value.get("task_type") != "CAUSAL_LM"
+        or type(observed_targets) is not list
+        or any(type(item) is not str for item in observed_targets)
+        or set(observed_targets) != expected_targets
+    ):
+        _fail("adapter_config_training_plan_mismatch")
     snapshot = dict(value)
     snapshot["base_model_name_or_path"] = request.base_artifact_ref
     snapshot.pop("revision", None)
+    _reject_private_adapter_config_paths(snapshot)
     return snapshot
 
 
