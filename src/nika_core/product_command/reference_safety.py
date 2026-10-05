@@ -92,6 +92,9 @@ def safe_evidence_reference(reference: str) -> str:
     single-line presentation, or beyond the public evidence byte budget.
     """
 
+    if type(reference) is not str:
+        raise ValueError("evidence reference must be a plain string")
+
     encoded = _strict_utf8(reference)
     if len(encoded) > _MAX_EVIDENCE_REFERENCE_BYTES:
         digest = hashlib.sha256(encoded).hexdigest()
