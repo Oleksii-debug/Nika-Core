@@ -86,7 +86,10 @@ def test_restore_default_expected_conflict_returns_bounded_error(tmp_path: Path,
     response = bridge.restore_default("nav.agents")
 
     assert response["ok"] is False
-    assert response["message"] == "shortcut conflict with nav.tasks"
+    assert response["message"] == (
+        "Не вдалося відновити комбінацію за замовчуванням: "
+        "перевірте конфлікти карти клавіш."
+    )
 
 
 def test_list_actions_contains_unexpected_failure_without_exposing_details(
