@@ -1319,6 +1319,8 @@ def _train_one_step(
         or not stat.S_ISDIR(parent_stat.st_mode)
     ):
         _fail("candidate_publish_failed")
+    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+        _fail("checkpoint_payload_changed_before_candidate")
     temporary = _reserve_candidate_temporary(candidate)
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
@@ -1340,6 +1342,8 @@ def _train_one_step(
             os.fspath(temporary),
             metadata={"nika_adapter_manifest": manifest_json},
         )
+        if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+            _fail("checkpoint_payload_changed_during_candidate")
         temporary_stat = _require_regular_unlinked(
             temporary,
             code="candidate_publish_failed",
