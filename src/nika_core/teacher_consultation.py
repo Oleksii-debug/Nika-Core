@@ -105,6 +105,8 @@ class TeacherConsultationSpec:
             ModelMessage(role=message.role, content=message.content)
             for message in self.messages
         )
+        for message in canonical_messages:
+            _utf8_bytes(message.content, "teacher message content")
         object.__setattr__(self, "messages", canonical_messages)
         request_chars = sum(len(message.content) for message in canonical_messages)
         if request_chars > canonical_policy.max_request_chars:
@@ -272,6 +274,22 @@ class TeacherConsultationService:
                     failure_effect=ModelFailureEffect.UNKNOWN,
                 ),
             )
+        try:
+            _utf8_bytes(response.text, "teacher response text")
+        except ValueError:
+            return TeacherConsultationResult(
+                text=None,
+                evidence=_failure_evidence(
+                    spec=spec,
+                    request_chars=request_chars,
+                    request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
+                    status=TeacherConsultationStatus.FAILED,
+                    code=ModelErrorCode.PROVIDER_ERROR,
+                    retryable=False,
+                    failure_effect=ModelFailureEffect.UNKNOWN,
+                ),
+            )
 
         response_chars = len(response.text)
         if response_chars > spec.policy.max_response_chars:
@@ -356,21 +374,28 @@ def _bounded_identity(value: object, name: str) -> str:
     return value
 
 
+def _utf8_bytes(value: str, name: str) -> bytes:
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError(f"{name} must be valid UTF-8 text") from error
+
+
 def _fingerprint_messages(messages: tuple[ModelMessage, ...]) -> str:
     digest = hashlib.sha256()
     for message in messages:
-        for value in (message.role, message.content):
-            encoded = value.encode("utf-8", errors="surrogatepass")
+        for name, value in (
+            ("teacher message role", message.role),
+            ("teacher message content", message.content),
+        ):
+            encoded = _utf8_bytes(value, name)
             digest.update(len(encoded).to_bytes(8, "big"))
             digest.update(encoded)
     return f"sha256:{digest.hexdigest()}"
 
 
 def _sha256_text(value: str) -> str:
-    digest = hashlib.sha256(
-        value.encode("utf-8", errors="surrogatepass")
-    ).hexdigest()
-    return f"sha256:{digest}"
+    return f"sha256:{hashlib.sha256(_utf8_bytes(value, 'teacher response text')).hexdigest()}"
 
 
 def _validated_usage(response: ModelResponse) -> tuple[int | None, int | None, int | None]:
