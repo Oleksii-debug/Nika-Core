@@ -45,7 +45,7 @@ class NetworkResearchRepository:
             if collision is not None:
                 raise ValueError("source_id is already owned by a local source")
             existing = conn.execute(
-                "SELECT url FROM research_http_sources WHERE source_id=?",
+                "SELECT url, workspace_id FROM research_http_sources WHERE source_id=?",
                 (source.source_id,),
             ).fetchone()
             if existing is None:
@@ -62,22 +62,26 @@ class NetworkResearchRepository:
                         now,
                     ),
                 )
+            elif existing["workspace_id"] != source.workspace_id:
+                # Snapshots, artifact identity and document origins are scoped to
+                # the original workspace. A source ID cannot be reassigned by
+                # registering it from another workspace.
+                raise ValueError("HTTP source_id belongs to a different workspace")
             elif existing["url"] == source.locator:
                 conn.execute(
                     """UPDATE research_http_sources
-                    SET workspace_id=?, updated_at=? WHERE source_id=?""",
-                    (source.workspace_id, now, source.source_id),
+                    SET updated_at=? WHERE source_id=?""",
+                    (now, source.source_id),
                 )
             else:
                 conn.execute(
                     """UPDATE research_http_sources SET
-                        workspace_id=?, url=?, final_url=NULL, etag=NULL, last_modified=NULL,
+                        url=?, final_url=NULL, etag=NULL, last_modified=NULL,
                         current_raw_sha256=NULL, freshness=?, last_attempt_at=NULL,
                         last_success_at=NULL, last_status_code=NULL, last_error_code=NULL,
                         last_error_message=NULL, updated_at=?
                     WHERE source_id=?""",
                     (
-                        source.workspace_id,
                         source.locator,
                         FreshnessState.UNKNOWN.value,
                         now,

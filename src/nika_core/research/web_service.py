@@ -28,6 +28,7 @@ from nika_core.research.local import (
 from nika_core.research.models import (
     BlobArtifact,
     ExtractionStatus,
+    HttpSourceState,
     RefreshDisposition,
     RefreshResult,
     SourceKind,
@@ -73,6 +74,16 @@ class HttpResearchService:
         document_limits: DocumentLimits | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
+        try:
+            repository_path = repository._store.path.resolve(strict=False)
+            network_path = network_repository._store.path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(
+                "research repositories must use the same SQLite store"
+            ) from exc
+        if repository_path != network_path:
+            raise ValueError("research repositories must use the same SQLite store")
+
         self._repository = repository
         self._network = network_repository
         self._blobs = blob_store
@@ -152,6 +163,36 @@ class HttpResearchService:
             row["last_modified"],
             row["last_status_code"],
         )
+
+    def _cached_blob_is_verified(self, state: HttpSourceState) -> bool:
+        """Validate the actual raw artifact before trusting conditional HTTP evidence."""
+        if state.current_raw_sha256 is None:
+            return False
+        with self._network._store.connection() as conn:
+            row = conn.execute(
+                """SELECT a.artifact_id, a.workspace_id, a.raw_sha256,
+                    a.byte_size, a.storage_relpath
+                FROM research_http_snapshots s
+                JOIN corpus_artifacts a ON a.artifact_id = s.artifact_id
+                WHERE s.source_id = ? AND s.raw_sha256 = ?
+                    AND a.workspace_id = ? AND a.raw_sha256 = s.raw_sha256
+                LIMIT 1""",
+                (state.source_id, state.current_raw_sha256, state.workspace_id),
+            ).fetchone()
+        if row is None:
+            return False
+        artifact = BlobArtifact(
+            artifact_id=row["artifact_id"],
+            workspace_id=row["workspace_id"],
+            raw_sha256=row["raw_sha256"],
+            byte_size=row["byte_size"],
+            storage_relpath=row["storage_relpath"],
+        )
+        try:
+            self._blobs.resolve(artifact)
+        except (BlobStoreError, OSError, RuntimeError, TypeError, ValueError):
+            return False
+        return True
 
     def _extract_artifact(
         self,
@@ -369,6 +410,12 @@ class HttpResearchService:
                 )
 
         validators = HttpValidators(etag=state.etag, last_modified=state.last_modified)
+        if state.current_raw_sha256 is not None and (
+            validators.etag or validators.last_modified
+        ) and not self._cached_blob_is_verified(state):
+            # A digest in SQLite is not proof that its raw file survived a crash
+            # or external corruption. Re-fetch without an unusable validator.
+            validators = HttpValidators()
         result: HttpFetchResult | None = None
         attempts = 0
         for attempt in range(1, self._policy.max_attempts + 1):
@@ -387,6 +434,20 @@ class HttpResearchService:
                     disposition=RefreshDisposition.FAILED,
                     error_code="unexpected_not_modified",
                     message="HTTP 304 without a validated cached source",
+                )
+            elif (
+                result.disposition is RefreshDisposition.NOT_MODIFIED
+                and not self._cached_blob_is_verified(state)
+            ):
+                # Revalidate after the network round trip. A valid cached blob can
+                # disappear or be replaced after conditional-request preflight but
+                # before a 304 response arrives; that response must not promote
+                # unverifiable bytes to CURRENT.
+                result = replace(
+                    result,
+                    disposition=RefreshDisposition.FAILED,
+                    error_code="cached_blob_changed_during_refresh",
+                    message="cached HTTP content changed during conditional refresh",
                 )
             if result.retryable and attempt < self._policy.max_attempts:
                 self._record_fetch_attempt(
@@ -431,18 +492,50 @@ class HttpResearchService:
 
         if result.body is None or result.media_type is None:
             raise RuntimeError("successful HTTP fetch omitted body or media type")
-        artifact = self._blobs.put_bytes(
-            state.workspace_id,
-            result.body,
-            max_bytes=self._policy.max_response_bytes,
-        )
-        title = _source_title(result.final_url)
-        self._repository.record_artifact(
-            source,
-            artifact,
-            media_type=result.media_type,
-            original_name=title,
-        )
+        try:
+            artifact = self._blobs.put_bytes(
+                state.workspace_id,
+                result.body,
+                max_bytes=self._policy.max_response_bytes,
+            )
+            title = _source_title(result.final_url)
+            self._repository.record_artifact(
+                source,
+                artifact,
+                media_type=result.media_type,
+                original_name=title,
+            )
+        except (BlobStoreError, OSError, RuntimeError):
+            # Never mark the old digest CURRENT if its on-disk blob is corrupt
+            # or the replacement could not be durably stored.
+            failed = replace(
+                result,
+                disposition=RefreshDisposition.FAILED,
+                error_code="blob_storage_failed",
+                message="HTTP content could not be stored or verified",
+            )
+            self._record_fetch_attempt(
+                source_id=source_id,
+                attempt_number=attempts,
+                result=failed,
+                task_id=task_id,
+            )
+            self._network.finalize_source(
+                source_id,
+                disposition=failed.disposition,
+                final_url=failed.final_url,
+                status_code=failed.status_code,
+                error_code=failed.error_code,
+                error_message=failed.message,
+            )
+            return RefreshResult(
+                source_id=source_id,
+                disposition=failed.disposition,
+                attempts=attempts,
+                status_code=failed.status_code,
+                error_code=failed.error_code,
+                message=failed.message,
+            )
         if artifact.raw_sha256 == state.current_raw_sha256:
             self._record_fetch_attempt(
                 source_id=source_id,
