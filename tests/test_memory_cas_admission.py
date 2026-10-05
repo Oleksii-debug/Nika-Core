@@ -197,6 +197,40 @@ def test_conditional_put_rejects_non_datetime_revision_before_sql(
         assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 0
 
 
+def test_expired_write_commits_cleanup_and_audit_before_runtime_error(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    audit = AuditLog(store)
+    memory = MemoryService(store, audit)
+    memory.put(**_identity(), value={"generation": "old"})
+
+    with pytest.raises(RuntimeError, match="expired during write"):
+        memory.put(
+            **_identity(),
+            value={"generation": "expired"},
+            expires_at=datetime.now(UTC) - timedelta(seconds=1),
+        )
+
+    assert memory.get(**_identity()) is None
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM memory_records WHERE scope = ? AND owner_id = ? "
+            "AND namespace = ? AND memory_key = ?",
+            ("workspace", "research", "policy", "ranking"),
+        ).fetchone()[0]
+    assert count == 0
+
+    events = audit.list_for(
+        entity_type="memory",
+        entity_id="workspace:research:policy:ranking",
+    )
+    assert [event.event_type for event in events] == [
+        "memory.upserted",
+        "memory.upserted",
+    ]
+
+
 def test_stale_conditional_write_preserves_newer_minimized_winner(tmp_path: Path) -> None:
     store = _store(tmp_path)
     memory = MemoryService(store)
