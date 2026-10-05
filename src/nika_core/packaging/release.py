@@ -164,7 +164,7 @@ def _safe_files(bundle_dir: Path) -> tuple[Path, ...]:
 
 
 def _canonical_relative_path(value: object) -> bool:
-    if not isinstance(value, str) or not value or "\x00" in value:
+    if type(value) is not str or not value or "\x00" in value:
         return False
     if "\\" in value or ":" in value or value in {".", ".."}:
         return False
@@ -182,7 +182,7 @@ def _canonical_relative_path(value: object) -> bool:
 
 
 def _release_path_is_secret(value: object) -> bool:
-    if not isinstance(value, str):
+    if type(value) is not str:
         return False
     for part in PurePosixPath(value).parts:
         identity = part.casefold()
@@ -196,7 +196,7 @@ def _release_path_is_secret(value: object) -> bool:
 def _canonical_release_path(value: object) -> bool:
     return (
         _canonical_relative_path(value)
-        and isinstance(value, str)
+        and type(value) is str
         and value.casefold() != _RELEASE_MANIFEST_NAME
     )
 
@@ -282,11 +282,13 @@ def _archive_member_contains_secret_assignment(
 
 
 def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
+    if type(manifest) is not ReleaseManifest:
+        return ("manifest:type",)
     findings: list[str] = []
     if type(manifest.manifest_version) is not int or manifest.manifest_version != _MANIFEST_VERSION:
         findings.append("manifest:schema-version")
     if (
-        not isinstance(manifest.product, str)
+        type(manifest.product) is not str
         or not manifest.product
         or manifest.product != manifest.product.strip()
     ):
@@ -294,18 +296,18 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
     if not _valid_product_version(manifest.version):
         findings.append("manifest:product-version")
     if (
-        not isinstance(manifest.source_sha, str)
+        type(manifest.source_sha) is not str
         or not _SOURCE_SHA_RE.fullmatch(manifest.source_sha)
     ):
         findings.append("manifest:source-sha")
-    if not isinstance(manifest.files, tuple) or not manifest.files:
+    if type(manifest.files) is not tuple or not manifest.files:
         findings.append("manifest:files")
         return tuple(findings)
 
     seen_paths: set[str] = set()
     seen_windows_paths: set[str] = set()
     for index, entry in enumerate(manifest.files):
-        if not isinstance(entry, ReleaseFile):
+        if type(entry) is not ReleaseFile:
             findings.append(f"manifest:file-type:{index}")
             continue
         if not _canonical_release_path(entry.path):
@@ -323,7 +325,7 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
                 seen_windows_paths.add(windows_identity)
         if type(entry.size) is not int or entry.size < 0:
             findings.append(f"manifest:size-format:{index}")
-        if not isinstance(entry.sha256, str) or not _SHA256_RE.fullmatch(entry.sha256):
+        if type(entry.sha256) is not str or not _SHA256_RE.fullmatch(entry.sha256):
             findings.append(f"manifest:sha256-format:{index}")
     return tuple(findings)
 
@@ -518,7 +520,9 @@ def verify_release_archive(
     When expected_product_version is provided, bind the embedded manifest version to
     that trusted release identity in addition to the exact source and file evidence.
     """
-    normalized_source_sha = source_sha.strip().casefold()
+    if type(source_sha) is not str:
+        return ("archive:source-sha-format",)
+    normalized_source_sha = source_sha.casefold()
     if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
         return ("archive:source-sha-format",)
     if expected_product_version is not None and not _valid_product_version(
@@ -643,9 +647,13 @@ def verify_distributable_evidence(
     immediately before upload.
     """
     findings: list[str] = []
-    normalized_source_sha = source_sha.strip().casefold()
+    if type(source_sha) is not str:
+        return ("distributable:source-sha-format",)
+    normalized_source_sha = source_sha.casefold()
     if not _SOURCE_SHA_RE.fullmatch(normalized_source_sha):
         return ("distributable:source-sha-format",)
+    if type(artifact_reference) is not str:
+        return ("distributable:artifact-reference-format",)
     if not _valid_product_version(expected_product_version):
         return ("distributable:expected-product-version-format",)
     if not artifact_path.is_file():
@@ -690,7 +698,7 @@ def verify_distributable_evidence(
         findings.append("distributable:size")
 
     expected_sha256 = payload.get("distributable_zip_sha256")
-    if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256):
+    if type(expected_sha256) is not str or not _SHA256_RE.fullmatch(expected_sha256):
         findings.append("distributable:sha256-format")
     elif _sha256(artifact_path) != expected_sha256:
         findings.append("distributable:sha256")
