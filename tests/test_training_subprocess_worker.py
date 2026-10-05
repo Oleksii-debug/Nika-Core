@@ -265,6 +265,59 @@ sys.stdout.write(json.dumps(response))
     assert second.candidate_sha256 == "b" * 64
 
 
+def test_resume_rejects_tampered_material_attestation_before_process_effect(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "second-step-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+if request["step_index"] == 1:
+    Path({str(marker)!r}).write_text("started", encoding="utf-8")
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{"step": request["step_index"]}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    first = worker.step(
+        spec=_spec(materials),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+    tampered = json.loads(json.dumps(first.resume_state))
+    envelope = tampered["_nika_subprocess"]
+    assert isinstance(envelope, dict)
+    envelope["consumed_materials_sha256"] = "0" * 64
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=1,
+            resume_state=tampered,
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "resume_state_material_attestation_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
 def test_resume_binds_trainer_artifact_id_even_when_digest_is_same(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
