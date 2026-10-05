@@ -365,10 +365,7 @@ class BatchCursor:
                 target.operation_key,
                 _completion_envelope(clean_result, next_batch_not_before),
             )
-        durable_result, durable_due = _decode_completion_result(
-            record.result,
-            fallback_result=clean_result,
-        )
+        durable_result, durable_due = _decode_completion_result(record.result)
         self._confirm_from_durable(target, durable_result)
         self._advance(durable_due)
         self._persist()
@@ -714,15 +711,11 @@ def _completion_envelope(
     }
 
 
-def _decode_completion_result(
-    raw: Any,
-    *,
-    fallback_result: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], datetime | None]:
+def _decode_completion_result(raw: Any) -> tuple[dict[str, Any], datetime | None]:
     if raw is None:
-        if fallback_result is None:
-            raise BatchCursorStateError("completed effect is missing durable result")
-        return _json_copy(fallback_result), None
+        # A caller-supplied value is not proof that an earlier COMPLETED
+        # reservation recorded the same external effect.
+        raise BatchCursorStateError("completed effect is missing durable result")
     if not isinstance(raw, dict):
         raise BatchCursorStateError("completed effect result is malformed")
 
