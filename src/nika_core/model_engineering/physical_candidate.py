@@ -9,7 +9,11 @@ from nika_core.model_artifacts import (
     ModelArtifactResources,
     ModelIntegrityBasis,
 )
-from nika_core.model_engineering.contracts import ModelCandidate, validate_model_candidate
+from nika_core.model_engineering.contracts import (
+    ModelCandidate,
+    benchmark_configuration_sha256,
+    validate_model_candidate,
+)
 from nika_core.model_engineering.runner import ModelCompletionPort
 from nika_core.model_gateway.contracts import ModelRequest, ModelResponse, ProviderKind
 from nika_core.training_artifacts import verify_candidate_artifact
@@ -114,6 +118,7 @@ class PhysicalCandidateGateway:
     ) -> None:
         _validate_candidate_binding(candidate, descriptor)
         self._gateway = gateway
+        self._candidate_id = candidate.candidate_id
         self._candidate_evidence_sha256 = candidate.evidence_sha256
         self._provider_id = candidate.provider_id
         self._provider_kind = candidate.provider_kind
@@ -157,6 +162,43 @@ class PhysicalCandidateGateway:
                 "candidate physical verification does not match evaluation binding"
             )
 
+    def _validate_benchmark_evidence(self, request: ModelRequest) -> None:
+        metadata = request.metadata
+        required = (
+            "benchmark_configuration_sha256",
+            "benchmark_execution_config_sha256",
+            "evaluation_set_id",
+            "evaluation_set_sha256",
+            "evaluation_set_version",
+            "model_candidate_id",
+        )
+        if any(key not in metadata for key in required):
+            raise PhysicalCandidateEvaluationError(
+                "benchmark request is missing candidate/evaluation evidence"
+            )
+        if metadata["model_candidate_id"] != self._candidate_id:
+            raise PhysicalCandidateEvaluationError(
+                "benchmark request candidate identity does not match the bound candidate"
+            )
+        try:
+            expected_configuration = benchmark_configuration_sha256(
+                candidate_evidence_sha256=self._candidate_evidence_sha256,
+                evaluation_set_id=metadata["evaluation_set_id"],
+                evaluation_set_version=metadata["evaluation_set_version"],
+                evaluation_set_sha256=metadata["evaluation_set_sha256"],
+                execution_config_sha256=metadata[
+                    "benchmark_execution_config_sha256"
+                ],
+            )
+        except (TypeError, ValueError) as exc:
+            raise PhysicalCandidateEvaluationError(
+                "benchmark request evidence metadata is invalid"
+            ) from exc
+        if metadata["benchmark_configuration_sha256"] != expected_configuration:
+            raise PhysicalCandidateEvaluationError(
+                "benchmark request configuration does not match the bound candidate"
+            )
+
     def _validate_request(self, request: ModelRequest) -> None:
         if type(request) is not ModelRequest:
             raise TypeError("request must be an exact ModelRequest")
@@ -177,6 +219,7 @@ class PhysicalCandidateGateway:
             raise PhysicalCandidateEvaluationError(
                 "physical candidate evaluation forbids fallback provider substitution"
             )
+        self._validate_benchmark_evidence(request)
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
         self._validate_request(request)
