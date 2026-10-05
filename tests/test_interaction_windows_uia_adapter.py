@@ -234,6 +234,46 @@ def test_falsey_injected_backend_is_not_replaced_by_live_backend() -> None:
     assert snapshot.target.window.native_handle == 100
 
 
+def test_backend_without_guarded_action_contract_fails_closed_before_effect() -> None:
+    backend = FakeBackend()
+    backend.guarded_action = None  # type: ignore[method-assign]
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    with pytest.raises(
+        UnsupportedInteractionError,
+        match="does not implement guarded action authority",
+    ):
+        adapter.act(node, InteractionAction.INVOKE, None)
+
+    assert backend.calls == []
+
+
+def test_backend_without_guarded_focus_contract_fails_closed_before_effect() -> None:
+    backend = FakeBackend()
+    backend.guarded_focus = None  # type: ignore[method-assign]
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    with pytest.raises(
+        UnsupportedInteractionError,
+        match="does not implement guarded focus authority",
+    ):
+        adapter.focus(node)
+
+    assert backend.calls == []
+
+
+def test_restore_focus_without_guarded_contract_returns_false_without_effect() -> None:
+    backend = FakeBackend()
+    backend.guarded_focus = None  # type: ignore[method-assign]
+    adapter = _adapter(backend)
+    node = adapter.observe().controls[0]
+
+    assert adapter.restore_focus(node.node_id) is False
+    assert backend.calls == []
+
+
 class _LookalikeNode:
     def __init__(self, node) -> None:
         self.node_id = node.node_id
