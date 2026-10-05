@@ -242,7 +242,6 @@ def test_risk_position_limit_does_not_merge_equal_ids_from_other_venue() -> None
     assert approved.intent.instrument == _INSTRUMENT_B
 
 
-
 def test_risk_generated_approval_id_binds_full_instrument_identity() -> None:
     snapshot = AccountSnapshot(
         cash=Decimal(1000),
@@ -310,7 +309,6 @@ def test_replay_book_state_does_not_alias_shared_approval_id_across_venues() -> 
             instrument_identity(_INSTRUMENT_B): Decimal(100),
         }
     ).positions) == 2
-
 
 
 def test_execution_uses_host_submission_slice_not_strategy_proposal_slice() -> None:
@@ -440,7 +438,6 @@ def test_persistence_records_complete_instrument_identity(tmp_path) -> None:
     assert positions[0]["venue_timezone"] == "Europe/Bratislava"
     assert positions[0]["instrument_id"] == "SAME"
     assert positions[0]["currency"] == "USD"
-
 
 
 def test_persistence_isolates_equal_fill_ids_and_accounts_between_runs(tmp_path) -> None:
@@ -604,8 +601,6 @@ def test_adverse_slippage_never_crosses_limit_price(
 
     assert update.fill is not None
     assert update.fill.price == Decimal(100)
-
-
 
 
 def test_nonempty_v2_state_fails_closed_without_run_scope(tmp_path) -> None:
