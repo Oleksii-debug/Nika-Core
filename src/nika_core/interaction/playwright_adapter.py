@@ -49,6 +49,12 @@ _WINDOWS_RESERVED_FILENAMES: Final = frozenset(
         "nul",
         "conin$",
         "conout$",
+        "com¹",
+        "com²",
+        "com³",
+        "lpt¹",
+        "lpt²",
+        "lpt³",
         *(f"com{number}" for number in range(1, 10)),
         *(f"lpt{number}" for number in range(1, 10)),
     }
@@ -58,9 +64,10 @@ _WINDOWS_RESERVED_FILENAMES: Final = frozenset(
 def _safe_download_filename(value: object) -> str:
     if type(value) is not str:
         raise UnsupportedInteractionError("download did not provide a safe filename")
-    # Browser suggestions are basenames, but normalize both separator families
-    # explicitly so safety does not depend on the host running the test.
-    filename = value.replace("\\", "/").rsplit("/", 1)[-1]
+    # A suggested filename is untrusted data and must already be one ordinary
+    # Windows path component. Never normalize a supplied path into a different
+    # basename because that changes the browser-provided artifact identity.
+    filename = value
     if not filename or filename in {".", ".."}:
         raise UnsupportedInteractionError("download did not provide a safe filename")
     if filename.endswith((" ", ".")):

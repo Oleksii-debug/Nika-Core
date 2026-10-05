@@ -99,12 +99,17 @@ def test_download_broker_persists_under_approved_root(tmp_path: Path) -> None:
     assert broker.saved[0].read_text(encoding="utf-8") == "UTF-8 доказ"
 
 
-def test_download_broker_never_uses_suggested_parent_path(tmp_path: Path) -> None:
+def test_download_broker_rejects_suggested_parent_path_before_save(tmp_path: Path) -> None:
     root = tmp_path / "approved"
     broker = DownloadBroker(root)
     download = _FakeDownload("../outside.txt")
-    broker.handle(download)
-    assert broker.saved == [(root / "outside.txt").resolve()]
+
+    with pytest.raises(UnsupportedInteractionError, match="safe filename"):
+        broker.handle(download)
+
+    assert download.destination is None
+    assert broker.saved == []
+    assert list(broker.approved_root.iterdir()) == []
     assert not (tmp_path / "outside.txt").exists()
 
 
@@ -245,11 +250,17 @@ def test_download_broker_does_not_follow_linked_destination(tmp_path: Path) -> N
         "con",
         "COM1.log",
         "lPt9.data",
+        "COM¹",
+        "com².txt",
+        "LPT³.log",
         "CONIN$",
         "report.txt:private-stream",
         "bad?.txt",
         "bad*.txt",
         "bad|name.txt",
+        "nested/file.txt",
+        r"nested\file.txt",
+        r"..\parent\доказ.txt",
         "trailing.",
         "trailing ",
         "control\x01.txt",
@@ -271,18 +282,6 @@ def test_download_broker_rejects_nonordinary_windows_component_before_save(
     assert download.destination is None
     assert broker.saved == []
     assert list(broker.approved_root.iterdir()) == []
-
-
-def test_download_broker_treats_backslash_parent_text_as_basename(
-    tmp_path: Path,
-) -> None:
-    broker = DownloadBroker(tmp_path / "downloads")
-    download = _FakeDownload(r"..\parent\доказ.txt", "UTF-8 доказ")
-
-    broker.handle(download)
-
-    assert broker.saved == [(broker.approved_root / "доказ.txt").resolve()]
-    assert broker.saved[0].read_text(encoding="utf-8") == "UTF-8 доказ"
 
 
 def test_download_broker_accepts_255_utf16_unit_unicode_component(
