@@ -548,6 +548,14 @@ class _FakeModel:
         )
 
 
+class _FakeTensor:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def numel(self) -> int:
+        return len(self.payload)
+
+
 class _FakeSafeTensorReader:
     def __init__(self, path: str) -> None:
         self._path = Path(path)
@@ -561,9 +569,9 @@ class _FakeSafeTensorReader:
     def keys(self) -> list[str]:
         return ["lora.weight"]
 
-    def get_tensor(self, name: str) -> bytes:
+    def get_tensor(self, name: str) -> _FakeTensor:
         assert name == "lora.weight"
-        return b"tensor-bytes"
+        return _FakeTensor(self._path.read_bytes())
 
 
 def _fake_safe_open(path: str, *, framework: str, device: str) -> _FakeSafeTensorReader:
@@ -676,6 +684,11 @@ def _fake_stack() -> tuple[object, ...]:
             is_available=lambda: False,
             empty_cache=lambda: None,
         ),
+        isfinite=lambda tensor: SimpleNamespace(
+            all=lambda: SimpleNamespace(
+                item=lambda: b"nan" not in tensor.payload,
+            )
+        ),
         set_num_threads=lambda value: value == 2
         or (_ for _ in ()).throw(AssertionError("unexpected torch thread count")),
         use_deterministic_algorithms=lambda enabled: enabled is True
@@ -714,6 +727,12 @@ class _ConfigOnlyMutationFakeTrainer(_NoMutationFakeTrainer):
         self.model.base_model_name_or_path = "C:/changed-config-without-weight-effect"
 
 
+class _NonFiniteMutationFakeTrainer(_NoMutationFakeTrainer):
+    def train(self, *, resume_from_checkpoint: str | bool) -> None:
+        super().train(resume_from_checkpoint=resume_from_checkpoint)
+        self.model.adapter_bytes = b"trained-adapter-nan-weights"
+
+
 def _trainer_variant_stack(trainer_type: type[_FakeTrainer]) -> tuple[object, ...]:
     stack = list(_fake_stack())
     stack[10] = trainer_type
@@ -726,6 +745,10 @@ def _no_mutation_fake_stack() -> tuple[object, ...]:
 
 def _config_only_mutation_fake_stack() -> tuple[object, ...]:
     return _trainer_variant_stack(_ConfigOnlyMutationFakeTrainer)
+
+
+def _non_finite_mutation_fake_stack() -> tuple[object, ...]:
+    return _trainer_variant_stack(_NonFiniteMutationFakeTrainer)
 
 
 def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
@@ -792,6 +815,35 @@ def test_training_step_rejects_unchanged_adapter_weights(
     ).exists()
 
 
+def test_non_finite_adapter_weights_fail_before_durable_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _non_finite_mutation_fake_stack,
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="adapter_candidate_non_finite"):
+        peft._train_one_step(request, config, consumed)
+
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    assert not (checkpoint / peft._CHECKPOINT_MARKER).exists()
+    assert not peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    ).exists()
+
+
 def test_adapter_config_change_does_not_count_as_weight_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -833,7 +885,12 @@ def test_adapter_weight_snapshot_fails_closed_and_cleans_temporary_directory(
     job_root.mkdir()
 
     with pytest.raises(peft.PeftTrainerError, match="adapter_weight_snapshot_failed"):
-        peft._snapshot_adapter_weights_sha256(_EmptyAdapterSnapshotModel(), job_root)
+        peft._snapshot_adapter_weights_sha256(
+            _EmptyAdapterSnapshotModel(),
+            job_root,
+            safe_open=_fake_safe_open,
+            torch=_fake_stack()[0],
+        )
 
     assert list(job_root.iterdir()) == []
 
