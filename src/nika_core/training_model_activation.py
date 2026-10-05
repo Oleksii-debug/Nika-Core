@@ -19,6 +19,11 @@ from nika_core.training_evaluation_attestation import (
 )
 from nika_core.training_evaluation_comparison import AttestedTrainingComparisonResult
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
+from nika_core.training_ollama_manifest import (
+    OllamaManifestAuthority,
+    OllamaManifestAuthorityError,
+    OllamaPreparedModelBinding,
+)
 from nika_core.v01_model_settings import (
     ModelPromotionReceipt,
     ModelSetupError,
@@ -153,6 +158,8 @@ def _apply_promotion(
     expected_revision: int,
     activation_request_sha256: str,
     activation_attestation_sha256: str,
+    base_prepared_model: OllamaPreparedModelBinding | None = None,
+    challenger_prepared_model: OllamaPreparedModelBinding | None = None,
 ) -> ModelPromotionReceipt:
     training = canonical.challenger_benchmark.binding.revalidated()
     try:
@@ -170,11 +177,119 @@ def _apply_promotion(
             challenger_descriptor_digest=training.descriptor_digest,
             activation_request_sha256=activation_request_sha256,
             activation_attestation_sha256=activation_attestation_sha256,
+            base_provider_manifest_sha256=(
+                base_prepared_model.provider_manifest_sha256
+                if base_prepared_model is not None
+                else None
+            ),
+            base_preparation_sha256=(
+                base_prepared_model.preparation_sha256
+                if base_prepared_model is not None
+                else None
+            ),
+            challenger_provider_manifest_sha256=(
+                challenger_prepared_model.provider_manifest_sha256
+                if challenger_prepared_model is not None
+                else None
+            ),
+            challenger_preparation_sha256=(
+                challenger_prepared_model.preparation_sha256
+                if challenger_prepared_model is not None
+                else None
+            ),
         )
     except ModelSetupError as exc:
         raise TrainingModelActivationError(
             "attested model promotion was rejected by the active route authority"
         ) from exc
+
+
+def _require_prepared_binding(
+    binding: OllamaPreparedModelBinding,
+    *,
+    role: str,
+    model_id: str,
+    artifact_sha256: str,
+    descriptor_digest: str,
+    endpoint_sha256: str,
+) -> OllamaPreparedModelBinding:
+    if type(binding) is not OllamaPreparedModelBinding:
+        raise TrainingModelActivationError(
+            f"{role} Ollama prepared-model evidence is not canonical"
+        )
+    try:
+        canonical = binding.revalidated()
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise TrainingModelActivationError(
+            f"{role} Ollama prepared-model evidence is not canonical"
+        ) from exc
+    if (
+        canonical.route_model_id != model_id
+        or canonical.artifact_sha256 != artifact_sha256
+        or canonical.descriptor_digest != descriptor_digest
+        or canonical.endpoint_sha256 != endpoint_sha256
+    ):
+        raise TrainingModelActivationError(
+            f"{role} Ollama prepared-model evidence does not match promotion authority"
+        )
+    return canonical
+
+
+async def _prepare_ollama_promotion_models(
+    *,
+    training: TrainingEvaluationBinding,
+    base_url: object,
+    authority: OllamaManifestAuthority,
+) -> tuple[OllamaPreparedModelBinding, OllamaPreparedModelBinding]:
+    if type(authority) is not OllamaManifestAuthority:
+        raise TypeError("manifest_authority must be an exact OllamaManifestAuthority")
+    if type(base_url) is not str:
+        raise TrainingModelActivationError(
+            "active Ollama route does not carry a canonical endpoint"
+        )
+    try:
+        expected_endpoint = OllamaManifestAuthority(base_url=base_url).endpoint_sha256
+    except (TypeError, ValueError) as exc:
+        raise TrainingModelActivationError(
+            "active Ollama route does not carry a canonical endpoint"
+        ) from exc
+    if authority.endpoint_sha256 != expected_endpoint:
+        raise TrainingModelActivationError(
+            "Ollama manifest authority belongs to another endpoint"
+        )
+    try:
+        base = await authority.prepare_existing_gguf_blob(
+            model_id=training.base_model_id,
+            artifact_sha256=training.base_sha256,
+            descriptor_digest=training.base_descriptor_digest,
+        )
+        challenger = await authority.prepare_existing_gguf_blob(
+            model_id=training.challenger_model_id,
+            artifact_sha256=training.challenger_sha256,
+            descriptor_digest=training.descriptor_digest,
+        )
+    except OllamaManifestAuthorityError as exc:
+        raise TrainingModelActivationError(
+            "Ollama physical-artifact to manifest preparation failed"
+        ) from exc
+    return (
+        _require_prepared_binding(
+            base,
+            role="base",
+            model_id=training.base_model_id,
+            artifact_sha256=training.base_sha256,
+            descriptor_digest=training.base_descriptor_digest,
+            endpoint_sha256=expected_endpoint,
+        ),
+        _require_prepared_binding(
+            challenger,
+            role="challenger",
+            model_id=training.challenger_model_id,
+            artifact_sha256=training.challenger_sha256,
+            descriptor_digest=training.descriptor_digest,
+            endpoint_sha256=expected_endpoint,
+        ),
+    )
 
 
 async def activate_attested_training_promotion(
@@ -183,6 +298,7 @@ async def activate_attested_training_promotion(
     settings: V01ModelSettings,
     expected_revision: int,
     effect_port: LoadedModelAttestedCompletionPort | None = None,
+    manifest_authority: OllamaManifestAuthority | None = None,
 ) -> ModelPromotionReceipt:
     """Activate a promoted local model only after a fresh loaded-byte attestation.
 
@@ -199,6 +315,9 @@ async def activate_attested_training_promotion(
 
     try:
         existing = settings.promotion_receipt(canonical.evidence_sha256)
+        existing_manifest = settings.promotion_manifest_receipt(
+            canonical.evidence_sha256
+        )
     except ModelSetupError as exc:
         raise TrainingModelActivationError(
             "durable model promotion evidence could not be read"
@@ -211,6 +330,15 @@ async def activate_attested_training_promotion(
             raise TrainingModelActivationError(
                 "existing promotion predates fresh loaded-model attestation; "
                 "rollback or reevaluate before activation"
+            )
+        if existing_manifest is None:
+            raise TrainingModelActivationError(
+                "existing promotion predates durable Ollama manifest evidence; "
+                "rollback or reevaluate before activation"
+            )
+        if existing_manifest.binding_sha256 != training.binding_sha256:
+            raise TrainingModelActivationError(
+                "durable Ollama manifest evidence does not match training authority"
             )
         return _apply_promotion(
             canonical=canonical,
@@ -246,6 +374,18 @@ async def activate_attested_training_promotion(
         raise TrainingModelActivationError(
             "fresh loaded-model attestation is required before activation"
         )
+    if manifest_authority is None:
+        raise TrainingModelActivationError(
+            "fresh Ollama artifact-to-manifest preparation is required before activation"
+        )
+
+    base_prepared_model, challenger_prepared_model = (
+        await _prepare_ollama_promotion_models(
+            training=training,
+            base_url=snapshot.get("base_url"),
+            authority=manifest_authority,
+        )
+    )
 
     request = _activation_probe(
         canonical=canonical,
@@ -270,6 +410,8 @@ async def activate_attested_training_promotion(
         expected_revision=expected_revision,
         activation_request_sha256=_activation_request_sha256(request),
         activation_attestation_sha256=_activation_attestation_sha256(attested),
+        base_prepared_model=base_prepared_model,
+        challenger_prepared_model=challenger_prepared_model,
     )
 
 
