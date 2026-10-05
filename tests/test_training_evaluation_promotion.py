@@ -6,10 +6,13 @@ from dataclasses import replace
 
 import pytest
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.experiments import (
+    ExperimentEngine,
     ExperimentStatus,
     InMemoryExperimentRepository,
     PromotionPolicy,
+    SQLiteExperimentRepository,
 )
 from nika_core.model_engineering import (
     BenchmarkExecutionConfig,
@@ -18,7 +21,11 @@ from nika_core.model_engineering import (
     EvaluationSet,
     ModelCandidate,
 )
-from nika_core.model_engineering.experiment_bridge import QUALITY_METRIC
+from nika_core.model_engineering.experiment_bridge import (
+    QUALITY_METRIC,
+    benchmark_observations,
+    build_experiment_definition,
+)
 from nika_core.model_gateway.contracts import (
     ModelMessage,
     ModelResponse,
@@ -491,3 +498,277 @@ def test_direct_attested_old_new_decision_construction_is_disabled() -> None:
             execution_config=None,
             permission_fingerprint="permissions:v1",
         )
+
+def _promotion_policy() -> PromotionPolicy:
+    return PromotionPolicy(
+        primary_metric=QUALITY_METRIC,
+        minimum_improvement=0.1,
+        minimum_replays=2,
+    )
+
+
+async def _promotion_pair():
+    return await _benchmark_pair(
+        champion_answers={"case-one": "one", "case-two": "wrong"},
+        challenger_answers={"case-one": "one", "case-two": "two"},
+    )
+
+
+def _definition_and_observations(
+    *,
+    experiment_id: str,
+    champion: AttestedChampionBenchmarkResult,
+    challenger: AttestedChallengerBenchmarkResult,
+    evaluation: EvaluationSet,
+    config: BenchmarkExecutionConfig,
+    policy: PromotionPolicy,
+    permission_fingerprint: str,
+):
+    definition = build_experiment_definition(
+        experiment_id=experiment_id,
+        champion=champion.report.candidate,
+        challengers=(challenger.report.candidate,),
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint=permission_fingerprint,
+    )
+    observations = (
+        *benchmark_observations(
+            champion.report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ),
+        *benchmark_observations(
+            challenger.report,
+            definition=definition,
+            evaluation_set=evaluation,
+        ),
+    )
+    return definition, observations
+
+
+@pytest.mark.asyncio
+async def test_terminal_decision_is_idempotent_on_same_repository() -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    repository = _TrackingRepository()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    kwargs = dict(
+        experiment_id="loop-c-idempotent",
+        champion_benchmark=champion,
+        challenger_benchmark=challenger,
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+        repository=repository,
+    )
+
+    first = evaluate_attested_old_vs_new(**kwargs)
+    second = evaluate_attested_old_vs_new(**kwargs)
+
+    assert repository.create_calls == 1
+    assert first.snapshot == second.snapshot
+    assert first.evidence_sha256 == second.evidence_sha256
+    assert second.snapshot.status is ExperimentStatus.PROMOTED
+    assert len(second.snapshot.observations) == 4
+
+
+@pytest.mark.asyncio
+async def test_partial_experiment_resumes_without_duplicate_observations() -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    repository = InMemoryExperimentRepository()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    definition, observations = _definition_and_observations(
+        experiment_id="loop-c-partial-resume",
+        champion=champion,
+        challenger=challenger,
+        evaluation=evaluation,
+        config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+    )
+    engine = ExperimentEngine(repository)
+    engine.create(definition)
+    engine.start(definition.experiment_id)
+    engine.record(definition.experiment_id, observations[0])
+
+    decision = evaluate_attested_old_vs_new(
+        experiment_id=definition.experiment_id,
+        champion_benchmark=champion,
+        challenger_benchmark=challenger,
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+        repository=repository,
+    )
+
+    assert decision.snapshot.status is ExperimentStatus.PROMOTED
+    assert len(decision.snapshot.observations) == 4
+    keys = {
+        (item.candidate_id, item.replay_id, item.metric)
+        for item in decision.snapshot.observations
+    }
+    assert len(keys) == 4
+
+
+@pytest.mark.asyncio
+async def test_conflicting_partial_observation_fails_closed() -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    repository = InMemoryExperimentRepository()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    definition, observations = _definition_and_observations(
+        experiment_id="loop-c-conflicting-partial",
+        champion=champion,
+        challenger=challenger,
+        evaluation=evaluation,
+        config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+    )
+    conflicting = replace(
+        observations[0],
+        value=float(observations[0].value) + 0.25,
+    )
+    engine = ExperimentEngine(repository)
+    engine.create(definition)
+    engine.start(definition.experiment_id)
+    engine.record(definition.experiment_id, conflicting)
+
+    with pytest.raises(
+        AttestedOldVsNewDecisionError,
+        match="conflicts with attested benchmark",
+    ):
+        evaluate_attested_old_vs_new(
+            experiment_id=definition.experiment_id,
+            champion_benchmark=champion,
+            challenger_benchmark=challenger,
+            evaluation_set=evaluation,
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="permissions:v1",
+            repository=repository,
+        )
+
+    persisted = repository.get(definition.experiment_id)
+    assert persisted.observations == (conflicting,)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_restart_resumes_partial_decision(tmp_path) -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    definition, observations = _definition_and_observations(
+        experiment_id="loop-c-sqlite-restart",
+        champion=champion,
+        challenger=challenger,
+        evaluation=evaluation,
+        config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+    )
+    database = tmp_path / "nika.db"
+    first_store = SQLiteStore(database)
+    first_store.initialize()
+    first_repository = SQLiteExperimentRepository(first_store)
+    first_engine = ExperimentEngine(first_repository)
+    first_engine.create(definition)
+    first_engine.start(definition.experiment_id)
+    first_engine.record(definition.experiment_id, observations[0])
+
+    reopened_store = SQLiteStore(database)
+    reopened_store.initialize()
+    reopened_repository = SQLiteExperimentRepository(reopened_store)
+    decision = evaluate_attested_old_vs_new(
+        experiment_id=definition.experiment_id,
+        champion_benchmark=champion,
+        challenger_benchmark=challenger,
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+        repository=reopened_repository,
+    )
+
+    assert decision.snapshot.status is ExperimentStatus.PROMOTED
+    assert len(decision.snapshot.observations) == 4
+    assert reopened_repository.get(definition.experiment_id) == decision.snapshot
+
+
+@pytest.mark.asyncio
+async def test_existing_conflicting_definition_fails_before_mutation() -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    repository = InMemoryExperimentRepository()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    conflicting_definition, _ = _definition_and_observations(
+        experiment_id="loop-c-definition-conflict",
+        champion=champion,
+        challenger=challenger,
+        evaluation=evaluation,
+        config=config,
+        policy=policy,
+        permission_fingerprint="permissions:other",
+    )
+    ExperimentEngine(repository).create(conflicting_definition)
+
+    with pytest.raises(
+        AttestedOldVsNewDecisionError,
+        match="definition conflicts",
+    ):
+        evaluate_attested_old_vs_new(
+            experiment_id=conflicting_definition.experiment_id,
+            champion_benchmark=champion,
+            challenger_benchmark=challenger,
+            evaluation_set=evaluation,
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="permissions:v1",
+            repository=repository,
+        )
+
+    persisted = repository.get(conflicting_definition.experiment_id)
+    assert persisted.status is ExperimentStatus.DRAFT
+    assert persisted.observations == ()
+
+
+@pytest.mark.asyncio
+async def test_rolled_back_decision_cannot_be_reused_as_fresh_evidence() -> None:
+    champion, challenger, evaluation = await _promotion_pair()
+    repository = InMemoryExperimentRepository()
+    config = BenchmarkExecutionConfig()
+    policy = _promotion_policy()
+    experiment_id = "loop-c-rolled-back"
+    first = evaluate_attested_old_vs_new(
+        experiment_id=experiment_id,
+        champion_benchmark=champion,
+        challenger_benchmark=challenger,
+        evaluation_set=evaluation,
+        execution_config=config,
+        policy=policy,
+        permission_fingerprint="permissions:v1",
+        repository=repository,
+    )
+    assert first.snapshot.status is ExperimentStatus.PROMOTED
+    ExperimentEngine(repository).rollback(experiment_id)
+
+    with pytest.raises(
+        AttestedOldVsNewDecisionError,
+        match="rolled-back experiment",
+    ):
+        evaluate_attested_old_vs_new(
+            experiment_id=experiment_id,
+            champion_benchmark=champion,
+            challenger_benchmark=challenger,
+            evaluation_set=evaluation,
+            execution_config=config,
+            policy=policy,
+            permission_fingerprint="permissions:v1",
+            repository=repository,
+        )
+
