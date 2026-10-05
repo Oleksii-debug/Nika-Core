@@ -776,6 +776,8 @@ def _validate_json_value(value: Any) -> None:
                 for key, child in item.items():
                     if type(key) is not str:
                         raise TypeError("batch cursor JSON keys must be text")
+                    if len(key) > _MAX_VALUE_BYTES:
+                        raise ValueError("batch cursor value exceeds the byte limit")
                     text_bytes += len(key.encode("utf-8"))
                     if text_bytes > _MAX_VALUE_BYTES:
                         raise ValueError("batch cursor value exceeds the byte limit")
