@@ -592,6 +592,8 @@ def run_physical_training_pilot(
     )
     if paused.next_step != 1:
         _fail("trainer did not reach the required one-step durable pause boundary")
+    if paused.reason != "paused":
+        _fail("initial pilot pause did not come from the explicit pause control")
 
     resumed_runtime = restart_runtime()
     resumed_worker = restart_worker()
