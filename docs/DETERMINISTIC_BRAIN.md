@@ -45,7 +45,8 @@ A deterministic run receives:
 - a `WorldState` containing explicit facts;
 - a `DeterministicGoal` with required and forbidden facts;
 - uniquely identified `DeterministicAction` definitions with explicit preconditions/effects and
-  optional registered Nika tool calls;
+  optional registered Nika tool calls; action IDs are canonical bounded NFC UTF-8 identities
+  because they also bind durable completion/replay evidence;
 - caller budgets for maximum total executed steps (including recovered
   `previously_completed_action_ids`), maximum re-plans, total planning wall time and a
   per-observation timeout when authoritative state observation is enabled;
