@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import replace
 
 import pytest
@@ -985,3 +986,85 @@ def test_settings_reject_foundry_automatic_promotion_without_weight_pin(tmp_path
 
     assert settings.snapshot()["model"] == "base-model"
     assert settings.snapshot()["revision"] == 1
+
+
+
+@pytest.mark.asyncio
+async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) -> None:
+    result = await _promoted_comparison(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
+    training = result.challenger_benchmark.binding.revalidated()
+    activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=1,
+    )
+
+    promoted_payload = settings.prepare_task_payload({"command": "promoted task"})
+    promoted_pin = promoted_payload["v01_model_artifact_pin"]
+    assert promoted_pin["role"] == "challenger"
+    assert promoted_pin["route_revision"] == 2
+    assert promoted_pin["artifact_sha256"] == training.challenger_sha256
+    assert promoted_pin["descriptor_digest"] == training.descriptor_digest
+    assert "challenger-model" not in repr(promoted_pin)
+
+    promoted_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=promoted_payload,
+    )
+    assert settings.for_task(promoted_task.task_id).model == "challenger-model"
+    frozen_pin = settings.artifact_pin_for_task(promoted_task.task_id)
+    assert frozen_pin is not None
+    assert frozen_pin.artifact_sha256 == training.challenger_sha256
+
+    tampered = dict(promoted_payload)
+    tampered_pin = dict(promoted_pin)
+    tampered_pin["artifact_sha256"] = _sha(b"substituted-task-artifact")
+    tampered["v01_model_artifact_pin"] = tampered_pin
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (
+                json.dumps(tampered, ensure_ascii=False, sort_keys=True),
+                promoted_task.task_id,
+            ),
+        )
+    with pytest.raises(ModelSetupError, match="Артефакт"):
+        settings.for_task(promoted_task.task_id)
+
+    rollback_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=2,
+    )
+    rollback_payload = settings.prepare_task_payload({"command": "rollback task"})
+    rollback_pin = rollback_payload["v01_model_artifact_pin"]
+    assert rollback_pin["role"] == "rollback"
+    assert rollback_pin["route_revision"] == 3
+    assert rollback_pin["artifact_sha256"] == training.base_sha256
+    assert rollback_pin["descriptor_digest"] == training.base_descriptor_digest
+
+    rollback_task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=rollback_payload,
+    )
+    assert settings.for_task(rollback_task.task_id).model == "base-model"
+    restored_pin = settings.artifact_pin_for_task(rollback_task.task_id)
+    assert restored_pin is not None
+    assert restored_pin.artifact_sha256 == training.base_sha256
+
+
+def test_caller_cannot_inject_promoted_artifact_pin(tmp_path) -> None:
+    _, settings = _configured_model_settings(tmp_path)
+
+    with pytest.raises(ModelSetupError, match="лише Nika"):
+        settings.prepare_task_payload(
+            {
+                "command": "forged",
+                "v01_model_artifact_pin": {
+                    "schema": "nika.v01.model-artifact-pin.v1",
+                },
+            }
+        )
