@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -92,6 +93,7 @@ def test_no_arguments_preserve_existing_status_and_database_path(
         f"Nika Core 0.0.2: agents=2, queued=3, db={db_path}\n"
     )
 
+
 @pytest.mark.parametrize(
     ("flag", "expected_code", "expected_text"),
     [
@@ -111,15 +113,44 @@ def test_real_module_entrypoint_offline_options_do_not_read_config(
     env = os.environ.copy()
     env["NIKA_DB_PATH"] = str(db_path)
     env["NIKA_LOG_LEVEL"] = "invalid_offline"
+    env["PYTHONIOENCODING"] = "utf-8"
     completed = subprocess.run(
         [sys.executable, "-m", "nika_core", flag],
         cwd=Path(__file__).resolve().parents[1],
         env=env,
         capture_output=True,
         text=True,
+        encoding="utf-8",
         timeout=15,
         check=False,
     )
     assert completed.returncode == expected_code, completed.stderr
     assert expected_text in completed.stdout + completed.stderr
     assert not db_path.exists()
+
+
+def test_real_default_start_creates_unicode_sqlite_database(tmp_path: Path) -> None:
+    db_path = tmp_path / "папка з пробілами" / "ніка.db"
+    env = os.environ.copy()
+    env["NIKA_DB_PATH"] = str(db_path)
+    env["NIKA_LOG_LEVEL"] = "INFO"
+    env["NIKA_SCHEMA_VERSION"] = "1"
+    env["PYTHONIOENCODING"] = "utf-8"
+    completed = subprocess.run(
+        [sys.executable, "-m", "nika_core"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "agents=" in completed.stdout and "queued=" in completed.stdout
+    assert str(db_path) in completed.stdout
+    assert db_path.is_file()
+    with sqlite3.connect(db_path) as connection:
+        assert connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_migrations'"
+        ).fetchone() == (1,)
