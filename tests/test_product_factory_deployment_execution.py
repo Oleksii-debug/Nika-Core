@@ -666,3 +666,35 @@ def test_restore_rejects_tampered_release_payload_without_mutation() -> None:
     with pytest.raises(DeploymentExecutionError, match="request or intent"):
         target.restore(DeploymentExecutionSnapshot((corrupted,)))
     assert target.snapshot() == before
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "error"),
+    [
+        ("request", object(), "request or intent"),
+        ("credential_ttl_seconds", True, "lease durations"),
+    ],
+)
+def test_submit_revalidates_tampered_spec_before_publication(
+    field_name: str,
+    invalid_value: object,
+    error: str,
+) -> None:
+    coordinator, _, _, _ = _coordinator()
+    spec = _spec("project-a", "tampered-submit")
+    object.__setattr__(spec, field_name, invalid_value)
+    before = coordinator.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match=error):
+        coordinator.submit(spec, now=NOW)
+
+    assert coordinator.snapshot() == before
+
+
+def test_submit_rejects_non_spec_carrier_before_publication() -> None:
+    coordinator, _, _, _ = _coordinator()
+    before = coordinator.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="execution spec"):
+        coordinator.submit(object(), now=NOW)
+
+    assert coordinator.snapshot() == before
