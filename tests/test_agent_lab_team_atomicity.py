@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from pathlib import Path
 
@@ -7,7 +8,25 @@ import pytest
 
 from nika_core.builder.spec import ToolGrant
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.multi_agent import AgentHandoff, HandoffKind, MemberState, MultiAgentStore, TeamQuota
+from nika_core.multi_agent import (
+    AgentHandoff,
+    HandoffKind,
+    MemberState,
+    MultiAgentStore,
+    MultiAgentSupervisor,
+    TeamQuota,
+)
+
+
+class _NoopCancelRuntime:
+    capabilities = frozenset()
+
+    async def cancel(self, *, task_id: str, thread_id: str) -> None:
+        del task_id, thread_id
+
+
+class _UnusedDefinitions:
+    pass
 
 
 def _store(tmp_path: Path) -> tuple[SQLiteStore, MultiAgentStore]:
@@ -89,7 +108,12 @@ def test_result_handoff_failure_rolls_back_result_and_member_state(tmp_path: Pat
 
 def test_late_runtime_result_cannot_overwrite_team_cancellation(tmp_path: Path) -> None:
     sqlite, store = _store(tmp_path)
-    store.cancel_team("team-atomic")
+    supervisor = MultiAgentSupervisor(
+        runtime=_NoopCancelRuntime(),
+        store=store,
+        definitions=_UnusedDefinitions(),
+    )
+    asyncio.run(supervisor.cancel_team("team-atomic"))
 
     member = store.finish_member_execution(
         team_id="team-atomic",

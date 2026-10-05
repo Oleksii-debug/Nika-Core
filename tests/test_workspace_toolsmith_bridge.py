@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from nika_core.security import (
-    ApprovalAuthority,
+    ApprovalEvidence,
     ApprovalLedger,
     ExecutionBudgetLedger,
     authorize_action,
@@ -299,10 +299,6 @@ def test_external_side_effect_binding_cannot_bypass_approval(tmp_path: Path) -> 
 
 
 def test_high_impact_binding_still_requires_exact_m10_approval(tmp_path: Path) -> None:
-    authority = ApprovalAuthority(
-        issuer_id="toolsmith-host-v01",
-        secret=b"toolsmith-bridge-test-secret-seed-0123456789",
-    )
     envelope = build_toolsmith_security_envelope(
         _job(tmp_path, isolation=IsolationClass.OS_SANDBOXED),
         bindings=(
@@ -314,7 +310,6 @@ def test_high_impact_binding_still_requires_exact_m10_approval(tmp_path: Path) -
         ),
         budget=_budget(),
         require_untrusted_execution=True,
-        approval_verifier=authority.verifier(),
     )
     intent = envelope.intent(
         permission="release.high_impact",
@@ -332,8 +327,12 @@ def test_high_impact_binding_still_requires_exact_m10_approval(tmp_path: Path) -
             now=now,
         )
 
-    request = authority.request(intent, now=now - timedelta(minutes=1))
-    approval = authority.approve(request.request_id, now=now)
+    approval = ApprovalEvidence(
+        approval_id="approval-release-1",
+        action_fingerprint=intent.approval_fingerprint,
+        approved_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(minutes=4),
+    )
     result = authorize_action(
         intent,
         envelope.security_policy,

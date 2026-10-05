@@ -15,8 +15,6 @@ from nika_core.runtime.contracts import (
     RuntimeRequest,
     RuntimeResult,
     RuntimeResumeMode,
-    RuntimeResumeProbe,
-    RuntimeResumeProbeStatus,
     RuntimeResumeRequest,
 )
 from nika_core.runtime.coordinator import TaskRuntimeCoordinator
@@ -49,16 +47,6 @@ class _ApprovalRuntime:
 
     async def cancel(self, *, task_id: str, thread_id: str) -> bool:
         return False
-
-    async def probe_resume(self, *, task_id: str, thread_id: str, resume_token: str):
-        del task_id
-        if resume_token != thread_id:
-            raise ValueError("test resume token must match thread")
-        return RuntimeResumeProbe(
-            status=RuntimeResumeProbeStatus.READY,
-            reason="approval checkpoint exists",
-            checkpoint_id=f"checkpoint:{thread_id}",
-        )
 
 
 class _ExplodingRuntime(_ApprovalRuntime):

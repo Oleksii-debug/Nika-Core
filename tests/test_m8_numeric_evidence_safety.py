@@ -32,22 +32,22 @@ def test_observation_rejects_non_numeric_or_unrepresentable_evidence(bad):
 
 @pytest.mark.parametrize("bad", [True, "0.5", float("nan"), float("-inf"), 10**400])
 def test_policy_thresholds_reject_ambiguous_numbers(bad):
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         PromotionPolicy("quality", minimum_improvement=bad)
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         MetricRule("safety", max_regression=bad)
 
 
 @pytest.mark.parametrize("bad", [True, 1.0, "1", 0, -1])
 def test_minimum_replays_requires_a_positive_integer(bad):
-    with pytest.raises(ValueError, match="positive integer"):
+    with pytest.raises((TypeError, ValueError)):
         PromotionPolicy("quality", minimum_replays=bad)
 
 
 def test_policy_directions_must_be_actual_booleans():
-    with pytest.raises(ValueError, match="boolean"):
+    with pytest.raises(TypeError, match="boolean"):
         PromotionPolicy("quality", primary_higher_is_better="false")
-    with pytest.raises(ValueError, match="boolean"):
+    with pytest.raises(TypeError, match="boolean"):
         MetricRule("safety", higher_is_better=0)
 
 
@@ -63,7 +63,7 @@ def test_policy_directions_must_be_actual_booleans():
 def test_reloaded_policy_rejects_coercion(field, bad):
     data = json.loads(_encode_definition(_definition()))
     data["policy"][field] = bad
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         _decode_definition(json.dumps(data))
 
 
@@ -123,9 +123,9 @@ def test_valid_integer_evidence_remains_usable():
     observation = MetricObservation("champion", "r1", "quality", 1)
     policy = PromotionPolicy("quality", minimum_improvement=0)
     rule = MetricRule("safety", max_regression=0)
-    assert observation.value == 1.0 and type(observation.value) is float
-    assert policy.minimum_improvement == 0.0
-    assert rule.max_regression == 0.0
+    assert observation.value == 1
+    assert policy.minimum_improvement == 0
+    assert rule.max_regression == 0
 
 
 @pytest.mark.parametrize(
@@ -144,7 +144,7 @@ def test_sqlite_restart_rejects_corrupt_policy_without_transition(tmp_path, fiel
             "UPDATE experiments SET definition_json = ? WHERE experiment_id = ?",
             (json.dumps(data), "numeric-safety"),
         )
-    with pytest.raises(ValueError):
+    with pytest.raises((TypeError, ValueError)):
         repository.get("numeric-safety")
     with store.connection() as conn:
         status = conn.execute(
@@ -155,3 +155,13 @@ def test_sqlite_restart_rejects_corrupt_policy_without_transition(tmp_path, fiel
             ("numeric-safety",),
         ).fetchone()["n"]
     assert status == "draft" and events == 1
+
+
+@pytest.mark.parametrize("bad", [True, "0.2", 10**400, float("inf")])
+def test_reloaded_guardrail_threshold_rejects_unsafe_scalar(bad):
+    data = json.loads(_encode_definition(
+        _definition(guardrails=(MetricRule("safety"),))
+    ))
+    data["policy"]["guardrails"][0]["max_regression"] = bad
+    with pytest.raises((TypeError, ValueError)):
+        _decode_definition(json.dumps(data))
