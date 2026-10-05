@@ -175,7 +175,6 @@ def _verify_candidate_receipt(
     return receipt
 
 
-
 @dataclass(frozen=True, slots=True)
 class _CandidateManifestEvidence:
     candidate_manifest_sha256: str
@@ -249,7 +248,7 @@ def _candidate_manifest_evidence(
 ) -> _CandidateManifestEvidence:
     try:
         manifest = candidate_adapter_manifest(candidate_path)
-    except (PeftTrainerError, OSError, RuntimeError, TypeError, ValueError) as exc:
+    except (PeftTrainerError, OSError, TypeError, ValueError) as exc:
         raise PhysicalTrainingPilotError(
             "canonical PEFT candidate manifest verification failed"
         ) from exc
@@ -699,7 +698,6 @@ def build_physical_training_pilot_report(
     )
 
 
-
 def _snapshot_job_spec(spec: object) -> TrainingJobSpec:
     if type(spec) is not TrainingJobSpec:
         raise TypeError("spec must be an exact TrainingJobSpec")
@@ -727,7 +725,6 @@ def _snapshot_job_spec(spec: object) -> TrainingJobSpec:
         raise PhysicalTrainingPilotError(
             "physical pilot job specification is not canonical"
         ) from exc
-
 
 
 def _resolve_candidate_descriptor(
