@@ -295,6 +295,33 @@ class TrainingRuntime:
                         reason="cancelled",
                     )
 
+                resource_decision = self._resources.revalidate(
+                    scope=spec.resource_scope,
+                    owner_id=spec.owner_id,
+                    request_id=spec.job_id,
+                )
+                if not resource_decision.granted:
+                    resource_reason = f"resource_revalidation:{resource_decision.reason}"
+                    saved = self._save(
+                        spec,
+                        fingerprint=fingerprint,
+                        state=TrainingRunState.PAUSED,
+                        next_step=step_index,
+                        resume_state=resume_state,
+                        candidate_sha256=candidate_sha256,
+                        reason=resource_reason,
+                    )
+                    return self._evidence(
+                        spec,
+                        execution_plan_sha256=execution_plan_sha256,
+                        job_fingerprint=fingerprint,
+                        state=TrainingRunState.PAUSED,
+                        next_step=step_index,
+                        candidate_sha256=candidate_sha256,
+                        checkpoint=saved,
+                        reason=resource_reason,
+                    )
+
                 self._save(
                     spec,
                     fingerprint=fingerprint,
