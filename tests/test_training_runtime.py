@@ -20,6 +20,12 @@ from nika_core.training_materials import (
     TrainingMaterialSetEvidence,
     resolve_training_materials,
 )
+from nika_core.training_scale import (
+    TrainingScaleError,
+    TrainingScalePlan,
+    TrainingScaleTier,
+    authorize_training_scale,
+)
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingCheckpointError,
@@ -85,6 +91,70 @@ def _material_evidence(
         package,
         workspace_sha256=_sha256(workspace_id.encode()),
         materials=materials,
+    )
+
+
+def _scale_plan(
+    evidence: TrainingMaterialSetEvidence,
+    *,
+    max_steps: int,
+) -> TrainingScalePlan:
+    training_records = sum(
+        item.record_count
+        for item in evidence.materials
+        if item.split is LearningDataSplit.TRAINING
+    )
+    training_bytes = sum(
+        item.byte_count
+        for item in evidence.materials
+        if item.split is LearningDataSplit.TRAINING
+    )
+    validation_records = sum(
+        item.record_count
+        for item in evidence.materials
+        if item.split is LearningDataSplit.VALIDATION
+    )
+    validation_bytes = sum(
+        item.byte_count
+        for item in evidence.materials
+        if item.split is LearningDataSplit.VALIDATION
+    )
+    return TrainingScalePlan(
+        plan_id="runtime-test-pilot",
+        evaluation_set_sha256=evidence.evaluation_set_sha256,
+        tiers=(
+            TrainingScaleTier(
+                tier_id="pilot",
+                max_training_records=training_records,
+                max_training_bytes=training_bytes,
+                max_validation_records=validation_records,
+                max_validation_bytes=validation_bytes,
+                max_steps=max_steps,
+            ),
+        ),
+    )
+
+
+def _scale_authorization(
+    *,
+    evidence: TrainingMaterialSetEvidence,
+    job_id: str,
+    base_artifact: ArtifactIdentity,
+    candidate_artifact_ref: str,
+    execution_plan_sha256: str,
+    max_steps: int,
+    resource_scope: str = "model_training",
+):
+    return authorize_training_scale(
+        plan=_scale_plan(evidence, max_steps=max_steps),
+        tier_id="pilot",
+        job_id=job_id,
+        base_artifact=base_artifact,
+        candidate_artifact_ref=candidate_artifact_ref,
+        material_evidence=evidence,
+        execution_plan_sha256=execution_plan_sha256,
+        max_steps=max_steps,
+        resource_scope=resource_scope,
     )
 
 
@@ -236,6 +306,10 @@ def _store_with_task(path: Path, task_id: str = "training-task") -> SQLiteStore:
 
 
 def _spec(**overrides: object) -> TrainingJobSpec:
+    scale_execution_plan_sha256 = overrides.pop(
+        "scale_execution_plan_sha256",
+        _EXECUTION_PLAN_SHA256,
+    )
     values: dict[str, object] = {
         "job_id": "job-1",
         "task_id": "training-task",
@@ -251,6 +325,19 @@ def _spec(**overrides: object) -> TrainingJobSpec:
         "max_steps": 4,
     }
     values.update(overrides)
+    try:
+        authorization = _scale_authorization(
+            evidence=_material_evidence(),
+            job_id=values["job_id"],  # type: ignore[arg-type]
+            base_artifact=values["base_artifact"],  # type: ignore[arg-type]
+            candidate_artifact_ref=values["candidate_artifact_ref"],  # type: ignore[arg-type]
+            execution_plan_sha256=scale_execution_plan_sha256,  # type: ignore[arg-type]
+            max_steps=values["max_steps"],  # type: ignore[arg-type]
+            resource_scope=values.get("resource_scope", "model_training"),  # type: ignore[arg-type]
+        )
+        values["scale_authorization_sha256"] = authorization.authorization_sha256
+    except (TrainingScaleError, TypeError, ValueError):
+        values["scale_authorization_sha256"] = "0" * 64
     return TrainingJobSpec(**values)  # type: ignore[arg-type]
 
 
@@ -281,18 +368,69 @@ def _replace_latest_checkpoint_field(
         )
 
 
+@dataclass
+class _AuthorizedRuntime:
+    runtime: TrainingRuntime
+    materials: ResolvedTrainingPackage
+
+    def run(
+        self,
+        spec: TrainingJobSpec,
+        worker,
+        *,
+        control=None,
+    ):
+        observed_plan = getattr(worker, "execution_plan_sha256", None)
+        try:
+            authorization = _scale_authorization(
+                evidence=self.materials.evidence,
+                job_id=spec.job_id,
+                base_artifact=spec.base_artifact,
+                candidate_artifact_ref=spec.candidate_artifact_ref,
+                execution_plan_sha256=observed_plan,
+                max_steps=spec.max_steps,
+                resource_scope=spec.resource_scope,
+            )
+        except (TrainingScaleError, TypeError, ValueError):
+            authorization = _scale_authorization(
+                evidence=self.materials.evidence,
+                job_id=spec.job_id,
+                base_artifact=spec.base_artifact,
+                candidate_artifact_ref=spec.candidate_artifact_ref,
+                execution_plan_sha256=_EXECUTION_PLAN_SHA256,
+                max_steps=spec.max_steps,
+                resource_scope=spec.resource_scope,
+            )
+        return self.runtime.run(
+            spec,
+            worker,
+            scale_authorization=authorization,
+            control=control,
+        )
+
+
+def _authorized_runtime(
+    runtime: TrainingRuntime,
+    materials: ResolvedTrainingPackage,
+) -> _AuthorizedRuntime:
+    return _AuthorizedRuntime(runtime=runtime, materials=materials)
+
+
 def _runtime(
     store: SQLiteStore,
     observer: _Observer | None = None,
     *,
     training_materials: ResolvedTrainingPackage | None = None,
-) -> TrainingRuntime:
+) -> _AuthorizedRuntime:
     resources = ResourceManager(store, observer or _Observer())
     materials = training_materials or _resolved_materials(store.path.parent)
-    return TrainingRuntime(
-        resources=resources,
-        checkpoints=CheckpointService(store),
-        training_materials=materials,
+    return _authorized_runtime(
+        TrainingRuntime(
+            resources=resources,
+            checkpoints=CheckpointService(store),
+            training_materials=materials,
+        ),
+        materials,
     )
 
 
@@ -350,7 +488,7 @@ def test_restart_rejects_different_worker_execution_plan_before_effect(
     tmp_path: Path,
 ) -> None:
     store = _store_with_task(tmp_path / "nika.db")
-    spec = _spec()
+    spec = _spec(scale_execution_plan_sha256="a" * 64)
     first = _Worker(complete_at=3, execution_plan_sha256="a" * 64)
     paused = _runtime(store).run(
         spec,
@@ -486,10 +624,14 @@ def test_resource_pressure_waits_without_running_trainer(tmp_path: Path) -> None
             max_cpu_percent=25.0,
         )
     )
-    runtime = TrainingRuntime(
-        resources=resources,
-        checkpoints=CheckpointService(store),
-        training_materials=_resolved_materials(store.path.parent),
+    materials = _resolved_materials(store.path.parent)
+    runtime = _authorized_runtime(
+        TrainingRuntime(
+            resources=resources,
+            checkpoints=CheckpointService(store),
+            training_materials=materials,
+        ),
+        materials,
     )
     worker = _Worker(complete_at=0)
 
@@ -519,10 +661,13 @@ def test_live_resource_pressure_pauses_before_next_training_effect_and_resumes(
         )
     )
     materials = _resolved_materials(store.path.parent)
-    runtime = TrainingRuntime(
-        resources=resources,
-        checkpoints=CheckpointService(store),
-        training_materials=materials,
+    runtime = _authorized_runtime(
+        TrainingRuntime(
+            resources=resources,
+            checkpoints=CheckpointService(store),
+            training_materials=materials,
+        ),
+        materials,
     )
     spec = _spec()
     first_worker = _ResourcePressureWorker(observer)
@@ -539,10 +684,13 @@ def test_live_resource_pressure_pauses_before_next_training_effect_and_resumes(
 
     observer.cpu_percent = 5.0
     second_worker = _Worker(complete_at=1)
-    completed = TrainingRuntime(
-        resources=resources,
-        checkpoints=CheckpointService(store),
-        training_materials=materials,
+    completed = _authorized_runtime(
+        TrainingRuntime(
+            resources=resources,
+            checkpoints=CheckpointService(store),
+            training_materials=materials,
+        ),
+        materials,
     ).run(spec, second_worker)
 
     assert completed.state is TrainingRunState.COMPLETED
@@ -767,7 +915,10 @@ def test_execution_plan_drift_fails_before_next_worker_effect(tmp_path: Path) ->
     store = _store_with_task(tmp_path / "nika.db")
     worker = _DriftingExecutionPlanWorker()
 
-    failed = _runtime(store).run(_spec(), worker)
+    failed = _runtime(store).run(
+        _spec(scale_execution_plan_sha256="a" * 64),
+        worker,
+    )
 
     assert failed.state is TrainingRunState.FAILED
     assert failed.reason == "training_execution_plan_changed"
