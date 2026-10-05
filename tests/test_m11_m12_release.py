@@ -173,6 +173,8 @@ def test_windows_plan_is_onedir_windowed_and_bundles_web_assets(tmp_path: Path) 
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
     plan = default_windows_plan(tmp_path)
     args = plan.pyinstaller_args()
     assert "--onedir" in args
@@ -190,6 +192,8 @@ def test_windows_plan_rejects_path_like_reserved_and_invalid_bundle_names(
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
     plan = default_windows_plan(tmp_path)
 
     invalid_names = (
@@ -220,6 +224,8 @@ def test_windows_plan_accepts_unicode_single_component_bundle_name(tmp_path: Pat
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
     plan = replace(default_windows_plan(tmp_path), name="Ніка Core")
 
     assert plan.bundle_dir == tmp_path / "dist" / "Ніка Core"
@@ -237,6 +243,8 @@ def test_windows_plan_rejects_behavioral_string_bundle_name(tmp_path: Path) -> N
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
     plan = replace(default_windows_plan(tmp_path), name=BehavioralName("NikaCore"))
 
     with pytest.raises(TypeError, match="exact text"):
@@ -249,6 +257,8 @@ def test_windows_plan_accepts_maximum_component_length(tmp_path: Path) -> None:
     web = tmp_path / "src" / "nika_core" / "ui" / "web"
     web.mkdir(parents=True)
     (web / "index.html").write_text("<main></main>", encoding="utf-8")
+    (web / "app.js").write_text("console.log('Nika')", encoding="utf-8")
+    (web / "styles.css").write_text("body {}", encoding="utf-8")
     name = "a" * 255
     plan = replace(default_windows_plan(tmp_path), name=name)
 
