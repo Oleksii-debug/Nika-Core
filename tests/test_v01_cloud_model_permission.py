@@ -1105,6 +1105,7 @@ def test_cloud_permission_clock_rejects_datetime_subclass(tmp_path: Path) -> Non
             "SELECT COUNT(*) FROM standing_permissions"
         ).fetchone()[0] == 0
 
+
 def test_recovered_running_task_with_live_grant_does_not_reprompt(
     tmp_path: Path,
 ) -> None:
