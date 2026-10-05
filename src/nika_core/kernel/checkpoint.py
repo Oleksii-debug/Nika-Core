@@ -120,6 +120,7 @@ def _validate_payload_resources(payload: object) -> None:
             for item in value:
                 stack.append((item, depth + 1))
 
+
 def _canonical_json(payload: dict[str, object]) -> str:
     _validate_payload_resources(payload)
     try:
