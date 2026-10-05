@@ -440,3 +440,56 @@ def test_restore_invalid_later_record_cannot_partially_replace_existing_state() 
     with pytest.raises(DeploymentExecutionError, match="attempt"):
         target.restore(DeploymentExecutionSnapshot((good, malformed)))
     assert target.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"request": None}, "request or intent"),
+        ({"intent": None}, "request or intent"),
+        ({"operation_id": None}, "identity"),
+        ({"credential_ref": 123}, "identity"),
+        ({"credential_audience": b"staging"}, "identity"),
+        ({"credential_scope": ""}, "identity"),
+        ({"credential_ttl_seconds": True}, "lease durations"),
+        ({"credential_ttl_seconds": 1.5}, "lease durations"),
+        ({"credential_ttl_seconds": float("nan")}, "lease durations"),
+        ({"credential_ttl_seconds": 0}, "lease durations"),
+        ({"node_lease_seconds": False}, "lease durations"),
+        ({"node_lease_seconds": float("inf")}, "lease durations"),
+        ({"node_lease_seconds": "300"}, "lease durations"),
+    ],
+)
+def test_execution_spec_rejects_ambiguous_input_carriers(
+    changes: dict[str, object], error: str
+) -> None:
+    spec = _spec("project-a", "source")
+    with pytest.raises(DeploymentExecutionError, match=error):
+        replace(spec, **changes)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value", "error"),
+    [
+        ("credential_ttl_seconds", True, "lease durations"),
+        ("node_lease_seconds", 1.5, "lease durations"),
+        ("credential_scope", None, "identity"),
+        ("request", None, "request or intent"),
+    ],
+)
+def test_restore_revalidates_tampered_execution_spec_before_mutation(
+    field_name: str, invalid_value: object, error: str
+) -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    valid = source.snapshot().records[0]
+    tampered_spec = replace(valid.spec)
+    object.__setattr__(tampered_spec, field_name, invalid_value)
+    corrupted = replace(valid, spec=tampered_spec)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+    with pytest.raises(DeploymentExecutionError, match=error):
+        target.restore(DeploymentExecutionSnapshot((corrupted,)))
+    assert target.snapshot() == before
