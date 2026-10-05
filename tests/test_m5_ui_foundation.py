@@ -38,9 +38,9 @@ def test_bridge_rejects_unknown_action_and_unconfigured_registered_action(tmp_pa
     unknown = bridge.dispatch({"request_id": "1", "action_id": "shell.exec", "payload": {}})
     unavailable = bridge.dispatch({"request_id": "2", "action_id": "agent.stop", "payload": {}})
     assert unknown["status"] == "rejected"
-    assert "Unknown action" in unknown["message"]
+    assert unknown["message"] == "Невідома дія інтерфейсу."
     assert unavailable["status"] == "rejected"
-    assert "not available" in unavailable["message"]
+    assert unavailable["message"] == "Ця дія недоступна в поточному контексті."
 
 
 def test_bridge_dispatch_and_keymap_conflict_are_fail_closed(tmp_path: Path) -> None:
