@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import unicodedata
 from datetime import UTC, datetime
 from typing import Any
 
@@ -220,6 +221,11 @@ def _required(name: str, value: str) -> str:
     result = value.strip()
     if not result:
         raise ValueError(f"{name} must not be empty")
+    if any(
+        unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+        for character in result
+    ):
+        raise ValueError(f"{name} must not contain control or invisible characters")
     try:
         result.encode("utf-8")
     except UnicodeEncodeError as exc:
