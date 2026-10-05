@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from enum import StrEnum
+import unicodedata
 from typing import Protocol
 
 from nika_core.model_gateway.contracts import (
@@ -86,7 +87,18 @@ class IntelligenceModePolicy:
                 raise ValueError(f"{name} must not be empty")
             if provider_id != provider_id.strip():
                 raise ValueError(f"{name} must not contain surrounding whitespace")
-            if len(provider_id) > 128 or any(ord(char) < 32 for char in provider_id):
+            if len(provider_id) > 128:
+                raise ValueError(f"{name} is invalid")
+            if any(
+                unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
+                for char in provider_id
+            ):
+                raise ValueError(f"{name} is invalid")
+            try:
+                size = len(provider_id.encode("utf-8"))
+            except UnicodeEncodeError:
+                raise ValueError(f"{name} must be valid UTF-8 text") from None
+            if size > 128:
                 raise ValueError(f"{name} is invalid")
             if "://" in provider_id or provider_id.casefold().startswith("env:"):
                 raise ValueError(
