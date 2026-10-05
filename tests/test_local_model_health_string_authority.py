@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from nika_core.diagnostics import ModelHealthFact, OllamaModelHealthProbe
+from nika_core.v01_model_settings import ModelSelection
 
 
 class _ExplosiveString(str):
@@ -248,4 +249,33 @@ def test_recursive_running_json_preserves_known_presence() -> None:
     assert snapshot.model_present is ModelHealthFact.YES
     assert snapshot.model_ready is ModelHealthFact.UNKNOWN
     assert calls == [f"{base}/api/tags", f"{base}/api/ps"]
+
+def test_model_selection_and_health_share_valid_ollama_url_contract() -> None:
+    for base_url in (
+        "http://localhost:11434",
+        "http://localhost:11434/",
+        "https://127.0.0.1:11434",
+        "http://[::1]:11434",
+        "https://[::1]:11434/",
+    ):
+        selection = ModelSelection(
+            route_kind="ollama",
+            provider_id="ollama",
+            model="local-model:1",
+            base_url=base_url,
+            private_data_allowed=True,
+            timeout_seconds=60,
+        )
+        calls: list[str] = []
+        snapshot = OllamaModelHealthProbe(
+            model_id=selection.model,
+            base_url=selection.base_url,
+            provider_id=selection.provider_id,
+            client_factory=_catalog_factory({"models": []}, calls),
+        ).snapshot()
+
+        assert snapshot.configured is ModelHealthFact.YES
+        assert snapshot.reachable is ModelHealthFact.YES
+        assert snapshot.model_present is ModelHealthFact.NO
+        assert calls == [f"{base_url.rstrip('/')}/api/tags"]
 
