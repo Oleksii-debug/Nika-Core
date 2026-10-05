@@ -108,6 +108,20 @@ def _completed_for(payload: bytes) -> TrainingRunEvidence:
     )
 
 
+def _restart_probe(
+    *,
+    next_step: int = 1,
+    checkpoint_id: str = "checkpoint-restart",
+    reason: str = "paused_before_admission",
+) -> TrainingRunEvidence:
+    return _run_evidence(
+        state=TrainingRunState.PAUSED,
+        next_step=next_step,
+        checkpoint_id=checkpoint_id,
+        reason=reason,
+    )
+
+
 def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrainingPilotReport:
     candidate = tmp_path / "adapter_model.safetensors"
     candidate.write_bytes(payload)
@@ -117,6 +131,7 @@ def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrai
             next_step=1,
             checkpoint_id="checkpoint-paused",
         ),
+        restart_probe=_restart_probe(),
         completed=_completed_for(payload),
         candidate_path=candidate,
         candidate_descriptor=_descriptor(candidate),
@@ -179,6 +194,7 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
             next_step=1,
             checkpoint_id="checkpoint-paused",
         ),
+        restart_probe=_restart_probe(),
         completed=_completed_for(payload),
         candidate_path=candidate,
         candidate_descriptor=descriptor,
@@ -186,12 +202,14 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     )
 
     assert report.platform == "windows"
+    assert report.schema_version == 2
     assert report.completed_steps == 2
     assert report.candidate_sha256 == _sha256(payload)
     assert report.candidate_byte_count == len(payload)
     assert report.candidate_descriptor_sha256 == descriptor.descriptor_digest
     assert report.candidate_registry_key == descriptor.registry_key
     assert report.paused_checkpoint_id == "checkpoint-paused"
+    assert report.restart_checkpoint_id == "checkpoint-restart"
     assert report.completed_checkpoint_id == "checkpoint-completed"
 
 
@@ -238,6 +256,7 @@ def test_build_report_rejects_runtime_candidate_digest_mismatch(tmp_path: Path) 
                 next_step=1,
                 checkpoint_id="checkpoint-paused",
             ),
+            restart_probe=_restart_probe(),
             completed=_completed_for(b"different-candidate"),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
@@ -257,9 +276,54 @@ def test_build_report_rejects_descriptor_digest_mismatch(tmp_path: Path) -> None
                 next_step=1,
                 checkpoint_id="checkpoint-paused",
             ),
+            restart_probe=_restart_probe(),
             completed=_completed_for(b"actual-candidate"),
             candidate_path=candidate,
             candidate_descriptor=descriptor,
+            candidate_root=tmp_path,
+        )
+
+
+def test_build_report_rejects_restart_probe_without_durable_reopen(
+    tmp_path: Path,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="reopen"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(next_step=0),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+def test_build_report_requires_effect_free_restart_probe_reason(
+    tmp_path: Path,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="before admission"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(reason="paused"),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,
         )
 
@@ -276,6 +340,7 @@ def test_build_report_rejects_restart_identity_drift(tmp_path: Path) -> None:
                 next_step=1,
                 checkpoint_id="checkpoint-paused",
             ),
+            restart_probe=_restart_probe(),
             completed=_run_evidence(
                 state=TrainingRunState.COMPLETED,
                 next_step=2,
@@ -303,6 +368,7 @@ def test_build_report_rejects_boolean_step_carrier(tmp_path: Path) -> None:
     with pytest.raises(PhysicalTrainingPilotError, match="step boundary"):
         build_physical_training_pilot_report(
             paused=paused,
+            restart_probe=_restart_probe(),
             completed=_completed_for(payload),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
@@ -322,6 +388,7 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
                 next_step=1,
                 checkpoint_id="same-checkpoint",
             ),
+            restart_probe=_restart_probe(),
             completed=_run_evidence(
                 state=TrainingRunState.COMPLETED,
                 next_step=2,
@@ -353,6 +420,7 @@ def test_build_report_rejects_non_windows_builder(
                 next_step=1,
                 checkpoint_id="checkpoint-paused",
             ),
+            restart_probe=_restart_probe(),
             completed=_completed_for(b"candidate"),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
@@ -374,6 +442,7 @@ def test_build_report_requires_explicit_pause_reason(tmp_path: Path) -> None:
     with pytest.raises(PhysicalTrainingPilotError, match="explicit pause control"):
         build_physical_training_pilot_report(
             paused=paused,
+            restart_probe=_restart_probe(),
             completed=_completed_for(payload),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
@@ -394,6 +463,7 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             execution_plan_sha256=report.execution_plan_sha256,
             job_fingerprint=report.job_fingerprint,
             paused_checkpoint_id=report.paused_checkpoint_id,
+            restart_checkpoint_id=report.restart_checkpoint_id,
             completed_checkpoint_id=report.completed_checkpoint_id,
             candidate_artifact_ref=report.candidate_artifact_ref,
             candidate_descriptor_sha256=report.candidate_descriptor_sha256,
@@ -402,6 +472,153 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             candidate_byte_count=report.candidate_byte_count,
             completed_steps=report.completed_steps,
             platform="linux",
+        )
+
+
+def _install_runner_fakes(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    resumed_probe: TrainingRunEvidence,
+    completed: TrainingRunEvidence,
+    initial_pause: TrainingRunEvidence | None = None,
+) -> tuple[object, object, list[tuple[str, bool]]]:
+    calls: list[tuple[str, bool]] = []
+
+    class FakeRuntime:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.calls = 0
+
+        def run(self, *_: object, control: object = None, **__: object) -> TrainingRunEvidence:
+            self.calls += 1
+            calls.append((self.name, control is not None))
+            if self.name == "initial":
+                if initial_pause is not None:
+                    return initial_pause
+                return _run_evidence(
+                    state=TrainingRunState.PAUSED,
+                    next_step=1,
+                    checkpoint_id="checkpoint-paused",
+                )
+            if self.calls == 1:
+                return resumed_probe
+            return completed
+
+    class FakeWorker:
+        @property
+        def execution_plan_sha256(self) -> str:
+            return "e" * 64
+
+    class FakeSpec:
+        max_steps = 2
+        base_artifact = ArtifactIdentity("models/base", "a" * 64)
+        job_id = "pilot-job"
+        task_id = "pilot-task"
+        project_id = "pilot-project"
+        owner_id = "pilot-owner"
+        frozen_package_sha256 = "b" * 64
+        training_material_sha256 = "c" * 64
+        scale_authorization_sha256 = "d" * 64
+        candidate_artifact_ref = "models/candidate/pilot"
+        resource_scope = "model_training"
+
+    class FakeAuthorization:
+        pass
+
+    initial_runtime = FakeRuntime("initial")
+    resumed_runtime = FakeRuntime("resumed")
+    initial_worker = FakeWorker()
+    resumed_worker = FakeWorker()
+    sentinel = object()
+
+    monkeypatch.setattr(pilot, "TrainingRuntime", FakeRuntime)
+    monkeypatch.setattr(pilot, "SubprocessTrainingWorker", FakeWorker)
+    monkeypatch.setattr(pilot, "TrainingJobSpec", FakeSpec)
+    monkeypatch.setattr(pilot, "TrainingScaleAuthorization", FakeAuthorization)
+    monkeypatch.setattr(
+        pilot,
+        "_snapshot_job_spec",
+        lambda _: FakeSpec(),
+    )
+    monkeypatch.setattr(
+        pilot,
+        "_resolve_candidate_descriptor",
+        lambda *_: object(),
+    )
+    monkeypatch.setattr(
+        pilot,
+        "build_physical_training_pilot_report",
+        lambda **_: sentinel,
+    )
+
+    result = pilot.run_physical_training_pilot(
+        runtime=initial_runtime,
+        restart_runtime=lambda: resumed_runtime,
+        spec=FakeSpec(),
+        worker=initial_worker,
+        restart_worker=lambda: resumed_worker,
+        scale_authorization=FakeAuthorization(),
+        candidate_path=Path("candidate"),
+        candidate_descriptor_factory=lambda _: object(),  # type: ignore[return-value]
+    )
+    return result, sentinel, calls
+
+
+def test_physical_runner_probes_reopened_checkpoint_before_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, sentinel, calls = _install_runner_fakes(
+        monkeypatch,
+        resumed_probe=_restart_probe(),
+        completed=_completed_for(b"candidate"),
+    )
+
+    assert result is sentinel
+    assert calls == [
+        ("initial", True),
+        ("resumed", True),
+        ("resumed", False),
+    ]
+
+
+def test_physical_runner_rejects_non_control_initial_pause_before_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_pause = _run_evidence(
+        state=TrainingRunState.PAUSED,
+        next_step=1,
+        checkpoint_id="checkpoint-paused",
+        reason="resource_revalidation:denied",
+    )
+
+    with pytest.raises(PhysicalTrainingPilotError, match="explicit pause control"):
+        _install_runner_fakes(
+            monkeypatch,
+            initial_pause=initial_pause,
+            resumed_probe=_restart_probe(),
+            completed=_completed_for(b"candidate"),
+        )
+
+
+def test_physical_runner_rejects_empty_restart_store_before_resume(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(PhysicalTrainingPilotError, match="reopen"):
+        _install_runner_fakes(
+            monkeypatch,
+            resumed_probe=_restart_probe(next_step=0),
+            completed=_completed_for(b"candidate"),
+        )
+
+
+def test_physical_runner_rejects_non_effect_free_restart_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(PhysicalTrainingPilotError, match="before admission"):
+        _install_runner_fakes(
+            monkeypatch,
+            resumed_probe=_restart_probe(reason="paused"),
+            completed=_completed_for(b"candidate"),
         )
 
 
