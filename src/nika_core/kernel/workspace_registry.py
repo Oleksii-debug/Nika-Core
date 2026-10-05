@@ -45,6 +45,18 @@ class WorkspaceDefinition:
             raise ValueError("enabled must be a boolean")
 
 
+def _snapshot_definition(value: object) -> WorkspaceDefinition:
+    if type(value) is not WorkspaceDefinition:
+        raise TypeError("definition must be an exact WorkspaceDefinition")
+    return WorkspaceDefinition(
+        value.workspace_id,
+        value.name,
+        value.version,
+        description=value.description,
+        enabled=value.enabled,
+    )
+
+
 class WorkspaceRegistry:
     def __init__(self, store: SQLiteStore) -> None:
         self._store = store
@@ -58,6 +70,7 @@ class WorkspaceRegistry:
         return int(row["count"])
 
     def register(self, definition: WorkspaceDefinition) -> None:
+        canonical = _snapshot_definition(definition)
         with self._store.connection() as conn:
             # Serialize the version check and insert across independent registry instances.
             # A deferred transaction would still allow multiple writers to observe the same
@@ -67,7 +80,7 @@ class WorkspaceRegistry:
                 "SELECT workspace_id, name, version, description, enabled "
                 "FROM workspaces WHERE workspace_id = ? "
                 "ORDER BY version DESC LIMIT 1",
-                (definition.workspace_id,),
+                (canonical.workspace_id,),
             ).fetchone()
             if row is not None:
                 _stored_text(row["workspace_id"], "workspace_id", allow_blank=False)
@@ -75,17 +88,17 @@ class WorkspaceRegistry:
                 current_version = _stored_version(row["version"])
                 _stored_text(row["description"], "description", allow_blank=True)
                 _stored_enabled(row["enabled"])
-                if definition.version <= current_version:
+                if canonical.version <= current_version:
                     raise ValueError("workspace version must increase")
             conn.execute(
                 "INSERT INTO workspaces(workspace_id, version, name, description, enabled, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
-                    definition.workspace_id,
-                    definition.version,
-                    definition.name,
-                    definition.description,
-                    int(definition.enabled),
+                    canonical.workspace_id,
+                    canonical.version,
+                    canonical.name,
+                    canonical.description,
+                    int(canonical.enabled),
                     datetime.now(UTC).isoformat(),
                 ),
             )
