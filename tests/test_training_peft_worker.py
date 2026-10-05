@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -175,6 +176,8 @@ def _config(tmp_path: Path, request: peft.ParsedRequest, base: bytes) -> peft.Tr
     return peft.TrainerConfig(
         base_gguf=base_path,
         base_gguf_sha256=_sha256(base),
+        initial_adapter=None,
+        initial_adapter_sha256=None,
         model_dir=model_dir,
         model_dir_manifest_sha256=peft.model_directory_manifest_sha256(model_dir),
         trainer_implementation_sha256=peft.trainer_implementation_sha256(),
@@ -409,7 +412,7 @@ def test_base_gguf_copy_rejects_logical_base_divergence_without_warm_start(
     request = peft._parse_request(raw_request)
     config = _config(tmp_path, request, base)
 
-    with pytest.raises(peft.PeftTrainerError, match="base_gguf_logical_base_mismatch"):
+    with pytest.raises(peft.PeftTrainerError, match="logical_base_digest_mismatch"):
         peft._copy_verified_base(config, request, peft._job_root(config, request))
 
 
@@ -804,6 +807,125 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     assert second_state["checkpoint_step"] == 2
 
 
+def test_new_job_can_warm_start_from_promoted_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, foundation = _request(tmp_path, max_steps=1)
+    promoted_bytes = b"promoted-tier-zero-adapter"
+    promoted_sha256 = _sha256(promoted_bytes)
+    raw_request["job"]["base_artifact"] = {
+        "artifact_ref": "models/candidate/pilot",
+        "sha256": promoted_sha256,
+    }
+    raw_request["training_materials"]["base_artifact_sha256"] = promoted_sha256
+    request = peft._parse_request(raw_request)
+    base_config = _config(tmp_path, request, foundation)
+    promoted = tmp_path / "promoted.safetensors"
+    promoted.write_bytes(promoted_bytes)
+    config = replace(
+        base_config,
+        initial_adapter=promoted.resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    consumed = peft._consume_materials(request, max_records=10)
+    prior_manifest = {
+        "adapter_config": {
+            "base_model_name_or_path": "models/base",
+            "bias": "none",
+            "lora_alpha": config.lora_alpha,
+            "lora_dropout": config.lora_dropout,
+            "r": config.lora_r,
+            "target_modules": list(config.lora_target_modules),
+            "task_type": "CAUSAL_LM",
+        },
+        "base_artifact_ref": "models/base",
+        "base_artifact_sha256": config.base_gguf_sha256,
+        "candidate_artifact_ref": request.base_artifact_ref,
+        "consumed_materials_sha256": "7" * 64,
+        "foundation_model_sha256": config.base_gguf_sha256,
+        "job_fingerprint": "8" * 64,
+        "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
+        "schema": "nika-peft-candidate-v2",
+        "step_number": 2,
+        "trainer_artifact_id": "a" * 64,
+        "trainer_implementation_sha256": "b" * 64,
+        "trainer_sha256": "c" * 64,
+        "training_runtime_manifest_sha256": "d" * 64,
+        "training_runtime_versions": dict(_RUNTIME_VERSIONS),
+        "trainer_parameters": {
+            "learning_rate": config.learning_rate,
+            "lora_alpha": config.lora_alpha,
+            "lora_dropout": config.lora_dropout,
+            "lora_r": config.lora_r,
+            "lora_target_modules": list(config.lora_target_modules),
+            "max_records": config.max_records,
+            "max_sequence_length": config.max_sequence_length,
+            "seed": config.seed,
+            "torch_num_threads": config.torch_num_threads,
+        },
+    }
+    monkeypatch.setattr(peft, "candidate_adapter_manifest", lambda _: prior_manifest)
+    stack = list(_fake_stack())
+
+    def fresh_adapter_must_not_be_created(*_: object, **__: object) -> object:
+        raise AssertionError("warm-start job must not create a fresh LoRA adapter")
+
+    stack[4] = fresh_adapter_must_not_be_created
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    _, candidate_sha256 = peft._train_one_step(request, config, consumed)
+
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    assert candidate_sha256 == _sha256(candidate.read_bytes())
+    job_root = config.output_root / peft._candidate_key(
+        request.candidate_artifact_ref
+    )
+    assert (
+        job_root / "initial-adapter" / peft._CANDIDATE_FILE
+    ).read_bytes() == promoted_bytes
+
+
+def test_warm_start_rejects_wrong_foundation_chain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, foundation = _request(tmp_path, max_steps=1)
+    promoted = tmp_path / "promoted.safetensors"
+    promoted.write_bytes(b"promoted")
+    promoted_sha256 = _sha256(b"promoted")
+    raw_request["job"]["base_artifact"]["artifact_ref"] = "models/candidate/pilot"
+    raw_request["job"]["base_artifact"]["sha256"] = promoted_sha256
+    raw_request["training_materials"]["base_artifact_sha256"] = promoted_sha256
+    request = peft._parse_request(raw_request)
+    base_config = _config(tmp_path, request, foundation)
+    config = replace(
+        base_config,
+        initial_adapter=promoted.resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    manifest = {
+        "schema": "nika-peft-candidate-v2",
+        "candidate_artifact_ref": request.base_artifact_ref,
+        "foundation_model_sha256": "0" * 64,
+        "adapter_config": {},
+    }
+    monkeypatch.setattr(peft, "candidate_adapter_manifest", lambda _: manifest)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="initial_adapter_foundation_model_mismatch",
+    ):
+        peft._stage_initial_adapter(
+            config,
+            request,
+            peft._ensure_job_root(config, request),
+        )
+
+
 def test_training_step_rejects_unchanged_adapter_weights(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1099,6 +1221,69 @@ def test_read_config_rejects_foundation_gguf_digest_drift(
     config.base_gguf.write_bytes(b"replacement-foundation")
 
     with pytest.raises(peft.PeftTrainerError, match="base_gguf_digest_mismatch"):
+        peft._read_config()
+
+
+def test_environment_builder_binds_promoted_initial_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    initial_adapter = tmp_path / "promoted.safetensors"
+    initial_adapter.write_bytes(b"promoted-adapter")
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
+
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        initial_adapter=initial_adapter.resolve(),
+        output_root=config.output_root,
+        trainer_artifact=_trainer_artifact(tmp_path),
+    )
+
+    assert environment["NIKA_TRAINER_INITIAL_ADAPTER_PATH"] == str(
+        initial_adapter.resolve()
+    )
+    assert environment["NIKA_TRAINER_INITIAL_ADAPTER_SHA256"] == _sha256(
+        b"promoted-adapter"
+    )
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+    loaded = peft._read_config()
+    assert loaded.initial_adapter == initial_adapter.resolve()
+    assert loaded.initial_adapter_sha256 == _sha256(b"promoted-adapter")
+
+
+def test_read_config_rejects_partial_initial_adapter_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    monkeypatch.setattr(
+        peft.importlib.metadata,
+        "version",
+        _RUNTIME_VERSIONS.__getitem__,
+    )
+    environment = peft.build_trainer_environment(
+        base_gguf=config.base_gguf,
+        model_dir=config.model_dir,
+        output_root=config.output_root,
+        trainer_artifact=_trainer_artifact(tmp_path),
+    )
+    environment["NIKA_TRAINER_INITIAL_ADAPTER_SHA256"] = "9" * 64
+    for key, value in environment.items():
+        monkeypatch.setenv(key, value)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="initial_adapter_authority_incomplete",
+    ):
         peft._read_config()
 
 
