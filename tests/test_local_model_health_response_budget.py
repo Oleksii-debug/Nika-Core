@@ -271,3 +271,58 @@ def test_running_body_read_timeout_preserves_catalog_presence() -> None:
     assert calls == ["/api/tags", "/api/ps"]
     assert broken.closed
 
+def _raw_response(payload: bytes) -> httpx.Response:
+    return httpx.Response(200, stream=httpx.ByteStream(payload))
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        (
+            b'{"models":[{"model":"other:1"}],'
+            b'"models":[{"model":"selected:1"}]}'
+        ),
+        b'{"models":[{"model":"other:1","model":"selected:1"}]}',
+        b'{"models":[{"name":"other:1","name":"selected:1"}]}',
+        b'{"models":[{"model":"selected:1","score":NaN}]}',
+    ],
+)
+def test_ambiguous_tags_json_is_unknown(payload: bytes) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        return _raw_response(payload)
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="selected:1",
+        client_factory=_client_factory(handler),
+    ).snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.UNKNOWN
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["/api/tags"]
+
+
+def test_duplicate_running_identity_cannot_prove_readiness() -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path == "/api/tags":
+            return _response([{"model": "selected:1"}])
+        return _raw_response(
+            b'{"models":[{"model":"other:1","model":"selected:1"}]}'
+        )
+
+    snapshot = OllamaModelHealthProbe(
+        model_id="selected:1",
+        client_factory=_client_factory(handler),
+    ).snapshot()
+
+    assert snapshot.reachable is ModelHealthFact.YES
+    assert snapshot.model_present is ModelHealthFact.YES
+    assert snapshot.model_ready is ModelHealthFact.UNKNOWN
+    assert calls == ["/api/tags", "/api/ps"]
+
