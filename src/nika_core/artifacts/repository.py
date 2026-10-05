@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -24,9 +25,42 @@ def _stored_int(value: object, *, field: str) -> int:
     return value
 
 
-def _record_from_row(row: Any) -> ArtifactRecord:
+def _reject_nonfinite_json_constant(value: str) -> None:
+    raise ValueError(f"non-finite JSON constant is not allowed: {value}")
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError(f"duplicate durable JSON key: {key}")
+        value[key] = item
+    return value
+
+
+def _load_durable_json(value: object, *, field: str) -> dict[str, Any]:
+    if type(value) is not str:
+        raise ArtifactRegistryError(f"{field} must be stored as SQLite TEXT")
     try:
-        record = ArtifactRecord.model_validate_json(str(row["record_json"]))
+        payload = json.loads(
+            value,
+            parse_constant=_reject_nonfinite_json_constant,
+            object_pairs_hook=_unique_json_object,
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ArtifactRegistryError(f"{field} is invalid") from exc
+    if type(payload) is not dict:
+        raise ArtifactRegistryError(f"{field} is invalid")
+    return payload
+
+
+def _record_from_row(row: Any) -> ArtifactRecord:
+    payload = _load_durable_json(
+        row["record_json"],
+        field="artifact registry record payload",
+    )
+    try:
+        record = ArtifactRecord.model_validate(payload)
     except (TypeError, ValueError) as exc:
         raise ArtifactRegistryError("artifact registry record payload is invalid") from exc
 
@@ -49,10 +83,12 @@ def _record_from_row(row: Any) -> ArtifactRecord:
 
 
 def _verification_from_row(row: Any) -> ArtifactVerification:
+    payload = _load_durable_json(
+        row["verification_json"],
+        field="artifact verification payload",
+    )
     try:
-        verification = ArtifactVerification.model_validate_json(
-            str(row["verification_json"])
-        )
+        verification = ArtifactVerification.model_validate(payload)
     except (TypeError, ValueError) as exc:
         raise ArtifactRegistryError("artifact verification payload is invalid") from exc
 
