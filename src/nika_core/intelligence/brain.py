@@ -163,6 +163,8 @@ class DeterministicBrain:
         observation_timeout_seconds: float = 10.0,
     ) -> DeterministicBrainResult:
         _require_run_identity(run_id, name="run_id")
+        if task_id is not None:
+            _require_run_identity(task_id, name="task_id")
         if type(max_steps) is not int or max_steps <= 0:
             raise ValueError("max_steps must be a positive integer")
         if type(max_replans) is not int or max_replans < 0:
@@ -176,7 +178,6 @@ class DeterministicBrain:
         if self._effect_journal is not None:
             if task_id is None:
                 raise ValueError("task_id is required when effect_journal is configured")
-            _require_run_identity(task_id, name="task_id")
 
         # Kept for source compatibility only. A planner-selected action ID is not approval
         # evidence and must never turn into ToolCall.approved=True.
@@ -187,6 +188,11 @@ class DeterministicBrain:
         if type(actions) is not tuple:
             raise TypeError("actions must be an exact tuple")
         actions = tuple(DeterministicAction.detached_copy(action) for action in actions)
+        for index, action in enumerate(actions):
+            _require_run_identity(
+                action.action_id,
+                name=f"actions[{index}].action_id",
+            )
         if type(previously_completed_action_ids) is not tuple:
             raise TypeError("previously_completed_action_ids must be an exact tuple")
         if any(type(action_id) is not str for action_id in previously_completed_action_ids):
@@ -214,7 +220,7 @@ class DeterministicBrain:
         completed_set = set(previously_completed_action_ids)
         history: list[DeterministicPlan] = []
         replans = 0
-        executed_steps = 0
+        executed_steps = len(previously_completed_action_ids)
 
         journal = self._effect_journal
         if journal is not None:
@@ -278,6 +284,18 @@ class DeterministicBrain:
                         planner_invoked=False,
                     )
                 )
+                if (
+                    remaining_steps == 0
+                    and previously_completed_action_ids
+                    and self._goal_satisfied(current_state, goal)
+                ):
+                    return DeterministicBrainResult(
+                        plan=plan,
+                        completed_actions=tuple(completed),
+                        final_state=current_state,
+                        planning_history=tuple(history),
+                        replans=replans,
+                    )
                 return self._failure(
                     plan=plan,
                     completed=completed,
