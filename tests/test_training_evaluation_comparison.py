@@ -39,6 +39,7 @@ from nika_core.model_gateway.contracts import (
     PrivacyClass,
     ProviderKind,
 )
+from nika_core.model_gateway.providers import OllamaProvider as CanonicalOllamaProvider
 from nika_core.training_evaluation_champion import (
     bind_champion_for_attested_evaluation,
 )
@@ -58,7 +59,6 @@ from nika_core.training_model_activation import (
     rollback_attested_training_promotion,
 )
 from nika_core.training_ollama_manifest import (
-    ManifestPinnedOllamaProvider,
     OllamaManifestAuthority,
     OllamaPreparedModelBinding,
     OllamaPromotionManifestStore,
@@ -1342,14 +1342,14 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     monkeypatch.setattr(settings, "artifact_pin_for_task", unexpected_legacy_read)
     monkeypatch.setattr(TaskQueue, "get", unexpected_legacy_read)
 
-    seen_binding: list[OllamaPreparedModelBinding] = []
+    seen_provider_args: list[dict[str, object]] = []
 
     def observing_provider(**kwargs):
-        seen_binding.append(kwargs["binding"])
-        return ManifestPinnedOllamaProvider(**kwargs)
+        seen_provider_args.append(dict(kwargs))
+        return CanonicalOllamaProvider(**kwargs)
 
     monkeypatch.setattr(
-        "nika_core.v01_model_settings.ManifestPinnedOllamaProvider",
+        "nika_core.v01_model_settings.OllamaProvider",
         observing_provider,
     )
     factory = V01BoundModelRuntimeFactory(
@@ -1359,12 +1359,12 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
     )
 
     assert factory.for_task(task.task_id) is not None
-    assert len(seen_binding) == 1
+    assert len(seen_provider_args) == 1
+    assert seen_provider_args[0]["default_model"] == "challenger-model"
     assert (
-        seen_binding[0].artifact_sha256
-        == result.challenger_benchmark.binding.challenger_sha256
+        seen_provider_args[0]["expected_manifest_sha256"]
+        == _CHALLENGER_PROVIDER_MANIFEST_SHA256
     )
-    assert seen_binding[0].route_model_id == "challenger-model"
 
 
 @pytest.mark.asyncio
