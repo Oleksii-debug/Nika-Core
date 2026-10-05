@@ -122,6 +122,32 @@ def test_matching_raw_digest_of_ambiguous_selection_cannot_bind_task(
         ).fetchone()[0] == 0
 
 
+def test_mismatched_source_digest_preserves_existing_identity_error(
+    tmp_path: Path,
+) -> None:
+    store, settings, _selection = _configured(tmp_path)
+    selection_id = settings.prepare_task_payload({"command": "Порівняй"})[
+        "v01_source_selection"
+    ]
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "Порівняй", "v01_source_selection": selection_id},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_source_selections SET selection_json = ? WHERE selection_id = ?",
+            ('{"schema_version":1}', selection_id),
+        )
+    with pytest.raises(SourceSetupError, match="не вдалося перевірити"):
+        settings.for_task(task.task_id)
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_source_bindings WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()[0] == 0
+
+
 def test_valid_legacy_json_preserves_raw_digest_and_task_binding(tmp_path: Path) -> None:
     store, settings, selection = _configured(tmp_path)
     body = json.dumps(selection.model_dump(), indent=2, ensure_ascii=False)

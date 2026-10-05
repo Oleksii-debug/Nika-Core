@@ -31,6 +31,18 @@ def _reject_nonfinite_constant(_raw: str) -> None:
     raise ValueError("nonfinite stored JSON constant")
 
 
+def bounded_stored_utf8(value: str, *, max_bytes: int) -> bytes:
+    """Validate an untrusted SQLite TEXT carrier before hashing or parsing."""
+    if type(value) is not str:
+        raise TypeError("stored JSON must be text")
+    if len(value) > max_bytes:
+        raise ValueError("oversized stored JSON")
+    raw = value.encode("utf-8")
+    if len(raw) > max_bytes:
+        raise ValueError("oversized stored JSON")
+    return raw
+
+
 def load_persisted_json_object(value: str, *, max_bytes: int) -> dict[str, Any]:
     """Parse SQLite TEXT once; reject ambiguous, invalid or oversized JSON.
 
@@ -38,10 +50,7 @@ def load_persisted_json_object(value: str, *, max_bytes: int) -> dict[str, Any]:
     The caller must retain/hash the original text rather than reserialize the
     parsed mapping when checking a previously accepted selection identifier.
     """
-    if type(value) is not str:
-        raise TypeError("stored JSON must be text")
-    if len(value) > max_bytes or len(value.encode("utf-8")) > max_bytes:
-        raise ValueError("oversized stored JSON")
+    bounded_stored_utf8(value, max_bytes=max_bytes)
     decoded = json.loads(
         value,
         object_pairs_hook=_unique_object_keys,

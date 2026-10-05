@@ -36,7 +36,7 @@ from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
 from nika_core.ui.bridge_models import UIResult
-from nika_core.v01_settings_json import load_persisted_json_object
+from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json_object
 
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
@@ -312,10 +312,13 @@ class V01ModelSettings:
         if row is None or not isinstance(row["selection_json"], str):
             raise ModelSetupError("Збережену модель завдання не знайдено.")
         body = row["selection_json"]
-        selection = ModelSelection.from_stored(body)
-        if hashlib.sha256(body.encode("utf-8")).hexdigest() != selection_id:
+        try:
+            raw = bounded_stored_utf8(body, max_bytes=_MAX_STORED_SELECTION_BYTES)
+        except (TypeError, ValueError) as exc:
+            raise ModelSetupError("Збережену модель завдання не вдалося перевірити.") from exc
+        if hashlib.sha256(raw).hexdigest() != selection_id:
             raise ModelSetupError("Збережену модель завдання не вдалося перевірити.")
-        return selection
+        return ModelSelection.from_stored(body)
 
     def _selected(self, conn: sqlite3.Connection) -> ModelSelection:
         row = conn.execute("SELECT * FROM v01_model_settings WHERE singleton = 1").fetchone()

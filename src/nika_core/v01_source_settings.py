@@ -16,7 +16,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.research.local import local_media_type, resolve_local_file
 from nika_core.ui.bridge_models import UIResult
-from nika_core.v01_settings_json import load_persisted_json_object
+from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json_object
 
 MAX_SOURCE_BYTES = 16 * 1024 * 1024
 _MAX_STORED_SOURCE_JSON_BYTES = 1024 * 1024
@@ -206,10 +206,13 @@ class V01SourceSettings:
         if row is None or type(row["selection_json"]) is not str:
             raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
         body = row["selection_json"]
-        selection = SourceSelection.from_stored(body)
-        if hashlib.sha256(body.encode("utf-8")).hexdigest() != selection_id:
+        try:
+            raw = bounded_stored_utf8(body, max_bytes=_MAX_STORED_SOURCE_JSON_BYTES)
+        except (TypeError, ValueError) as exc:
+            raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.") from exc
+        if hashlib.sha256(raw).hexdigest() != selection_id:
             raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
-        return selection
+        return SourceSelection.from_stored(body)
 
     def _default_selection(self) -> SourceSelection | None:
         values = (

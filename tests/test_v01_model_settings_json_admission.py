@@ -99,6 +99,35 @@ def test_matching_raw_digest_cannot_authorize_ambiguous_task_route(
         ).fetchone()[0] == 0
 
 
+def test_mismatched_model_digest_preserves_existing_identity_error(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "Дані Ніки" / "модель.db")
+    store.initialize()
+    settings = V01ModelSettings(store)
+    assert settings.configure({"route_kind": "deterministic", "revision": 0}).status == (
+        "completed"
+    )
+    task = TaskQueue(store).create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload=settings.prepare_task_payload({"command": "Перевір"}),
+    )
+    selection_id = task.payload["v01_model_selection"]
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_model_selections SET selection_json = ? WHERE selection_id = ?",
+            ('{"schema_version":1}', selection_id),
+        )
+    with pytest.raises(ModelSetupError, match="не вдалося перевірити"):
+        settings.for_task(task.task_id)
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM v01_task_model_bindings WHERE task_id = ?",
+            (task.task_id,),
+        ).fetchone()[0] == 0
+
+
 def test_noncanonical_but_valid_legacy_json_keeps_its_raw_digest(
     tmp_path: Path,
 ) -> None:
