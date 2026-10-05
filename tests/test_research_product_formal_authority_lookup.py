@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -157,7 +159,7 @@ def test_formal_authority_identity_corruption_cannot_hide_marker(
         decided_by_ref="user://owner",
     )
     with pytest.raises(ProductProjectError, match="formal research handoff authority is malformed"):
-        ProductDecisionRepository(store).record(
+        AuthorizingProductDecisionRepository(store).record(
             "p1",
             decision,
             expected_row_version=0,
