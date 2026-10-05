@@ -326,10 +326,14 @@ class OllamaModelHealthProbe:
                 ):
                     return None
                 payload = bytearray()
-                for chunk in response.iter_raw(chunk_size=16384):
-                    if len(chunk) > _MAX_HEALTH_RESPONSE_BYTES - len(payload):
-                        return None
-                    payload.extend(chunk)
+                try:
+                    for chunk in response.iter_raw(chunk_size=16384):
+                        if len(chunk) > _MAX_HEALTH_RESPONSE_BYTES - len(payload):
+                            return None
+                        payload.extend(chunk)
+                except httpx.TransportError:
+                    # Headers arrived: keep reachability, but trust no partial catalog.
+                    return None
                 return httpx.Response(
                     status_code=response.status_code,
                     content=bytes(payload),
