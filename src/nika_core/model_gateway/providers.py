@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable
 from typing import Any
@@ -9,6 +10,7 @@ import httpx
 
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
+    ModelFailureEffect,
     ModelGatewayError,
     ModelRequest,
     ModelResponse,
@@ -16,6 +18,10 @@ from nika_core.model_gateway.contracts import (
     ProviderCapabilities,
     ProviderKind,
 )
+
+
+_OLLAMA_MANIFEST_DIGEST = re.compile(r"^[0-9a-f]{64}$")
+_MAX_OLLAMA_CATALOG_MODELS = 4096
 
 
 def _require_provider_text(name: str, value: object) -> str:
@@ -214,6 +220,7 @@ class OllamaProvider:
         default_model: str,
         base_url: str = "http://localhost:11434",
         think: bool | str = False,
+        expected_manifest_sha256: str | None = None,
         client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
     ) -> None:
         default_model = _require_provider_text("default_model", default_model)
@@ -249,14 +256,168 @@ class OllamaProvider:
         self._default_model = default_model
         self._base_url = base_url.rstrip("/")
         self._think = _normalize_ollama_think(think)
+        if expected_manifest_sha256 is not None and (
+            type(expected_manifest_sha256) is not str
+            or _OLLAMA_MANIFEST_DIGEST.fullmatch(expected_manifest_sha256) is None
+        ):
+            raise ValueError(
+                "expected_manifest_sha256 must be an exact lowercase SHA-256 digest"
+            )
+        self._expected_manifest_sha256 = expected_manifest_sha256
         self._client_factory = client_factory
 
     @property
     def capabilities(self) -> ProviderCapabilities:
         return self._capabilities
 
+    @staticmethod
+    def _catalog_manifest_sha256(body: object, *, model: str) -> str:
+        if type(body) is not dict:
+            raise ValueError("Ollama model catalog must be an object")
+        models = body.get("models")
+        if type(models) is not list or len(models) > _MAX_OLLAMA_CATALOG_MODELS:
+            raise ValueError("Ollama model catalog is invalid or unbounded")
+
+        matches: list[str] = []
+        for item in models:
+            if type(item) is not dict:
+                raise ValueError("Ollama model catalog entry must be an object")
+            name = _require_provider_text("Ollama catalog name", item.get("name"))
+            item_model = _require_provider_text(
+                "Ollama catalog model", item.get("model")
+            )
+            digest = item.get("digest")
+            if (
+                type(digest) is not str
+                or _OLLAMA_MANIFEST_DIGEST.fullmatch(digest) is None
+            ):
+                raise ValueError("Ollama catalog digest is invalid")
+            if name == model or item_model == model:
+                if name != model or item_model != model:
+                    raise ValueError("Ollama catalog model identity is ambiguous")
+                matches.append(digest)
+
+        if len(matches) != 1:
+            raise ValueError("Ollama catalog does not contain one exact model identity")
+        return matches[0]
+
+    @staticmethod
+    def _remaining_timeout(
+        deadline: float,
+        *,
+        failure_effect: ModelFailureEffect,
+    ) -> float:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise ModelGatewayError(
+                ModelErrorCode.TIMEOUT,
+                "Ollama manifest verification exceeded the request deadline",
+                provider_id="ollama",
+                retryable=False,
+                failure_effect=failure_effect,
+            )
+        return remaining
+
+    async def _manifest_sha256(
+        self,
+        *,
+        endpoint: str,
+        model: str,
+        deadline: float,
+        failure_effect: ModelFailureEffect,
+    ) -> str:
+        timeout_seconds = self._remaining_timeout(
+            deadline,
+            failure_effect=failure_effect,
+        )
+        try:
+            async with self._client_factory(
+                timeout=timeout_seconds,
+                trust_env=False,
+                follow_redirects=False,
+            ) as client:
+                response = await client.get(f"{self._base_url}/{endpoint}")
+                response.raise_for_status()
+                media_type = response.headers.get("content-type", "").partition(";")[0]
+                if media_type.strip().casefold() != "application/json":
+                    raise ValueError("Ollama manifest endpoint must return JSON")
+                body = response.json()
+                return self._catalog_manifest_sha256(body, model=model)
+        except httpx.TimeoutException as exc:
+            raise ModelGatewayError(
+                ModelErrorCode.TIMEOUT,
+                "Ollama manifest verification timed out",
+                provider_id=self.capabilities.provider_id,
+                retryable=failure_effect is ModelFailureEffect.NO_EFFECT,
+                failure_effect=failure_effect,
+            ) from exc
+        except httpx.HTTPStatusError as exc:
+            code, retryable = _classify_http_status(exc.response.status_code)
+            raise ModelGatewayError(
+                code,
+                f"Ollama manifest endpoint returned HTTP {exc.response.status_code}",
+                provider_id=self.capabilities.provider_id,
+                retryable=(
+                    retryable and failure_effect is ModelFailureEffect.NO_EFFECT
+                ),
+                failure_effect=failure_effect,
+            ) from exc
+        except httpx.RequestError as exc:
+            raise ModelGatewayError(
+                ModelErrorCode.UNAVAILABLE,
+                "Ollama manifest endpoint is unavailable",
+                provider_id=self.capabilities.provider_id,
+                retryable=failure_effect is ModelFailureEffect.NO_EFFECT,
+                failure_effect=failure_effect,
+            ) from exc
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "Ollama manifest evidence is invalid",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+                failure_effect=failure_effect,
+            ) from exc
+
+    async def _verify_manifest_sha256(
+        self,
+        *,
+        endpoint: str,
+        model: str,
+        deadline: float,
+        failure_effect: ModelFailureEffect,
+    ) -> None:
+        expected = self._expected_manifest_sha256
+        if expected is None:
+            return
+        observed = await self._manifest_sha256(
+            endpoint=endpoint,
+            model=model,
+            deadline=deadline,
+            failure_effect=failure_effect,
+        )
+        if observed != expected:
+            raise ModelGatewayError(
+                ModelErrorCode.PROVIDER_ERROR,
+                "Ollama model manifest does not match the pinned identity",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+                failure_effect=failure_effect,
+            )
+
     async def complete(self, request: ModelRequest) -> ModelResponse:
         model = request.model or self._default_model
+        if (
+            self._expected_manifest_sha256 is not None
+            and model != self._default_model
+        ):
+            raise ModelGatewayError(
+                ModelErrorCode.INVALID_REQUEST,
+                "pinned Ollama provider does not permit a model override",
+                provider_id=self.capabilities.provider_id,
+                retryable=False,
+                failure_effect=ModelFailureEffect.NO_EFFECT,
+            )
         payload: dict[str, Any] = {
             "model": model,
             "messages": [
@@ -270,9 +431,19 @@ class OllamaProvider:
             payload["options"] = {"temperature": request.temperature}
 
         started = time.perf_counter()
+        deadline = started + float(request.timeout_seconds)
+        await self._verify_manifest_sha256(
+            endpoint="api/tags",
+            model=model,
+            deadline=deadline,
+            failure_effect=ModelFailureEffect.NO_EFFECT,
+        )
         try:
             async with self._client_factory(
-                timeout=request.timeout_seconds,
+                timeout=self._remaining_timeout(
+                    deadline,
+                    failure_effect=ModelFailureEffect.NO_EFFECT,
+                ),
                 trust_env=False,
                 follow_redirects=False,
             ) as client:
@@ -335,6 +506,13 @@ class OllamaProvider:
                 provider_id=self.capabilities.provider_id,
                 retryable=False,
             ) from exc
+
+        await self._verify_manifest_sha256(
+            endpoint="api/ps",
+            model=model,
+            deadline=deadline,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
 
         return ModelResponse(
             request_id=request.request_id,
