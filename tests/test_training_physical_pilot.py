@@ -293,6 +293,15 @@ def test_report_round_trip_is_canonical_and_digest_stable(tmp_path: Path) -> Non
     )
 
 
+def test_report_from_json_rejects_bytes_transport(tmp_path: Path) -> None:
+    report = _build_report(tmp_path)
+
+    with pytest.raises(TypeError, match="exact text"):
+        PhysicalTrainingPilotReport.from_json(
+            report.to_json().encode("utf-8"),  # type: ignore[arg-type]
+        )
+
+
 def test_report_rejects_unknown_or_duplicate_json_fields(tmp_path: Path) -> None:
     report = _build_report(tmp_path)
     value = report.canonical_payload()
@@ -581,7 +590,9 @@ def test_report_publication_round_trips_exact_canonical_bytes(tmp_path: Path) ->
 
     payload = output.read_bytes()
     assert payload == report.to_json().encode("utf-8")
-    restored = PhysicalTrainingPilotReport.from_json(payload)
+    restored = PhysicalTrainingPilotReport.from_json(
+        payload.decode("utf-8", errors="strict")
+    )
     assert restored == report
 
 
