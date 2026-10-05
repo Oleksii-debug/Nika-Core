@@ -55,6 +55,24 @@ A committed fill row and its resulting account snapshot commit in one SQLite tra
 
 Current limit: Batch 2 stores the resulting account snapshot as deterministic Decimal-string JSON evidence. Full durable session/order reconstruction is reserved for the paper-session Batch 4 unless earlier Batch 2 CI/audit proves it is required for fill/account correctness.
 
+## Full instrument and venue identity
+
+Paper-trading authority uses one complete immutable identity tuple:
+venue ID, venue timezone, native instrument ID and currency. Portfolio positions,
+risk marks/deltas and replay matching no longer key by the native instrument ID alone.
+Deterministic fill IDs also bind a SHA-256 digest of that complete identity, so equal
+native IDs on different venues cannot alias the same simulated fill.
+
+Durable Trader schema v2 stores the venue ID/timezone and currency beside the native
+instrument ID and repeats the same fields in account-position evidence. An empty
+development v1 database can upgrade additively under one `BEGIN IMMEDIATE` writer
+transaction. A non-empty v1 database fails closed because its historical rows never
+recorded venue identity and Nika must not invent that missing authority.
+
+Limit-order simulation applies deterministic adverse slippage but caps the final
+paper fill at the legal limit: BUY fills never exceed the limit and SELL fills never
+fall below it. This remains simulation-only; there is no broker/network order route.
+
 ## Numerical oracle set
 
 `tests/fixtures/trading_research_numerical_oracles.json` contains exactly 42 unique manually calculable cases:
