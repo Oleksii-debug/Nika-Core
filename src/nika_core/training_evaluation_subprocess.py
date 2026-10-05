@@ -53,6 +53,37 @@ _MAX_JSON_DEPTH = 12
 _MAX_JSON_NODES = 4096
 _READ_CHUNK_BYTES = 64 * 1024
 _HEX_DIGITS = frozenset("0123456789abcdef")
+_FORBIDDEN_ENVIRONMENT_KEYS = frozenset(
+    {
+        "classpath",
+        "comspec",
+        "dotnet_additional_deps",
+        "dotnet_startup_hooks",
+        "dyld_framework_path",
+        "dyld_insert_libraries",
+        "dyld_library_path",
+        "java_tool_options",
+        "ld_library_path",
+        "ld_preload",
+        "node_options",
+        "path",
+        "pathext",
+        "perl5lib",
+        "perl5opt",
+        "rubyopt",
+        "_java_options",
+    }
+)
+_SECRET_ENVIRONMENT_MARKERS = (
+    "api_key",
+    "apikey",
+    "auth",
+    "credential",
+    "passwd",
+    "password",
+    "secret",
+    "token",
+)
 
 
 def _error(
@@ -184,6 +215,16 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
             raise ValueError("environment keys and values must be strings")
         if not key or "=" in key or "\x00" in key or "\x00" in value:
             raise ValueError("environment contains an invalid key or value")
+        normalized_key = key.casefold()
+        if (
+            normalized_key in _FORBIDDEN_ENVIRONMENT_KEYS
+            or normalized_key.startswith("python")
+            or normalized_key.startswith("ld_")
+            or normalized_key.startswith("dyld_")
+        ):
+            raise ValueError("environment may not alter runtime or loader authority")
+        if any(marker in normalized_key for marker in _SECRET_ENVIRONMENT_MARKERS):
+            raise ValueError("evaluation environment must not contain credential material")
         if len(key.encode("utf-8")) > _MAX_ENVIRONMENT_FIELD_BYTES:
             raise ValueError("environment key exceeds the configured byte limit")
         if len(value.encode("utf-8")) > _MAX_ENVIRONMENT_FIELD_BYTES:
@@ -259,7 +300,12 @@ def _normalized_path(value: str) -> str:
 
 def _snapshot_request(request: ModelRequest) -> ModelRequest:
     if type(request) is not ModelRequest:
-        raise TypeError("request must be an exact ModelRequest")
+        raise _error(
+            ModelErrorCode.INVALID_REQUEST,
+            "subprocess evaluation request is invalid",
+            provider_id=None,
+            effect=ModelFailureEffect.NO_EFFECT,
+        )
     try:
         return ModelRequest(
             request_id=request.request_id,
@@ -593,6 +639,10 @@ class RegistrySubprocessLoadedModelAttestor:
     ) -> str:
         payload = {
             "argv": list(self._command),
+            "environment": {
+                key: self._environment[key]
+                for key in sorted(self._environment)
+            },
             "artifacts": [
                 {
                     "argument_index": index,
