@@ -67,12 +67,15 @@ class Instrument:
 def require_aware_utc(value: datetime, field_name: str) -> datetime:
     if not isinstance(value, datetime):
         raise TradingResearchError(f"{field_name} must be a datetime")
+    if value.tzinfo is None:
+        raise TradingResearchError(f"{field_name} must be timezone-aware")
     try:
-        if value.tzinfo is None or value.utcoffset() is None:
-            raise TradingResearchError(f"{field_name} must be timezone-aware")
-        return value.astimezone(UTC)
+        offset = value.utcoffset()
+        if offset is not None:
+            return value.astimezone(UTC)
     except (OverflowError, ValueError):
         raise TradingResearchError(f"{field_name} must be a valid aware datetime") from None
+    raise TradingResearchError(f"{field_name} must be timezone-aware")
 
 
 def _finite_decimal(value: Decimal, field_name: str) -> Decimal:
