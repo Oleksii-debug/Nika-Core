@@ -3,13 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
+from nika_core.data.sqlite import SQLiteStore
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
@@ -26,6 +29,7 @@ _SHA256 = re.compile(r"[0-9a-f]{64}")
 _MAX_CONTROL_RESPONSE_BYTES = 1024 * 1024
 _MAX_MODELS = 4096
 _DEFAULT_TIMEOUT_SECONDS = 30.0
+_MAX_BINDING_JSON_BYTES = 16 * 1024
 
 
 class OllamaManifestAuthorityError(RuntimeError):
@@ -202,6 +206,247 @@ class OllamaPreparedModelBinding:
             create_request_sha256=payload["create_request_sha256"],
             preparation_sha256=payload["preparation_sha256"],
         )
+
+
+class OllamaPromotionManifestStoreError(RuntimeError):
+    """Safe failure from durable promotion-to-provider-manifest authority."""
+
+
+class OllamaPromotionManifestStore:
+    """Immutable provider-manifest mapping for one promotion decision.
+
+    V01ModelSettings remains the generic route/promotion authority. This table stores
+    only provider-specific Ollama evidence and is keyed by the already-canonical
+    promotion decision plus challenger/rollback role.
+    """
+
+    _TABLE = "training_ollama_promotion_manifests"
+    _ROLES = frozenset({"challenger", "rollback"})
+
+    def __init__(self, store: SQLiteStore) -> None:
+        if type(store) is not SQLiteStore:
+            raise TypeError("store must be an exact SQLiteStore")
+        self._store = store
+        try:
+            with store.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute(
+                    f"CREATE TABLE IF NOT EXISTS {self._TABLE} ("
+                    "decision_sha256 TEXT NOT NULL, "
+                    "binding_sha256 TEXT NOT NULL, "
+                    "role TEXT NOT NULL CHECK(role IN ('challenger','rollback')), "
+                    "prepared_model_json TEXT NOT NULL, "
+                    "prepared_model_sha256 TEXT NOT NULL, "
+                    "created_at TEXT NOT NULL, "
+                    "PRIMARY KEY(decision_sha256, role))"
+                )
+        except sqlite3.Error as exc:
+            raise OllamaPromotionManifestStoreError(
+                "Ollama promotion manifest store could not be initialized"
+            ) from exc
+
+    @staticmethod
+    def _role(value: object) -> str:
+        if type(value) is not str or value not in OllamaPromotionManifestStore._ROLES:
+            raise ValueError("role must be challenger or rollback")
+        return value
+
+    @staticmethod
+    def _canonical(binding: OllamaPreparedModelBinding) -> OllamaPreparedModelBinding:
+        try:
+            return binding.revalidated()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise OllamaPromotionManifestStoreError(
+                "prepared Ollama model binding is not canonical"
+            ) from exc
+
+    @staticmethod
+    def _parse_json(value: object) -> OllamaPreparedModelBinding:
+        if type(value) is not str:
+            raise OllamaPromotionManifestStoreError(
+                "stored Ollama manifest binding is not text"
+            )
+        try:
+            raw = value.encode("utf-8", errors="strict")
+        except UnicodeEncodeError as exc:
+            raise OllamaPromotionManifestStoreError(
+                "stored Ollama manifest binding is invalid"
+            ) from exc
+        if not raw or len(raw) > _MAX_BINDING_JSON_BYTES:
+            raise OllamaPromotionManifestStoreError(
+                "stored Ollama manifest binding exceeds the allowed size"
+            )
+        try:
+            payload = json.loads(
+                raw.decode("utf-8", errors="strict"),
+                object_pairs_hook=_strict_object,
+                parse_constant=_reject_constant,
+            )
+            binding = OllamaPreparedModelBinding.from_payload(payload)
+        except (
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+            TypeError,
+            ValueError,
+        ) as exc:
+            raise OllamaPromotionManifestStoreError(
+                "stored Ollama manifest binding is invalid"
+            ) from exc
+        if binding.canonical_json() != value:
+            raise OllamaPromotionManifestStoreError(
+                "stored Ollama manifest binding is not canonical JSON"
+            )
+        return binding
+
+    @classmethod
+    def _binding_from_row(
+        cls,
+        row: sqlite3.Row,
+        *,
+        decision_sha256: str,
+        binding_sha256: str,
+        role: str,
+    ) -> OllamaPreparedModelBinding:
+        try:
+            if (
+                row["decision_sha256"] != decision_sha256
+                or row["binding_sha256"] != binding_sha256
+                or row["role"] != role
+            ):
+                raise OllamaPromotionManifestStoreError(
+                    "stored Ollama manifest row identity does not match"
+                )
+            prepared = cls._parse_json(row["prepared_model_json"])
+            expected_digest = hashlib.sha256(
+                prepared.canonical_json().encode("utf-8")
+            ).hexdigest()
+            if row["prepared_model_sha256"] != expected_digest:
+                raise OllamaPromotionManifestStoreError(
+                    "stored Ollama manifest binding digest does not match"
+                )
+            return prepared
+        except (IndexError, TypeError) as exc:
+            raise OllamaPromotionManifestStoreError(
+                "stored Ollama manifest row is malformed"
+            ) from exc
+
+    def save_pair(
+        self,
+        *,
+        decision_sha256: str,
+        binding_sha256: str,
+        base: OllamaPreparedModelBinding,
+        challenger: OllamaPreparedModelBinding,
+    ) -> None:
+        decision = _require_sha256(decision_sha256, name="decision_sha256")
+        training_binding = _require_sha256(binding_sha256, name="binding_sha256")
+        canonical_base = self._canonical(base)
+        canonical_challenger = self._canonical(challenger)
+        if canonical_base.endpoint_sha256 != canonical_challenger.endpoint_sha256:
+            raise OllamaPromotionManifestStoreError(
+                "base and challenger bindings belong to different Ollama endpoints"
+            )
+        rows = (
+            ("rollback", canonical_base),
+            ("challenger", canonical_challenger),
+        )
+        try:
+            with self._store.connection() as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                for role, prepared in rows:
+                    existing = conn.execute(
+                        f"SELECT * FROM {self._TABLE} "
+                        "WHERE decision_sha256 = ? AND role = ?",
+                        (decision, role),
+                    ).fetchone()
+                    if existing is not None:
+                        current = self._binding_from_row(
+                            existing,
+                            decision_sha256=decision,
+                            binding_sha256=training_binding,
+                            role=role,
+                        )
+                        if current != prepared:
+                            raise OllamaPromotionManifestStoreError(
+                                "promotion manifest mapping is immutable"
+                            )
+                        continue
+                    body = prepared.canonical_json()
+                    conn.execute(
+                        f"INSERT INTO {self._TABLE} "
+                        "(decision_sha256, binding_sha256, role, prepared_model_json, "
+                        "prepared_model_sha256, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (
+                            decision,
+                            training_binding,
+                            role,
+                            body,
+                            hashlib.sha256(body.encode("utf-8")).hexdigest(),
+                            datetime.now(UTC).isoformat(),
+                        ),
+                    )
+        except OllamaPromotionManifestStoreError:
+            raise
+        except sqlite3.Error as exc:
+            raise OllamaPromotionManifestStoreError(
+                "Ollama promotion manifest mapping could not be saved"
+            ) from exc
+
+    def resolve(
+        self,
+        *,
+        decision_sha256: str,
+        binding_sha256: str,
+        role: str,
+        artifact_sha256: str,
+        descriptor_digest: str,
+        route_model_id: str,
+        base_url: str,
+    ) -> OllamaPreparedModelBinding:
+        decision = _require_sha256(decision_sha256, name="decision_sha256")
+        training_binding = _require_sha256(binding_sha256, name="binding_sha256")
+        task_role = self._role(role)
+        artifact = _require_sha256(artifact_sha256, name="artifact_sha256")
+        descriptor = _require_sha256(descriptor_digest, name="descriptor_digest")
+        model = _require_model_id(route_model_id)
+        try:
+            expected_endpoint = OllamaManifestAuthority(base_url=base_url).endpoint_sha256
+        except (TypeError, ValueError) as exc:
+            raise OllamaPromotionManifestStoreError(
+                "task Ollama endpoint is invalid"
+            ) from exc
+        try:
+            with self._store.connection() as conn:
+                row = conn.execute(
+                    f"SELECT * FROM {self._TABLE} "
+                    "WHERE decision_sha256 = ? AND role = ?",
+                    (decision, task_role),
+                ).fetchone()
+        except sqlite3.Error as exc:
+            raise OllamaPromotionManifestStoreError(
+                "Ollama promotion manifest mapping could not be read"
+            ) from exc
+        if row is None:
+            raise OllamaPromotionManifestStoreError(
+                "Ollama promotion manifest mapping is missing"
+            )
+        prepared = self._binding_from_row(
+            row,
+            decision_sha256=decision,
+            binding_sha256=training_binding,
+            role=task_role,
+        )
+        if (
+            prepared.artifact_sha256 != artifact
+            or prepared.descriptor_digest != descriptor
+            or prepared.route_model_id != model
+            or prepared.endpoint_sha256 != expected_endpoint
+        ):
+            raise OllamaPromotionManifestStoreError(
+                "Ollama promotion manifest mapping does not match the task pin"
+            )
+        return prepared
 
 
 class OllamaManifestAuthority:
@@ -535,5 +780,7 @@ __all__ = [
     "ManifestPinnedOllamaProvider",
     "OllamaManifestAuthority",
     "OllamaManifestAuthorityError",
+    "OllamaPromotionManifestStore",
+    "OllamaPromotionManifestStoreError",
     "OllamaPreparedModelBinding",
 ]
