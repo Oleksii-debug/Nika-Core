@@ -59,6 +59,7 @@ _FROZEN_PACKAGE_MAX_BYTES = 16 * 1024 * 1024
 _PILOT_REPORT_MAX_BYTES = 64 * 1024
 _REPORT_MAX_BYTES = 64 * 1024
 _MAX_TEXT_BYTES = 4096
+_MAX_EVALUATION_TEXT_BYTES = 1024 * 1024
 _MAX_CASES = 10_000
 _MAX_MESSAGES_PER_CASE = 128
 _MAX_COMMAND_FILES = 16
@@ -169,6 +170,18 @@ def _require_text(value: object, *, name: str) -> str:
     return value
 
 
+def _require_evaluation_text(value: object, *, name: str) -> str:
+    if type(value) is not str or not value.strip():
+        _fail(f"{name} must be non-empty text")
+    try:
+        encoded = value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise PhysicalEvaluationDriverError(f"{name} must be valid UTF-8 text") from exc
+    if len(encoded) > _MAX_EVALUATION_TEXT_BYTES:
+        _fail(f"{name} exceeds the configured byte limit")
+    return value
+
+
 def _require_absolute_path(value: object, *, name: str) -> Path:
     path = Path(_require_text(value, name=name))
     if not path.is_absolute():
@@ -185,7 +198,10 @@ def _require_number(
 ) -> float:
     if type(value) not in (int, float):
         _fail(f"{name} must be a finite number")
-    number = float(value)
+    try:
+        number = float(value)
+    except OverflowError as exc:
+        raise PhysicalEvaluationDriverError(f"{name} must be a finite number") from exc
     if not math.isfinite(number) or number < minimum:
         _fail(f"{name} must be a finite number not below {minimum}")
     if maximum is not None and number > maximum:
@@ -237,21 +253,38 @@ def _read_regular_file(path: Path, *, name: str, max_bytes: int) -> bytes:
     before = _canonical_file(path, name=name)
     if before.st_size > max_bytes:
         _fail(f"{name} size is outside the admitted range")
+    descriptor: int | None = None
     try:
-        with path.open("rb") as handle:
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+        flags |= int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            _fail(f"{name} changed before it was opened")
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = None
             payload = handle.read(max_bytes + 1)
-        after = os.lstat(path)
+            after_open = os.fstat(handle.fileno())
+        after_path = _canonical_file(path, name=name)
+    except PhysicalEvaluationDriverError:
+        raise
     except OSError as exc:
         raise PhysicalEvaluationDriverError(f"{name} could not be read") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     if len(payload) > max_bytes:
         _fail(f"{name} exceeds the configured byte limit")
     if (
-        stat.S_ISLNK(after.st_mode)
-        or _is_reparse(after)
-        or not stat.S_ISREG(after.st_mode)
-        or (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino)
-        or before.st_size != after.st_size
-        or getattr(before, "st_mtime_ns", None) != getattr(after, "st_mtime_ns", None)
+        (opened.st_dev, opened.st_ino) != (after_open.st_dev, after_open.st_ino)
+        or (opened.st_dev, opened.st_ino) != (after_path.st_dev, after_path.st_ino)
+        or opened.st_size != after_open.st_size
+        or opened.st_size != after_path.st_size
+        or getattr(opened, "st_mtime_ns", None) != getattr(after_open, "st_mtime_ns", None)
+        or getattr(opened, "st_mtime_ns", None) != getattr(after_path, "st_mtime_ns", None)
     ):
         _fail(f"{name} changed while it was being read")
     return payload
@@ -576,7 +609,7 @@ def _evaluation_set_from_json(raw: str) -> EvaluationSet:
                 messages.append(
                     ModelMessage(
                         role=_require_text(raw_message["role"], name="evaluation message role"),
-                        content=_require_text(
+                        content=_require_evaluation_text(
                             raw_message["content"], name="evaluation message content"
                         ),
                     )
@@ -590,7 +623,7 @@ def _evaluation_set_from_json(raw: str) -> EvaluationSet:
                 EvaluationCase(
                     case_id=_require_text(raw_case["case_id"], name="evaluation case_id"),
                     messages=tuple(messages),
-                    expected_text=_require_text(
+                    expected_text=_require_evaluation_text(
                         raw_case["expected_text"], name="evaluation expected_text"
                     ),
                     pass_score=raw_case["pass_score"],
