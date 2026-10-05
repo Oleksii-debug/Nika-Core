@@ -239,5 +239,6 @@ def test_generic_dispatch_commits_directed_focus_before_state_refresh() -> None:
 
     focus_decl = dispatch.index("const focusId =")
     focus_commit = dispatch.index("if (focusId) focusElementById(focusId);")
-    refresh = dispatch.index("const stateReady = await refreshState();")
+    refresh = dispatch.index("stateReady = await refreshState();")
+    assert focus_decl >= 0 and focus_commit >= 0 and refresh >= 0
     assert focus_decl < focus_commit < refresh

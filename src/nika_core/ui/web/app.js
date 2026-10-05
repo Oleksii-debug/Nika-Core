@@ -223,12 +223,19 @@
   });
   let actions = [];
   let actionsReady = false;
+  const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
+  const inFlightActions = new Set();
+  let keymapMutationPending = false;
+  let stateReconciliationPending = 0;
+  let stateReconciliationTail = Promise.resolve();
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let stateRefreshGeneration = 0;
   let lastStateReady = false;
   let teamStateSignature = null;
   let teamModelResultAvailable = null;
+  let stateUnavailableReported = false;
+  const maxActivityItems = 200;
 
   function announce(message, assertive = false) {
     statusNode.setAttribute("aria-live", assertive ? "assertive" : "polite");
@@ -236,10 +243,14 @@
   }
 
   function appendLog(message) {
-    if (!message) return;
+    if (!message || activityLog.lastElementChild?.textContent === message) return;
     const item = document.createElement("li");
     item.textContent = message;
     activityLog.appendChild(item);
+    if (activityLog.childElementCount > maxActivityItems) {
+      activityLog.firstElementChild.remove();
+      activityLog.setAttribute("aria-label", "Журнал активності: останні 200 повідомлень");
+    }
   }
 
   function requestId() {
@@ -366,6 +377,8 @@
     renderModelSettings(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
+    if (stateUnavailableReported) return;
+    stateUnavailableReported = true;
     announce(productProjectUnavailableMessage, true);
     appendLog(productProjectUnavailableMessage);
   }
@@ -1505,7 +1518,11 @@
     );
   });
 
-  async function refreshState({ announceTeamTransitions = true } = {}) {
+  async function refreshState({
+    announceTeamTransitions = true,
+    allowDuringReconciliation = false,
+  } = {}) {
+    if (stateReconciliationPending > 0 && !allowDuringReconciliation) return false;
     const stateReadGeneration = ++stateRefreshGeneration;
     const isCurrentStateRead = () => stateReadGeneration === stateRefreshGeneration;
     const autostartReadGeneration = autostartGeneration;
@@ -1585,6 +1602,7 @@
           : "Стан командного завдання оновлено.",
       );
     }
+    stateUnavailableReported = false;
     lastStateReady = true;
     return true;
   }
@@ -1592,6 +1610,10 @@
   async function dispatch(actionId, trigger = null) {
     if (!globalThis.pywebview?.api?.dispatch) {
       announce("Міст Nika ще не готовий.", true);
+      return;
+    }
+    if (stateReconciliationPending > 0) {
+      announce("Триває звірка стану після непідтвердженої дії. Дочекайтеся її завершення.", false);
       return;
     }
     if (["settings.autostart.configure", "settings.autostart.refresh"].includes(actionId)) {
@@ -1602,24 +1624,182 @@
       await dispatchModel(actionId, trigger);
       return;
     }
-    const payload = {};
-    if (actionId === "task.create") payload.command = commandInput.value.trim();
-    if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
-    if (actionId === "speech.start") payload.text = speechText?.value ?? "";
-    if (actionId === "team.sources.configure") {
-      payload.revision = sourceRevision;
-      for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+    const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
+    if (inFlightActions.has(lockKey)) {
+      announce("Попередню команду ще обробляють. Дочекайтеся підтвердження.", false);
+      return;
     }
-    const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-    const failed = result.status === "failed" || result.status === "rejected";
-    if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
-    announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
-    appendLog(result.message);
-    const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
-    if (focusId) focusElementById(focusId);
-    else trigger?.focus?.();
-    const stateReady = await refreshState();
-    document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+    inFlightActions.add(lockKey);
+    let keepLocked = false;
+    const reconcileUncertain = async (message) => {
+      announce(message, true);
+      appendLog(message);
+      let stateReady = false;
+      stateReconciliationPending += 1;
+      const queuedReconciliation = stateReconciliationTail
+        .catch(() => false)
+        .then(() => refreshState({ allowDuringReconciliation: true }));
+      stateReconciliationTail = queuedReconciliation;
+      try {
+        try {
+          stateReady = await queuedReconciliation;
+        } catch {
+          reportStateUnavailable();
+        }
+      } finally {
+        stateReconciliationPending -= 1;
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (stateReady) {
+        const reconciled = "Стан перечитано після непідтвердженої дії. Перевірте результат перед повтором.";
+        announce(reconciled, true);
+        appendLog(reconciled);
+      } else {
+        keepLocked = true;
+        announce(
+          "Немає безпечного підтвердження поточного стану. Повтор цієї дії заблоковано до перезапуску вікна.",
+          true,
+        );
+      }
+      trigger?.focus?.();
+    };
+    try {
+      const payload = {};
+      if (actionId === "task.create") payload.command = commandInput.value.trim();
+      if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
+      if (actionId === "speech.start") payload.text = speechText?.value ?? "";
+      if (actionId === "team.sources.configure") {
+        payload.revision = sourceRevision;
+        for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+      }
+      let result;
+      try {
+        result = await globalThis.pywebview.api.dispatch({
+          request_id: requestId(),
+          action_id: actionId,
+          payload,
+        });
+      } catch {
+        await reconcileUncertain(
+          "Немає підтвердження виконання дії. Стан буде перечитано перед можливим повтором.",
+        );
+        return;
+      }
+      if (!result || !["accepted", "completed", "failed", "rejected"].includes(result.status)) {
+        await reconcileUncertain(
+          "Міст повернув непідтверджений результат. Стан буде перечитано перед можливим повтором.",
+        );
+        return;
+      }
+      const failed = ["failed", "rejected"].includes(result.status);
+      const message = typeof result.message === "string" && result.message
+        ? result.message
+        : (failed
+          ? "Дію відхилено."
+          : (result.status === "accepted" ? "Дію прийнято до виконання." : "Виконано."));
+      if (actionId === "team.sources.configure" && result.status === "completed") {
+        sourceDirty = false;
+      }
+      announce(message, failed);
+      appendLog(message);
+      // Commit directed keyboard focus before an asynchronous state refresh can rerender its target.
+      const focusId = result.focus_id
+        || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
+      if (focusId) focusElementById(focusId);
+      else trigger?.focus?.();
+      let stateReady = false;
+      try {
+        stateReady = await refreshState();
+      } catch {
+        reportStateUnavailable();
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
+        announce(
+          failed
+            ? "Не вдалося оновити стан після відхиленої дії. Причина є в журналі."
+            : (result.status === "accepted"
+              ? "Дію прийнято, але оновлений стан недоступний. Не повторюйте її без перевірки."
+              : "Дію підтверджено, але оновлений стан недоступний. Перечитайте стан."),
+          true,
+        );
+      }
+    } finally {
+      if (!keepLocked) inFlightActions.delete(lockKey);
+    }
+  }
+
+  async function mutateKeymap(operation, focusId = null, failureTarget = null) {
+    if (keymapMutationPending) {
+      announce("Зміна карти клавіш ще виконується. Дочекайтеся підтвердження.", false);
+      return;
+    }
+    keymapMutationPending = true;
+    let keepPending = false;
+    const reconcileUncertainKeymap = async (message) => {
+      announce(message, true);
+      appendLog(message);
+      let keymapReady = false;
+      try {
+        keymapReady = await refreshKeymap();
+      } catch {
+        keymapReady = false;
+      }
+      if (keymapReady) {
+        const reconciled = "Карту клавіш перечитано після непідтвердженої зміни. Перевірте її перед повтором.";
+        announce(reconciled, true);
+        appendLog(reconciled);
+      } else {
+        actionsReady = false;
+        keepPending = true;
+        announce(
+          "Немає безпечного підтвердження карти клавіш. Повтор змін заблоковано до перезапуску вікна.",
+          true,
+        );
+      }
+      failureTarget?.focus?.();
+    };
+    try {
+      let response;
+      try {
+        response = await operation();
+      } catch {
+        await reconcileUncertainKeymap(
+          "Немає підтвердження зміни клавіш. Карта буде перечитана перед можливим повтором.",
+        );
+        return;
+      }
+      if (!response || typeof response.ok !== "boolean") {
+        await reconcileUncertainKeymap(
+          "Міст повернув непідтверджену зміну клавіш. Карта буде перечитана перед можливим повтором.",
+        );
+        return;
+      }
+      const message = typeof response.message === "string" && response.message
+        ? response.message
+        : (response.ok ? "Зміни збережено." : "Зміну відхилено.");
+      announce(message, !response.ok);
+      appendLog(message);
+      if (!response.ok) {
+        failureTarget?.focus?.();
+        return;
+      }
+      try {
+        if (!await refreshKeymap()) throw new Error("keymap unavailable");
+      } catch {
+        actionsReady = false;
+        keepPending = true;
+        announce(
+          "Зміну підтверджено, але карту клавіш не вдалося перечитати. Повтор змін заблоковано до перезапуску вікна.",
+          true,
+        );
+        failureTarget?.focus?.();
+        return;
+      }
+      if (focusId) focusElementById(focusId);
+    } finally {
+      if (!keepPending) keymapMutationPending = false;
+    }
   }
 
   async function refreshKeymap() {
@@ -1656,12 +1836,11 @@
           : `Зберегти комбінацію для ${accessibleActionLabel}`,
       );
       save.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(saveFocusId);
-        } else input.focus();
+        await mutateKeymap(
+          () => globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null),
+          saveFocusId,
+          input,
+        );
       });
       const restore = document.createElement("button");
       const restoreFocusId = keymapControlId(action.action_id, "restore");
@@ -1673,12 +1852,11 @@
         `Відновити комбінацію за замовчуванням для ${accessibleActionLabel}`,
       );
       restore.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.restore_default(action.action_id);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(restoreFocusId);
-        }
+        await mutateKeymap(
+          () => globalThis.pywebview.api.restore_default(action.action_id),
+          restoreFocusId,
+          restore,
+        );
       });
       controlCell.append(save, document.createTextNode(" "), restore);
       row.append(labelCell, bindingCell, controlCell);
@@ -1730,19 +1908,35 @@
   }
 
   document.getElementById("keymap-export").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.export_keymap();
-    announce(response.message, !response.ok);
-    if (response.ok) {
-      keymapJson.value = response.data;
-      keymapJson.focus();
+    if (keymapMutationPending) {
+      announce("Дочекайтеся збереження карти клавіш перед експортом.");
+      return;
+    }
+    try {
+      const response = await globalThis.pywebview.api.export_keymap();
+      if (!response || typeof response.ok !== "boolean"
+          || (response.ok && typeof response.data !== "string")) {
+        throw new Error("invalid keymap export acknowledgement");
+      }
+      const message = typeof response.message === "string" && response.message
+        ? response.message
+        : (response.ok ? "Карту експортовано." : "Не вдалося експортувати карту.");
+      announce(message, !response.ok);
+      if (response.ok) {
+        keymapJson.value = response.data;
+        keymapJson.focus();
+      }
+    } catch {
+      announce("Не вдалося підтвердити експорт карти клавіш. Повторіть після перевірки мосту.", true);
     }
   });
 
   document.getElementById("keymap-import").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.import_keymap(keymapJson.value);
-    announce(response.message, !response.ok);
-    if (response.ok) await refreshKeymap();
-    else keymapJson.focus();
+    await mutateKeymap(
+      () => globalThis.pywebview.api.import_keymap(keymapJson.value),
+      null,
+      keymapJson,
+    );
   });
 
   document.addEventListener("click", (event) => {
