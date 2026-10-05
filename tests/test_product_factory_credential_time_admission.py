@@ -7,6 +7,7 @@ import pytest
 from nika_core.product_factory_credentials import (
     CredentialBroker,
     CredentialBrokerError,
+    IdentityRef,
     SecretRef,
 )
 
@@ -17,6 +18,7 @@ class _Store:
     def __init__(self) -> None:
         self.issued = 0
         self.available = True
+        self.last_scopes: frozenset[str] | None = None
 
     def contains(self, secret_ref: str, generation: int) -> bool:
         return self.available and secret_ref == "secret-a" and generation == 1
@@ -32,6 +34,7 @@ class _Store:
         expires_at: datetime,
     ) -> str:
         self.issued += 1
+        self.last_scopes = scopes
         return f"opaque-handle-{self.issued}"
 
     def revoke_handles(self, secret_ref: str, generation: int) -> None:
@@ -158,3 +161,103 @@ def test_removed_protected_material_cannot_authorize_or_audit_stale_handle() -> 
 
     replacement = _issue(broker)
     assert replacement.lease_id != lease.lease_id
+
+
+def test_mutable_delegated_scopes_cannot_expand_an_issued_lease() -> None:
+    broker, store = _broker()
+    requested = {"repo:read"}
+    lease = broker.issue_lease(
+        project_id="project-a",
+        secret_ref="secret-a",
+        audience="github-api",
+        scopes=requested,  # type: ignore[arg-type]
+        now=_NOW,
+    )
+    requested.add("repo:write")
+
+    assert lease.scopes == frozenset({"repo:read"})
+    assert store.last_scopes == lease.scopes
+    with pytest.raises(CredentialBrokerError, match="does not authorize"):
+        broker.authorize_use(
+            lease_id=lease.lease_id,
+            project_id="project-a",
+            scope="repo:write",
+            now=_NOW + timedelta(seconds=1),
+        )
+    assert broker.authorize_use(
+        lease_id=lease.lease_id,
+        project_id="project-a",
+        scope="repo:read",
+        now=_NOW + timedelta(seconds=2),
+    ).scope == "repo:read"
+
+
+def test_registered_secret_scopes_and_audiences_snapshot_caller_sets() -> None:
+    scopes = {"repo:read"}
+    audiences = {"github-api"}
+    secret = SecretRef(
+        "secret-a",
+        "project-a",
+        "github",
+        "test automation",
+        scopes,  # type: ignore[arg-type]
+        audiences,  # type: ignore[arg-type]
+    )
+    broker = CredentialBroker(_Store())
+    broker.register_secret(secret, now=_NOW)
+    scopes.add("repo:write")
+    audiences.add("unapproved-service")
+
+    assert secret.scopes == frozenset({"repo:read"})
+    assert secret.allowed_audiences == frozenset({"github-api"})
+    with pytest.raises(CredentialBrokerError, match="scopes exceed"):
+        broker.issue_lease(
+            project_id="project-a",
+            secret_ref="secret-a",
+            audience="github-api",
+            scopes=frozenset({"repo:write"}),
+            now=_NOW,
+        )
+    with pytest.raises(CredentialBrokerError, match="audience is not allowed"):
+        broker.issue_lease(
+            project_id="project-a",
+            secret_ref="secret-a",
+            audience="unapproved-service",
+            scopes=frozenset({"repo:read"}),
+            now=_NOW,
+        )
+
+
+def test_identity_refs_snapshot_mutable_input_before_registration() -> None:
+    refs = ["secret-a"]
+    identity = IdentityRef(
+        "identity-a",
+        "project-a",
+        "github",
+        "subject-a",
+        refs,  # type: ignore[arg-type]
+    )
+    refs.append("foreign-secret")
+    broker, _ = _broker()
+    broker.register_identity(identity)
+
+    assert broker.get_identity(project_id="project-a", identity_ref="identity-a").secret_refs == (
+        "secret-a",
+    )
+
+
+@pytest.mark.parametrize("scopes", [["repo:read"], "repo:read", {"repo:read": True}, {1}])
+def test_malformed_lease_scope_carrier_rejected_before_handle(scopes: object) -> None:
+    broker, store = _broker()
+    initial = broker.snapshot()
+
+    with pytest.raises(CredentialBrokerError, match="credential lease scopes"):
+        broker.issue_lease(
+            project_id="project-a",
+            secret_ref="secret-a",
+            audience="github-api",
+            scopes=scopes,  # type: ignore[arg-type]
+            now=_NOW,
+        )
+    assert store.issued == 0
+    assert broker.snapshot() == initial
