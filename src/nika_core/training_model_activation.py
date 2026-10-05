@@ -132,18 +132,19 @@ def _activation_attestation_sha256(
             "activation result must be an exact AttestedModelCompletionResult"
         )
     attestation = result.attestation.revalidated()
-    return _canonical_sha256(
-        {
-            "request_id": attestation.request_id,
-            "binding_sha256": attestation.binding_sha256,
-            "provider_id": attestation.provider_id,
-            "model_id": attestation.model_id,
-            "artifact_sha256": attestation.artifact_sha256,
-            "descriptor_digest": attestation.descriptor_digest,
-            "attestor_id": attestation.attestor_id,
-            "attestor_sha256": attestation.attestor_sha256,
-        }
-    )
+    payload: dict[str, object] = {
+        "request_id": attestation.request_id,
+        "binding_sha256": attestation.binding_sha256,
+        "provider_id": attestation.provider_id,
+        "model_id": attestation.model_id,
+        "artifact_sha256": attestation.artifact_sha256,
+        "descriptor_digest": attestation.descriptor_digest,
+        "attestor_id": attestation.attestor_id,
+        "attestor_sha256": attestation.attestor_sha256,
+    }
+    if attestation.provider_manifest_sha256 is not None:
+        payload["provider_manifest_sha256"] = attestation.provider_manifest_sha256
+    return _canonical_sha256(payload)
 
 
 def _apply_promotion(
