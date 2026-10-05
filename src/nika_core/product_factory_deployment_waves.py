@@ -10,6 +10,7 @@ from nika_core.product_factory_deployment_execution import (
     DeploymentExecutionSnapshot,
     DeploymentExecutionSpec,
     OperationState,
+    _snapshot_execution_spec,
 )
 
 
@@ -130,13 +131,14 @@ class DeploymentWaveCoordinator:
         except (AttributeError, TypeError, ValueError) as exc:
             raise DeploymentWaveError("invalid rollout plan") from exc
 
-        existing = self._plans.get(plan.plan_id)
+        private_plan = _snapshot_wave_plan(plan)
+        existing = self._plans.get(private_plan.plan_id)
         if existing is not None:
-            if existing.plan != plan:
+            if existing.plan != private_plan:
                 raise DeploymentWaveError("rollout plan id conflicts with prior payload")
-            return existing
+            return _snapshot_wave_record(existing)
         ordered_services = sorted(
-            plan.services,
+            private_plan.services,
             key=lambda item: (item.wave, item.service_id),
         )
         for service in ordered_services:
@@ -153,14 +155,17 @@ class DeploymentWaveCoordinator:
         for service in ordered_services:
             execution = self.executions.submit(service.execution)
             services.append(self._service_record(service, execution))
-        record = DeploymentWaveRecord(plan, RolloutState.PENDING, tuple(services))
-        self._plans[plan.plan_id] = record
-        return record
+        record = DeploymentWaveRecord(
+            private_plan,
+            RolloutState.PENDING,
+            tuple(services),
+        )
+        return self._save(record)
 
     def advance(self, plan_id: str) -> DeploymentWaveRecord:
         record = self._record(plan_id)
         if record.state is RolloutState.SUCCEEDED:
-            return record
+            return _snapshot_wave_record(record)
 
         current = {item.service_id: item for item in record.services}
         specs = {item.service_id: item for item in record.plan.services}
@@ -201,7 +206,7 @@ class DeploymentWaveCoordinator:
         return self._save(self._summarize(updated))
 
     def get(self, plan_id: str) -> DeploymentWaveRecord:
-        return self._record(plan_id)
+        return _snapshot_wave_record(self._record(plan_id))
 
     def snapshot(self) -> DeploymentWaveSnapshot:
         execution = self.executions.snapshot()
@@ -218,7 +223,9 @@ class DeploymentWaveCoordinator:
                 )
                 for service in record.services
             )
-            plans.append(self._summarize(replace(record, services=services)))
+            plans.append(
+                _snapshot_wave_record(self._summarize(replace(record, services=services)))
+            )
         return DeploymentWaveSnapshot(tuple(plans), execution)
 
     def restore(self, snapshot: DeploymentWaveSnapshot) -> None:
@@ -312,7 +319,8 @@ class DeploymentWaveCoordinator:
                     raise DeploymentWaveError("rollout snapshot disagrees with execution snapshot")
             if record.state is not self._summarize(record).state:
                 raise DeploymentWaveError("rollout snapshot summary is inconsistent")
-            restored[record.plan.plan_id] = record
+            private_record = _snapshot_wave_record(record)
+            restored[private_record.plan.plan_id] = private_record
 
         self.executions.restore(snapshot.execution)
         self._plans = restored
@@ -382,8 +390,48 @@ class DeploymentWaveCoordinator:
         return record
 
     def _save(self, record: DeploymentWaveRecord) -> DeploymentWaveRecord:
-        self._plans[record.plan.plan_id] = record
-        return record
+        private_record = _snapshot_wave_record(record)
+        self._plans[private_record.plan.plan_id] = private_record
+        return _snapshot_wave_record(private_record)
+
+
+def _snapshot_wave_plan(plan: DeploymentWavePlan) -> DeploymentWavePlan:
+    if type(plan) is not DeploymentWavePlan:
+        raise DeploymentWaveError("invalid rollout plan")
+    services = tuple(
+        ServiceRolloutSpec(
+            service_id=service.service_id,
+            wave=service.wave,
+            execution=_snapshot_execution_spec(service.execution),
+            depends_on=tuple(service.depends_on),
+        )
+        for service in plan.services
+    )
+    return DeploymentWavePlan(
+        plan_id=plan.plan_id,
+        project_id=plan.project_id,
+        services=services,
+    )
+
+
+def _snapshot_wave_record(record: DeploymentWaveRecord) -> DeploymentWaveRecord:
+    if type(record) is not DeploymentWaveRecord:
+        raise DeploymentWaveError("invalid rollout record")
+    return DeploymentWaveRecord(
+        plan=_snapshot_wave_plan(record.plan),
+        state=record.state,
+        services=tuple(
+            ServiceRolloutRecord(
+                service_id=service.service_id,
+                operation_id=service.operation_id,
+                wave=service.wave,
+                state=service.state,
+                attempt=service.attempt,
+                evidence_refs=tuple(service.evidence_refs),
+            )
+            for service in record.services
+        ),
+    )
 
 
 _TERMINAL_SUCCESS = {OperationState.SUCCEEDED}
