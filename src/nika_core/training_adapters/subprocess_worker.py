@@ -8,6 +8,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from typing import NoReturn
 
@@ -818,6 +819,8 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             ) from exc
 
+        deadline = time.monotonic() + self._timeout_seconds
+
         if process.stdin is None or process.stdout is None:
             self._kill_process(process)
             self._reap_process(process)
@@ -837,6 +840,17 @@ class SubprocessTrainingWorker:
                 "command_artifact_changed_after_process_start",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             ) from exc
+
+        remaining_timeout = deadline - time.monotonic()
+        if remaining_timeout <= 0:
+            self._close_pipe(process.stdin)
+            self._close_pipe(process.stdout)
+            self._kill_process(process)
+            self._reap_process(process)
+            raise _error(
+                "training_subprocess_timeout",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            )
 
         stdin = process.stdin
         stdout = process.stdout
@@ -881,7 +895,7 @@ class SubprocessTrainingWorker:
 
         timed_out: subprocess.TimeoutExpired | None = None
         try:
-            returncode = process.wait(timeout=self._timeout_seconds)
+            returncode = process.wait(timeout=remaining_timeout)
         except subprocess.TimeoutExpired as exc:
             timed_out = exc
             self._kill_process(process)
