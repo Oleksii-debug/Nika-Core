@@ -81,6 +81,10 @@ def test_grant_transaction_keeps_commit_control_inside_store(
 ) -> None:
     store, audit, permissions = _authority(tmp_path)
     permission_id = "model-cloud:no-caller-commit"
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE dependent_atomicity_probe(value TEXT NOT NULL)"
+        )
 
     with pytest.raises(RuntimeError, match="dependent write rejected"):
         with permissions.grant_transaction(
@@ -91,12 +95,11 @@ def test_grant_transaction_keeps_commit_control_inside_store(
             assert not hasattr(transaction, "rollback")
             assert not hasattr(transaction, "close")
             transaction.execute(
-                "CREATE TABLE dependent_atomicity_probe(value TEXT NOT NULL)"
-            )
-            transaction.execute(
                 "INSERT INTO dependent_atomicity_probe(value) VALUES (?)",
                 ("uncommitted",),
             )
+            with pytest.raises(ValueError, match="only permits"):
+                transaction.execute("COMMIT")
             raise RuntimeError("dependent write rejected")
 
     assert permissions.get(permission_id) is None
@@ -105,11 +108,70 @@ def test_grant_transaction_keeps_commit_control_inside_store(
         entity_id=permission_id,
     ) == ()
     with store.connection() as conn:
-        exists = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' "
-            "AND name = 'dependent_atomicity_probe'"
-        ).fetchone()
-    assert exists is None
+        count = conn.execute(
+            "SELECT COUNT(*) FROM dependent_atomicity_probe"
+        ).fetchone()[0]
+    assert count == 0
+
+
+@pytest.mark.parametrize(
+    "unsafe_sql",
+    (
+        "BEGIN",
+        "ROLLBACK",
+        "END",
+        "SAVEPOINT nested",
+        "RELEASE nested",
+        "CREATE TABLE escaped(value TEXT)",
+        "PRAGMA foreign_keys = OFF",
+        "ATTACH DATABASE ':memory:' AS escaped",
+    ),
+)
+def test_grant_transaction_rejects_transaction_control_and_non_dml_sql(
+    tmp_path: Path,
+    unsafe_sql: str,
+) -> None:
+    _store, audit, permissions = _authority(tmp_path)
+    permission_id = "model-cloud:sql-boundary"
+
+    with pytest.raises(ValueError, match="only permits"):
+        with permissions.grant_transaction(
+            permission_id=permission_id,
+            scope=_scope(),
+        ) as (transaction, _granted):
+            transaction.execute(unsafe_sql)
+
+    assert permissions.get(permission_id) is None
+    assert audit.list_for(
+        entity_type="standing_permission",
+        entity_id=permission_id,
+    ) == ()
+
+
+class _HostileSQL(str):
+    def lstrip(self, *args: object, **kwargs: object) -> str:
+        del args, kwargs
+        raise AssertionError("hostile SQL methods must not run")
+
+
+def test_grant_transaction_rejects_nonexact_sql_before_string_methods(
+    tmp_path: Path,
+) -> None:
+    _store, audit, permissions = _authority(tmp_path)
+    permission_id = "model-cloud:hostile-sql"
+
+    with pytest.raises(TypeError, match="exact text"):
+        with permissions.grant_transaction(
+            permission_id=permission_id,
+            scope=_scope(),
+        ) as (transaction, _granted):
+            transaction.execute(_HostileSQL("COMMIT"))
+
+    assert permissions.get(permission_id) is None
+    assert audit.list_for(
+        entity_type="standing_permission",
+        entity_id=permission_id,
+    ) == ()
 
 
 def test_grant_transaction_abrupt_exit_leaves_no_grant_or_audit(
