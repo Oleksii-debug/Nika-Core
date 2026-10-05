@@ -8,6 +8,7 @@ from nika_core.web_api import (
     WebApplicationBoundary,
     WebCommand,
     WebCommandResult,
+    WebCommandOutcomeUnknownError,
     WebPrincipal,
 )
 
@@ -185,8 +186,9 @@ def test_handler_cannot_change_request_identity() -> None:
             )
 
     boundary = WebApplicationBoundary(authorization=_Allow(True), handler=WrongHandler())
-    with pytest.raises(RuntimeError, match="request identity"):
+    with pytest.raises(WebCommandOutcomeUnknownError) as caught:
         boundary.dispatch(principal=_principal(), command=_command())
+    assert caught.value.request_id == "request-1"
 
 
 def test_principal_rejects_noncanonical_identity_text() -> None:
@@ -258,9 +260,12 @@ def test_handler_failure_is_not_automatically_retried() -> None:
 
     handler = FailingHandler()
     boundary = WebApplicationBoundary(authorization=_Allow(True), handler=handler)
-    with pytest.raises(RuntimeError, match="unknown"):
+    with pytest.raises(WebCommandOutcomeUnknownError) as caught:
         boundary.dispatch(principal=_principal(), command=_command())
     assert handler.calls == 1
+    assert caught.value.request_id == "request-1"
+    assert "effect outcome is unknown" not in str(caught.value)
+    assert isinstance(caught.value.__cause__, RuntimeError)
 
 def test_result_constructor_rejects_noncanonical_internal_json() -> None:
     with pytest.raises(ValueError, match="canonical JSON|finite"):
