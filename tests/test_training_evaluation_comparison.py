@@ -799,6 +799,23 @@ def _promotion_manifest_args(result, store: SQLiteStore) -> dict[str, object]:
     }
 
 
+async def _activate_with_manifests(
+    *,
+    result,
+    store: SQLiteStore,
+    settings: V01ModelSettings,
+    expected_revision: int,
+    effect_port=None,
+):
+    return await activate_attested_training_promotion(
+        result=result,
+        settings=settings,
+        expected_revision=expected_revision,
+        effect_port=effect_port,
+        **_promotion_manifest_args(result, store),
+    )
+
+
 async def _promoted_comparison(tmp_path):
     evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
     return run_attested_old_vs_new_comparison(
@@ -827,8 +844,9 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     )
 
     activation_port = _ChallengerPort("activation-ok")
-    receipt = await activate_attested_training_promotion(
+    receipt = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=activation_port,
@@ -851,8 +869,9 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
     assert settings.snapshot()["model"] == "challenger-model"
     assert settings.snapshot()["revision"] == 2
 
-    retried = await activate_attested_training_promotion(
+    retried = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
     )
@@ -897,8 +916,9 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         TrainingModelActivationError,
         match="rejected by the active route authority",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=restarted,
             expected_revision=3,
         )
@@ -1003,7 +1023,7 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
     tmp_path,
 ) -> None:
     result = await _promoted_comparison(tmp_path)
-    _, settings = _configured_model_settings(tmp_path)
+    store, settings = _configured_model_settings(tmp_path)
 
     class _SwappedArtifactPort(_ChallengerPort):
         async def complete_attested(self, request, *, binding):
@@ -1021,8 +1041,9 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
         TrainingModelActivationError,
         match="fresh loaded-model activation attestation failed",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=settings,
             expected_revision=1,
             effect_port=port,
@@ -1036,9 +1057,10 @@ async def test_activation_rejects_swapped_loaded_artifact_before_route_mutation(
 @pytest.mark.asyncio
 async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
     result = await _promoted_comparison(tmp_path)
-    _, settings = _configured_model_settings(tmp_path)
-    await activate_attested_training_promotion(
+    store, settings = _configured_model_settings(tmp_path)
+    await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -1060,8 +1082,9 @@ async def test_newer_manual_route_blocks_promotion_rollback(tmp_path) -> None:
         TrainingModelActivationError,
         match="rejected by the active route authority",
     ):
-        await activate_attested_training_promotion(
+        await _activate_with_manifests(
             result=result,
+            store=store,
             settings=settings,
             expected_revision=3,
         )
@@ -1160,8 +1183,9 @@ async def test_v2_promotion_database_migrates_without_fabricating_attestation(
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    original = await activate_attested_training_promotion(
+    original = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -1264,8 +1288,9 @@ async def test_corrupt_promotion_receipt_fails_closed_without_route_mutation(
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    receipt = await activate_attested_training_promotion(
+    receipt = await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -1335,8 +1360,9 @@ async def test_promoted_and_rollback_tasks_freeze_exact_artifact_pins(tmp_path) 
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
     training = result.challenger_benchmark.binding.revalidated()
-    await activate_attested_training_promotion(
+    await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
@@ -1419,8 +1445,9 @@ async def test_runtime_factory_reads_promoted_route_and_pin_from_one_binding_sna
 ) -> None:
     result = await _promoted_comparison(tmp_path)
     store, settings = _configured_model_settings(tmp_path)
-    await activate_attested_training_promotion(
+    await _activate_with_manifests(
         result=result,
+        store=store,
         settings=settings,
         expected_revision=1,
         effect_port=_ChallengerPort("activation-ok"),
