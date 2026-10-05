@@ -4,11 +4,11 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from typing import Self
 
 import pytest
 
 from nika_core.packaging import notices
-
 
 _FIFO_SWAP_SCRIPT = r"""
 import os
@@ -123,7 +123,7 @@ def test_notice_descriptor_recheck_rejects_unstable_bytes(
             self._source = original_fdopen(fd, mode, closefd=closefd)
             self._reads = 0
 
-        def __enter__(self) -> "UnstableReader":
+        def __enter__(self) -> Self:
             self._source.__enter__()
             return self
 
