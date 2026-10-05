@@ -7,7 +7,7 @@ from urllib.parse import quote
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.kernel.task_queue import TaskQueue
+from nika_core.kernel.task_queue import TaskPayloadCorruptionError, TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.learning import StudyMaterial, StudyMaterialKind, StudyQueue
 
@@ -131,6 +131,54 @@ def test_interrupted_enqueue_created_state_is_recovered_without_touching_other_t
     assert [item.task_id for item in recovered] == [interrupted.task_id]
     assert queue.get(interrupted.task_id).state is TaskState.READY
     assert tasks.get(ordinary.task_id).state is TaskState.CREATED
+
+
+@pytest.mark.parametrize(
+    "corrupt_payload",
+    [
+        b'{"nika_kind":"study_material_v1"}',
+        '{"nika_kind":"ordinary","nika_kind":"study_material_v1"}',
+        '{"nika_kind":"study_material_v1","value":NaN}',
+    ],
+)
+def test_study_scan_reuses_canonical_task_payload_admission_before_recovery(
+    tmp_path,
+    corrupt_payload,
+) -> None:
+    _, tasks, queue = _services(tmp_path)
+    record = tasks.create(
+        workspace_id="study",
+        agent_id="reader",
+        payload={"nika_kind": "ordinary"},
+    )
+    with tasks.store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET state = ?, payload_json = ? WHERE task_id = ?",
+            (TaskState.CREATED.value, corrupt_payload, record.task_id),
+        )
+        before = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events WHERE task_id = ?",
+            (record.task_id,),
+        ).fetchone()["count"]
+
+    with pytest.raises(
+        TaskPayloadCorruptionError,
+        match="Збережені дані завдання пошкоджені",
+    ):
+        queue.recover_created(limit=1)
+
+    with tasks.store.connection() as conn:
+        row = conn.execute(
+            "SELECT state FROM tasks WHERE task_id = ?",
+            (record.task_id,),
+        ).fetchone()
+        after = conn.execute(
+            "SELECT COUNT(*) AS count FROM task_events WHERE task_id = ?",
+            (record.task_id,),
+        ).fetchone()["count"]
+
+    assert row["state"] == TaskState.CREATED.value
+    assert after == before
 
 
 def test_recovery_refuses_task_that_left_created_after_scan(
