@@ -212,11 +212,6 @@ async def activate_attested_training_promotion(
             activation_attestation_sha256=existing.activation_attestation_sha256,
         )
 
-    if effect_port is None:
-        raise TrainingModelActivationError(
-            "fresh loaded-model attestation is required before activation"
-        )
-
     try:
         snapshot = settings.snapshot()
     except ModelSetupError as exc:
@@ -238,6 +233,10 @@ async def activate_attested_training_promotion(
     ):
         raise TrainingModelActivationError(
             "automatic attested activation currently requires local Ollama"
+        )
+    if effect_port is None:
+        raise TrainingModelActivationError(
+            "fresh loaded-model attestation is required before activation"
         )
 
     request = _activation_probe(
