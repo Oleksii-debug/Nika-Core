@@ -186,3 +186,30 @@ def test_oversized_evidence_is_rejected_before_parsing(
     oversized = b"{" + (b" " * m11_release._PF11_MAX_EVIDENCE_BYTES) + b"}"
     with pytest.raises(RuntimeError, match="exceeds the size limit"):
         _proof(monkeypatch, tmp_path, lambda path: path.write_bytes(oversized))
+
+def test_data_adoption_helper_reuses_strict_pf11_evidence_reader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "NikaCore.exe"
+    executable.write_bytes(b"candidate")
+    output = tmp_path / "data-adoption.json"
+    cwd = tmp_path / "launch"
+    cwd.mkdir()
+    raw = json.dumps(_payload(), ensure_ascii=False, sort_keys=True)
+    duplicate = (raw[:-1] + ',"route":"product_project"}').encode("utf-8")
+
+    def fake_run(argv, *, check, env, cwd, timeout):
+        del argv, check, env, cwd, timeout
+        output.write_bytes(duplicate)
+        return subprocess.CompletedProcess([], 0)
+
+    monkeypatch.setattr(m11_release.subprocess, "run", fake_run)
+    with pytest.raises(RuntimeError, match="strict JSON evidence"):
+        m11_release._run_packaged_pf11(
+            executable,
+            output=output,
+            environment={},
+            cwd=cwd,
+        )
+
