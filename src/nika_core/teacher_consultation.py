@@ -105,6 +105,8 @@ class TeacherConsultationSpec:
             ModelMessage(role=message.role, content=message.content)
             for message in self.messages
         )
+        for message in canonical_messages:
+            _utf8_bytes(message.content, "teacher message content")
         object.__setattr__(self, "messages", canonical_messages)
         request_chars = sum(len(message.content) for message in canonical_messages)
         if request_chars > canonical_policy.max_request_chars:
@@ -120,6 +122,11 @@ class TeacherConsultationEvidence:
     request_fingerprint: str
     status: TeacherConsultationStatus
     privacy: PrivacyClass
+    temperature: float | None
+    max_request_chars: int
+    max_response_chars: int
+    timeout_seconds: float
+    max_observed_total_tokens: int | None
     request_chars: int
     response_chars: int | None
     response_sha256: str | None
@@ -134,7 +141,7 @@ class TeacherConsultationEvidence:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema": "nika.teacher-consultation-evidence:v1",
+            "schema": "nika.teacher-consultation-evidence:v2",
             "consultation_id": self.consultation_id,
             "provider_id": self.provider_id,
             "provider_kind": self.provider_kind.value,
@@ -142,6 +149,11 @@ class TeacherConsultationEvidence:
             "request_fingerprint": self.request_fingerprint,
             "status": self.status.value,
             "privacy": self.privacy.value,
+            "temperature": self.temperature,
+            "max_request_chars": self.max_request_chars,
+            "max_response_chars": self.max_response_chars,
+            "timeout_seconds": self.timeout_seconds,
+            "max_observed_total_tokens": self.max_observed_total_tokens,
             "request_chars": self.request_chars,
             "response_chars": self.response_chars,
             "response_sha256": self.response_sha256,
@@ -207,6 +219,7 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=status,
                     code=error.code,
                     retryable=error.retryable,
@@ -221,6 +234,7 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=TeacherConsultationStatus.FAILED,
                     code=ModelErrorCode.PROVIDER_ERROR,
                     retryable=False,
@@ -238,6 +252,7 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=TeacherConsultationStatus.FAILED,
                     code=ModelErrorCode.PROVIDER_ERROR,
                     retryable=False,
@@ -252,6 +267,23 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
+                    status=TeacherConsultationStatus.FAILED,
+                    code=ModelErrorCode.PROVIDER_ERROR,
+                    retryable=False,
+                    failure_effect=ModelFailureEffect.UNKNOWN,
+                ),
+            )
+        try:
+            _utf8_bytes(response.text, "teacher response text")
+        except ValueError:
+            return TeacherConsultationResult(
+                text=None,
+                evidence=_failure_evidence(
+                    spec=spec,
+                    request_chars=request_chars,
+                    request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=TeacherConsultationStatus.FAILED,
                     code=ModelErrorCode.PROVIDER_ERROR,
                     retryable=False,
@@ -267,10 +299,14 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=TeacherConsultationStatus.FAILED,
                     code=ModelErrorCode.RESOURCE_LIMIT,
                     retryable=False,
                     failure_effect=ModelFailureEffect.UNKNOWN,
+                    response_chars=response_chars,
+                    usage=usage,
+                    latency_ms=latency_ms,
                 ),
             )
 
@@ -287,6 +323,11 @@ class TeacherConsultationService:
             request_fingerprint=request_fingerprint,
             status=TeacherConsultationStatus.SUCCEEDED,
             privacy=spec.privacy,
+            temperature=request.temperature,
+            max_request_chars=spec.policy.max_request_chars,
+            max_response_chars=spec.policy.max_response_chars,
+            timeout_seconds=spec.policy.timeout_seconds,
+            max_observed_total_tokens=spec.policy.max_observed_total_tokens,
             request_chars=request_chars,
             response_chars=response_chars,
             response_sha256=response_sha256,
@@ -336,21 +377,28 @@ def _bounded_identity(value: object, name: str) -> str:
     return value
 
 
+def _utf8_bytes(value: str, name: str) -> bytes:
+    try:
+        return value.encode("utf-8")
+    except UnicodeEncodeError as error:
+        raise ValueError(f"{name} must be valid UTF-8 text") from error
+
+
 def _fingerprint_messages(messages: tuple[ModelMessage, ...]) -> str:
     digest = hashlib.sha256()
     for message in messages:
-        for value in (message.role, message.content):
-            encoded = value.encode("utf-8", errors="surrogatepass")
+        for name, value in (
+            ("teacher message role", message.role),
+            ("teacher message content", message.content),
+        ):
+            encoded = _utf8_bytes(value, name)
             digest.update(len(encoded).to_bytes(8, "big"))
             digest.update(encoded)
     return f"sha256:{digest.hexdigest()}"
 
 
 def _sha256_text(value: str) -> str:
-    digest = hashlib.sha256(
-        value.encode("utf-8", errors="surrogatepass")
-    ).hexdigest()
-    return f"sha256:{digest}"
+    return f"sha256:{hashlib.sha256(_utf8_bytes(value, 'teacher response text')).hexdigest()}"
 
 
 def _validated_usage(response: ModelResponse) -> tuple[int | None, int | None, int | None]:
@@ -363,13 +411,17 @@ def _validated_usage(response: ModelResponse) -> tuple[int | None, int | None, i
         if value is not None and (type(value) is not int or value < 0):
             raise ValueError("model usage counters must be non-negative integers or None")
     input_tokens, output_tokens, total_tokens = values
-    if (
-        input_tokens is not None
-        and output_tokens is not None
-        and total_tokens is not None
-        and total_tokens != input_tokens + output_tokens
-    ):
-        raise ValueError("model usage total_tokens contradicts observed token counters")
+    if total_tokens is not None:
+        if input_tokens is not None and total_tokens < input_tokens:
+            raise ValueError("model usage total_tokens contradicts observed token counters")
+        if output_tokens is not None and total_tokens < output_tokens:
+            raise ValueError("model usage total_tokens contradicts observed token counters")
+        if (
+            input_tokens is not None
+            and output_tokens is not None
+            and total_tokens != input_tokens + output_tokens
+        ):
+            raise ValueError("model usage total_tokens contradicts observed token counters")
     return values
 
 
@@ -418,10 +470,14 @@ def _failure_evidence(
     spec: TeacherConsultationSpec,
     request_chars: int,
     request_fingerprint: str,
+    temperature: float | None,
     status: TeacherConsultationStatus,
     code: ModelErrorCode,
     retryable: bool,
     failure_effect: ModelFailureEffect,
+    response_chars: int | None = None,
+    usage: tuple[int | None, int | None, int | None] = (None, None, None),
+    latency_ms: float | None = None,
 ) -> TeacherConsultationEvidence:
     return TeacherConsultationEvidence(
         consultation_id=spec.consultation_id,
@@ -431,16 +487,21 @@ def _failure_evidence(
         request_fingerprint=request_fingerprint,
         status=status,
         privacy=spec.privacy,
+        temperature=temperature,
+        max_request_chars=spec.policy.max_request_chars,
+        max_response_chars=spec.policy.max_response_chars,
+        timeout_seconds=spec.policy.timeout_seconds,
+        max_observed_total_tokens=spec.policy.max_observed_total_tokens,
         request_chars=request_chars,
-        response_chars=None,
+        response_chars=response_chars,
         response_sha256=None,
-        input_tokens=None,
-        output_tokens=None,
-        total_tokens=None,
-        latency_ms=None,
+        input_tokens=usage[0],
+        output_tokens=usage[1],
+        total_tokens=usage[2],
+        latency_ms=latency_ms,
         budget_status=_budget_status(
             limit=spec.policy.max_observed_total_tokens,
-            total_tokens=None,
+            total_tokens=usage[2],
         ),
         error_code=code,
         retryable=retryable,

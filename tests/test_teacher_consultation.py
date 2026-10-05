@@ -92,6 +92,7 @@ def _spec(
     model: str = "teacher-model",
     policy: TeacherConsultationPolicy | None = None,
     privacy: PrivacyClass = PrivacyClass.PRIVATE,
+    temperature: float | None = None,
 ) -> TeacherConsultationSpec:
     return TeacherConsultationSpec(
         consultation_id="consultation-001",
@@ -103,6 +104,7 @@ def _spec(
             ModelMessage(role="user", content="Explain the evidence."),
         ),
         privacy=privacy,
+        temperature=temperature,
         policy=policy or TeacherConsultationPolicy(),
     )
 
@@ -135,6 +137,68 @@ def test_local_teacher_call_is_explicit_bounded_and_content_free_in_evidence() -
     assert "teacher answer" not in durable
     assert result.evidence.request_fingerprint.startswith("sha256:")
     assert result.evidence.response_sha256 is not None
+
+
+def test_durable_evidence_binds_execution_policy_and_temperature() -> None:
+    provider = _FakeProvider(provider_id="teacher-local", kind=ProviderKind.LOCAL)
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=123,
+        timeout_seconds=12.5,
+        max_observed_total_tokens=10,
+    )
+
+    result = asyncio.run(
+        service.consult(_spec(policy=policy, temperature=0.7))
+    )
+
+    evidence = result.evidence
+    assert evidence.status is TeacherConsultationStatus.SUCCEEDED
+    assert evidence.temperature == 0.7
+    assert evidence.max_request_chars == 100
+    assert evidence.max_response_chars == 123
+    assert evidence.timeout_seconds == 12.5
+    assert evidence.max_observed_total_tokens == 10
+    assert evidence.total_tokens == 7
+    assert evidence.budget_status is TeacherBudgetStatus.WITHIN
+    durable = evidence.as_dict()
+    assert durable["schema"] == "nika.teacher-consultation-evidence:v2"
+    assert durable["temperature"] == 0.7
+    assert durable["max_observed_total_tokens"] == 10
+
+
+def test_failed_evidence_retains_policy_context() -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        text="too long",
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=3,
+        timeout_seconds=9.0,
+        max_observed_total_tokens=5,
+    )
+
+    result = asyncio.run(
+        service.consult(_spec(policy=policy, temperature=0.25))
+    )
+
+    assert result.text is None
+    evidence = result.evidence
+    assert evidence.status is TeacherConsultationStatus.FAILED
+    assert evidence.error_code is ModelErrorCode.RESOURCE_LIMIT
+    assert evidence.temperature == 0.25
+    assert evidence.max_request_chars == 100
+    assert evidence.max_response_chars == 3
+    assert evidence.timeout_seconds == 9.0
+    assert evidence.max_observed_total_tokens == 5
 
 
 def test_cloud_teacher_uses_selected_provider_without_fallback() -> None:
@@ -239,6 +303,39 @@ def test_mutated_policy_is_revalidated_before_gateway_call() -> None:
     assert provider.requests == []
 
 
+def test_mutated_non_utf8_message_fails_before_gateway_call() -> None:
+    provider = _FakeProvider(provider_id="teacher-local", kind=ProviderKind.LOCAL)
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    spec = _spec()
+    object.__setattr__(spec.messages[1], "content", "\ud800")
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        asyncio.run(service.consult(spec))
+
+    assert provider.requests == []
+
+
+def test_non_utf8_provider_response_fails_closed_without_cognition_text() -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        text="\ud800",
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+
+    result = asyncio.run(service.consult(_spec()))
+
+    assert result.text is None
+    assert result.evidence.status is TeacherConsultationStatus.FAILED
+    assert result.evidence.error_code is ModelErrorCode.PROVIDER_ERROR
+    assert result.evidence.response_sha256 is None
+    assert len(provider.requests) == 1
+
+
 def test_request_bound_fails_before_gateway_call() -> None:
     with pytest.raises(ValueError, match="max_request_chars"):
         _spec(
@@ -332,6 +429,69 @@ def test_inconsistent_complete_usage_fails_closed_without_budget_success() -> No
     assert result.evidence.error_code is ModelErrorCode.PROVIDER_ERROR
     assert result.evidence.total_tokens is None
     assert result.evidence.budget_status is TeacherBudgetStatus.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens", "total_tokens"),
+    [
+        (11, None, 10),
+        (None, 11, 10),
+    ],
+)
+def test_impossible_partial_usage_fails_closed_without_budget_success(
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int,
+) -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=100,
+        max_observed_total_tokens=10,
+    )
+
+    result = asyncio.run(service.consult(_spec(policy=policy)))
+
+    assert result.text is None
+    assert result.evidence.status is TeacherConsultationStatus.FAILED
+    assert result.evidence.error_code is ModelErrorCode.PROVIDER_ERROR
+    assert result.evidence.total_tokens is None
+    assert result.evidence.budget_status is TeacherBudgetStatus.UNKNOWN
+
+
+def test_partial_usage_with_possible_total_remains_truthful() -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        input_tokens=8,
+        output_tokens=None,
+        total_tokens=10,
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=100,
+        max_observed_total_tokens=10,
+    )
+
+    result = asyncio.run(service.consult(_spec(policy=policy)))
+
+    assert result.evidence.status is TeacherConsultationStatus.SUCCEEDED
+    assert result.evidence.input_tokens == 8
+    assert result.evidence.output_tokens is None
+    assert result.evidence.total_tokens == 10
+    assert result.evidence.budget_status is TeacherBudgetStatus.WITHIN
 
 
 def test_mismatched_teacher_response_identity_fails_closed() -> None:
