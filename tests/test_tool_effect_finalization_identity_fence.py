@@ -19,9 +19,6 @@ from nika_core.tools import (
 )
 
 _OPERATION_TYPE = "tool.external_effect"
-_REBOUND_CREATED_AT = "2099-01-01T00:00:00+00:00"
-
-
 def _guard_bundle(tmp_path):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
@@ -55,6 +52,7 @@ def _rebind_exact_reservation(
     task_id: str,
     input_fingerprint: str,
 ) -> None:
+    original = ledger.require(operation_key)
     ledger.release_pending(operation_key)
     record, created = ledger.reserve_once(
         operation_key=operation_key,
@@ -64,10 +62,11 @@ def _rebind_exact_reservation(
     )
     assert created
     assert record.status is IdempotencyStatus.PENDING
+    assert record.reservation_generation != original.reservation_generation
     with store.connection() as conn:
         conn.execute(
             "UPDATE idempotency_records SET created_at = ? WHERE operation_key = ?",
-            (_REBOUND_CREATED_AT, operation_key),
+            (original.created_at, operation_key),
         )
 
 
@@ -99,7 +98,8 @@ def test_tool_guard_finalizers_reject_exact_semantic_rebind(
 
     rebound = ledger.require(reservation.operation_key)
     assert rebound.input_fingerprint == original.input_fingerprint
-    assert rebound.created_at == _REBOUND_CREATED_AT
+    assert rebound.created_at == original.created_at
+    assert rebound.reservation_generation != original.reservation_generation
     assert rebound.status is IdempotencyStatus.PENDING
 
 
@@ -142,5 +142,4 @@ def test_tool_executor_cannot_finalize_rebound_external_effect(tmp_path) -> None
     assert result.error == "tool result durability failed"
     rebound = ledger.list_for_task(task.task_id)
     assert len(rebound) == 1
-    assert rebound[0].created_at == _REBOUND_CREATED_AT
     assert rebound[0].status is IdempotencyStatus.PENDING
