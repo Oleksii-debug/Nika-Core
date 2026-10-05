@@ -254,10 +254,8 @@ def _finish_experiment(
 @dataclass(frozen=True, slots=True, init=False)
 class AttestedTrainingComparisonResult:
     experiment_snapshot: ExperimentSnapshot
-    training_binding_sha256: str
-    champion_binding_sha256: str
-    champion_benchmark_sha256: str
-    challenger_benchmark_sha256: str
+    champion_result: AttestedChampionBenchmarkResult
+    challenger_result: AttestedChallengerBenchmarkResult
     definition_sha256: str
     observations_sha256: str
 
@@ -267,11 +265,19 @@ class AttestedTrainingComparisonResult:
     def _validate(self) -> None:
         if type(self.experiment_snapshot) is not ExperimentSnapshot:
             raise TypeError("experiment_snapshot must be an exact ExperimentSnapshot")
+        champion = self.champion_result.revalidated()
+        challenger = self.challenger_result.revalidated()
+        if champion.training_binding != challenger.binding:
+            raise ValueError("comparison evidence does not share one training authority")
+        definition = self.experiment_snapshot.definition
+        if (
+            definition.champion.candidate_id != champion.report.candidate.candidate_id
+            or len(definition.challengers) != 1
+            or definition.challengers[0].candidate_id
+            != challenger.report.candidate.candidate_id
+        ):
+            raise ValueError("experiment candidate identity does not match attested evidence")
         for value, name in (
-            (self.training_binding_sha256, "training_binding_sha256"),
-            (self.champion_binding_sha256, "champion_binding_sha256"),
-            (self.champion_benchmark_sha256, "champion_benchmark_sha256"),
-            (self.challenger_benchmark_sha256, "challenger_benchmark_sha256"),
             (self.definition_sha256, "definition_sha256"),
             (self.observations_sha256, "observations_sha256"),
         ):
@@ -279,7 +285,7 @@ class AttestedTrainingComparisonResult:
                 raise ValueError(f"{name} must be a lowercase SHA-256 digest")
             if any(character not in "0123456789abcdef" for character in value):
                 raise ValueError(f"{name} must be a lowercase SHA-256 digest")
-        if _definition_sha256(self.experiment_snapshot.definition) != self.definition_sha256:
+        if _definition_sha256(definition) != self.definition_sha256:
             raise ValueError("experiment definition evidence changed")
         if _observations_sha256(self.experiment_snapshot.observations) != self.observations_sha256:
             raise ValueError("experiment observation evidence changed")
@@ -296,10 +302,8 @@ class AttestedTrainingComparisonResult:
             self._validate()
             return _build_result(
                 experiment_snapshot=self.experiment_snapshot,
-                training_binding_sha256=self.training_binding_sha256,
-                champion_binding_sha256=self.champion_binding_sha256,
-                champion_benchmark_sha256=self.champion_benchmark_sha256,
-                challenger_benchmark_sha256=self.challenger_benchmark_sha256,
+                champion_result=self.champion_result.revalidated(),
+                challenger_result=self.challenger_result.revalidated(),
             )
         except AttributeError as exc:
             raise ValueError("attested comparison result fields are incomplete") from exc
@@ -313,10 +317,10 @@ class AttestedTrainingComparisonResult:
             "experiment_status": snapshot.status.value,
             "selected_candidate_id": snapshot.selected_candidate_id,
             "previous_champion_id": snapshot.previous_champion_id,
-            "training_binding_sha256": result.training_binding_sha256,
-            "champion_binding_sha256": result.champion_binding_sha256,
-            "champion_benchmark_sha256": result.champion_benchmark_sha256,
-            "challenger_benchmark_sha256": result.challenger_benchmark_sha256,
+            "training_binding_sha256": result.challenger_result.binding.binding_sha256,
+            "champion_binding_sha256": result.champion_result.binding.binding_sha256,
+            "champion_benchmark_sha256": result.champion_result.evidence_sha256,
+            "challenger_benchmark_sha256": result.challenger_result.evidence_sha256,
             "definition_sha256": result.definition_sha256,
             "observations_sha256": result.observations_sha256,
             "observation_count": len(snapshot.observations),
@@ -336,17 +340,13 @@ class AttestedTrainingComparisonResult:
 def _build_result(
     *,
     experiment_snapshot: ExperimentSnapshot,
-    training_binding_sha256: str,
-    champion_binding_sha256: str,
-    champion_benchmark_sha256: str,
-    challenger_benchmark_sha256: str,
+    champion_result: AttestedChampionBenchmarkResult,
+    challenger_result: AttestedChallengerBenchmarkResult,
 ) -> AttestedTrainingComparisonResult:
     result = object.__new__(AttestedTrainingComparisonResult)
     object.__setattr__(result, "experiment_snapshot", experiment_snapshot)
-    object.__setattr__(result, "training_binding_sha256", training_binding_sha256)
-    object.__setattr__(result, "champion_binding_sha256", champion_binding_sha256)
-    object.__setattr__(result, "champion_benchmark_sha256", champion_benchmark_sha256)
-    object.__setattr__(result, "challenger_benchmark_sha256", challenger_benchmark_sha256)
+    object.__setattr__(result, "champion_result", champion_result)
+    object.__setattr__(result, "challenger_result", challenger_result)
     object.__setattr__(
         result,
         "definition_sha256",
@@ -471,10 +471,8 @@ def run_attested_old_vs_new_comparison(
         )
     return _build_result(
         experiment_snapshot=snapshot,
-        training_binding_sha256=training_binding.binding_sha256,
-        champion_binding_sha256=champion_binding.binding_sha256,
-        champion_benchmark_sha256=champion.evidence_sha256,
-        challenger_benchmark_sha256=challenger.evidence_sha256,
+        champion_result=champion,
+        challenger_result=challenger,
     )
 
 
