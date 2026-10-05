@@ -166,6 +166,68 @@ def test_training_status_fails_closed_on_malformed_latest_training_checkpoint(
         TrainingStatusService(checkpoints).read(task_id)
 
 
+@pytest.mark.parametrize("field_name", ("job_id", "candidate_artifact_ref"))
+def test_training_status_rejects_noncanonical_training_identifiers(
+    tmp_path: Path,
+    field_name: str,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _task_id(store)
+    checkpoints = CheckpointService(store)
+    payload = _payload()
+    payload[field_name] = " noncanonical "
+    checkpoints.save(
+        task_id=task_id,
+        stage="training_runtime/v3/paused",
+        payload=payload,
+    )
+
+    with pytest.raises(TrainingStatusError, match="identity"):
+        TrainingStatusService(checkpoints).read(task_id)
+
+
+def test_training_status_rejects_resume_state_above_training_byte_limit(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _task_id(store)
+    checkpoints = CheckpointService(store)
+    payload = _payload()
+    payload["resume_state"] = {"opaque": "x" * (70 * 1024)}
+    checkpoints.save(
+        task_id=task_id,
+        stage="training_runtime/v3/paused",
+        payload=payload,
+    )
+
+    with pytest.raises(TrainingStatusError, match="result evidence"):
+        TrainingStatusService(checkpoints).read(task_id)
+
+
+def test_training_status_rejects_resume_state_above_training_depth_limit(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    task_id = _task_id(store)
+    checkpoints = CheckpointService(store)
+    root: dict[str, object] = {}
+    cursor = root
+    for _ in range(13):
+        child: dict[str, object] = {}
+        cursor["child"] = child
+        cursor = child
+    payload = _payload()
+    payload["resume_state"] = root
+    checkpoints.save(
+        task_id=task_id,
+        stage="training_runtime/v3/paused",
+        payload=payload,
+    )
+
+    with pytest.raises(TrainingStatusError, match="result evidence"):
+        TrainingStatusService(checkpoints).read(task_id)
+
+
 def test_training_status_accepts_completed_checkpoint_without_exposing_candidate_digest(
     tmp_path: Path,
 ) -> None:
