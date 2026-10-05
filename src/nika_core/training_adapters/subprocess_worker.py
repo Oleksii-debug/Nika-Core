@@ -708,7 +708,7 @@ class SubprocessTrainingWorker:
                 object_pairs_hook=_strict_object,
                 parse_constant=_reject_nonstandard_constant,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
             raise _error(
                 "training_subprocess_invalid_json_response",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
