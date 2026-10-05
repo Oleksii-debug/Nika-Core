@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import re
+import stat
 import tempfile
 import uuid
 from dataclasses import dataclass, field
@@ -167,10 +168,26 @@ class DownloadBroker:
     approved_root: Path
     saved: list[Path] = field(default_factory=list)
     _captured: list[_DownloadRecord] = field(default_factory=list, init=False, repr=False)
+    _root_identity: tuple[int, int] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.approved_root = self.approved_root.expanduser().resolve()
         self.approved_root.mkdir(parents=True, exist_ok=True)
+        root_info = self.approved_root.lstat()
+        if not stat.S_ISDIR(root_info.st_mode):
+            raise UnsupportedInteractionError("download root is not a directory")
+        self._root_identity = (root_info.st_dev, root_info.st_ino)
+
+    def _assert_root_identity(self) -> None:
+        try:
+            root_info = self.approved_root.lstat()
+        except OSError as exc:
+            raise UnsupportedInteractionError("download root is unavailable") from exc
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or (root_info.st_dev, root_info.st_ino) != self._root_identity
+        ):
+            raise UnsupportedInteractionError("download root identity changed")
 
     @property
     def checkpoint(self) -> int:
@@ -214,6 +231,7 @@ class DownloadBroker:
         return completed
 
     def handle(self, download: Any) -> None:
+        self._assert_root_identity()
         filename = _safe_download_filename(download.suggested_filename)
         raw_destination = self.approved_root / filename
         # A pre-existing file (including a link) is never an implicit overwrite grant.
@@ -223,24 +241,62 @@ class DownloadBroker:
         if destination.parent != self.approved_root:
             raise UnsupportedInteractionError("download path escaped approved root")
 
-        # A complete download is published with a no-clobber filesystem operation.
-        # The staging file lives on the same filesystem for os.link on Windows/Unix.
-        fd, staging_name = tempfile.mkstemp(
-            prefix=".nika-download-", suffix=".part", dir=self.approved_root
-        )
-        os.close(fd)
-        staging = Path(staging_name)
-        try:
+        # Stage outside the approved artifact root so a less-trusted writer that
+        # can replace entries only inside that root cannot redirect save_as().
+        # A sibling private directory keeps staging on the same filesystem for
+        # the final atomic, no-clobber hard-link publication.
+        with tempfile.TemporaryDirectory(
+            prefix=".nika-download-stage-",
+            dir=self.approved_root.parent,
+        ) as staging_dir:
+            staging = Path(staging_dir) / "payload.part"
             download.save_as(str(staging))
             try:
-                os.link(staging, destination)
+                staging_info = staging.lstat()
+            except OSError as exc:
+                raise UnsupportedInteractionError(
+                    "download staging artifact is unavailable"
+                ) from exc
+            if not stat.S_ISREG(staging_info.st_mode):
+                raise UnsupportedInteractionError("download staging artifact is unsafe")
+            try:
+                self._assert_root_identity()
+                if os.link in os.supports_dir_fd:
+                    flags = os.O_RDONLY
+                    flags |= getattr(os, "O_DIRECTORY", 0)
+                    flags |= getattr(os, "O_NOFOLLOW", 0)
+                    root_fd = os.open(self.approved_root, flags)
+                    try:
+                        root_info = os.fstat(root_fd)
+                        if (
+                            not stat.S_ISDIR(root_info.st_mode)
+                            or (root_info.st_dev, root_info.st_ino)
+                            != self._root_identity
+                        ):
+                            raise UnsupportedInteractionError(
+                                "download root identity changed"
+                            )
+                        os.link(
+                            staging,
+                            filename,
+                            dst_dir_fd=root_fd,
+                            follow_symlinks=False,
+                        )
+                        try:
+                            self._assert_root_identity()
+                        except UnsupportedInteractionError:
+                            os.unlink(filename, dir_fd=root_fd)
+                            raise
+                    finally:
+                        os.close(root_fd)
+                else:
+                    os.link(staging, destination)
+                    self._assert_root_identity()
             except FileExistsError as exc:
                 raise _DownloadDestinationExistsError(
                     "download destination already exists"
                 ) from exc
             self.saved.append(destination)
-        finally:
-            staging.unlink(missing_ok=True)
 
 
 @dataclass(slots=True)

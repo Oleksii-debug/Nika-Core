@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -175,6 +176,8 @@ def _config(tmp_path: Path, request: peft.ParsedRequest, base: bytes) -> peft.Tr
         base_gguf=base_path,
         model_dir=model_dir,
         model_dir_manifest_sha256=peft.model_directory_manifest_sha256(model_dir),
+        trainer_implementation_sha256=peft.trainer_implementation_sha256(),
+        training_runtime_versions=tuple(_RUNTIME_VERSIONS.items()),
         output_root=output_root,
         max_records=100,
         max_sequence_length=64,
@@ -746,11 +749,12 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
         "version",
         _RUNTIME_VERSIONS.__getitem__,
     )
+    trainer_artifact = _trainer_artifact(tmp_path)
     environment = peft.build_trainer_environment(
         base_gguf=config.base_gguf,
         model_dir=config.model_dir,
         output_root=config.output_root,
-        trainer_artifact=_trainer_artifact(tmp_path),
+        trainer_artifact=trainer_artifact,
         max_records=123,
         max_sequence_length=256,
         learning_rate=0.0003,
@@ -775,6 +779,7 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
         peft._training_runtime_manifest_sha256(dict(_RUNTIME_VERSIONS))
     )
     assert environment["NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"] == "a" * 64
+    assert environment["NIKA_TRAINER_DEPLOYMENT_SHA256"] == trainer_artifact.sha256
     for distribution, environment_key in peft._TRAINING_RUNTIME_DISTRIBUTIONS:
         assert environment[environment_key] == _RUNTIME_VERSIONS[distribution]
 
@@ -784,10 +789,59 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     assert loaded.model_dir_manifest_sha256 == environment[
         "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"
     ]
+    assert loaded.trainer_implementation_sha256 == peft.trainer_implementation_sha256()
+    assert dict(loaded.training_runtime_versions) == _RUNTIME_VERSIONS
     assert loaded.lora_r == 16
     assert loaded.torch_num_threads == 3
     assert loaded.seed == 99
 
+
+def test_trainer_deployment_identity_binds_exact_registry_digest(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, _ = _request(tmp_path)
+    trainer_artifact = _trainer_artifact(tmp_path)
+    raw_request["trainer_artifact_id"] = trainer_artifact.artifact_id
+    raw_request["trainer_sha256"] = trainer_artifact.sha256
+    request = peft._parse_request(raw_request)
+    monkeypatch.setenv(
+        "NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID",
+        trainer_artifact.artifact_id,
+    )
+    monkeypatch.setenv(
+        "NIKA_TRAINER_DEPLOYMENT_SHA256",
+        trainer_artifact.sha256,
+    )
+
+    peft._verify_trainer_deployment_identity(request)
+
+    monkeypatch.setenv("NIKA_TRAINER_DEPLOYMENT_SHA256", "0" * 64)
+    with pytest.raises(peft.PeftTrainerError, match="deployment_sha256_mismatch"):
+        peft._verify_trainer_deployment_identity(request)
+
+
+def test_main_rejects_deployment_mismatch_before_config_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, _ = _request(tmp_path)
+    trainer_artifact = _trainer_artifact(tmp_path)
+    raw_request["trainer_artifact_id"] = trainer_artifact.artifact_id
+    raw_request["trainer_sha256"] = trainer_artifact.sha256
+    monkeypatch.setattr(peft, "_read_request", lambda: raw_request)
+    monkeypatch.setenv(
+        "NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID",
+        trainer_artifact.artifact_id,
+    )
+    monkeypatch.setenv("NIKA_TRAINER_DEPLOYMENT_SHA256", "0" * 64)
+
+    def config_effect_must_not_run() -> peft.TrainerConfig:
+        raise AssertionError("config effects must not run before deployment identity")
+
+    monkeypatch.setattr(peft, "_read_config", config_effect_must_not_run)
+
+    assert peft.main() == 2
 
 
 def test_environment_builder_rejects_invalid_torch_thread_count(
@@ -979,12 +1033,44 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     )
     manifest = json.loads(raw)
     assert peft._validate_candidate_manifest_payload(manifest) == manifest
+    assert manifest["trainer_artifact_id"] == request.trainer_artifact_id
+    assert manifest["trainer_sha256"] == request.trainer_sha256
+    assert manifest["trainer_implementation_sha256"] == config.trainer_implementation_sha256
+    assert manifest["training_runtime_versions"] == _RUNTIME_VERSIONS
+    assert manifest["training_runtime_manifest_sha256"] == (
+        peft._training_runtime_manifest_sha256(_RUNTIME_VERSIONS)
+    )
     assert manifest["trainer_parameters"]["torch_num_threads"] == config.torch_num_threads
 
     bad_sha = json.loads(raw)
     bad_sha["base_artifact_sha256"] = "0" * 63
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(bad_sha)
+
+    bad_trainer_sha = json.loads(raw)
+    bad_trainer_sha["trainer_sha256"] = "0" * 63
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_trainer_sha)
+
+    bad_implementation_sha = json.loads(raw)
+    bad_implementation_sha["trainer_implementation_sha256"] = "0" * 63
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_implementation_sha)
+
+    bad_runtime_version = json.loads(raw)
+    bad_runtime_version["training_runtime_versions"]["torch"] = "2.99.0"
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_runtime_version)
+
+    missing_runtime_version = json.loads(raw)
+    del missing_runtime_version["training_runtime_versions"]["gguf"]
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(missing_runtime_version)
+
+    bad_runtime_manifest = json.loads(raw)
+    bad_runtime_manifest["training_runtime_manifest_sha256"] = "0" * 64
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_runtime_manifest)
 
     bad_parameter = json.loads(raw)
     bad_parameter["trainer_parameters"]["lora_r"] = config.lora_r + 1
@@ -1022,6 +1108,110 @@ def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -
     duplicate_adapter_target["adapter_config"]["target_modules"].append(first_target)
     with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
         peft._validate_candidate_manifest_payload(duplicate_adapter_target)
+
+
+def test_candidate_manifest_producer_rejects_reader_invalid_adapter_config(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": ["q_proj", "q_proj", "v_proj"],
+        "task_type": "CAUSAL_LM",
+    }
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._candidate_manifest_json(
+            request=request,
+            config=config,
+            consumed=consumed,
+            adapter_config=adapter_config,
+        )
+
+
+def test_candidate_manifest_reader_accepts_persisted_strict_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+    )
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": raw}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(safe_open=safe_open))
+
+    manifest = peft.candidate_adapter_manifest(candidate.resolve())
+
+    assert manifest["trainer_artifact_id"] == request.trainer_artifact_id
+    assert manifest["trainer_sha256"] == request.trainer_sha256
+    assert manifest["training_runtime_versions"] == _RUNTIME_VERSIONS
+
+
+def test_candidate_manifest_reader_rejects_noncanonical_persisted_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    candidate.write_bytes(b"persisted-candidate")
+
+    class Reader:
+        def __enter__(self) -> "Reader":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def metadata(self) -> dict[str, str]:
+            return {"nika_adapter_manifest": '{ "schema": "nika-peft-candidate-v1" }'}
+
+    def safe_open(path: str, *, framework: str, device: str) -> Reader:
+        assert Path(path) == candidate
+        assert framework == "pt"
+        assert device == "cpu"
+        return Reader()
+
+    monkeypatch.setitem(sys.modules, "safetensors", SimpleNamespace(safe_open=safe_open))
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_not_canonical"):
+        peft.candidate_adapter_manifest(candidate.resolve())
 
 
 def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:

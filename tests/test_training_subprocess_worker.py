@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.training_adapters.subprocess_worker as subprocess_worker_module
 from nika_core.artifacts import ArtifactRegistry
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
@@ -1504,6 +1505,7 @@ response = {
         "transformers": os.getenv("NIKA_TRAINER_TRANSFORMERS_VERSION"),
         "manifest": os.getenv("NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"),
         "deployment": os.getenv("NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"),
+        "deployment_sha256": os.getenv("NIKA_TRAINER_DEPLOYMENT_SHA256"),
         "allowed": os.getenv("NIKA_ALLOWED"),
     },
     "step_id": request["step_id"],
@@ -1512,7 +1514,7 @@ sys.stdout.write(json.dumps(response))
 """.strip(),
     )
     metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
-    worker, _, artifact_id = _worker(
+    worker, registry, artifact_id = _worker(
         tmp_path,
         trainer,
         trainer_metadata=metadata,
@@ -1537,6 +1539,7 @@ sys.stdout.write(json.dumps(response))
         "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"
     ]
     assert trainer_state["deployment"] == artifact_id
+    assert trainer_state["deployment_sha256"] == registry.get(artifact_id).sha256
     assert trainer_state["allowed"] == "yes"
 
 
@@ -1549,6 +1552,23 @@ def test_runtime_deployment_artifact_id_must_match_registry_authority(
     environment["NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"] = "0" * 64
 
     with pytest.raises(ValueError, match="deployment artifact identity does not match"):
+        _worker(
+            tmp_path,
+            trainer,
+            trainer_metadata=metadata,
+            environment=environment,
+        )
+
+
+def test_runtime_deployment_sha256_must_match_registry_authority(
+    tmp_path: Path,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    environment = _runtime_environment()
+    environment["NIKA_TRAINER_DEPLOYMENT_SHA256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="deployment digest does not match"):
         _worker(
             tmp_path,
             trainer,
@@ -1600,6 +1620,126 @@ def test_runtime_environment_manifest_digest_must_match_versions(tmp_path: Path)
         )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows file-sharing semantics")
+def test_windows_launch_guard_blocks_replace_at_popen_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {"guarded": True},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("raise SystemExit(97)\n", encoding="utf-8")
+    worker, _, _ = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    real_popen = subprocess.Popen
+    attempts = 0
+
+    def racing_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal attempts
+        attempts += 1
+        try:
+            os.replace(replacement, trainer)
+        except OSError as exc:
+            assert getattr(exc, "winerror", None) in {5, 32, 33}
+        else:
+            raise AssertionError(
+                "Registry-bound command artifact was replaceable at process launch"
+            )
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(
+        subprocess_worker_module.subprocess,
+        "Popen",
+        racing_popen,
+    )
+
+    result = worker.step(
+        spec=_spec(materials),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    assert attempts == 1
+    envelope = result.resume_state["_nika_subprocess"]
+    assert isinstance(envelope, dict)
+    trainer_state = envelope["trainer_state"]
+    assert isinstance(trainer_state, dict)
+    assert trainer_state["guarded"] is True
+
+    # The guard is scoped to the child lifetime rather than permanently locking
+    # Registry-owned files.
+    os.replace(replacement, trainer)
+    assert trainer.read_text(encoding="utf-8") == "raise SystemExit(97)\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows file-sharing semantics")
+def test_windows_launch_guard_reverifies_swap_before_popen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "unexpected-start"
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('started', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    worker, _, _ = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    real_verify = worker._verify_command_artifacts
+    verify_calls = 0
+
+    def verify_then_swap(records: object) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        real_verify(records)  # type: ignore[arg-type]
+        if verify_calls == 1:
+            os.replace(replacement, trainer)
+
+    def process_must_not_start(*args: object, **kwargs: object) -> object:
+        raise AssertionError("process effect reached after command artifact replacement")
+
+    monkeypatch.setattr(worker, "_verify_command_artifacts", verify_then_swap)
+    monkeypatch.setattr(
+        subprocess_worker_module.subprocess,
+        "Popen",
+        process_must_not_start,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert verify_calls == 2
+    assert exc_info.value.code == "command_artifact_not_verified"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
 def test_runtime_registry_metadata_drift_fails_before_process_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1626,6 +1766,49 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
     drifted_record = original.model_copy(
         update={"metadata": training_runtime_registry_metadata(drifted_versions)}
     )
+
+    def changed_get(requested_artifact_id: str) -> object:
+        if requested_artifact_id == artifact_id:
+            return drifted_record
+        return real_get(requested_artifact_id)
+
+    monkeypatch.setattr(registry, "get", changed_get)
+    materials = _resolved_materials(tmp_path)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_execution_plan_changed"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_runtime_registry_trainer_digest_drift_fails_before_process_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    worker, registry, artifact_id = _worker(
+        tmp_path,
+        trainer,
+        trainer_metadata=metadata,
+    )
+    real_get = registry.get
+    original = real_get(artifact_id)
+    drifted_record = original.model_copy(update={"sha256": "0" * 64})
 
     def changed_get(requested_artifact_id: str) -> object:
         if requested_artifact_id == artifact_id:
