@@ -588,7 +588,10 @@
     }
     // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
     const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
-    if (inFlightActions.has(lockKey)) return;
+    if (inFlightActions.has(lockKey)) {
+      announce("Попередню команду ще обробляють. Дочекайтеся підтвердження.", false);
+      return;
+    }
     inFlightActions.add(lockKey);
     try {
       const payload = {};
@@ -648,7 +651,10 @@
   }
 
   async function mutateKeymap(operation, focusId = null, failureTarget = null) {
-    if (keymapMutationPending) return;
+    if (keymapMutationPending) {
+      announce("Зміна карти клавіш ще виконується. Дочекайтеся підтвердження.", false);
+      return;
+    }
     keymapMutationPending = true;
     try {
       let response;
@@ -795,7 +801,10 @@
   }
 
   document.getElementById("keymap-export").addEventListener("click", async () => {
-    if (keymapMutationPending) return;
+    if (keymapMutationPending) {
+      announce("Дочекайтеся збереження карти клавіш перед експортом.");
+      return;
+    }
     try {
       const response = await globalThis.pywebview.api.export_keymap();
       if (!response || typeof response.ok !== "boolean"
