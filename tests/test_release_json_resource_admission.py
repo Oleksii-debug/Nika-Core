@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import zipfile
 
 import pytest
 
@@ -8,7 +9,13 @@ from nika_core.packaging.release import (
     _MAX_PREHUMAN_EVIDENCE_BYTES,
     _decode_release_manifest,
     _read_evidence_object,
+    verify_distributable_evidence,
+    verify_release_archive,
 )
+
+SOURCE_SHA = "0123456789abcdef0123456789abcdef01234567"
+PRODUCT_VERSION = "0.0.2"
+ARTIFACT_REFERENCE = "./dist/NikaCore-0.0.2-windows-x64.zip"
 
 
 @pytest.mark.parametrize(
@@ -89,3 +96,57 @@ def test_release_manifest_decoder_rejects_excess_depth() -> None:
 )
 def test_release_manifest_decoder_rejects_nonfinite_numbers(raw: bytes) -> None:
     assert _decode_release_manifest(raw) is None
+
+
+def _public_distributable_findings(artifact: Path, evidence: Path) -> tuple[str, ...]:
+    return verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=SOURCE_SHA,
+        artifact_reference=ARTIFACT_REFERENCE,
+        expected_product_version=PRODUCT_VERSION,
+    )
+
+
+def test_public_distributable_verifier_maps_oversize_to_invalid_evidence(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "NikaCore.zip"
+    artifact.write_bytes(b"artifact")
+    evidence = tmp_path / "m12-prehuman-evidence.json"
+    evidence.write_bytes(b" " * (_MAX_PREHUMAN_EVIDENCE_BYTES + 1))
+
+    assert _public_distributable_findings(artifact, evidence) == (
+        "distributable:invalid-evidence",
+    )
+
+
+def test_public_distributable_verifier_maps_deep_json_to_invalid_evidence(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "NikaCore.zip"
+    artifact.write_bytes(b"artifact")
+    evidence = tmp_path / "m12-prehuman-evidence.json"
+    evidence.write_text(
+        '{"nested":' + "[" * 64 + "0" + "]" * 64 + "}",
+        encoding="utf-8",
+    )
+
+    assert _public_distributable_findings(artifact, evidence) == (
+        "distributable:invalid-evidence",
+    )
+
+
+def test_public_release_archive_maps_deep_manifest_to_invalid_manifest(
+    tmp_path: Path,
+) -> None:
+    artifact = tmp_path / "NikaCore.zip"
+    deep_manifest = '{"nested":' + "[" * 64 + "0" + "]" * 64 + "}"
+    with zipfile.ZipFile(artifact, "w") as archive:
+        archive.writestr("release-manifest.json", deep_manifest)
+
+    assert verify_release_archive(
+        artifact,
+        source_sha=SOURCE_SHA,
+        expected_product_version=PRODUCT_VERSION,
+    ) == ("archive:invalid-manifest",)
