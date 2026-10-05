@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 import sqlite3
@@ -52,8 +53,10 @@ from nika_core.v01_settings_json import bounded_stored_utf8, load_persisted_json
 MAX_MODEL_SETTINGS_REVISION = (1 << 53) - 1
 MAX_MODEL_TIMEOUT_SECONDS = 600.0
 _MAX_STORED_SELECTION_BYTES = 64 * 1024
-_SCHEMA_VERSION = 2
+_SCHEMA_VERSION = 3
 _TASK_SELECTION_FIELD = "v01_model_selection"
+_TASK_ARTIFACT_PIN_FIELD = "v01_model_artifact_pin"
+_TASK_ARTIFACT_PIN_SCHEMA = "nika.v01.model-artifact-pin.v1"
 _SELECTION_ID = re.compile(r"[0-9a-f]{64}")
 _ENV_CREDENTIAL_REF = re.compile(r"env:[A-Za-z_][A-Za-z0-9_]*")
 _FORBIDDEN_IDENTITY_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
@@ -88,6 +91,12 @@ _MIGRATIONS = {
             "activated_revision INTEGER NOT NULL CHECK(activated_revision > 0), "
             "rollback_revision INTEGER, "
             "CHECK(rollback_revision IS NULL OR rollback_revision > activated_revision))"
+        ),
+    ),
+    3: (
+        (
+            "ALTER TABLE v01_task_model_bindings "
+            "ADD COLUMN artifact_pin_sha256 TEXT"
         ),
     ),
 }
@@ -136,6 +145,80 @@ class ModelPromotionReceipt:
             or self.rollback_revision > MAX_MODEL_SETTINGS_REVISION
         ):
             raise ValueError("rollback_revision is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class TaskModelArtifactPin:
+    """Digest-only artifact authority frozen into one accepted task."""
+
+    decision_sha256: str
+    binding_sha256: str
+    role: Literal["challenger", "rollback"]
+    route_revision: int
+    artifact_sha256: str
+    descriptor_digest: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.decision_sha256, "decision_sha256"),
+            (self.binding_sha256, "binding_sha256"),
+            (self.artifact_sha256, "artifact_sha256"),
+            (self.descriptor_digest, "descriptor_digest"),
+        ):
+            if type(value) is not str or _SELECTION_ID.fullmatch(value) is None:
+                raise ValueError(f"{name} must be an exact lowercase SHA-256 digest")
+        if self.role not in {"challenger", "rollback"}:
+            raise ValueError("role must be challenger or rollback")
+        if (
+            type(self.route_revision) is not int
+            or not 1 <= self.route_revision <= MAX_MODEL_SETTINGS_REVISION
+        ):
+            raise ValueError("route_revision is invalid")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema": _TASK_ARTIFACT_PIN_SCHEMA,
+            "decision_sha256": self.decision_sha256,
+            "binding_sha256": self.binding_sha256,
+            "role": self.role,
+            "route_revision": self.route_revision,
+            "artifact_sha256": self.artifact_sha256,
+            "descriptor_digest": self.descriptor_digest,
+        }
+
+    @property
+    def pin_sha256(self) -> str:
+        body = json.dumps(
+            self.to_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def from_payload(cls, payload: object) -> TaskModelArtifactPin:
+        if type(payload) is not dict:
+            raise ValueError("artifact pin must be an exact object")
+        expected = {
+            "schema",
+            "decision_sha256",
+            "binding_sha256",
+            "role",
+            "route_revision",
+            "artifact_sha256",
+            "descriptor_digest",
+        }
+        if set(payload) != expected or payload.get("schema") != _TASK_ARTIFACT_PIN_SCHEMA:
+            raise ValueError("artifact pin schema does not match")
+        return cls(
+            decision_sha256=payload["decision_sha256"],
+            binding_sha256=payload["binding_sha256"],
+            role=payload["role"],
+            route_revision=payload["route_revision"],
+            artifact_sha256=payload["artifact_sha256"],
+            descriptor_digest=payload["descriptor_digest"],
+        )
 
 
 class ModelSelection(BaseModel):
