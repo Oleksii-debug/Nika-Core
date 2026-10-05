@@ -95,3 +95,23 @@ def test_invalid_utf8_stored_as_sqlite_text_is_not_loaded_or_rewritten(
             "FROM packaged_product_selection WHERE slot = 1"
         ).fetchone()
     assert row is not None and row["raw_id"] == "80"
+
+@pytest.mark.parametrize(
+    "invalid",
+    [None, True, 42, b"create a product", ["create a product"], "task\x00name", "task\ud800"],
+)
+def test_packaged_router_rejects_nontext_or_malformed_commands_before_routing(
+    invalid: object,
+) -> None:
+    from nika_core.product_factory_packaged_journey import PackagedProductCommandRouter
+
+    def forbid_ordinary(_payload: object) -> None:
+        raise AssertionError("invalid command escaped packaged admission")
+
+    router = PackagedProductCommandRouter(
+        products=object(),  # type: ignore[arg-type]
+        ordinary_handler=forbid_ordinary,  # type: ignore[arg-type]
+    )
+    with pytest.raises(PackagedProductJourneyError, match="Команда"):
+        router.create({"command": invalid})
+    assert router.active_project_id is None
