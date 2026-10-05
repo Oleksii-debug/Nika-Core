@@ -258,8 +258,14 @@ class _AbortOnAttestedGatewayFailure:
 
     def __init__(self, gateway: ModelCompletionPort) -> None:
         self._gateway = gateway
+        self._provider_calls_started = 0
+
+    @property
+    def provider_calls_started(self) -> int:
+        return self._provider_calls_started
 
     async def complete(self, request: ModelRequest) -> ModelResponse:
+        self._provider_calls_started += 1
         try:
             return await self._gateway.complete(request)
         except ModelGatewayError as exc:
@@ -352,22 +358,37 @@ async def run_attested_challenger_benchmark(
         expected_attestor_id=expected_attestor_id,
         expected_attestor_sha256=expected_attestor_sha256,
     )
+    fail_fast_gateway = _AbortOnAttestedGatewayFailure(attested_gateway)
     runner = ModelBenchmarkRunner(
-        _AbortOnAttestedGatewayFailure(attested_gateway),
+        fail_fast_gateway,
         scorer=scorer,
         scorer_id=scorer_id,
         resource_observer=resource_observer,
         accelerator_observer=accelerator_observer,
     )
-    report = await runner.benchmark(
-        canonical_challenger,
-        canonical_evaluation,
-        timeout_seconds=execution_config.timeout_seconds,
-        temperature=execution_config.temperature,
-    )
+    try:
+        report = await runner.benchmark(
+            canonical_challenger,
+            canonical_evaluation,
+            timeout_seconds=execution_config.timeout_seconds,
+            temperature=execution_config.temperature,
+        )
+    except TrainingEvaluationExecutionError:
+        raise
+    except Exception:
+        effect = (
+            ModelFailureEffect.UNKNOWN
+            if fail_fast_gateway.provider_calls_started
+            else ModelFailureEffect.NO_EFFECT
+        )
+        raise TrainingEvaluationExecutionError(
+            "attested challenger benchmark infrastructure failed",
+            failure_effect=effect,
+        ) from None
     if report.execution_config_sha256 != execution_config.evidence_sha256:
         raise TrainingEvaluationExecutionError(
-            "benchmark execution configuration identity changed"
+            "benchmark execution configuration identity changed",
+            failure_effect=ModelFailureEffect.UNKNOWN,
         )
     try:
         return _build_result(
@@ -376,10 +397,11 @@ async def run_attested_challenger_benchmark(
             attestor_id=expected_attestor_id,
             attestor_sha256=expected_attestor_sha256,
         )
-    except (AttributeError, TypeError, ValueError) as exc:
+    except (AttributeError, TypeError, ValueError):
         raise TrainingEvaluationExecutionError(
-            "attested challenger benchmark evidence is inconsistent"
-        ) from exc
+            "attested challenger benchmark evidence is inconsistent",
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        ) from None
 
 
 __all__ = [
