@@ -77,6 +77,14 @@ def _completed_for(payload: bytes) -> TrainingRunEvidence:
     )
 
 
+def _restart_probe() -> TrainingRunEvidence:
+    return _run_evidence(
+        state=TrainingRunState.PAUSED,
+        next_step=1,
+        checkpoint_id="checkpoint-restart",
+    )
+
+
 def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrainingPilotReport:
     candidate = tmp_path / "adapter_model.safetensors"
     candidate.write_bytes(payload)
@@ -86,6 +94,7 @@ def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrai
             next_step=1,
             checkpoint_id="checkpoint-paused",
         ),
+        restart_probe=_restart_probe(),
         completed=_completed_for(payload),
         candidate_path=candidate,
         candidate_descriptor=_descriptor(candidate),
@@ -107,6 +116,7 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
             next_step=1,
             checkpoint_id="checkpoint-paused",
         ),
+        restart_probe=_restart_probe(),
         completed=_completed_for(payload),
         candidate_path=candidate,
         candidate_descriptor=descriptor,
@@ -120,6 +130,7 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     assert report.candidate_descriptor_sha256 == descriptor.descriptor_digest
     assert report.candidate_registry_key == descriptor.registry_key
     assert report.paused_checkpoint_id == "checkpoint-paused"
+    assert report.restart_checkpoint_id == "checkpoint-restart"
     assert report.completed_checkpoint_id == "checkpoint-completed"
 
 
@@ -166,7 +177,8 @@ def test_build_report_rejects_runtime_candidate_digest_mismatch(tmp_path: Path) 
                 next_step=1,
                 checkpoint_id="checkpoint-paused",
             ),
-            completed=_completed_for(b"different-candidate"),
+            restart_probe=_restart_probe(),
+        completed=_completed_for(b"different-candidate"),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,
@@ -185,9 +197,36 @@ def test_build_report_rejects_descriptor_digest_mismatch(tmp_path: Path) -> None
                 next_step=1,
                 checkpoint_id="checkpoint-paused",
             ),
-            completed=_completed_for(b"actual-candidate"),
+            restart_probe=_restart_probe(),
+        completed=_completed_for(b"actual-candidate"),
             candidate_path=candidate,
             candidate_descriptor=descriptor,
+            candidate_root=tmp_path,
+        )
+
+
+def test_build_report_rejects_restart_probe_without_durable_reopen(
+    tmp_path: Path,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="reopen"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=0,
+                checkpoint_id="checkpoint-restart",
+            ),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,
         )
 
@@ -204,7 +243,8 @@ def test_build_report_rejects_restart_identity_drift(tmp_path: Path) -> None:
                 next_step=1,
                 checkpoint_id="checkpoint-paused",
             ),
-            completed=_run_evidence(
+            restart_probe=_restart_probe(),
+        completed=_run_evidence(
                 state=TrainingRunState.COMPLETED,
                 next_step=2,
                 checkpoint_id="checkpoint-completed",
@@ -231,7 +271,8 @@ def test_build_report_rejects_boolean_step_carrier(tmp_path: Path) -> None:
     with pytest.raises(PhysicalTrainingPilotError, match="step boundary"):
         build_physical_training_pilot_report(
             paused=paused,
-            completed=_completed_for(payload),
+            restart_probe=_restart_probe(),
+        completed=_completed_for(payload),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,
@@ -250,7 +291,8 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
                 next_step=1,
                 checkpoint_id="same-checkpoint",
             ),
-            completed=_run_evidence(
+            restart_probe=_restart_probe(),
+        completed=_run_evidence(
                 state=TrainingRunState.COMPLETED,
                 next_step=2,
                 checkpoint_id="same-checkpoint",
@@ -275,6 +317,7 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             execution_plan_sha256=report.execution_plan_sha256,
             job_fingerprint=report.job_fingerprint,
             paused_checkpoint_id=report.paused_checkpoint_id,
+            restart_checkpoint_id=report.restart_checkpoint_id,
             completed_checkpoint_id=report.completed_checkpoint_id,
             candidate_artifact_ref=report.candidate_artifact_ref,
             candidate_descriptor_sha256=report.candidate_descriptor_sha256,
