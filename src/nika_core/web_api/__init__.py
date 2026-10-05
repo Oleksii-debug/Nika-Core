@@ -6,6 +6,7 @@ from nika_core.web_api.application import (
     WebCommandOutcomeUnknownError,
 )
 from nika_core.web_api.contracts import WebCommand, WebCommandResult, WebPrincipal
+from nika_core.web_api.http_transport import HttpCommandAdapter, HttpCommandResponse
 
 __all__ = [
     "WebApplicationBoundary",
@@ -16,4 +17,6 @@ __all__ = [
     "WebCommandOutcomeUnknownError",
     "WebCommandResult",
     "WebPrincipal",
+    "HttpCommandAdapter",
+    "HttpCommandResponse",
 ]
