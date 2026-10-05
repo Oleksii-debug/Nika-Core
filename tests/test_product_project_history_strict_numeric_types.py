@@ -6,6 +6,8 @@ from dataclasses import replace
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -103,7 +105,7 @@ def _research(projects: ProductProjectRepository, count: int, *, start: int = 0)
 def _rich_history(store: SQLiteStore, projects: ProductProjectRepository) -> None:
     _research(projects, 1)
     current = projects.get("project-1")
-    ProductDecisionRepository(store).record(
+    AuthorizingProductDecisionRepository(store).record(
         "project-1",
         ProductDecision(
             decision_id="decision-1",
