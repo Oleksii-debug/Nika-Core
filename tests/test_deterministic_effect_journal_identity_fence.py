@@ -24,11 +24,11 @@ _OPERATION_TYPE = "deterministic.tool_action"
 _FOREIGN_FINGERPRINT = "foreign-rebound-operation"
 
 
-def _task_and_ledger(tmp_path):
+def _task_store_and_ledger(tmp_path):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     task = TaskQueue(store).create(workspace_id="proof", agent_id="deterministic")
-    return task, IdempotencyLedger(store)
+    return task, store, IdempotencyLedger(store)
 
 
 def _local_write_action() -> DeterministicAction:
@@ -41,39 +41,56 @@ def _local_write_action() -> DeterministicAction:
 
 
 def _rebind_reservation(
+    store: SQLiteStore,
     ledger: IdempotencyLedger,
     *,
     operation_key: str,
     task_id: str,
+    input_fingerprint: str,
 ) -> None:
     ledger.release_pending(operation_key)
     record, created = ledger.reserve_once(
         operation_key=operation_key,
         task_id=task_id,
         operation_type=_OPERATION_TYPE,
-        input_fingerprint=_FOREIGN_FINGERPRINT,
+        input_fingerprint=input_fingerprint,
     )
     assert created
     assert record.status is IdempotencyStatus.PENDING
 
+    # Make the replacement generation deterministic even on clocks with coarse resolution.
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE idempotency_records SET created_at = ? WHERE operation_key = ?",
+            ("2099-01-01T00:00:00+00:00", operation_key),
+        )
+
 
 @pytest.mark.parametrize("mutation_name", ["complete", "mark_uncertain", "release_pending"])
+@pytest.mark.parametrize("same_semantics", [False, True])
 def test_journal_finalizers_reject_rebound_operation(
     tmp_path,
     mutation_name: str,
+    same_semantics: bool,
 ) -> None:
-    task, ledger = _task_and_ledger(tmp_path)
+    task, store, ledger = _task_store_and_ledger(tmp_path)
     journal = RuntimeIdempotencyEffectJournal(ledger)
     reservation = journal.reserve(
         task_id=task.task_id,
         action=_local_write_action(),
     )
     assert reservation.created
+    original = ledger.require(reservation.operation_key)
+    rebound_fingerprint = (
+        original.input_fingerprint if same_semantics else _FOREIGN_FINGERPRINT
+    )
 
     _rebind_reservation(
+        store,
         ledger,
         operation_key=reservation.operation_key,
         task_id=task.task_id,
+        input_fingerprint=rebound_fingerprint,
     )
 
     with pytest.raises(
@@ -85,12 +102,13 @@ def test_journal_finalizers_reject_rebound_operation(
     rebound = ledger.require(reservation.operation_key)
     assert rebound.task_id == task.task_id
     assert rebound.operation_type == _OPERATION_TYPE
-    assert rebound.input_fingerprint == _FOREIGN_FINGERPRINT
+    assert rebound.input_fingerprint == rebound_fingerprint
+    assert rebound.created_at == "2099-01-01T00:00:00+00:00"
     assert rebound.status is IdempotencyStatus.PENDING
 
 
 def test_brain_cannot_complete_rebound_local_write_effect(tmp_path) -> None:
-    task, ledger = _task_and_ledger(tmp_path)
+    task, store, ledger = _task_store_and_ledger(tmp_path)
     journal = RuntimeIdempotencyEffectJournal(ledger)
     action = _local_write_action()
     effect_calls = 0
@@ -108,9 +126,11 @@ def test_brain_cannot_complete_rebound_local_write_effect(tmp_path) -> None:
         records = ledger.list_for_task(task.task_id)
         assert len(records) == 1
         _rebind_reservation(
+            store,
             ledger,
             operation_key=records[0].operation_key,
             task_id=task.task_id,
+            input_fingerprint=_FOREIGN_FINGERPRINT,
         )
         return {"written": True}
 
