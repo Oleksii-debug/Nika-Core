@@ -1662,8 +1662,42 @@ def _import_training_stack() -> tuple[Any, ...]:
     )
 
 
-def _snapshot_adapter_weights_sha256(model: object, job_root: Path) -> str:
-    """Hash the exact serialized PEFT adapter weights without retaining a snapshot."""
+def _validate_serialized_adapter_weights(
+    path: Path,
+    *,
+    safe_open: Any,
+    torch: Any,
+    invalid_code: str,
+    non_finite_code: str,
+) -> None:
+    _require_regular_unlinked(path, code=invalid_code)
+    try:
+        with safe_open(os.fspath(path), framework="pt", device="cpu") as source:
+            names = sorted(source.keys())
+            if not names:
+                _fail(invalid_code)
+            for name in names:
+                tensor = source.get_tensor(name)
+                count = tensor.numel()
+                finite = torch.isfinite(tensor).all().item()
+                if type(count) is not int or count <= 0:
+                    _fail(invalid_code)
+                if finite is not True:
+                    _fail(non_finite_code)
+    except PeftTrainerError:
+        raise
+    except Exception:
+        _fail(invalid_code)
+
+
+def _snapshot_adapter_weights_sha256(
+    model: object,
+    job_root: Path,
+    *,
+    safe_open: Any,
+    torch: Any,
+) -> str:
+    """Hash one valid finite serialized PEFT adapter without retaining the snapshot."""
     try:
         with tempfile.TemporaryDirectory(
             prefix=".adapter-weight-snapshot-",
@@ -1674,8 +1708,16 @@ def _snapshot_adapter_weights_sha256(model: object, job_root: Path) -> str:
                 os.fspath(adapter_dir),
                 safe_serialization=True,
             )
+            adapter_file = adapter_dir / _CANDIDATE_FILE
+            _validate_serialized_adapter_weights(
+                adapter_file,
+                safe_open=safe_open,
+                torch=torch,
+                invalid_code="adapter_weight_snapshot_failed",
+                non_finite_code="adapter_weight_snapshot_non_finite",
+            )
             digest, size = _hash_regular_snapshot(
-                adapter_dir / _CANDIDATE_FILE,
+                adapter_file,
                 code="adapter_weight_snapshot_failed",
             )
     except PeftTrainerError:
@@ -1765,6 +1807,8 @@ def _train_one_step(
         before_step_adapter_sha256 = _snapshot_adapter_weights_sha256(
             model,
             job_root,
+            safe_open=safe_open,
+            torch=torch,
         )
 
         training_dataset = _TokenizedDataset(
@@ -1838,7 +1882,13 @@ def _train_one_step(
             torch.cuda.empty_cache()
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
-    _require_regular_unlinked(adapter_file, code="adapter_candidate_missing")
+    _validate_serialized_adapter_weights(
+        adapter_file,
+        safe_open=safe_open,
+        torch=torch,
+        invalid_code="adapter_candidate_invalid",
+        non_finite_code="adapter_candidate_non_finite",
+    )
     after_step_adapter_sha256, _ = _hash_regular_snapshot(
         adapter_file,
         code="adapter_candidate_invalid",
