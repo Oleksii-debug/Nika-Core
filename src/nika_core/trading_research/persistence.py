@@ -45,6 +45,10 @@ class TradingStateRepository:
             if current > _TRADER_SCHEMA_VERSION:
                 raise RuntimeError("trading research schema is newer than supported")
             if current == 0:
+                if _has_unversioned_trading_rows(conn):
+                    raise RuntimeError(
+                        "unversioned trading state exists; refusing to invent schema authority"
+                    )
                 _create_v3_tables(conn)
                 conn.execute(
                     "INSERT INTO trading_research_schema_migrations(version) VALUES (3)"
@@ -152,6 +156,27 @@ def _fill_evidence(fill: SimulatedFill) -> tuple[object, ...]:
         fill.filled_at.isoformat(),
         fill.filled_slice,
     )
+
+
+
+
+def _has_unversioned_trading_rows(conn: sqlite3.Connection) -> bool:
+    for table in (
+        "trading_research_fills",
+        "trading_research_account_state",
+        "trading_research_run_fills",
+        "trading_research_run_account_state",
+    ):
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            (table,),
+        ).fetchone()
+        if row is None:
+            continue
+        data = conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+        if data is not None:
+            return True
+    return False
 
 
 def _create_v3_tables(conn: sqlite3.Connection) -> None:
