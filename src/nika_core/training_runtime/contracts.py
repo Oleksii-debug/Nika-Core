@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Protocol
 
+from nika_core.training_materials import ResolvedTrainingPackage
+
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MACHINE_CODE_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,127}$")
 _MAX_IDENTIFIER_BYTES = 512
@@ -145,6 +147,7 @@ class TrainingJobSpec:
     owner_id: str
     base_artifact: ArtifactIdentity
     frozen_package_sha256: str
+    training_material_sha256: str
     candidate_artifact_ref: str
     max_steps: int
     resource_scope: str = "model_training"
@@ -162,6 +165,7 @@ class TrainingJobSpec:
         if type(self.base_artifact) is not ArtifactIdentity:
             raise TypeError("base_artifact must be an exact ArtifactIdentity")
         _require_sha256(self.frozen_package_sha256, name="frozen_package_sha256")
+        _require_sha256(self.training_material_sha256, name="training_material_sha256")
         if type(self.max_steps) is not int or not 1 <= self.max_steps <= _MAX_STEPS:
             raise ValueError(f"max_steps must be an integer from 1 through {_MAX_STEPS}")
         if self.candidate_artifact_ref == self.base_artifact.artifact_ref:
@@ -196,6 +200,7 @@ class TrainingRunEvidence:
     next_step: int
     base_artifact: ArtifactIdentity
     frozen_package_sha256: str
+    training_material_sha256: str
     candidate_artifact_ref: str
     candidate_sha256: str | None = None
     checkpoint_id: str | None = None
@@ -212,4 +217,5 @@ class TrainingWorkerPort(Protocol):
         spec: TrainingJobSpec,
         step_index: int,
         resume_state: dict[str, object],
+        training_materials: ResolvedTrainingPackage,
     ) -> TrainingStepResult: ...
