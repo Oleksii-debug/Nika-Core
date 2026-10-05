@@ -14,6 +14,7 @@ from nika_core.product_factory_operations import ProductOperationsCoordinator
 from nika_core.product_factory_operations_contracts import (
     DeployableService,
     MaintenanceAction,
+    MaintenanceEffectReservation,
     MaintenanceEffectState,
     MaintenanceRequest,
     MaintenanceResult,
@@ -187,6 +188,29 @@ def _coordinator(
     coordinator.register(service)
     coordinator.record_observation(_observation(service))
     return coordinator
+
+
+@pytest.mark.parametrize(
+    ("state", "result"),
+    (
+        (MaintenanceEffectState.UNCERTAIN, None),
+        (
+            MaintenanceEffectState.COMPLETED,
+            MaintenanceResult(True, False, ("provider:completed",)),
+        ),
+    ),
+)
+def test_created_reservation_authority_requires_pending_state(
+    state: MaintenanceEffectState,
+    result: MaintenanceResult | None,
+) -> None:
+    with pytest.raises(ProductOperationsError, match="created.*must be pending"):
+        MaintenanceEffectReservation(
+            "pf8-maintenance:" + ("a" * 64),
+            state,
+            True,
+            result,
+        )
 
 
 def test_runtime_ledger_reservation_and_result_survive_adapter_recreation(tmp_path) -> None:
