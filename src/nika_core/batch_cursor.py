@@ -8,7 +8,15 @@ from datetime import UTC, datetime, timezone
 from enum import StrEnum
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
 
 from nika_core.memory import MemoryScope, MemoryService
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
@@ -67,6 +75,12 @@ class TargetCursor(BaseModel):
     def validate_terminal_evidence(self) -> TargetCursor:
         if self.attempts < 0:
             raise ValueError("attempts must not be negative")
+        try:
+            _json_copy(self.payload)
+        except BatchCursorStateError as exc:
+            raise ValueError(
+                "target payload must satisfy bounded JSON admission"
+            ) from exc
         if self.attempt_state is AttemptState.CONFIRMED:
             if self.confirmed_result is None or self.uncertain_result is not None:
                 raise ValueError("confirmed target requires only confirmed_result")
@@ -82,9 +96,11 @@ class TargetCursor(BaseModel):
             if evidence is None:
                 continue
             try:
-                _canonical_json(evidence)
-            except (TypeError, ValueError) as exc:
-                raise ValueError(f"{name} must be canonical finite JSON") from exc
+                _json_copy(evidence)
+            except BatchCursorStateError as exc:
+                raise ValueError(
+                    f"{name} must satisfy bounded JSON admission"
+                ) from exc
         return self
 
 
@@ -124,6 +140,13 @@ class BatchCursorState(BaseModel):
     plan_fingerprint: StrictStr
     targets: list[TargetCursor]
     next_scheduled_intent: ScheduledIntent | None = None
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def require_exact_version_type(cls, value: object) -> object:
+        if type(value) is not int:
+            raise ValueError("cursor version must be an exact integer")
+        return value
 
     @model_validator(mode="after")
     def validate_plan(self) -> BatchCursorState:
@@ -171,7 +194,14 @@ class BatchCursorState(BaseModel):
             elif target.attempt_state is not AttemptState.PENDING:
                 raise ValueError("only the first unfinished target may be active")
 
-        if sorted(input_positions) != list(range(self.input_count)):
+        ordered_input_positions = sorted(input_positions)
+        if (
+            len(ordered_input_positions) != self.input_count
+            or any(
+                position != expected
+                for expected, position in enumerate(ordered_input_positions)
+            )
+        ):
             raise ValueError("input positions do not match input_count")
         max_batch = self.targets[-1].batch_index if self.targets else 0
         if self.ready_batch_index > max_batch:
