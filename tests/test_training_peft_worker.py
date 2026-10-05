@@ -799,6 +799,70 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     assert second_state["checkpoint_step"] == 2
 
 
+class _PriorCheckpointTamperingFakeTrainer(_FakeTrainer):
+    def train(self, *, resume_from_checkpoint: str | bool) -> None:
+        prior_checkpoint = Path(str(resume_from_checkpoint))
+        assert prior_checkpoint.name == "checkpoint-1"
+        prior_adapter = prior_checkpoint / "adapter" / peft._CANDIDATE_FILE
+        assert prior_adapter.is_file()
+        super().train(resume_from_checkpoint=resume_from_checkpoint)
+        prior_adapter.write_bytes(b"forged-prior-adapter-after-load")
+
+
+def _prior_checkpoint_tampering_fake_stack() -> tuple[object, ...]:
+    return _trainer_variant_stack(_PriorCheckpointTamperingFakeTrainer)
+
+
+def test_resumed_manifest_binds_loaded_pre_step_tensor_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
+    prior_adapter = (
+        job_root / "trainer" / "checkpoint-1" / "adapter" / peft._CANDIDATE_FILE
+    )
+    loaded_bytes = prior_adapter.read_bytes()
+    expected_previous_sha256 = _sha256(
+        b"tensor-only-v1\x00lora.weight\x00" + loaded_bytes
+    )
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = "3" * 64
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _prior_checkpoint_tampering_fake_stack,
+    )
+
+    peft._train_one_step(second, config, second_consumed)
+
+    assert prior_adapter.read_bytes() == b"forged-prior-adapter-after-load"
+    forged_previous_sha256 = _sha256(
+        b"tensor-only-v1\x00lora.weight\x00" + prior_adapter.read_bytes()
+    )
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        second.candidate_artifact_ref,
+    )
+    carrier = json.loads(candidate.read_bytes())
+    manifest = json.loads(carrier["metadata"]["nika_adapter_manifest"])
+    assert manifest["previous_adapter_tensors_sha256"] == expected_previous_sha256
+    assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
+
+
 def test_training_step_rejects_unchanged_adapter_weights(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -898,6 +962,7 @@ def test_adapter_weight_snapshot_fails_closed_and_cleans_temporary_directory(
             _EmptyAdapterSnapshotModel(),
             job_root,
             safe_open=_fake_safe_open,
+            safe_serialize=_fake_safe_serialize,
             torch=_fake_stack()[0],
         )
 

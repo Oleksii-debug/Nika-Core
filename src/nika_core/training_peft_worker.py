@@ -1730,9 +1730,10 @@ def _snapshot_adapter_weights_sha256(
     job_root: Path,
     *,
     safe_open: Any,
+    safe_serialize: Any,
     torch: Any,
-) -> str:
-    """Hash one valid finite serialized PEFT adapter without retaining the snapshot."""
+) -> tuple[str, str]:
+    """Bind exact bytes and canonical tensors from one loaded-model adapter snapshot."""
     try:
         with tempfile.TemporaryDirectory(
             prefix=".adapter-weight-snapshot-",
@@ -1755,13 +1756,21 @@ def _snapshot_adapter_weights_sha256(
                 adapter_file,
                 code="adapter_weight_snapshot_failed",
             )
+            tensor_sha256 = _adapter_tensor_sha256(
+                adapter_file,
+                safe_open=safe_open,
+                safe_serialize=safe_serialize,
+                torch=torch,
+                invalid_code="adapter_weight_snapshot_failed",
+                non_finite_code="adapter_weight_snapshot_non_finite",
+            )
     except PeftTrainerError:
         raise
     except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
         _fail("adapter_weight_snapshot_failed")
     if size <= 0:
         _fail("adapter_weight_snapshot_failed")
-    return digest
+    return digest, tensor_sha256
 
 
 def _train_one_step(
@@ -1840,10 +1849,14 @@ def _train_one_step(
                 local_files_only=True,
             )
 
-        before_step_adapter_sha256 = _snapshot_adapter_weights_sha256(
+        (
+            before_step_adapter_sha256,
+            loaded_adapter_tensors_sha256,
+        ) = _snapshot_adapter_weights_sha256(
             model,
             job_root,
             safe_open=safe_open,
+            safe_serialize=safe_serialize,
             torch=torch,
         )
 
@@ -1939,22 +1952,14 @@ def _train_one_step(
         invalid_code="adapter_candidate_invalid",
         non_finite_code="adapter_candidate_non_finite",
     )
-    previous_adapter_tensors_sha256: str | None = None
-    if previous_checkpoint is not None:
-        previous_adapter_file = previous_checkpoint / "adapter" / _CANDIDATE_FILE
-        previous_adapter_tensors_sha256 = _adapter_tensor_sha256(
-            previous_adapter_file,
-            safe_open=safe_open,
-            safe_serialize=safe_serialize,
-            torch=torch,
-            invalid_code="previous_adapter_candidate_invalid",
-            non_finite_code="previous_adapter_candidate_non_finite",
-        )
-        if hmac.compare_digest(
-            previous_adapter_tensors_sha256,
-            trained_adapter_tensors_sha256,
-        ):
-            _fail("training_step_no_tensor_mutation")
+    previous_adapter_tensors_sha256 = (
+        loaded_adapter_tensors_sha256 if previous_checkpoint is not None else None
+    )
+    if previous_adapter_tensors_sha256 is not None and hmac.compare_digest(
+        previous_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256,
+    ):
+        _fail("training_step_no_tensor_mutation")
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
         checkpoint,
