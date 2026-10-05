@@ -316,6 +316,47 @@ def test_retry_after_is_bounded_and_every_attempt_is_durable(tmp_path: Path) -> 
 
 
 @pytest.mark.parametrize(
+    "retry_after",
+    ["NaN", "Infinity", "-Infinity", "-0.5", "invalid"],
+)
+def test_invalid_retry_after_uses_finite_fallback_and_persists_attempts(
+    tmp_path: Path,
+    retry_after: str,
+) -> None:
+    sleeps: list[float] = []
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        del request
+        calls += 1
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": retry_after})
+        return httpx.Response(
+            200,
+            headers={"Content-Type": "text/plain"},
+            content=b"retry completed",
+        )
+
+    policy = HttpFetchPolicy(max_attempts=2, backoff_base_seconds=0.25)
+    _, _, network, service = _service(
+        tmp_path,
+        handler=handler,
+        policy=policy,
+        sleeper=sleeps.append,
+    )
+    service.register_source(_source())
+
+    result = service.refresh_source("web-1")
+
+    assert result.disposition is RefreshDisposition.CHANGED
+    assert result.attempts == 2
+    assert calls == 2
+    assert network.attempt_count("web-1") == 2
+    assert sleeps == [0.25]
+
+
+@pytest.mark.parametrize(
     ("status", "disposition", "freshness"),
     [
         (401, RefreshDisposition.BLOCKED, FreshnessState.BLOCKED),
