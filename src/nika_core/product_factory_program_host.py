@@ -315,6 +315,9 @@ class ProductFactoryProgramHost:
                 raise ProductFactoryProgramError(
                     "durable result operation identity requires explicit reconciliation"
                 )
+            if operation.status is IdempotencyStatus.COMPLETED:
+                self._require_completed_result_match(operation, record)
+                continue
             if operation.status not in {
                 IdempotencyStatus.PENDING,
                 IdempotencyStatus.UNCERTAIN,
@@ -357,6 +360,7 @@ class ProductFactoryProgramHost:
                             "durable result operation identity changed during reconciliation"
                         )
                     if current.status is IdempotencyStatus.COMPLETED:
+                        self._require_completed_result_match(current, record)
                         continue
                     if current.status is IdempotencyStatus.PENDING:
                         self._ledger.complete_with_connection(
@@ -1241,6 +1245,7 @@ class ProductFactoryProgramHost:
                 raise ProductFactoryProgramError(
                     "worker operation must be completed before downstream transition"
                 )
+            self._require_completed_result_match(current, prior_record)
             self._require_checkpointed_result(
                 connection,
                 host_task_id=host_task_id,
@@ -1325,6 +1330,20 @@ class ProductFactoryProgramHost:
         if durable_record != record:
             raise ProductFactoryProgramError(
                 "worker result does not match the latest durable Product Factory checkpoint"
+            )
+
+    @staticmethod
+    def _require_completed_result_match(
+        operation: IdempotencyRecord,
+        record: WorkRecord,
+    ) -> None:
+        if operation.status is not IdempotencyStatus.COMPLETED:
+            raise ProductFactoryProgramError(
+                "worker operation is not completed for result comparison"
+            )
+        if operation.result != _result_summary(record):
+            raise ProductFactoryProgramError(
+                "completed worker operation result disagrees with durable checkpoint"
             )
 
     def _require_matching_operation(
