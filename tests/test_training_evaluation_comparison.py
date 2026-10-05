@@ -831,7 +831,7 @@ async def test_activation_rejects_stale_current_champion_without_mutation(tmp_pa
 
     with pytest.raises(
         TrainingModelActivationError,
-        match="rejected by the active route authority",
+        match="current model route no longer matches",
     ):
         await activate_attested_training_promotion(
             result=result,
@@ -958,6 +958,55 @@ def test_settings_reject_cross_provider_promotion_before_route_mutation(tmp_path
 
     assert settings.snapshot()["model"] == "base-model"
     assert settings.snapshot()["revision"] == 1
+
+
+
+def test_direct_promotion_retry_keeps_first_committed_activation_proof(tmp_path) -> None:
+    _, settings = _configured_model_settings(tmp_path)
+    decision_sha256 = _sha(b"race-decision")
+    binding_sha256 = _sha(b"race-binding")
+    base_artifact_sha256 = _sha(b"race-base-artifact")
+    base_descriptor_digest = _sha(b"race-base-descriptor")
+    challenger_artifact_sha256 = _sha(b"race-challenger-artifact")
+    challenger_descriptor_digest = _sha(b"race-challenger-descriptor")
+    first_request = _sha(b"race-first-request")
+    first_attestation = _sha(b"race-first-attestation")
+
+    first = settings.activate_promoted_local_model(
+        expected_revision=1,
+        base_provider_id="ollama",
+        base_model_id="base-model",
+        challenger_provider_id="ollama",
+        challenger_model_id="challenger-model",
+        decision_sha256=decision_sha256,
+        binding_sha256=binding_sha256,
+        base_artifact_sha256=base_artifact_sha256,
+        base_descriptor_digest=base_descriptor_digest,
+        challenger_artifact_sha256=challenger_artifact_sha256,
+        challenger_descriptor_digest=challenger_descriptor_digest,
+        activation_request_sha256=first_request,
+        activation_attestation_sha256=first_attestation,
+    )
+    retried = settings.activate_promoted_local_model(
+        expected_revision=1,
+        base_provider_id="ollama",
+        base_model_id="base-model",
+        challenger_provider_id="ollama",
+        challenger_model_id="challenger-model",
+        decision_sha256=decision_sha256,
+        binding_sha256=binding_sha256,
+        base_artifact_sha256=base_artifact_sha256,
+        base_descriptor_digest=base_descriptor_digest,
+        challenger_artifact_sha256=challenger_artifact_sha256,
+        challenger_descriptor_digest=challenger_descriptor_digest,
+        activation_request_sha256=_sha(b"race-second-request"),
+        activation_attestation_sha256=_sha(b"race-second-attestation"),
+    )
+
+    assert retried == first
+    assert retried.activation_request_sha256 == first_request
+    assert retried.activation_attestation_sha256 == first_attestation
+    assert settings.snapshot()["revision"] == 2
 
 
 
