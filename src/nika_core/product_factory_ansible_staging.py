@@ -91,8 +91,11 @@ class RunnerExecution:
             raise StagingAdapterError("runner evidence_ref must be bounded non-empty text")
         if self.contract is not None:
             snapshot = _snapshot_contract(self.contract)
-            _canonical_contract_json(snapshot)
-            object.__setattr__(self, "contract", snapshot)
+            canonical = _canonical_contract_json(snapshot)
+            deep_snapshot = json.loads(canonical)
+            if type(deep_snapshot) is not dict:
+                raise StagingAdapterError("ansible-runner contract must be an object")
+            object.__setattr__(self, "contract", deep_snapshot)
 
 
 class RunnerExecutionPort(Protocol):
@@ -183,6 +186,8 @@ class AuthorizedAnsibleStagingAdapter:
         self, intent: DeploymentIntent, previous_release_sha: str | None
     ) -> RollbackEvidence:
         self._validate_intent(intent)
+        if previous_release_sha is not None:
+            _validate_release_sha(previous_release_sha, "previous_release_sha")
         execution = self._run(
             "rollback",
             self.config.rollback_playbook,
@@ -377,13 +382,16 @@ def _require_bool(contract: Mapping[str, object], key: str) -> bool:
     return value
 
 
-def _require_sha(contract: Mapping[str, object], key: str) -> str:
-    value = contract.get(key)
-    if not isinstance(value, str) or len(value) != 40:
-        raise StagingAdapterError(f"contract field {key} must be a lowercase 40-character SHA")
+def _validate_release_sha(value: object, field: str) -> str:
+    if type(value) is not str or len(value) != 40:
+        raise StagingAdapterError(f"{field} must be a lowercase 40-character SHA")
     if any(character not in "0123456789abcdef" for character in value):
-        raise StagingAdapterError(f"contract field {key} must be a lowercase 40-character SHA")
+        raise StagingAdapterError(f"{field} must be a lowercase 40-character SHA")
     return value
+
+
+def _require_sha(contract: Mapping[str, object], key: str) -> str:
+    return _validate_release_sha(contract.get(key), f"contract field {key}")
 
 
 def _contract_time(contract: Mapping[str, object]) -> datetime:
