@@ -360,3 +360,37 @@ def test_report_writer_cleans_temporary_after_publish_failure(
 
     assert not path.exists()
     assert not tuple(tmp_path.glob(".physical-evaluation-report.*.tmp"))
+
+
+def test_evaluation_set_allows_multiline_payload_text() -> None:
+    payload = _evaluation_payload()
+    cases = payload["cases"]
+    assert isinstance(cases, list)
+    case = cases[0]
+    assert isinstance(case, dict)
+    messages = case["messages"]
+    assert isinstance(messages, list)
+    message = messages[0]
+    assert isinstance(message, dict)
+    message["content"] = "line one\nline two"
+    case["expected_text"] = "answer line one\nanswer line two"
+
+    evaluation = driver._evaluation_set_from_json(
+        json.dumps(payload, ensure_ascii=False)
+    )
+
+    assert evaluation.cases[0].messages[0].content == "line one\nline two"
+    assert evaluation.cases[0].expected_text == "answer line one\nanswer line two"
+
+
+def test_numeric_overflow_is_reported_as_driver_error(tmp_path: Path) -> None:
+    payload = _payload(tmp_path)
+    benchmark = payload["benchmark"]
+    assert isinstance(benchmark, dict)
+    benchmark["timeout_seconds"] = 10**10000
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="must be a finite number",
+    ):
+        driver.PhysicalEvaluationConfig.from_json(json.dumps(payload))
