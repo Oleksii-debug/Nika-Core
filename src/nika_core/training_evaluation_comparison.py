@@ -257,24 +257,68 @@ def _finish_experiment(
 @dataclass(frozen=True, slots=True, init=False)
 class AttestedTrainingComparisonResult:
     experiment_snapshot: ExperimentSnapshot
-    training_binding_sha256: str
-    champion_binding_sha256: str
-    champion_benchmark_sha256: str
-    challenger_benchmark_sha256: str
+    champion_benchmark: AttestedChampionBenchmarkResult
+    challenger_benchmark: AttestedChallengerBenchmarkResult
     definition_sha256: str
     observations_sha256: str
 
     def __init_subclass__(cls, **_: object) -> None:
         raise TypeError("AttestedTrainingComparisonResult cannot be subclassed")
 
+    def _canonical_authorities(
+        self,
+    ) -> tuple[
+        AttestedChampionBenchmarkResult,
+        AttestedChallengerBenchmarkResult,
+        TrainingEvaluationBinding,
+    ]:
+        if type(self.champion_benchmark) is not AttestedChampionBenchmarkResult:
+            raise TypeError(
+                "champion_benchmark must be an exact AttestedChampionBenchmarkResult"
+            )
+        if type(self.challenger_benchmark) is not AttestedChallengerBenchmarkResult:
+            raise TypeError(
+                "challenger_benchmark must be an exact AttestedChallengerBenchmarkResult"
+            )
+        champion = self.champion_benchmark.revalidated()
+        challenger = self.challenger_benchmark.revalidated()
+        if type(challenger.binding) is not TrainingEvaluationBinding:
+            raise TypeError("challenger benchmark must carry exact training authority")
+        training = challenger.binding.revalidated()
+        champion_binding = champion.binding.revalidated()
+        if (
+            champion_binding.training_binding_sha256 != training.binding_sha256
+            or champion_binding.job_id != training.job_id
+            or champion_binding.candidate_id != training.base_candidate_id
+            or champion_binding.provider_id != training.base_provider_id
+            or champion_binding.model_id != training.base_model_id
+            or champion_binding.artifact_sha256 != training.base_sha256
+            or champion_binding.artifact_size_bytes != training.base_size_bytes
+            or champion_binding.frozen_package_sha256
+            != training.frozen_package_sha256
+            or champion_binding.evaluation_set_sha256
+            != training.evaluation_set_sha256
+            or champion_binding.descriptor_digest != training.base_descriptor_digest
+            or champion_binding.descriptor_registry_key
+            != training.base_descriptor_registry_key
+        ):
+            raise ValueError(
+                "champion benchmark does not match challenger training authority"
+            )
+        if (
+            champion.report.evaluation_set_sha256
+            != challenger.report.evaluation_set_sha256
+            or champion.report.execution_config_sha256
+            != challenger.report.execution_config_sha256
+        ):
+            raise ValueError("old/new benchmark authority changed")
+        return champion, challenger, training
+
     def _validate(self) -> None:
         if type(self.experiment_snapshot) is not ExperimentSnapshot:
             raise TypeError("experiment_snapshot must be an exact ExperimentSnapshot")
+        champion, challenger, _ = self._canonical_authorities()
         for value, name in (
-            (self.training_binding_sha256, "training_binding_sha256"),
-            (self.champion_binding_sha256, "champion_binding_sha256"),
-            (self.champion_benchmark_sha256, "champion_benchmark_sha256"),
-            (self.challenger_benchmark_sha256, "challenger_benchmark_sha256"),
             (self.definition_sha256, "definition_sha256"),
             (self.observations_sha256, "observations_sha256"),
         ):
@@ -286,6 +330,14 @@ class AttestedTrainingComparisonResult:
             raise ValueError("experiment definition evidence changed")
         if _observations_sha256(self.experiment_snapshot.observations) != self.observations_sha256:
             raise ValueError("experiment observation evidence changed")
+        definition = self.experiment_snapshot.definition
+        if (
+            definition.champion.candidate_id != champion.report.candidate.candidate_id
+            or len(definition.challengers) != 1
+            or definition.challengers[0].candidate_id
+            != challenger.report.candidate.candidate_id
+        ):
+            raise ValueError("experiment candidate authority changed")
         if self.experiment_snapshot.status not in {
             ExperimentStatus.COMPLETED,
             ExperimentStatus.PROMOTED,
@@ -297,15 +349,34 @@ class AttestedTrainingComparisonResult:
             raise TypeError("result must be an exact AttestedTrainingComparisonResult")
         try:
             self._validate()
+            champion, challenger, _ = self._canonical_authorities()
             return _build_result(
                 experiment_snapshot=self.experiment_snapshot,
-                training_binding_sha256=self.training_binding_sha256,
-                champion_binding_sha256=self.champion_binding_sha256,
-                champion_benchmark_sha256=self.champion_benchmark_sha256,
-                challenger_benchmark_sha256=self.challenger_benchmark_sha256,
+                champion_benchmark=champion,
+                challenger_benchmark=challenger,
             )
         except AttributeError as exc:
             raise ValueError("attested comparison result fields are incomplete") from exc
+
+    @property
+    def training_binding_sha256(self) -> str:
+        _, _, training = self._canonical_authorities()
+        return training.binding_sha256
+
+    @property
+    def champion_binding_sha256(self) -> str:
+        champion, _, _ = self._canonical_authorities()
+        return champion.binding.binding_sha256
+
+    @property
+    def champion_benchmark_sha256(self) -> str:
+        champion, _, _ = self._canonical_authorities()
+        return champion.evidence_sha256
+
+    @property
+    def challenger_benchmark_sha256(self) -> str:
+        _, challenger, _ = self._canonical_authorities()
+        return challenger.evidence_sha256
 
     def evidence_payload(self) -> dict[str, object]:
         result = self.revalidated()
@@ -339,17 +410,13 @@ class AttestedTrainingComparisonResult:
 def _build_result(
     *,
     experiment_snapshot: ExperimentSnapshot,
-    training_binding_sha256: str,
-    champion_binding_sha256: str,
-    champion_benchmark_sha256: str,
-    challenger_benchmark_sha256: str,
+    champion_benchmark: AttestedChampionBenchmarkResult,
+    challenger_benchmark: AttestedChallengerBenchmarkResult,
 ) -> AttestedTrainingComparisonResult:
     result = object.__new__(AttestedTrainingComparisonResult)
     object.__setattr__(result, "experiment_snapshot", experiment_snapshot)
-    object.__setattr__(result, "training_binding_sha256", training_binding_sha256)
-    object.__setattr__(result, "champion_binding_sha256", champion_binding_sha256)
-    object.__setattr__(result, "champion_benchmark_sha256", champion_benchmark_sha256)
-    object.__setattr__(result, "challenger_benchmark_sha256", challenger_benchmark_sha256)
+    object.__setattr__(result, "champion_benchmark", champion_benchmark)
+    object.__setattr__(result, "challenger_benchmark", challenger_benchmark)
     object.__setattr__(
         result,
         "definition_sha256",
@@ -362,7 +429,6 @@ def _build_result(
     )
     result._validate()
     return result
-
 
 def run_attested_old_vs_new_comparison(
     *,
@@ -487,10 +553,8 @@ def run_attested_old_vs_new_comparison(
         )
     return _build_result(
         experiment_snapshot=snapshot,
-        training_binding_sha256=training_binding.binding_sha256,
-        champion_binding_sha256=champion_binding.binding_sha256,
-        champion_benchmark_sha256=champion.evidence_sha256,
-        challenger_benchmark_sha256=challenger.evidence_sha256,
+        champion_benchmark=champion,
+        challenger_benchmark=challenger,
     )
 
 
