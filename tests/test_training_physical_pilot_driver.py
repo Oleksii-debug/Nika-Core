@@ -301,7 +301,7 @@ def test_output_root_cannot_mutate_input_authority(
     monkeypatch.setattr(driver, "_is_windows", lambda: True)
     config.blob_store_root.mkdir()
     config.frozen_package_path.write_text("{}", encoding="utf-8")
-    config.trainer_executable.write_bytes(b"MZ")
+    _write_minimal_pe(config.trainer_executable)
     config.base_gguf_path.write_bytes(b"GGUF")
     config.model_dir.mkdir()
     (config.model_dir / "tokenizer.json").write_text("{}", encoding="utf-8")
