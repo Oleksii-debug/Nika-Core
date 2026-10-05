@@ -58,6 +58,23 @@ def test_prehuman_json_reader_accepts_exact_byte_limit(tmp_path: Path) -> None:
     assert payload == {"padding": padding.decode("ascii")}
 
 
+def test_prehuman_json_reader_rejects_integer_above_digit_limit(tmp_path: Path) -> None:
+    path = tmp_path / "m12-prehuman-evidence.json"
+    path.write_bytes(b'{"value":' + b"9" * 1235 + b"}")
+
+    assert _read_evidence_object(path) is None
+
+
+def test_prehuman_json_reader_enforces_integer_bit_boundary(tmp_path: Path) -> None:
+    path = tmp_path / "m12-prehuman-evidence.json"
+    accepted = 1 << 4095
+    path.write_text('{"value":' + str(accepted) + "}", encoding="utf-8")
+    assert _read_evidence_object(path) == {"value": accepted}
+
+    path.write_text('{"value":' + str(1 << 4096) + "}", encoding="utf-8")
+    assert _read_evidence_object(path) is None
+
+
 def test_prehuman_json_reader_rejects_excess_depth(tmp_path: Path) -> None:
     path = tmp_path / "m12-prehuman-evidence.json"
     path.write_text('{"nested":' + "[" * 64 + "0" + "]" * 64 + "}", encoding="utf-8")
