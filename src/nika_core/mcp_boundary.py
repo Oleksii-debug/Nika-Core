@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -20,7 +21,11 @@ from nika_core.tools import (
 _MAX_MCP_SEGMENT_CHARS = 128
 _MAX_MCP_CURSOR_BYTES = 4096
 _MAX_MCP_LIST_PAGES = 1000
+_MAX_MCP_LIST_TOOLS = 10_000
 _MAX_MCP_ARGUMENT_DEPTH = 64
+_MAX_MCP_ARGUMENT_NODES = 10_000
+_MAX_MCP_ARGUMENT_BYTES = 1_048_576
+_MAX_MCP_ARGUMENT_INTEGER_BITS = 4_096
 _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -78,23 +83,48 @@ def _exact_tool_risk(value: object) -> ToolRisk:
     return value
 
 
+def _charge_argument_bytes(value: object, budget: list[int]) -> None:
+    budget[1] += len(
+        json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    )
+    if budget[1] > _MAX_MCP_ARGUMENT_BYTES:
+        raise ValueError("MCP arguments exceed safe JSON byte limit")
+
+
 def _snapshot_mcp_json(
     value: object,
     *,
     path: str,
     depth: int = 0,
     active: set[int] | None = None,
+    budget: list[int] | None = None,
 ) -> object:
     if depth > _MAX_MCP_ARGUMENT_DEPTH:
         raise ValueError("MCP arguments exceed safe nesting depth")
-    if value is None or type(value) is bool or type(value) is int:
+    if budget is None:
+        budget = [0, 0]
+    budget[0] += 1
+    if budget[0] > _MAX_MCP_ARGUMENT_NODES:
+        raise ValueError("MCP arguments exceed safe node limit")
+    if value is None or type(value) is bool:
+        _charge_argument_bytes(value, budget)
+        return value
+    if type(value) is int:
+        if value.bit_length() > _MAX_MCP_ARGUMENT_INTEGER_BITS:
+            raise ValueError("MCP arguments contain an oversized integer")
+        _charge_argument_bytes(value, budget)
         return value
     if type(value) is float:
         if not math.isfinite(value):
             raise ValueError(f"{path} must not contain NaN or infinity")
+        _charge_argument_bytes(value, budget)
         return value
     if type(value) is str:
-        return _exact_utf8_text(value, field=path)
+        if len(value) > _MAX_MCP_ARGUMENT_BYTES:
+            raise ValueError("MCP arguments exceed safe JSON byte limit")
+        text = _exact_utf8_text(value, field=path)
+        _charge_argument_bytes(text, budget)
+        return text
     if type(value) is not dict and type(value) is not list:
         raise TypeError(f"{path} must contain only exact JSON values")
 
@@ -112,18 +142,23 @@ def _snapshot_mcp_json(
                     path=f"{path}[{index}]",
                     depth=depth + 1,
                     active=active,
+                    budget=budget,
                 )
                 for index, item in enumerate(value)
             ]
 
         snapshot: dict[str, object] = {}
         for index, (raw_key, item) in enumerate(value.items()):
+            if type(raw_key) is str and len(raw_key) > _MAX_MCP_ARGUMENT_BYTES:
+                raise ValueError("MCP arguments exceed safe JSON byte limit")
             key = _exact_utf8_text(raw_key, field=f"{path} key {index}")
+            _charge_argument_bytes(key, budget)
             snapshot[key] = _snapshot_mcp_json(
                 item,
                 path=f"{path}.{key}",
                 depth=depth + 1,
                 active=active,
+                budget=budget,
             )
         return snapshot
     finally:
@@ -134,6 +169,9 @@ def _snapshot_mcp_arguments(arguments: object) -> dict[str, object]:
     if type(arguments) is not dict:
         raise TypeError("arguments must be an exact dict")
     snapshot = _snapshot_mcp_json(arguments, path="arguments")
+    if len(json.dumps(snapshot, ensure_ascii=False, allow_nan=False,
+                      separators=(",", ":")).encode("utf-8")) > _MAX_MCP_ARGUMENT_BYTES:
+        raise ValueError("MCP arguments exceed safe JSON byte limit")
     if type(snapshot) is not dict:
         raise TypeError("arguments must be an exact dict")
     return snapshot
@@ -223,6 +261,8 @@ class MCPClientAdapter:
                     raise ValueError("MCP tools page is incomplete") from exc
                 if type(page_tools) is not list:
                     raise TypeError("MCP tools page must contain an exact list")
+                if len(page_tools) > _MAX_MCP_LIST_TOOLS - len(specs):
+                    raise ValueError("MCP tools discovery exceeds safe tool limit")
 
                 for tool in page_tools:
                     tool_name = _exact_mcp_tool_name(tool.name)
