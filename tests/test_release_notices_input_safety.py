@@ -278,6 +278,7 @@ def test_distribution_license_regular_utf8_is_preserved(
         ("LICENSE", "SPDX compatible text"),
     )
 
+
 @pytest.mark.parametrize(
     "item",
     (
@@ -288,6 +289,13 @@ def test_distribution_license_regular_utf8_is_preserved(
         "pkg/./LICENSE",
         "pkg/../LICENSE",
         "pkg/\nLICENSE",
+        "pkg/\x85LICENSE",
+        "pkg/\u200eLICENSE",
+        "pkg/\u202eLICENSE",
+        "pkg/\u2066LICENSE",
+        "pkg/\u2028LICENSE",
+        "pkg/\u2029LICENSE",
+        "pkg/\ud800LICENSE",
     ),
 )
 def test_distribution_license_rejects_noncanonical_path_before_locate(item: str) -> None:
@@ -302,19 +310,19 @@ def test_distribution_license_rejects_noncanonical_path_before_locate(item: str)
 
 
 def test_distribution_license_preserves_valid_nested_relative_path(tmp_path: Path) -> None:
-    nested = tmp_path / "pkg" / "licenses"
+    nested = tmp_path / "pkg" / "ліцензії"
     nested.mkdir(parents=True)
     license_file = nested / "LICENSE.txt"
     license_file.write_text("Nested license evidence\n", encoding="utf-8")
 
     class Distribution:
-        files = ("pkg/licenses/LICENSE.txt",)
+        files = ("pkg/ліцензії/LICENSE.txt",)
 
         def locate_file(self, item: str) -> Path:
-            assert item == "pkg/licenses/LICENSE.txt"
+            assert item == "pkg/ліцензії/LICENSE.txt"
             return license_file
 
     assert notices._license_texts(Distribution()) == (
-        ("pkg/licenses/LICENSE.txt", "Nested license evidence"),
+        ("pkg/ліцензії/LICENSE.txt", "Nested license evidence"),
     )
 
