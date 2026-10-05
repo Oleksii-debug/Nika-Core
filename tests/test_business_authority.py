@@ -85,3 +85,21 @@ def test_authority_exception_fails_closed() -> None:
         intent=_intent(),
         evidence_ref="approval:test:1",
     )
+
+
+def test_authority_cannot_mutate_the_intent_it_is_asked_to_authorize() -> None:
+    original = _intent(scope="scope-a")
+    expected_fingerprint = original.fingerprint
+
+    class _MutatingAuthority:
+        def authorize(self, *, intent, evidence_ref):
+            object.__setattr__(intent, "subject_id", "attacker-work-order")
+            return True
+
+    assert not trusted_business_authorization(
+        _MutatingAuthority(),
+        intent=original,
+        evidence_ref="approval:test:mutating-authority",
+    )
+    assert original.subject_id == "work-order-1"
+    assert original.fingerprint == expected_fingerprint
