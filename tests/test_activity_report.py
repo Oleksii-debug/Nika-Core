@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -28,6 +28,63 @@ class _QueryOnlyTrackingStore(SQLiteStore):
             row = conn.execute("PRAGMA query_only").fetchone()
             assert row is not None
             self.observed_query_only = int(row[0])
+
+
+class _AuditMutationConnection:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        after_grouped_audit_read: Callable[[], None],
+    ) -> None:
+        self._conn = conn
+        self._after_grouped_audit_read = after_grouped_audit_read
+        self._fired = False
+
+    def execute(self, sql: str, parameters=()):
+        cursor = self._conn.execute(sql, parameters)
+        if (
+            not self._fired
+            and "FROM audit_events WHERE created_at" in sql
+            and "GROUP BY event_type" in sql
+        ):
+            self._fired = True
+            self._after_grouped_audit_read()
+        return cursor
+
+
+class _ConcurrentAuditMutationStore(SQLiteStore):
+    def __init__(self, path: Path, *, created_at: str) -> None:
+        super().__init__(path)
+        self._created_at = created_at
+        self.writer_committed = False
+
+    @contextmanager
+    def connection(self) -> Iterator[_AuditMutationConnection]:
+        with super().connection() as conn:
+            yield _AuditMutationConnection(
+                conn,
+                after_grouped_audit_read=self._commit_memory_event,
+            )
+
+    def _commit_memory_event(self) -> None:
+        writer = sqlite3.connect(self.path, timeout=2.0)
+        try:
+            writer.execute(
+                "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    "memory.upserted",
+                    "memory",
+                    "concurrent-memory",
+                    "{}",
+                    self._created_at,
+                ),
+            )
+            writer.commit()
+            self.writer_committed = True
+        finally:
+            writer.close()
 
 
 class _ResourceObserver:
@@ -305,6 +362,32 @@ def test_report_rejects_non_text_grouped_durable_label(tmp_path) -> None:
             start=datetime(2026, 9, 12, tzinfo=UTC),
             end=datetime(2026, 9, 13, tzinfo=UTC),
         )
+
+
+def test_report_uses_one_read_snapshot_across_all_projections(tmp_path) -> None:
+    base_store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+    with base_store.connection() as conn:
+        journal_mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+        assert journal_mode is not None
+        assert str(journal_mode[0]).casefold() == "wal"
+
+    store = _ConcurrentAuditMutationStore(base_store.path, created_at=inside)
+    report = DailyActivityReportService(store).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert store.writer_committed is True
+    assert report.memory_update_events == 0
+    assert ActivityCount("memory.upserted", 1) not in report.audit_events
+    with base_store.connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM audit_events WHERE event_type = ?",
+            ("memory.upserted",),
+        ).fetchone()
+    assert row is not None
+    assert int(row["count"]) == 1
 
 
 def test_report_counts_repeated_memory_upserts_from_durable_audit_history(tmp_path) -> None:
