@@ -783,6 +783,94 @@ time.sleep(10)
     assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
 
 
+def test_timeout_kills_trainer_descendant_process_tree(tmp_path: Path) -> None:
+    spawned = tmp_path / "descendant-spawned.txt"
+    survived = tmp_path / "descendant-survived.txt"
+    child_code = (
+        "import pathlib,sys,time; "
+        "time.sleep(1.0); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    trainer = _script(
+        tmp_path,
+        f"""
+import pathlib
+import subprocess
+import sys
+import time
+
+time.sleep(0.2)
+subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(survived)!r}])
+pathlib.Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
+sys.stdin.buffer.read()
+time.sleep(30)
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer, timeout_seconds=1.5)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_subprocess_timeout"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert spawned.exists(), "test did not prove that a trainer descendant was started"
+    time.sleep(1.3)
+    assert not survived.exists(), "trainer descendant escaped timeout containment"
+
+
+def test_success_does_not_leave_trainer_descendant_running(tmp_path: Path) -> None:
+    spawned = tmp_path / "success-descendant-spawned.txt"
+    survived = tmp_path / "success-descendant-survived.txt"
+    child_code = (
+        "import pathlib,sys,time; "
+        "time.sleep(1.0); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    trainer = _script(
+        tmp_path,
+        f"""
+import json
+import pathlib
+import subprocess
+import sys
+import time
+
+time.sleep(0.2)
+subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(survived)!r}])
+pathlib.Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
+request = json.loads(sys.stdin.buffer.read())
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{"epoch": 1}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer, timeout_seconds=5)
+
+    result = worker.step(
+        spec=_spec(materials),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    assert result.completed is False
+    assert spawned.exists(), "test did not prove that a trainer descendant was started"
+    time.sleep(1.3)
+    assert not survived.exists(), "trainer descendant escaped successful-step containment"
+
+
 def test_oversized_response_is_bounded_and_unknown_effect(tmp_path: Path) -> None:
     trainer = _script(
         tmp_path,
