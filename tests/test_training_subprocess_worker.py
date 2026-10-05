@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -494,6 +495,57 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
 
     assert exc_info.value.code == "command_artifact_not_verified"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_command_tamper_during_spawn_is_unknown_and_process_is_reaped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "spawn-race-effect"
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    worker, _, _ = _worker(tmp_path, trainer)
+    real_popen = subprocess.Popen
+
+    def mutating_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        trainer.write_text(
+            f"""\nimport time\nfrom pathlib import Path\ntime.sleep(2)\nPath({str(marker)!r}).write_text(\"effect\", encoding=\"utf-8\")\n""".strip(),
+            encoding="utf-8",
+        )
+        return real_popen(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(
+        "nika_core.training_adapters.subprocess_worker.subprocess.Popen",
+        mutating_popen,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "command_artifact_changed_after_process_start"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
     assert not marker.exists()
 
 
