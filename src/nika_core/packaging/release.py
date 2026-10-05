@@ -521,7 +521,7 @@ def _open_release_file_for_snapshot(path: Path) -> Any:
     descriptor = os.open(path, flags)
     try:
         return os.fdopen(descriptor, "rb", closefd=True)
-    except BaseException:
+    except (OSError, ValueError):
         os.close(descriptor)
         raise
 
@@ -535,6 +535,8 @@ def _stable_release_file_snapshot(
     try:
         with _open_release_file_for_snapshot(path) as handle:
             before = os.fstat(handle.fileno())
+            if not stat.S_ISREG(before.st_mode):
+                return None
             snapshot = _stream_release_file_snapshot(handle, scan_secrets=scan_secrets)
             after = os.fstat(handle.fileno())
         if root is None:
