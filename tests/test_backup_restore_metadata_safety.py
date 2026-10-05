@@ -185,6 +185,7 @@ def test_restore_marker_path_must_be_direct_regular_file(tmp_path: Path, kind: s
 def test_broken_restore_marker_blocks_new_restore_preview(tmp_path: Path) -> None:
     target = tmp_path / "live.db"
     manager = _manager(target)
+    before_sha = _digest(target)
     artifact = manager.create_backup(tmp_path / "backup.sqlite3", record_audit=False)
     marker_path = manager._restore_marker_path(target)
     try:
@@ -195,7 +196,7 @@ def test_broken_restore_marker_blocks_new_restore_preview(tmp_path: Path) -> Non
     with pytest.raises(RestoreSafetyError, match="direct regular file"):
         manager.prepare_restore(artifact.database_path)
     assert marker_path.is_symlink()
-    assert _digest(target)
+    assert _digest(target) == before_sha
 
 
 def test_json_metadata_reader_rejects_indirect_file_even_without_caller_precheck(
