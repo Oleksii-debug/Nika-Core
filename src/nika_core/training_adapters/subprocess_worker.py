@@ -794,6 +794,7 @@ class SubprocessTrainingWorker:
         *,
         expected_command_records: Mapping[int, ArtifactRecord],
     ) -> bytes:
+        deadline = time.monotonic() + self._timeout_seconds
         try:
             process = subprocess.Popen(
                 self._command,
@@ -818,8 +819,6 @@ class SubprocessTrainingWorker:
                 "training_subprocess_start_failed",
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             ) from exc
-
-        deadline = time.monotonic() + self._timeout_seconds
 
         if process.stdin is None or process.stdout is None:
             self._kill_process(process)
