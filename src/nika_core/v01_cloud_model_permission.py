@@ -175,14 +175,27 @@ class V01CloudModelPermissionService:
         )
 
     def revoke_task(self, task_id: str) -> None:
-        """Revoke the task's current grant without fabricating missing authority."""
+        """Revoke only the grant still bound to this task under one write lock."""
 
         permission_id = self._bound_permission_id(task_id, strict=True)
         if permission_id is None:
             return
         permission = self._permissions.get(permission_id)
-        if permission is not None and permission.revoked_at is None:
-            self._permissions.revoke(permission_id, revoked_at=self._utc_now())
+        if permission is None or permission.revoked_at is not None:
+            return
+        with self._permissions.revoke_transaction(
+            permission_id,
+            revoked_at=self._utc_now(),
+        ) as (transaction, _revoked):
+            current_id = self._bound_permission_id(
+                task_id,
+                strict=True,
+                connection=transaction,
+            )
+            if current_id != permission_id:
+                raise CloudModelPermissionDenied(
+                    "Збережений дозвіл зовнішньої моделі змінився під час відкликання."
+                )
 
     def _cloud_selection(self, task_id: str) -> ModelSelection | None:
         try:
@@ -512,15 +525,27 @@ class V01CloudModelPermissionService:
             return None
         return permission_id
 
-    def _bound_permission_id(self, task_id: str, *, strict: bool) -> str | None:
-        with self._store.connection() as conn:
-            row = conn.execute(
-                "SELECT task_id, typeof(task_id) AS task_id_type, "
-                "permission_id, typeof(permission_id) AS permission_id_type, "
-                "updated_at, typeof(updated_at) AS updated_at_type "
-                "FROM v01_cloud_model_permission_bindings WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
+    def _bound_permission_id(
+        self,
+        task_id: str,
+        *,
+        strict: bool,
+        connection: _SQLExecutor | None = None,
+    ) -> str | None:
+        if connection is None:
+            with self._store.connection() as conn:
+                return self._bound_permission_id(
+                    task_id,
+                    strict=strict,
+                    connection=conn,
+                )
+        row = connection.execute(
+            "SELECT task_id, typeof(task_id) AS task_id_type, "
+            "permission_id, typeof(permission_id) AS permission_id_type, "
+            "updated_at, typeof(updated_at) AS updated_at_type "
+            "FROM v01_cloud_model_permission_bindings WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()
         if row is None:
             return None
         return self._binding_id_from_row(task_id, row, strict=strict)
