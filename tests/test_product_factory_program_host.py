@@ -1082,7 +1082,15 @@ def test_worker_reservation_collision_does_not_cancel_independent_component(
 
 
 @pytest.mark.parametrize(
-    "malformed", ("wrong_carrier", "nontext_phase", "blank_phase", "nontext_token")
+    "malformed",
+    (
+        "wrong_carrier",
+        "nontext_phase",
+        "blank_phase",
+        "nontext_token",
+        "missing_phase",
+        "missing_token",
+    ),
 )
 def test_invalid_inspected_recovery_state_cannot_reach_worker_and_can_retry(
     tmp_path, malformed: str
@@ -1111,8 +1119,10 @@ def test_invalid_inspected_recovery_state_cannot_reach_worker_and_can_retry(
         if malformed == "blank_phase":
             phase = " "
         token = b"invalid" if malformed == "nontext_token" else "resume"
-        object.__setattr__(untrusted, "phase", phase)
-        object.__setattr__(untrusted, "opaque_token", token)
+        if malformed != "missing_phase":
+            object.__setattr__(untrusted, "phase", phase)
+        if malformed != "missing_token":
+            object.__setattr__(untrusted, "opaque_token", token)
     worker.recovery_states[request.work_id] = untrusted  # type: ignore[assignment]
     first = _run(
         host.recover_running(
