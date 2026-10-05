@@ -153,23 +153,10 @@ def test_verifier_rejects_noncanonical_manifest_paths(tmp_path: Path, path: str)
 
 
 @pytest.mark.parametrize(
-    ("entry", "finding"),
-    [
-        (
-            ReleaseFile(path="NikaCore.exe", size=True, sha256="0" * 64),
-            "manifest:size-format:0",
-        ),
-        (
-            ReleaseFile(path="NikaCore.exe", size=6, sha256="A" * 64),
-            "manifest:sha256-format:0",
-        ),
-    ],
-)
-@pytest.mark.parametrize(
     "version",
     [
         "v" * 129,
-        "1.0.0\\x1f",
+        "1.0.0\x1f",
     ],
 )
 def test_manifest_rejects_product_version_outside_canonical_boundary(
@@ -190,6 +177,19 @@ def test_manifest_rejects_product_version_outside_canonical_boundary(
         write_release_manifest(bundle, manifest)
 
 
+@pytest.mark.parametrize(
+    ("entry", "finding"),
+    [
+        (
+            ReleaseFile(path="NikaCore.exe", size=True, sha256="0" * 64),
+            "manifest:size-format:0",
+        ),
+        (
+            ReleaseFile(path="NikaCore.exe", size=6, sha256="A" * 64),
+            "manifest:sha256-format:0",
+        ),
+    ],
+)
 def test_verifier_rejects_invalid_file_evidence(
     tmp_path: Path,
     entry: ReleaseFile,
