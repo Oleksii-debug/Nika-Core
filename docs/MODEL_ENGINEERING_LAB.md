@@ -128,7 +128,8 @@ bounded scorer without modifying routing, permissions or provider adapters.
 ## Metrics
 
 Per candidate the current foundation records:
-- weighted quality score;
+- weighted quality score, with each case's evaluation weight retained in the
+  report evidence carrier so standalone report integrity can be recomputed;
 - task pass rate;
 - completion rate;
 - mean latency;
@@ -210,6 +211,8 @@ Fail closed on:
 - custom scorer execution without a stable scorer identity;
 - malformed, unsafe or duplicate benchmark run identity;
 - run/configuration fingerprint substitution;
+- report aggregate substitution inconsistent with exact case evidence;
+- case-weight substitution at an exact EvaluationSet promotion boundary;
 - invalid Nika-process RSS used by benchmark resource evidence.
 
 Provider errors remain benchmark evidence as typed failures. Unexpected programming errors are not
