@@ -15,6 +15,7 @@ from nika_core.artifacts import (
     ArtifactLocationKind,
     ArtifactRecord,
     ArtifactRegistry,
+    ArtifactVerification,
     ArtifactRegistryError,
     ArtifactVerificationState,
     initialize_artifact_registry_schema,
@@ -243,6 +244,34 @@ def test_artifact_identity_fields_reject_nul_delimiter_collisions(
 
     with pytest.raises(ValidationError, match="must not contain NUL"):
         ArtifactRecord(**payload)
+
+
+@pytest.mark.parametrize("value", (True, 1.0, "1"))
+def test_artifact_size_fields_require_exact_integer_carriers(value: object) -> None:
+    record = {
+        "artifact_id": "a" * 64,
+        "idempotency_key": "effect",
+        "workspace_id": "workspace-a",
+        "kind": "result",
+        "location_kind": ArtifactLocationKind.OPAQUE_REFERENCE,
+        "locator": "blob:safe",
+        "sha256": "b" * 64,
+    }
+    with pytest.raises(ValidationError, match="valid integer"):
+        ArtifactRecord(**record, size_bytes=value)
+
+    verification = {
+        "verification_id": "c" * 64,
+        "artifact_id": "a" * 64,
+        "state": ArtifactVerificationState.VERIFIED,
+        "expected_sha256": "b" * 64,
+    }
+    with pytest.raises(ValidationError, match="valid integer"):
+        ArtifactVerification(
+            **verification,
+            expected_size_bytes=value,
+            actual_size_bytes=value,
+        )
 
 
 def test_idempotency_key_rejects_changed_immutable_metadata(tmp_path: Path) -> None:
