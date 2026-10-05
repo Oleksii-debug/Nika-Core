@@ -4,7 +4,11 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from nika_core.activation_authority import ActivationAuthorityPort, ActivationSubject
+from nika_core.activation_authority import (
+    ActivationAuthorityPort,
+    ActivationSubject,
+    canonical_approval_refs,
+)
 from nika_core.builder.compiler import CompilationResult
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
@@ -32,7 +36,7 @@ class AgentDefinitionRepository:
         activation_authority: ActivationAuthorityPort | None = None,
     ) -> None:
         self._store = store
-        self._audit_log = audit_log or AuditLog(store)
+        self._audit_log = AuditLog(store) if audit_log is None else audit_log
         self._activation_authority = activation_authority
 
     def next_version(self, agent_id: str) -> int:
@@ -112,6 +116,7 @@ class AgentDefinitionRepository:
         *,
         approval_refs: tuple[str, ...] = (),
     ) -> None:
+        approval_refs = canonical_approval_refs(approval_refs)
         if not definition.enabled:
             raise ValueError("disabled agent definition cannot be activated")
         with self._store.connection() as conn:
