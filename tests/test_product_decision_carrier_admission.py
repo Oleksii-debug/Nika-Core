@@ -264,7 +264,7 @@ def test_durable_replay_verifies_evidence_on_one_sqlite_snapshot(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, projects, decisions = _setup(tmp_path)
+    _, projects, decisions = _setup(tmp_path)
     decision = _decision()
     stored = decisions.record(
         "p1",
