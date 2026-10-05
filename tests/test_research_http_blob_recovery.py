@@ -1,6 +1,7 @@
 """A persisted HTTP digest must not outrank the corresponding raw blob on disk."""
 
 import sqlite3
+from collections.abc import Callable
 from pathlib import Path
 
 import httpx
@@ -20,17 +21,23 @@ from nika_core.research import (
     SourceSpec,
 )
 
-
 _BODY = b"reproducible research source content"
 
 
-def _session(tmp_path: Path, *, invalid_response: bool = False):
+def _session(
+    tmp_path: Path,
+    *,
+    second_not_modified: bool = False,
+    before_second_response: Callable[[], None] | None = None,
+):
     observed: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         observed.append(request.headers.get("if-none-match"))
-        if invalid_response and len(observed) == 2:
-            return httpx.Response(304)
+        if second_not_modified and len(observed) == 2:
+            if before_second_response is not None:
+                before_second_response()
+            return httpx.Response(304, headers={"ETag": '"verified"'})
         return httpx.Response(
             200,
             headers={"Content-Type": "text/plain", "ETag": '"verified"'},
@@ -117,7 +124,7 @@ def test_lost_blob_and_unconditional_304_cannot_mark_source_current(
     tmp_path: Path,
 ) -> None:
     _, network, service, path, digest, observed = _session(
-        tmp_path, invalid_response=True
+        tmp_path, second_not_modified=True
     )
     path.unlink()
 
@@ -130,6 +137,51 @@ def test_lost_blob_and_unconditional_304_cannot_mark_source_current(
     assert network.get_source("web-1").freshness is FreshnessState.STALE
     assert network.snapshot_count("web-1") == 1
     assert network.attempt_count("web-1") == 2
+
+
+def test_verified_blob_and_conditional_304_remain_current(tmp_path: Path) -> None:
+    _, network, service, path, digest, observed = _session(
+        tmp_path, second_not_modified=True
+    )
+
+    second = service.refresh_source("web-1")
+
+    assert second.disposition is RefreshDisposition.NOT_MODIFIED
+    assert second.error_code is None
+    assert observed == [None, '"verified"']
+    assert path.read_bytes() == _BODY
+    assert network.get_source("web-1").current_raw_sha256 == digest
+    assert network.get_source("web-1").freshness is FreshnessState.CURRENT
+    assert network.snapshot_count("web-1") == 1
+    assert network.attempt_count("web-1") == 2
+
+
+def test_blob_removed_during_conditional_304_cannot_mark_source_current(
+    tmp_path: Path,
+) -> None:
+    blob_paths: list[Path] = []
+
+    def remove_cached_blob() -> None:
+        blob_paths[0].unlink()
+
+    _, network, service, path, digest, observed = _session(
+        tmp_path,
+        second_not_modified=True,
+        before_second_response=remove_cached_blob,
+    )
+    blob_paths.append(path)
+
+    second = service.refresh_source("web-1")
+
+    assert second.disposition is RefreshDisposition.FAILED
+    assert second.error_code == "cached_blob_changed_during_refresh"
+    assert observed == [None, '"verified"']
+    assert not path.exists()
+    assert network.get_source("web-1").current_raw_sha256 == digest
+    assert network.get_source("web-1").freshness is FreshnessState.STALE
+    assert network.snapshot_count("web-1") == 1
+    assert network.attempt_count("web-1") == 2
+
 
 @pytest.mark.parametrize("url", [
     "https://example.com/page",
@@ -165,3 +217,55 @@ def test_same_workspace_http_reregistration_preserves_cached_identity(
     assert state.current_raw_sha256 == digest
     assert state.freshness is FreshnessState.CURRENT
     assert network.snapshot_count("web-1") == 1
+
+
+def test_http_service_rejects_split_sqlite_authority_before_network_effect(
+    tmp_path: Path,
+) -> None:
+    repository_store = SQLiteStore(tmp_path / "repository.db")
+    network_store = SQLiteStore(tmp_path / "network.db")
+    repository_store.initialize()
+    network_store.initialize()
+
+    def forbidden_handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("constructor must fail before any network request")
+
+    with pytest.raises(ValueError, match="same SQLite store"):
+        HttpResearchService(
+            repository=ResearchRepository(repository_store),
+            network_repository=NetworkResearchRepository(network_store),
+            blob_store=ContentAddressedBlobStore(tmp_path / "blobs-split"),
+            fetcher=HttpxResearchFetcher(
+                resolver=lambda host, port: ("93.184.216.34",),
+                transport=httpx.MockTransport(forbidden_handler),
+            ),
+        )
+
+
+def test_http_service_allows_separate_handles_for_same_sqlite_path(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "shared.db"
+    SQLiteStore(database_path).initialize()
+    repository = ResearchRepository(SQLiteStore(database_path))
+    repository.upsert_workspace(ResearchWorkspace("ws", "Research"))
+    network = NetworkResearchRepository(SQLiteStore(database_path))
+
+    def forbidden_handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("source registration must not perform a network request")
+
+    service = HttpResearchService(
+        repository=repository,
+        network_repository=network,
+        blob_store=ContentAddressedBlobStore(tmp_path / "blobs-shared"),
+        fetcher=HttpxResearchFetcher(
+            resolver=lambda host, port: ("93.184.216.34",),
+            transport=httpx.MockTransport(forbidden_handler),
+        ),
+    )
+    state = service.register_source(
+        SourceSpec("web-shared", "ws", SourceKind.HTTP, "https://example.com/shared")
+    )
+
+    assert state.workspace_id == "ws"
+    assert state.freshness is FreshnessState.UNKNOWN
