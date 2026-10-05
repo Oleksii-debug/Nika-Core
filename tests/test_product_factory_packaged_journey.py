@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.packaging.pf11_evidence import PACKAGED_PF11_EVIDENCE_KEYS
 from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
@@ -293,6 +294,7 @@ def test_headless_pf11_composition_proof_survives_process_restart(tmp_path: Path
     first_payload = json.loads(first.stdout.strip())
     second_payload = json.loads(second.stdout.strip())
     assert first_payload == second_payload
+    assert frozenset(first_payload) == PACKAGED_PF11_EVIDENCE_KEYS
     assert first_payload["route"] == "product_project"
     assert first_payload["spec_version"] == 1
     assert first_payload["command_center_state_proven"] is True
