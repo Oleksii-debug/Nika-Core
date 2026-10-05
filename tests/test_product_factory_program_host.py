@@ -2093,6 +2093,73 @@ def test_reconcile_durable_results_rejects_concurrent_operation_rebinding(tmp_pa
 
 
 
+def test_reconcile_durable_results_skips_owned_item_and_reconciles_sibling(
+    tmp_path: Path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(
+        tmp_path,
+        component_count=2,
+    )
+    host = ProductFactoryProgramHost(
+        store,
+        FakeProgramWorker(),
+        owner_id="program-host:reconcile-sibling",
+    )
+    requests = coordinator.ready_requests()
+    leases = tuple(host._acquire(request) for request in requests)
+    try:
+        started = tuple(
+            coordinator.start(request.component_id) for request in requests
+        )
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=started,
+            leases=leases,
+        )
+        for ordinal, (request, lease) in enumerate(zip(requests, leases, strict=True), 1):
+            operation, created = host._reserve_effect(
+                host_task_id=task_id,
+                request=request,
+                lease=lease,
+            )
+            assert created is True
+            assert operation.status is IdempotencyStatus.PENDING
+            coordinator.record_result(_envelope(request, ordinal))
+            host._save_fenced(task_id, binding, coordinator, lease)
+    finally:
+        for lease in leases:
+            host._release_best_effort(lease)
+
+    collided, independent = requests
+    authority = ProductFactoryWorkOwnership(store)
+    external_lease = authority.acquire(
+        project_id=collided.project_id,
+        work_id=collided.work_id,
+        owner_id="program-host:other-reconciler",
+        lease_seconds=300,
+    )
+
+    reconciled = host.reconcile_durable_results(
+        host_task_id=task_id,
+        coordinator=coordinator,
+    )
+
+    collided_key = f"pf-worker:{collided.work_id}"
+    independent_key = f"pf-worker:{independent.work_id}"
+    assert reconciled == (independent_key,)
+    assert IdempotencyLedger(store).require(
+        collided_key
+    ).status is IdempotencyStatus.PENDING
+    assert IdempotencyLedger(store).require(
+        independent_key
+    ).status is IdempotencyStatus.COMPLETED
+    assert authority.current(
+        project_id=collided.project_id,
+        work_id=collided.work_id,
+    ) == external_lease
+
 @pytest.mark.parametrize("collision", ("task", "operation_type", "fingerprint"))
 def test_fenced_host_contains_foreign_reservation_without_worker_effect(
     tmp_path: Path,
