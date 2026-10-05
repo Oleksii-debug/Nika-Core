@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
+
 import json
 
 import pytest
@@ -123,7 +125,7 @@ def test_formal_handoff_without_matching_integrity_seal_fails_closed(
                 (json.dumps(payload), row["event_id"]),
             )
 
-    decisions = ProductDecisionRepository(store)
+    decisions = ApprovedProductDecisionRepository(store)
     decision = ProductDecision(
         decision_id="decision-1",
         option_id="option-1",

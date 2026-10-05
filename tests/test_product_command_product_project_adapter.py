@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _product_decision_test_support import ApprovedProductProjectCommandService
+
 from dataclasses import replace
 
 import pytest
@@ -33,7 +35,7 @@ def _service(tmp_path):
     store = SQLiteStore(tmp_path / "nika.db")
     store.initialize()
     projects = ProductProjectRepository(store)
-    return ProductProjectCommandService(projects), projects, store
+    return ApprovedProductProjectCommandService(projects), projects, store
 
 
 def _spec(goal: str = "Build accessible expense app") -> ProductProjectSpec:
@@ -189,7 +191,7 @@ def test_real_product_decision_proposed_approved_restart_and_history(tmp_path) -
 
     restarted_store = SQLiteStore(store.path)
     restarted_store.initialize()
-    restarted = ProductProjectCommandService(ProductProjectRepository(restarted_store))
+    restarted = ApprovedProductProjectCommandService(ProductProjectRepository(restarted_store))
     restarted_detail = restarted.inspect_project("p1")
     assert restarted_detail.decisions[0].state == "approved"
     assert restarted_detail.decisions[0].evidence[0].reference == "research-accessibility"
@@ -270,7 +272,7 @@ def test_lifecycle_transition_is_durable_and_restart_visible(tmp_path) -> None:
 
     restarted_store = SQLiteStore(store.path)
     restarted_store.initialize()
-    restarted = ProductProjectCommandService(ProductProjectRepository(restarted_store))
+    restarted = ApprovedProductProjectCommandService(ProductProjectRepository(restarted_store))
     assert restarted.inspect_project("p1").summary.state == "paused"
     assert restarted.lifecycle_history("p1")[-1].new_state is ProductProjectState.PAUSED
 

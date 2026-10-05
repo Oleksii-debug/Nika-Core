@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
+
 import json
 from pathlib import Path
 
@@ -110,7 +112,7 @@ def _environment(tmp_path: Path):
         rationale="The option is supported by sealed research evidence.",
         decided_by_ref="user://owner",
     )
-    decisions = ProductDecisionRepository(store)
+    decisions = ApprovedProductDecisionRepository(store)
     decisions.record(
         "p1",
         decision,

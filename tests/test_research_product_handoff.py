@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
+
 import hashlib
 import json
 
@@ -291,7 +293,7 @@ def test_sealed_handoff_tampering_fails_before_product_decision(tmp_path) -> Non
             (json.dumps(payload),),
         )
 
-    decisions = ProductDecisionRepository(store)
+    decisions = ApprovedProductDecisionRepository(store)
     with pytest.raises(ProductProjectError, match="research handoff integrity mismatch"):
         decisions.record(
             "p1",
@@ -332,7 +334,7 @@ def test_requirement_inherits_approved_decision_evidence_and_survives_restart(tm
         package_id="research-1",
         options=_options(),
     )
-    decisions = ProductDecisionRepository(store)
+    decisions = ApprovedProductDecisionRepository(store)
     decisions.record(
         "p1",
         _approved_decision(),
@@ -375,7 +377,7 @@ def test_decision_rejects_formal_handoff_when_remote_source_becomes_stale(tmp_pa
             "UPDATE research_http_sources SET freshness='stale' WHERE source_id='http-1'"
         )
 
-    decisions = ProductDecisionRepository(store)
+    decisions = ApprovedProductDecisionRepository(store)
     with pytest.raises(ProductProjectError, match="remote research source is not current"):
         decisions.record(
             "p1",
@@ -395,7 +397,7 @@ def test_source_content_update_invalidates_handoff_and_decision_replay(tmp_path)
         package_id="research-1",
         options=_options(),
     )
-    decisions = ProductDecisionRepository(store)
+    decisions = ApprovedProductDecisionRepository(store)
     decision = _approved_decision()
     decisions.record(
         "p1",

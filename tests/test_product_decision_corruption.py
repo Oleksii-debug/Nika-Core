@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
+
 import json
 
 import pytest
@@ -43,7 +45,7 @@ def _environment(tmp_path):
             ),
         ),
     )
-    return store, ProductDecisionRepository(store)
+    return store, ApprovedProductDecisionRepository(store)
 
 
 def _decision() -> ProductDecision:

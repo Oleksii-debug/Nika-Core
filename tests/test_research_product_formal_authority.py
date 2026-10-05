@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
+
 import json
 
 import pytest
@@ -147,7 +149,7 @@ def test_formal_handoff_downgrade_cannot_hide_missing_seal(tmp_path) -> None:
             "AND entity_type='product_project' AND entity_id='p1'"
         )
 
-    decisions = ProductDecisionRepository(store)
+    decisions = ApprovedProductDecisionRepository(store)
     with pytest.raises(ProductProjectError, match="integrity seal is missing"):
         decisions.record(
             "p1",
@@ -244,7 +246,7 @@ def test_legacy_direct_handoff_remains_compatible_without_formal_authority(tmp_p
         rationale="Preserve legacy compatibility",
         decided_by_ref="user://owner",
     )
-    stored = ProductDecisionRepository(store).record(
+    stored = ApprovedProductDecisionRepository(store).record(
         "p-legacy",
         decision,
         expected_row_version=0,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from _product_decision_test_support import ApprovedProductDecisionRepository
+
 import json
 
 import pytest
@@ -157,7 +159,7 @@ def test_formal_authority_identity_corruption_cannot_hide_marker(
         decided_by_ref="user://owner",
     )
     with pytest.raises(ProductProjectError, match="formal research handoff authority is malformed"):
-        ProductDecisionRepository(store).record(
+        ApprovedProductDecisionRepository(store).record(
             "p1",
             decision,
             expected_row_version=0,
