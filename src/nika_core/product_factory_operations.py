@@ -98,7 +98,7 @@ class ProductOperationsCoordinator:
         if existing is not None:
             if existing.service != service:
                 raise ProductOperationsError("service id conflicts with prior payload")
-            return existing
+            return _private_service_record(existing)
         for dependency in service.dependencies:
             prior = self._services.get(dependency)
             if prior is None or prior.service.wave >= service.wave:
