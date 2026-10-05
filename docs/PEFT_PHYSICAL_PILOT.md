@@ -38,20 +38,23 @@ Windows-only. A successful call must:
     `SubprocessTrainingWorker` protocol identity, require its trainer artifact ID and trainer
     deployment SHA-256 to match the worker's canonical Registry-verified deployment identity,
     require its consumed-material attestation to match the exact attestation accepted by the
-    worker across the physical steps, and require its final step number to match the COMPLETED
-    runtime boundary; and
+    worker across the physical steps, require its final step number to match the exact two-step
+    COMPLETED runtime boundary, and require its previous and trained adapter tensor-state
+    SHA-256 identities to be present and different; and
 16. bind both the runtime job fingerprint and the distinct trainer-protocol job fingerprint,
     plus the independently verified trainer deployment identity, manifest digest, trainer
-    implementation, model directory, worker-accepted consumed-material, and runtime-manifest
-    identities into the report; and
+    implementation, model directory, worker-accepted consumed-material, runtime-manifest,
+    previous-adapter tensor-state, and trained-adapter tensor-state identities into the report;
+    and
 17. when persisted, publish the canonical report through the provided atomic/no-clobber
     writer rather than a direct truncating file write.
 
 The resulting `PhysicalTrainingPilotReport` is path-free. It contains bounded identifiers,
 SHA-256 identities, descriptor/registry digests, strict PEFT candidate-manifest digest,
 separate runtime and trainer-protocol job fingerprints, trainer deployment/implementation/runtime
-provenance, consumed-material and model-directory manifest digests, the original pause,
-restart-probe, and completion checkpoint IDs, candidate byte count, completed step count,
+provenance, consumed-material and model-directory manifest digests, distinct previous and trained
+adapter tensor-state digests, the original pause, restart-probe, and completion checkpoint IDs,
+candidate byte count, completed step count,
 schema version, and the literal platform value `windows`.
 It does not
 serialize training/validation records, model paths, credentials, environment variables,
@@ -66,7 +69,9 @@ Register the exact local trainer executable in the canonical Artifact Registry a
 
 Resolve the frozen training package through the canonical training-material resolver. Build
 the pilot-tier `TrainingScaleAuthorization` from the same material evidence and the
-`SubprocessTrainingWorker.execution_plan_sha256`. The job must use `max_steps >= 2`.
+`SubprocessTrainingWorker.execution_plan_sha256`. The physical evidence job must use exactly
+`max_steps == 2`: the first step establishes the durable pre-restart adapter state and the second
+step establishes the trained adapter tensor state after reopen.
 
 The restart factory must reopen the same durable checkpoint state rather than returning the
 original `TrainingRuntime` object or a new runtime backed by an empty store. The harness proves
@@ -88,8 +93,9 @@ published `adapter_model.safetensors`; its size and digest must describe those e
 The factory may use the completed candidate digest plus the now-materialized file size and the
 project's canonical public provenance/license references. The harness then delegates physical
 byte/containment verification to the existing candidate-artifact integrity authority and strict
-manifest parsing to the existing PEFT
-candidate reader rather than implementing another verifier or parser. On Windows it holds a
+manifest parsing to the existing PEFT candidate reader rather than implementing another verifier
+or parser. The candidate reader admits schema v2 and the physical verifier requires the prior and
+trained adapter tensor-state identities to differ. On Windows it holds a
 read-only deny-write/delete handle across both checks so a pathname replacement cannot splice
 manifest evidence from different candidate bytes.
 
@@ -183,7 +189,7 @@ Run from the installed environment that owns the registered trainer executable:
 nika-peft-physical-pilot "C:\\NikaData\\physical-pilot.json"
 ```
 
-A successful invocation prints the canonical path-free schema-v4 report and publishes
+A successful invocation prints the canonical path-free schema-v5 report and publishes
 `physical-pilot-report.json` through the canonical atomic/no-clobber writer. Generated run
 evidence remains outside Git. The command never auto-discovers runtime versions and never stores
 API keys, tokens, cookies, browser profiles, or other credentials.
@@ -209,10 +215,11 @@ print(report.evidence_sha256)
 ```
 
 The helper supplies both the control sequence required to create the one-step pause and the
-effect-free restart probe. Reports use schema version 4 because the runtime job fingerprint and
-the trainer-protocol job fingerprint are distinct authorities and are now recorded separately,
-alongside strict candidate-manifest and persisted trainer/runtime provenance plus the
-durable-reopen checkpoint.
+effect-free restart probe. Reports use schema version 5 because they preserve the distinct runtime
+and trainer-protocol job identities from schema v4 while additionally binding the previous and
+trained adapter tensor-state identities. The worker-accepted consumed-material attestation,
+strict candidate-manifest digest, Registry trainer deployment, trainer/runtime provenance, and
+three durable checkpoint identities remain part of the same evidence object.
 
 ## Evidence boundaries
 
@@ -220,6 +227,9 @@ A unit test, green CI run, or merely constructing a report is not physical-train
 The physical acceptance claim requires an observed successful run on the intended Windows/CPU
 ML environment with the exact Registry/runtime/material authorities that the report binds.
 
-This harness never sets or implies `HUMAN_TESTED`, `NVDA_VERIFIED`,
-`TRAINING_WEIGHTS_PROVEN`, old-vs-new model superiority, promotion eligibility, or
+This harness never sets or implies `HUMAN_TESTED` or `NVDA_VERIFIED`. A real observed schema-v5
+Windows run can supply concrete adapter-weight mutation evidence because the canonical trainer
+must pass the finite/non-empty per-step mutation fence and the final report binds distinct prior
+and trained tensor states. The repository/CI alone still cannot set `TRAINING_WEIGHTS_PROVEN`,
+old-vs-new model superiority, promotion eligibility, or
 `PRODUCTION_RELEASE_READY`. Those remain separate gates.
