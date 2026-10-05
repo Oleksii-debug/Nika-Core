@@ -8,6 +8,7 @@ from nika_core.experiments.contracts import (
     ArtifactKind,
     ExperimentDefinition,
     MetricObservation,
+    MetricRule,
     PromotionPolicy,
     ReplayCase,
     StrategyRef,
@@ -68,7 +69,7 @@ def build_experiment_definition(
     BenchmarkExecutionConfig.__post_init__(execution_config)
     if type(policy) is not PromotionPolicy:
         raise TypeError("policy must be an exact PromotionPolicy")
-    PromotionPolicy.__post_init__(policy)
+    _validate_promotion_policy(policy)
     if type(permission_fingerprint) is not str:
         raise TypeError("permission_fingerprint must be canonical text")
     if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
@@ -119,7 +120,7 @@ def benchmark_observations(
     validate_candidate_benchmark_report(report)
     if type(definition.policy) is not PromotionPolicy:
         raise TypeError("definition policy must be an exact PromotionPolicy")
-    PromotionPolicy.__post_init__(definition.policy)
+    _validate_promotion_policy(definition.policy)
     if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
         raise ValueError("model promotion observations require held-out evidence")
     metrics = _validate_policy_metrics(definition.policy)
@@ -250,6 +251,19 @@ def _validate_report_aggregates(
         or report.p95_latency_ms != expected_p95_latency
     ):
         raise ValueError("benchmark report aggregate metrics do not match case evidence")
+
+
+
+def _validate_promotion_policy(policy: PromotionPolicy) -> None:
+    if type(policy) is not PromotionPolicy:
+        raise TypeError("policy must be an exact PromotionPolicy")
+    if type(policy.guardrails) is not tuple:
+        raise TypeError("promotion guardrails must be a canonical tuple")
+    for rule in policy.guardrails:
+        if type(rule) is not MetricRule:
+            raise TypeError("promotion guardrails must use exact MetricRule values")
+        MetricRule.__post_init__(rule)
+    PromotionPolicy.__post_init__(policy)
 
 
 def _validate_policy_metrics(policy: PromotionPolicy) -> tuple[str, ...]:
