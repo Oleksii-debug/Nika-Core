@@ -4,6 +4,8 @@ import hashlib
 import hmac
 import json
 import os
+import stat
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -498,6 +500,136 @@ class PhysicalTrainingPilotReport:
             platform=value["platform"],
             schema_version=value["schema_version"],
         )
+
+
+
+def _is_reparse_point(snapshot: os.stat_result) -> bool:
+    attributes = int(getattr(snapshot, "st_file_attributes", 0))
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+    return bool(attributes & reparse_flag)
+
+
+def _canonical_report_output_path(value: object) -> tuple[Path, os.stat_result]:
+    path = _require_path(value, name="report_path")
+    parent = path.parent
+    try:
+        resolved_parent = parent.resolve(strict=True)
+        parent_snapshot = os.lstat(parent)
+    except OSError as exc:
+        raise PhysicalTrainingPilotError(
+            "pilot report parent directory is unavailable"
+        ) from exc
+    if resolved_parent != parent:
+        _fail("pilot report parent directory must be canonical")
+    if (
+        stat.S_ISLNK(parent_snapshot.st_mode)
+        or _is_reparse_point(parent_snapshot)
+        or not stat.S_ISDIR(parent_snapshot.st_mode)
+    ):
+        _fail("pilot report parent directory must be a non-linked directory")
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise PhysicalTrainingPilotError(
+            "pilot report destination could not be inspected"
+        ) from exc
+    else:
+        _fail("pilot report destination already exists")
+    return path, parent_snapshot
+
+
+def write_physical_training_pilot_report(
+    report: PhysicalTrainingPilotReport,
+    report_path: Path,
+) -> None:
+    """Atomically publish one canonical physical-pilot report without clobbering evidence."""
+
+    if type(report) is not PhysicalTrainingPilotReport:
+        raise TypeError("report must be exact PhysicalTrainingPilotReport")
+    destination, parent_before = _canonical_report_output_path(report_path)
+    payload = report.to_json().encode("utf-8")
+    temporary: Path | None = None
+    descriptor: int | None = None
+    published = False
+    try:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.",
+            suffix=".tmp",
+            dir=destination.parent,
+        )
+        temporary = Path(temporary_name)
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        parent_during = os.lstat(destination.parent)
+        if (
+            stat.S_ISLNK(parent_during.st_mode)
+            or _is_reparse_point(parent_during)
+            or not stat.S_ISDIR(parent_during.st_mode)
+            or (parent_during.st_dev, parent_during.st_ino)
+            != (parent_before.st_dev, parent_before.st_ino)
+        ):
+            _fail("pilot report parent directory changed during publication")
+
+        try:
+            os.link(temporary, destination)
+        except FileExistsError as exc:
+            raise PhysicalTrainingPilotError(
+                "pilot report destination already exists"
+            ) from exc
+        published = True
+        os.unlink(temporary)
+        temporary = None
+
+        final_snapshot = os.lstat(destination)
+        if (
+            stat.S_ISLNK(final_snapshot.st_mode)
+            or _is_reparse_point(final_snapshot)
+            or not stat.S_ISREG(final_snapshot.st_mode)
+            or int(getattr(final_snapshot, "st_nlink", 1)) != 1
+        ):
+            _fail("published pilot report is not a canonical regular file")
+        try:
+            published_payload = destination.read_bytes()
+        except OSError as exc:
+            raise PhysicalTrainingPilotError(
+                "published pilot report could not be reverified"
+            ) from exc
+        if not hmac.compare_digest(published_payload, payload):
+            _fail("published pilot report bytes changed during publication")
+        PhysicalTrainingPilotReport.from_json(published_payload)
+    except PhysicalTrainingPilotError:
+        if published:
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+        raise
+    except OSError as exc:
+        if published:
+            try:
+                destination.unlink()
+            except OSError:
+                pass
+        raise PhysicalTrainingPilotError(
+            "pilot report could not be published atomically"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
 
 
 def _snapshot_run_evidence(
