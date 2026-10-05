@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from threading import Barrier
 
-from nika_core.business_communication import (
-    BusinessCommunicationCoordinator,
-    BusinessCommunicationRepository,
-    StaleCommunicationStateError,
-)
+import pytest
+
 from nika_core.business_factory import (
     BusinessFactory,
     BusinessObjective,
     BusinessPolicy,
     CommunicationAuthority,
     StaleBusinessStateError,
+    dump_business_snapshot,
 )
 from nika_core.business_factory_persistence import BusinessFactoryRepository
 from nika_core.data.sqlite import SQLiteStore
@@ -30,8 +29,8 @@ def _factory(*, objective_id: str) -> BusinessFactory:
                 evidence=(
                     EvidenceRef(
                         evidence_id=f"evidence-{objective_id}",
-                        source_ref="research:source:controlled:concurrency",
-                        summary="Controlled concurrency evidence",
+                        provenance_ref="research:source:controlled:concurrency",
+                        claim="Controlled concurrency evidence",
                     ),
                 ),
                 research_artifact_ref=f"research:artifact:{objective_id}",
@@ -45,12 +44,41 @@ def _factory(*, objective_id: str) -> BusinessFactory:
     )
 
 
+def test_business_factory_repository_survives_restart(tmp_path) -> None:
+    path = tmp_path / "business factory unicode тест.sqlite"
+    store = SQLiteStore(path)
+    store.initialize()
+    repository = BusinessFactoryRepository(store)
+    repository.initialize()
+
+    factory = _factory(objective_id="objective-restart")
+    initial = factory.snapshot()
+    repository.save(initial, expected_row_version=0)
+
+    factory.identify_opportunity(
+        opportunity_id="opportunity-restart",
+        title="Durable opportunity",
+        evidence_ids=("evidence-objective-restart",),
+    )
+    advanced = factory.snapshot()
+    repository.save(advanced, expected_row_version=initial.row_version)
+
+    restarted_store = SQLiteStore(path)
+    restarted_store.initialize()
+    restarted_repository = BusinessFactoryRepository(restarted_store)
+    restarted_repository.initialize()
+    restored = restarted_repository.load("objective-restart")
+    assert restored is not None
+    assert dump_business_snapshot(restored) == dump_business_snapshot(advanced)
+
+
 def test_business_factory_first_writer_race_has_one_typed_stale_loser(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "business-factory-race.sqlite")
     store.initialize()
     first = BusinessFactoryRepository(store)
     second = BusinessFactoryRepository(store)
     first.initialize()
+    second.initialize()
     snapshot = _factory(objective_id="objective-race").snapshot()
     barrier = Barrier(2)
 
@@ -72,46 +100,48 @@ def test_business_factory_first_writer_race_has_one_typed_stale_loser(tmp_path) 
     assert restored == snapshot
 
 
-def test_business_communication_first_writer_race_has_one_typed_stale_loser(tmp_path) -> None:
-    store = SQLiteStore(tmp_path / "business-communication-race.sqlite")
+def test_business_factory_optimistic_update_rejects_stale_writer(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "business-factory-update.sqlite")
     store.initialize()
-    first = BusinessCommunicationRepository(store)
-    second = BusinessCommunicationRepository(store)
-    first.initialize()
+    repository = BusinessFactoryRepository(store)
+    repository.initialize()
 
-    factory = _factory(objective_id="objective-communication-race")
-    evidence_id = factory.snapshot().objective.research_package.evidence[0].evidence_id
+    factory = _factory(objective_id="objective-update")
+    base = factory.snapshot()
+    repository.save(base, expected_row_version=0)
+
     factory.identify_opportunity(
-        opportunity_id="opportunity-race",
-        title="Controlled concurrency opportunity",
-        evidence_ids=(evidence_id,),
+        opportunity_id="opportunity-update",
+        title="Durable opportunity",
+        evidence_ids=("evidence-objective-update",),
     )
-    factory.create_lead(
-        lead_id="lead-race",
-        channel_id="sandbox-email",
-        counterparty_ref="counterparty:controlled:race",
+    winner = factory.snapshot()
+    repository.save(winner, expected_row_version=base.row_version)
+
+    stale = replace(
+        base,
+        audit=winner.audit,
+        row_version=winner.row_version,
+        opportunity=winner.opportunity,
     )
-    record = BusinessCommunicationCoordinator.draft(
-        factory.snapshot(),
-        message_id="message-race",
-        thread_ref="thread:controlled:race",
-        payload_ref="payload:controlled:race",
-    )
-    barrier = Barrier(2)
+    with pytest.raises(StaleBusinessStateError, match="row version changed"):
+        repository.save(stale, expected_row_version=base.row_version)
 
-    def write(repository: BusinessCommunicationRepository) -> str:
-        barrier.wait()
-        try:
-            repository.save(record, expected_row_version=0)
-        except StaleCommunicationStateError:
-            return "stale"
-        return "saved"
 
-    with ThreadPoolExecutor(max_workers=2) as executor:
-        first_result = executor.submit(write, first)
-        second_result = executor.submit(write, second)
-        outcomes = sorted((first_result.result(), second_result.result()))
+def test_business_repository_detects_storage_metadata_tamper(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "business-factory-tamper.sqlite")
+    store.initialize()
+    repository = BusinessFactoryRepository(store)
+    repository.initialize()
+    snapshot = _factory(objective_id="objective-tamper").snapshot()
+    repository.save(snapshot, expected_row_version=0)
 
-    assert outcomes == ["saved", "stale"]
-    restored = first.load(record.message_id)
-    assert restored == record
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE business_factory_snapshots SET row_version = row_version + 1 "
+            "WHERE objective_id = ?",
+            ("objective-tamper",),
+        )
+
+    with pytest.raises(RuntimeError, match="row version does not match"):
+        repository.load("objective-tamper")

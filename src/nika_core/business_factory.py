@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -14,14 +15,34 @@ from nika_core.business_authority import (
 )
 from nika_core.product_project import (
     EvidenceRef,
+    ProductProject,
     ProductProjectError,
     ProductProjectRepository,
     ProductProjectSpec,
     ResearchEvidencePackage,
 )
-from nika_core.product_release_compliance import ReleaseComplianceGrant
 
-BUSINESS_FACTORY_SCHEMA = "nika.business_factory.v1"
+BUSINESS_FACTORY_SCHEMA = "nika.business_factory.pf9.v1"
+
+_PF9_LINEAGE_KEYS = frozenset(
+    {
+        "business_work_order_authorization_ref",
+        "business_work_order_authorization_fingerprint",
+        "business_product_spec_fingerprint",
+        "business_objective_ref",
+        "business_handoff_effect_key",
+    }
+)
+_TOKEN_VALUE = re.compile(
+    r"(?:"
+    r"gh[pousr]_[A-Za-z0-9]{20,}|"
+    r"github_pat_[A-Za-z0-9_]{20,}|"
+    r"sk-[A-Za-z0-9_-]{20,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{10,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
+    r")"
+)
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 
 class BusinessFactoryError(ValueError):
@@ -52,24 +73,6 @@ class ProposalState(StrEnum):
     REJECTED = "rejected"
 
 
-class QAState(StrEnum):
-    PASSED = "passed"
-    FAILED = "failed"
-
-
-class InvoicePaymentState(StrEnum):
-    UNBILLED = "unbilled"
-    INVOICED = "invoiced"
-    PAID = "paid"
-    OVERDUE = "overdue"
-    VOID = "void"
-
-
-class SupportCaseState(StrEnum):
-    OPEN = "open"
-    RESOLVED = "resolved"
-
-
 @dataclass(frozen=True, slots=True)
 class BusinessPolicy:
     policy_id: str
@@ -97,7 +100,9 @@ class BusinessPolicy:
                 )
             _text(self.standing_policy_ref, "standing_policy_ref")
         elif self.standing_policy_ref is not None:
-            raise BusinessFactoryError("standing_policy_ref requires standing-policy authority")
+            raise BusinessFactoryError(
+                "standing_policy_ref requires standing-policy communication authority"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,44 +162,12 @@ class BusinessWorkOrder:
     work_order_id: str
     proposal_id: str
     scope: str
+    target_project_id: str
+    target_project_name: str
+    product_spec_fingerprint: str
     authorization_ref: str
     authorization_fingerprint: str
     product_project_id: str | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class QARecord:
-    project_id: str
-    state: QAState
-    evidence_ref: str
-
-
-@dataclass(frozen=True, slots=True)
-class DeliveryRecord:
-    delivery_id: str
-    project_id: str
-    artifact_ref: str
-    authorization_ref: str
-    authorization_fingerprint: str
-    compliance_evidence_refs: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class PaymentRecord:
-    project_id: str
-    invoice_ref: str
-    state: InvoicePaymentState
-    evidence_ref: str
-
-
-@dataclass(frozen=True, slots=True)
-class SupportCase:
-    case_id: str
-    project_id: str
-    summary: str
-    evidence_ref: str
-    state: SupportCaseState = SupportCaseState.OPEN
-    resolution_ref: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,16 +188,17 @@ class BusinessFactorySnapshot:
     lead: BusinessLead | None = None
     proposal: BusinessProposal | None = None
     work_order: BusinessWorkOrder | None = None
-    qa: QARecord | None = None
-    delivery: DeliveryRecord | None = None
-    payment: PaymentRecord | None = None
-    support_cases: tuple[SupportCase, ...] = ()
     audit: tuple[BusinessAuditEvent, ...] = ()
     row_version: int = 0
 
 
 class BusinessFactory:
-    """PF9 lifecycle coordinator with no external-send, contract-signing or money executor."""
+    """PF9 business-intake to ProductProject coordinator.
+
+    This aggregate deliberately has no external-send, contract-signing, account-management,
+    payment, deployment, or release-compliance executor. Material proposal and WorkOrder
+    authorization is delegated to a trusted host authority and fails closed by default.
+    """
 
     def __init__(
         self,
@@ -233,7 +207,7 @@ class BusinessFactory:
         approval_authority: BusinessAuthorizationAuthorityPort | None = None,
     ) -> None:
         _validate_snapshot(snapshot)
-        self._snapshot = snapshot
+        self._snapshot = load_business_snapshot(dump_business_snapshot(snapshot))
         self._approval_authority = approval_authority
 
     @classmethod
@@ -267,7 +241,7 @@ class BusinessFactory:
         return cls(snapshot, approval_authority=approval_authority)
 
     def snapshot(self) -> BusinessFactorySnapshot:
-        return self._snapshot
+        return load_business_snapshot(dump_business_snapshot(self._snapshot))
 
     def identify_opportunity(
         self,
@@ -293,7 +267,7 @@ class BusinessFactory:
             opportunity_id,
             self._snapshot.objective.research_package.package_id,
         )
-        return opportunity
+        return replace(opportunity)
 
     def create_lead(
         self,
@@ -313,7 +287,7 @@ class BusinessFactory:
         lead = BusinessLead(lead_id, opportunity.opportunity_id, channel_id, counterparty_ref)
         self._snapshot = replace(self._snapshot, lead=lead)
         self._record("lead.created", lead_id, channel_id)
-        return lead
+        return replace(lead)
 
     def qualify_lead(self, *, qualification_ref: str) -> BusinessLead:
         lead = self._require_lead()
@@ -323,7 +297,7 @@ class BusinessFactory:
         lead = replace(lead, qualification_ref=qualification_ref)
         self._snapshot = replace(self._snapshot, lead=lead)
         self._record("lead.qualified", lead.lead_id, qualification_ref)
-        return lead
+        return replace(lead)
 
     def draft_proposal(
         self,
@@ -341,7 +315,7 @@ class BusinessFactory:
         proposal = BusinessProposal(proposal_id, lead.lead_id, scope_summary)
         self._snapshot = replace(self._snapshot, proposal=proposal)
         self._record("proposal.drafted", proposal_id, lead.qualification_ref or "qualification")
-        return proposal
+        return replace(proposal)
 
     def approve_proposal(self, *, approval_ref: str) -> BusinessProposal:
         proposal = self._require_proposal()
@@ -361,7 +335,7 @@ class BusinessFactory:
         )
         self._snapshot = replace(self._snapshot, proposal=proposal)
         self._record("proposal.approved", proposal.proposal_id, approval_ref)
-        return proposal
+        return replace(proposal)
 
     def reject_proposal(self, *, rejection_ref: str) -> BusinessProposal:
         proposal = self._require_proposal()
@@ -371,13 +345,16 @@ class BusinessFactory:
         proposal = replace(proposal, state=ProposalState.REJECTED, approval_ref=rejection_ref)
         self._snapshot = replace(self._snapshot, proposal=proposal)
         self._record("proposal.rejected", proposal.proposal_id, rejection_ref)
-        return proposal
+        return replace(proposal)
 
     def create_work_order(
         self,
         *,
         work_order_id: str,
         scope: str,
+        target_project_id: str,
+        target_project_name: str,
+        product_spec: ProductProjectSpec,
         authorization_ref: str,
     ) -> BusinessWorkOrder:
         proposal = self._require_proposal()
@@ -387,215 +364,101 @@ class BusinessFactory:
             raise BusinessFactoryError("work order already exists")
         _text(work_order_id, "work_order_id")
         _text(scope, "work order scope")
+        _text(target_project_id, "target ProductProject project_id")
+        _text(target_project_name, "target ProductProject name")
         _text(authorization_ref, "work order authorization_ref")
+        if not isinstance(product_spec, ProductProjectSpec):
+            raise BusinessFactoryError("work order product_spec must be ProductProjectSpec")
+        _validate_authorized_product_spec(product_spec, work_order_id=work_order_id)
+        product_spec_fingerprint = _product_spec_fingerprint(product_spec)
         intent = _work_order_authorization_intent(
             self._snapshot.objective.objective_id,
             proposal,
             work_order_id=work_order_id,
             scope=scope,
+            target_project_id=target_project_id,
+            target_project_name=target_project_name,
+            product_spec_fingerprint=product_spec_fingerprint,
         )
         self._require_authorization(intent, authorization_ref)
         order = BusinessWorkOrder(
-            work_order_id,
-            proposal.proposal_id,
-            scope,
-            authorization_ref,
-            intent.fingerprint,
+            work_order_id=work_order_id,
+            proposal_id=proposal.proposal_id,
+            scope=scope,
+            target_project_id=target_project_id,
+            target_project_name=target_project_name,
+            product_spec_fingerprint=product_spec_fingerprint,
+            authorization_ref=authorization_ref,
+            authorization_fingerprint=intent.fingerprint,
         )
         self._snapshot = replace(self._snapshot, work_order=order)
         self._record("work_order.authorized", work_order_id, authorization_ref)
-        return order
+        return replace(order)
 
     def handoff_to_product_factory(
         self,
         *,
         repository: ProductProjectRepository,
-        project_id: str,
-        project_name: str,
         spec: ProductProjectSpec,
         idempotency_key: str,
     ) -> BusinessWorkOrder:
         order = self._require_work_order()
-        _text(project_id, "ProductProject project_id")
-        _text(project_name, "ProductProject project_name")
         _text(idempotency_key, "ProductProject handoff request key")
         if not isinstance(spec, ProductProjectSpec):
             raise BusinessFactoryError("ProductProject handoff requires ProductProjectSpec")
-        work_order_ref = spec.compliance.get("business_work_order_ref")
-        if work_order_ref != order.work_order_id:
+        _validate_authorized_product_spec(spec, work_order_id=order.work_order_id)
+        if _product_spec_fingerprint(spec) != order.product_spec_fingerprint:
             raise BusinessFactoryError(
-                "ProductProject spec must bind the exact authorized business WorkOrder"
+                "ProductProject spec does not match the authorized WorkOrder specification"
             )
-        if order.product_project_id is not None:
-            if order.product_project_id != project_id:
-                raise BusinessFactoryError(
-                    "work order is already linked to a different ProductProject"
-                )
-            try:
-                linked = repository.get(project_id)
-            except KeyError as exc:
-                raise BusinessFactoryError(
-                    "linked ProductProject is missing from durable repository"
-                ) from exc
-            if linked.spec.compliance.get("business_work_order_ref") != order.work_order_id:
-                raise BusinessFactoryError(
-                    "linked ProductProject does not match the authorized business WorkOrder"
-                )
-            return order
 
         objective_id = self._snapshot.objective.objective_id
-        identity_payload = json.dumps(
-            {"objective_id": objective_id, "work_order_id": order.work_order_id},
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-        operation_key = "nika-pf9-handoff-v1:" + hashlib.sha256(
-            identity_payload.encode("utf-8")
-        ).hexdigest()
+        operation_key = _handoff_effect_key(objective_id, order.work_order_id)
         compliance = dict(spec.compliance)
         compliance.update(
             {
-                "business_work_order_ref": order.work_order_id,
                 "business_work_order_authorization_ref": order.authorization_ref,
                 "business_work_order_authorization_fingerprint": order.authorization_fingerprint,
+                "business_product_spec_fingerprint": order.product_spec_fingerprint,
                 "business_objective_ref": objective_id,
-                "business_handoff_request_key": idempotency_key,
+                "business_handoff_effect_key": operation_key,
             }
         )
         bound_spec = replace(spec, compliance=compliance)
         try:
             project = repository.create(
-                project_id=project_id,
-                name=project_name,
+                project_id=order.target_project_id,
+                name=order.target_project_name,
                 spec=bound_spec,
                 idempotency_key=operation_key,
             )
-        except ProductProjectError as exc:
+        except (KeyError, ProductProjectError) as exc:
             raise BusinessFactoryError(
                 "ProductProject handoff conflicts with durable WorkOrder effect"
             ) from exc
-        if project.spec.compliance.get("business_work_order_ref") != order.work_order_id:
-            raise BusinessFactoryError(
-                "durable ProductProject does not match the authorized business WorkOrder"
-            )
-        order = replace(order, product_project_id=project.project_id)
-        self._snapshot = replace(self._snapshot, work_order=order)
-        self._record("product_project.linked", project.project_id, order.authorization_ref)
-        return order
 
-    def record_qa(self, *, state: QAState, evidence_ref: str) -> QARecord:
-        order = self._require_linked_work_order()
-        _text(evidence_ref, "QA evidence_ref")
-        if not isinstance(state, QAState):
-            raise BusinessFactoryError("QA state is invalid")
-        qa = QARecord(order.product_project_id or "", state, evidence_ref)
-        self._snapshot = replace(self._snapshot, qa=qa)
-        self._record("qa.recorded", qa.project_id, evidence_ref)
-        return qa
-
-    def record_delivery(
-        self,
-        *,
-        delivery_id: str,
-        artifact_ref: str,
-        authorization_ref: str,
-        compliance: ReleaseComplianceGrant,
-    ) -> DeliveryRecord:
-        order = self._require_linked_work_order()
-        qa = self._snapshot.qa
-        if qa is None or qa.state is not QAState.PASSED:
-            raise BusinessFactoryError("delivery requires passing QA evidence")
-        project_id = order.product_project_id or ""
-        if not isinstance(compliance, ReleaseComplianceGrant):
-            raise BusinessFactoryError("delivery requires an exact PF10 release compliance grant")
-        if (
-            compliance.project_id != project_id
-            or compliance.artifact_ref != artifact_ref
-            or not compliance.allowed
-        ):
-            raise BusinessFactoryError("delivery requires an exact PF10 release compliance grant")
-        _text(delivery_id, "delivery_id")
-        _text(artifact_ref, "delivery artifact_ref")
-        _text(authorization_ref, "delivery authorization_ref")
-        intent = _delivery_authorization_intent(
-            self._snapshot.objective.objective_id,
-            delivery_id=delivery_id,
-            project_id=project_id,
-            artifact_ref=artifact_ref,
-            qa_evidence_ref=qa.evidence_ref,
-            compliance_evidence_refs=compliance.evidence_refs,
+        _validate_product_effect(
+            project,
+            order=order,
+            objective_id=objective_id,
+            operation_key=operation_key,
         )
-        self._require_authorization(intent, authorization_ref)
-        delivery = DeliveryRecord(
-            delivery_id,
-            project_id,
-            artifact_ref,
-            authorization_ref,
-            intent.fingerprint,
-            compliance.evidence_refs,
+        if order.product_project_id is not None:
+            if order.product_project_id != project.project_id:
+                raise BusinessFactoryError(
+                    "work order is already linked to a different ProductProject"
+                )
+            return replace(order)
+
+        linked = replace(order, product_project_id=project.project_id)
+        self._snapshot = replace(self._snapshot, work_order=linked)
+        request_digest = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()
+        self._record(
+            "product_project.linked",
+            project.project_id,
+            f"request-sha256:{request_digest}",
         )
-        self._snapshot = replace(self._snapshot, delivery=delivery)
-        self._record("delivery.authorized", delivery_id, authorization_ref)
-        return delivery
-
-    def record_payment_state(
-        self,
-        *,
-        invoice_ref: str,
-        state: InvoicePaymentState,
-        evidence_ref: str,
-    ) -> PaymentRecord:
-        delivery = self._require_delivery()
-        _text(invoice_ref, "invoice_ref")
-        _text(evidence_ref, "payment evidence_ref")
-        if not isinstance(state, InvoicePaymentState):
-            raise BusinessFactoryError("invoice/payment state is invalid")
-        payment = PaymentRecord(delivery.project_id, invoice_ref, state, evidence_ref)
-        self._snapshot = replace(self._snapshot, payment=payment)
-        self._record("payment_state.recorded", invoice_ref, evidence_ref)
-        return payment
-
-    def open_support_case(
-        self,
-        *,
-        case_id: str,
-        summary: str,
-        evidence_ref: str,
-    ) -> SupportCase:
-        delivery = self._require_delivery()
-        _text(case_id, "support case_id")
-        _text(summary, "support summary")
-        _text(evidence_ref, "support evidence_ref")
-        if any(item.case_id == case_id for item in self._snapshot.support_cases):
-            raise BusinessFactoryError("duplicate support case_id")
-        case = SupportCase(case_id, delivery.project_id, summary, evidence_ref)
-        self._snapshot = replace(
-            self._snapshot,
-            support_cases=(*self._snapshot.support_cases, case),
-        )
-        self._record("support.opened", case_id, evidence_ref)
-        return case
-
-    def resolve_support_case(self, *, case_id: str, resolution_ref: str) -> SupportCase:
-        _text(case_id, "support case_id")
-        _text(resolution_ref, "support resolution_ref")
-        cases = list(self._snapshot.support_cases)
-        for index, case in enumerate(cases):
-            if case.case_id != case_id:
-                continue
-            if case.state is SupportCaseState.RESOLVED:
-                raise BusinessFactoryError("support case is already resolved")
-            updated = replace(
-                case,
-                state=SupportCaseState.RESOLVED,
-                resolution_ref=resolution_ref,
-            )
-            cases[index] = updated
-            self._snapshot = replace(self._snapshot, support_cases=tuple(cases))
-            self._record("support.resolved", case_id, resolution_ref)
-            return updated
-        raise BusinessFactoryError("unknown support case_id")
+        return replace(linked)
 
     def _require_authorization(
         self,
@@ -645,28 +508,40 @@ class BusinessFactory:
             raise BusinessFactoryError("work order is required")
         return self._snapshot.work_order
 
-    def _require_linked_work_order(self) -> BusinessWorkOrder:
-        order = self._require_work_order()
-        if order.product_project_id is None:
-            raise BusinessFactoryError("work order must be linked to ProductProject")
-        return order
-
-    def _require_delivery(self) -> DeliveryRecord:
-        if self._snapshot.delivery is None:
-            raise BusinessFactoryError("delivery is required")
-        return self._snapshot.delivery
-
 
 def dump_business_snapshot(snapshot: BusinessFactorySnapshot) -> str:
     _validate_snapshot(snapshot)
-    return json.dumps(asdict(snapshot), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        asdict(snapshot),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise BusinessFactoryError(f"duplicate business snapshot field: {key}")
+        result[key] = value
+    return result
+
+
+def _reject_non_finite_json(value: str) -> None:
+    raise BusinessFactoryError(f"business snapshot contains non-finite JSON constant: {value}")
 
 
 def load_business_snapshot(payload: str) -> BusinessFactorySnapshot:
     if not isinstance(payload, str) or not payload.strip():
         raise BusinessFactoryError("business snapshot must be non-empty JSON text")
     try:
-        raw = json.loads(payload)
+        raw = json.loads(
+            payload,
+            object_pairs_hook=_strict_json_object,
+            parse_constant=_reject_non_finite_json,
+        )
     except json.JSONDecodeError as exc:
         raise BusinessFactoryError("business snapshot is invalid JSON") from exc
     if not isinstance(raw, dict):
@@ -679,17 +554,14 @@ def load_business_snapshot(payload: str) -> BusinessFactorySnapshot:
         "lead",
         "proposal",
         "work_order",
-        "qa",
-        "delivery",
-        "payment",
-        "support_cases",
         "audit",
         "row_version",
     }
     if set(raw) != expected:
         raise BusinessFactoryError("business snapshot fields do not match schema")
+
     objective_raw = _mapping(raw["objective"], "objective")
-    package_raw = _mapping(objective_raw["research_package"], "research package")
+    package_raw = _mapping(objective_raw.get("research_package"), "research package")
     evidence = tuple(
         EvidenceRef(
             evidence_id=_value(item, "evidence_id", "research evidence"),
@@ -711,6 +583,7 @@ def load_business_snapshot(payload: str) -> BusinessFactorySnapshot:
             ),
         ),
     )
+
     policy_raw = _mapping(raw["policy"], "policy")
     policy = BusinessPolicy(
         policy_id=_value(policy_raw, "policy_id", "policy"),
@@ -740,12 +613,6 @@ def load_business_snapshot(payload: str) -> BusinessFactorySnapshot:
         lead=_lead(raw["lead"]),
         proposal=_proposal(raw["proposal"]),
         work_order=_work_order(raw["work_order"]),
-        qa=_qa(raw["qa"]),
-        delivery=_delivery(raw["delivery"]),
-        payment=_payment(raw["payment"]),
-        support_cases=tuple(
-            _support(item) for item in _list(raw["support_cases"], "support cases")
-        ),
         audit=tuple(_audit(item) for item in _list(raw["audit"], "audit")),
         row_version=_int(raw["row_version"], "row_version"),
     )
@@ -754,6 +621,8 @@ def load_business_snapshot(payload: str) -> BusinessFactorySnapshot:
 
 
 def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
+    if not isinstance(snapshot, BusinessFactorySnapshot):
+        raise BusinessFactoryError("business snapshot type is invalid")
     if snapshot.schema != BUSINESS_FACTORY_SCHEMA:
         raise BusinessFactoryError("unsupported business snapshot schema")
     if snapshot.row_version < 0 or snapshot.row_version != len(snapshot.audit):
@@ -768,15 +637,10 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
 
     opportunity = snapshot.opportunity
     if opportunity is None:
-        downstream = (
-            snapshot.lead,
-            snapshot.proposal,
-            snapshot.work_order,
-            snapshot.qa,
-            snapshot.delivery,
-            snapshot.payment,
-        )
-        if any(item is not None for item in downstream) or snapshot.support_cases:
+        if any(
+            item is not None
+            for item in (snapshot.lead, snapshot.proposal, snapshot.work_order)
+        ):
             raise BusinessFactoryError("downstream business state exists without opportunity")
         return
     if opportunity.objective_id != snapshot.objective.objective_id:
@@ -787,14 +651,7 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
 
     lead = snapshot.lead
     if lead is None:
-        downstream = (
-            snapshot.proposal,
-            snapshot.work_order,
-            snapshot.qa,
-            snapshot.delivery,
-            snapshot.payment,
-        )
-        if any(item is not None for item in downstream) or snapshot.support_cases:
+        if snapshot.proposal is not None or snapshot.work_order is not None:
             raise BusinessFactoryError("downstream business state exists without lead")
         return
     _text(lead.lead_id, "lead_id")
@@ -808,23 +665,27 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
 
     proposal = snapshot.proposal
     if proposal is None:
-        downstream = (snapshot.work_order, snapshot.qa, snapshot.delivery, snapshot.payment)
-        if any(item is not None for item in downstream) or snapshot.support_cases:
+        if snapshot.work_order is not None:
             raise BusinessFactoryError("downstream business state exists without proposal")
         return
     _text(proposal.proposal_id, "proposal_id")
     _text(proposal.scope_summary, "proposal scope_summary")
     if proposal.lead_id != lead.lead_id or not lead.qualified:
         raise BusinessFactoryError("proposal requires the qualified restored lead")
+    if not isinstance(proposal.state, ProposalState):
+        raise BusinessFactoryError("proposal state is invalid")
     if proposal.state is ProposalState.APPROVED:
         if not proposal.approval_ref or not proposal.approval_fingerprint:
             raise BusinessFactoryError("approved proposal is missing trusted approval evidence")
+        _digest(proposal.approval_fingerprint, "proposal approval fingerprint")
         expected = _proposal_authorization_intent(
             snapshot.objective.objective_id,
             proposal,
         ).fingerprint
         if proposal.approval_fingerprint != expected:
-            raise BusinessFactoryError("proposal approval fingerprint does not match approved scope")
+            raise BusinessFactoryError(
+                "proposal approval fingerprint does not match approved scope"
+            )
     elif proposal.approval_fingerprint is not None:
         raise BusinessFactoryError("non-approved proposal cannot carry approval fingerprint")
     if proposal.approval_ref is not None:
@@ -832,78 +693,33 @@ def _validate_snapshot(snapshot: BusinessFactorySnapshot) -> None:
 
     order = snapshot.work_order
     if order is None:
-        downstream = (snapshot.qa, snapshot.delivery, snapshot.payment)
-        if any(item is not None for item in downstream) or snapshot.support_cases:
-            raise BusinessFactoryError("downstream business state exists without work order")
         return
     if proposal.state is not ProposalState.APPROVED or order.proposal_id != proposal.proposal_id:
         raise BusinessFactoryError("work order requires the approved restored proposal")
     _text(order.work_order_id, "work_order_id")
     _text(order.scope, "work order scope")
+    _text(order.target_project_id, "target ProductProject project_id")
+    _text(order.target_project_name, "target ProductProject name")
+    _digest(order.product_spec_fingerprint, "work order product spec fingerprint")
     _text(order.authorization_ref, "work order authorization_ref")
-    _text(order.authorization_fingerprint, "work order authorization fingerprint")
+    _digest(order.authorization_fingerprint, "work order authorization fingerprint")
     expected_order_fingerprint = _work_order_authorization_intent(
         snapshot.objective.objective_id,
         proposal,
         work_order_id=order.work_order_id,
         scope=order.scope,
+        target_project_id=order.target_project_id,
+        target_project_name=order.target_project_name,
+        product_spec_fingerprint=order.product_spec_fingerprint,
     ).fingerprint
     if order.authorization_fingerprint != expected_order_fingerprint:
-        raise BusinessFactoryError("work order authorization fingerprint does not match scope")
+        raise BusinessFactoryError("work order authorization fingerprint does not match effect")
     if order.product_project_id is not None:
         _text(order.product_project_id, "product_project_id")
-
-    qa = snapshot.qa
-    if qa is not None:
-        if order.product_project_id is None or qa.project_id != order.product_project_id:
-            raise BusinessFactoryError("QA record is not bound to ProductProject")
-        _text(qa.evidence_ref, "QA evidence_ref")
-
-    delivery = snapshot.delivery
-    if delivery is not None:
-        if qa is None or qa.state is not QAState.PASSED:
-            raise BusinessFactoryError("delivery exists without passing QA")
-        if delivery.project_id != order.product_project_id:
-            raise BusinessFactoryError("delivery/ProductProject identity mismatch")
-        _text(delivery.delivery_id, "delivery_id")
-        _text(delivery.artifact_ref, "delivery artifact_ref")
-        _text(delivery.authorization_ref, "delivery authorization_ref")
-        _text(delivery.authorization_fingerprint, "delivery authorization fingerprint")
-        _unique(
-            delivery.compliance_evidence_refs,
-            "delivery compliance evidence_ref",
-            allow_empty=True,
-        )
-        expected_delivery_fingerprint = _delivery_authorization_intent(
-            snapshot.objective.objective_id,
-            delivery_id=delivery.delivery_id,
-            project_id=delivery.project_id,
-            artifact_ref=delivery.artifact_ref,
-            qa_evidence_ref=qa.evidence_ref,
-            compliance_evidence_refs=delivery.compliance_evidence_refs,
-        ).fingerprint
-        if delivery.authorization_fingerprint != expected_delivery_fingerprint:
-            raise BusinessFactoryError("delivery authorization fingerprint does not match artifact")
-
-    payment = snapshot.payment
-    if payment is not None:
-        if delivery is None or payment.project_id != delivery.project_id:
-            raise BusinessFactoryError("payment state exists without matching delivery")
-        _text(payment.invoice_ref, "invoice_ref")
-        _text(payment.evidence_ref, "payment evidence_ref")
-
-    case_ids: set[str] = set()
-    for case in snapshot.support_cases:
-        if delivery is None or case.project_id != delivery.project_id:
-            raise BusinessFactoryError("support case exists without matching delivery")
-        if case.case_id in case_ids:
-            raise BusinessFactoryError("duplicate support case_id")
-        case_ids.add(case.case_id)
-        _text(case.case_id, "support case_id")
-        _text(case.summary, "support summary")
-        _text(case.evidence_ref, "support evidence_ref")
-        if case.state is SupportCaseState.RESOLVED and not case.resolution_ref:
-            raise BusinessFactoryError("resolved support case requires resolution_ref")
+        if order.product_project_id != order.target_project_id:
+            raise BusinessFactoryError(
+                "linked ProductProject identity differs from authorized target"
+            )
 
 
 def _proposal_authorization_intent(
@@ -927,45 +743,99 @@ def _work_order_authorization_intent(
     *,
     work_order_id: str,
     scope: str,
+    target_project_id: str,
+    target_project_name: str,
+    product_spec_fingerprint: str,
 ) -> BusinessAuthorizationIntent:
-    _text(proposal.approval_fingerprint, "proposal approval fingerprint")
+    if proposal.approval_fingerprint is None:
+        raise BusinessFactoryError("approved proposal is missing trusted approval fingerprint")
+    _digest(proposal.approval_fingerprint, "proposal approval fingerprint")
+    _digest(product_spec_fingerprint, "product spec fingerprint")
     return BusinessAuthorizationIntent(
         objective_id=objective_id,
         purpose="work_order.authorize",
         subject_id=work_order_id,
         bindings=(
-            ("proposal_id", proposal.proposal_id),
+            ("product_spec_fingerprint", product_spec_fingerprint),
             ("proposal_approval_fingerprint", proposal.approval_fingerprint),
+            ("proposal_id", proposal.proposal_id),
             ("scope", scope),
+            ("target_project_id", target_project_id),
+            ("target_project_name", target_project_name),
         ),
     )
 
 
-def _delivery_authorization_intent(
-    objective_id: str,
-    *,
-    delivery_id: str,
-    project_id: str,
-    artifact_ref: str,
-    qa_evidence_ref: str,
-    compliance_evidence_refs: tuple[str, ...],
-) -> BusinessAuthorizationIntent:
-    compliance_payload = json.dumps(
-        list(compliance_evidence_refs),
+def _product_spec_fingerprint(spec: ProductProjectSpec) -> str:
+    effective_spec = replace(
+        spec,
+        supersedes_spec_version=None,
+        revision_reason="initial specification",
+    )
+    payload = json.dumps(
+        effective_spec.to_dict(),
         ensure_ascii=False,
+        sort_keys=True,
         separators=(",", ":"),
     )
-    return BusinessAuthorizationIntent(
-        objective_id=objective_id,
-        purpose="delivery.authorize",
-        subject_id=delivery_id,
-        bindings=(
-            ("artifact_ref", artifact_ref),
-            ("compliance_evidence_refs", compliance_payload),
-            ("project_id", project_id),
-            ("qa_evidence_ref", qa_evidence_ref),
-        ),
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validate_authorized_product_spec(spec: ProductProjectSpec, *, work_order_id: str) -> None:
+    if spec.compliance.get("business_work_order_ref") != work_order_id:
+        raise BusinessFactoryError(
+            "ProductProject spec must bind the exact authorized business WorkOrder"
+        )
+    injected = _PF9_LINEAGE_KEYS.intersection(spec.compliance)
+    if injected:
+        raise BusinessFactoryError(
+            "caller ProductProject spec cannot pre-populate trusted PF9 lineage fields: "
+            + ", ".join(sorted(injected))
+        )
+
+
+def _handoff_effect_key(objective_id: str, work_order_id: str) -> str:
+    payload = json.dumps(
+        {"objective_id": objective_id, "work_order_id": work_order_id},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"nika-pf9-handoff-v2:{digest}"
+
+
+def _validate_product_effect(
+    project: ProductProject,
+    *,
+    order: BusinessWorkOrder,
+    objective_id: str,
+    operation_key: str,
+) -> None:
+    if project.project_id != order.target_project_id or project.name != order.target_project_name:
+        raise BusinessFactoryError(
+            "durable ProductProject identity does not match WorkOrder target"
+        )
+    compliance = project.spec.compliance
+    expected = {
+        "business_work_order_ref": order.work_order_id,
+        "business_work_order_authorization_ref": order.authorization_ref,
+        "business_work_order_authorization_fingerprint": order.authorization_fingerprint,
+        "business_product_spec_fingerprint": order.product_spec_fingerprint,
+        "business_objective_ref": objective_id,
+        "business_handoff_effect_key": operation_key,
+    }
+    for key, value in expected.items():
+        actual = compliance.get(key)
+        if project.spec_version == 1:
+            if actual != value:
+                raise BusinessFactoryError(
+                    f"durable ProductProject PF9 lineage mismatch at {key}"
+                )
+        elif actual is not None and actual != value:
+            raise BusinessFactoryError(
+                f"current ProductProject PF9 lineage conflicts at {key}"
+            )
 
 
 def _opportunity(raw: object) -> MarketOpportunity | None:
@@ -973,10 +843,10 @@ def _opportunity(raw: object) -> MarketOpportunity | None:
         return None
     item = _mapping(raw, "opportunity")
     return MarketOpportunity(
-        _value(item, "opportunity_id", "opportunity"),
-        _value(item, "objective_id", "opportunity"),
-        _value(item, "title", "opportunity"),
-        _strings(item, "evidence_ids", "opportunity"),
+        opportunity_id=_value(item, "opportunity_id", "opportunity"),
+        objective_id=_value(item, "objective_id", "opportunity"),
+        title=_value(item, "title", "opportunity"),
+        evidence_ids=_strings(item, "evidence_ids", "opportunity"),
     )
 
 
@@ -985,11 +855,11 @@ def _lead(raw: object) -> BusinessLead | None:
         return None
     item = _mapping(raw, "lead")
     return BusinessLead(
-        _value(item, "lead_id", "lead"),
-        _value(item, "opportunity_id", "lead"),
-        _value(item, "channel_id", "lead"),
-        _value(item, "counterparty_ref", "lead"),
-        _optional_value(item, "qualification_ref", "lead"),
+        lead_id=_value(item, "lead_id", "lead"),
+        opportunity_id=_value(item, "opportunity_id", "lead"),
+        channel_id=_value(item, "channel_id", "lead"),
+        counterparty_ref=_value(item, "counterparty_ref", "lead"),
+        qualification_ref=_optional_value(item, "qualification_ref", "lead"),
     )
 
 
@@ -998,12 +868,12 @@ def _proposal(raw: object) -> BusinessProposal | None:
         return None
     item = _mapping(raw, "proposal")
     return BusinessProposal(
-        _value(item, "proposal_id", "proposal"),
-        _value(item, "lead_id", "proposal"),
-        _value(item, "scope_summary", "proposal"),
-        _enum(ProposalState, item.get("state"), "proposal state"),
-        _optional_value(item, "approval_ref", "proposal"),
-        _optional_value(item, "approval_fingerprint", "proposal"),
+        proposal_id=_value(item, "proposal_id", "proposal"),
+        lead_id=_value(item, "lead_id", "proposal"),
+        scope_summary=_value(item, "scope_summary", "proposal"),
+        state=_enum(ProposalState, item.get("state"), "proposal state"),
+        approval_ref=_optional_value(item, "approval_ref", "proposal"),
+        approval_fingerprint=_optional_value(item, "approval_fingerprint", "proposal"),
     )
 
 
@@ -1012,72 +882,30 @@ def _work_order(raw: object) -> BusinessWorkOrder | None:
         return None
     item = _mapping(raw, "work order")
     return BusinessWorkOrder(
-        _value(item, "work_order_id", "work order"),
-        _value(item, "proposal_id", "work order"),
-        _value(item, "scope", "work order"),
-        _value(item, "authorization_ref", "work order"),
-        _value(item, "authorization_fingerprint", "work order"),
-        _optional_value(item, "product_project_id", "work order"),
-    )
-
-
-def _qa(raw: object) -> QARecord | None:
-    if raw is None:
-        return None
-    item = _mapping(raw, "QA record")
-    return QARecord(
-        _value(item, "project_id", "QA record"),
-        _enum(QAState, item.get("state"), "QA state"),
-        _value(item, "evidence_ref", "QA record"),
-    )
-
-
-def _delivery(raw: object) -> DeliveryRecord | None:
-    if raw is None:
-        return None
-    item = _mapping(raw, "delivery")
-    return DeliveryRecord(
-        _value(item, "delivery_id", "delivery"),
-        _value(item, "project_id", "delivery"),
-        _value(item, "artifact_ref", "delivery"),
-        _value(item, "authorization_ref", "delivery"),
-        _value(item, "authorization_fingerprint", "delivery"),
-        _strings(item, "compliance_evidence_refs", "delivery"),
-    )
-
-
-def _payment(raw: object) -> PaymentRecord | None:
-    if raw is None:
-        return None
-    item = _mapping(raw, "payment")
-    return PaymentRecord(
-        _value(item, "project_id", "payment"),
-        _value(item, "invoice_ref", "payment"),
-        _enum(InvoicePaymentState, item.get("state"), "payment state"),
-        _value(item, "evidence_ref", "payment"),
-    )
-
-
-def _support(raw: object) -> SupportCase:
-    item = _mapping(raw, "support case")
-    return SupportCase(
-        _value(item, "case_id", "support case"),
-        _value(item, "project_id", "support case"),
-        _value(item, "summary", "support case"),
-        _value(item, "evidence_ref", "support case"),
-        _enum(SupportCaseState, item.get("state"), "support state"),
-        _optional_value(item, "resolution_ref", "support case"),
+        work_order_id=_value(item, "work_order_id", "work order"),
+        proposal_id=_value(item, "proposal_id", "work order"),
+        scope=_value(item, "scope", "work order"),
+        target_project_id=_value(item, "target_project_id", "work order"),
+        target_project_name=_value(item, "target_project_name", "work order"),
+        product_spec_fingerprint=_value(item, "product_spec_fingerprint", "work order"),
+        authorization_ref=_value(item, "authorization_ref", "work order"),
+        authorization_fingerprint=_value(
+            item,
+            "authorization_fingerprint",
+            "work order",
+        ),
+        product_project_id=_optional_value(item, "product_project_id", "work order"),
     )
 
 
 def _audit(raw: object) -> BusinessAuditEvent:
     item = _mapping(raw, "audit event")
     return BusinessAuditEvent(
-        _int(item.get("sequence"), "audit sequence"),
-        _value(item, "event_type", "audit event"),
-        _value(item, "subject_id", "audit event"),
-        _value(item, "evidence_ref", "audit event"),
-        _value(item, "recorded_at", "audit event"),
+        sequence=_int(item.get("sequence"), "audit sequence"),
+        event_type=_value(item, "event_type", "audit event"),
+        subject_id=_value(item, "subject_id", "audit event"),
+        evidence_ref=_value(item, "evidence_ref", "audit event"),
+        recorded_at=_value(item, "recorded_at", "audit event"),
     )
 
 
@@ -1138,9 +966,18 @@ def _int(raw: object, label: str) -> int:
     return raw
 
 
+def _digest(value: object, label: str) -> None:
+    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+        raise BusinessFactoryError(f"{label} must be a lowercase SHA-256 digest")
+
+
 def _text(value: object, label: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise BusinessFactoryError(f"{label} must be non-empty text")
+    if _TOKEN_VALUE.search(value):
+        raise BusinessFactoryError(
+            f"raw credential material is forbidden at {label}; store an opaque reference"
+        )
 
 
 def _unique(values: tuple[str, ...], label: str, *, allow_empty: bool = False) -> None:

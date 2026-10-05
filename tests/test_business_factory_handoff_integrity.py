@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import pytest
 
+from nika_core.business_authority import BusinessAuthorizationIntent
 from nika_core.business_factory import (
     BusinessFactory,
     BusinessFactoryError,
     BusinessObjective,
+    BusinessWorkOrder,
     BusinessPolicy,
     CommunicationAuthority,
 )
@@ -19,7 +21,35 @@ from nika_core.product_project import (
 )
 
 
-def _factory_at_work_order(business_authority) -> BusinessFactory:
+class _Authority:
+    def __init__(self) -> None:
+        self.allowed: set[str] = set()
+        self.used: dict[str, str] = {}
+
+    def allow(self, evidence_ref: str) -> None:
+        self.allowed.add(evidence_ref)
+
+    def authorize(self, *, intent: BusinessAuthorizationIntent, evidence_ref: str) -> bool:
+        if evidence_ref not in self.allowed:
+            return False
+        previous = self.used.get(evidence_ref)
+        if previous is None:
+            self.used[evidence_ref] = intent.fingerprint
+            return True
+        return previous == intent.fingerprint
+
+
+def _spec(*, goal: str = "Build the authorized sandbox product") -> ProductProjectSpec:
+    return ProductProjectSpec(
+        goal=goal,
+        desired_outcome="A deterministic local result",
+        compliance={"business_work_order_ref": "work-order-handoff-1"},
+    )
+
+
+def _factory_at_work_order(
+    authority: _Authority,
+) -> tuple[BusinessFactory, ProductProjectSpec, BusinessWorkOrder]:
     factory = BusinessFactory.start(
         objective=BusinessObjective(
             objective_id="objective-handoff-1",
@@ -28,9 +58,9 @@ def _factory_at_work_order(business_authority) -> BusinessFactory:
                 package_id="research-handoff-1",
                 evidence=(
                     EvidenceRef(
-                        "evidence-handoff-1",
-                        "research:public:handoff-1",
-                        "Evidence for the authorized product",
+                        evidence_id="evidence-handoff-1",
+                        provenance_ref="research:public:handoff-1",
+                        claim="Evidence for the authorized product",
                     ),
                 ),
                 research_artifact_ref="research:artifact:handoff-1",
@@ -41,7 +71,7 @@ def _factory_at_work_order(business_authority) -> BusinessFactory:
             allowed_channel_ids=("sandbox-email",),
             communication_authority=CommunicationAuthority.APPROVAL_REQUIRED,
         ),
-        approval_authority=business_authority,
+        approval_authority=authority,
     )
     factory.identify_opportunity(
         opportunity_id="opportunity-handoff-1",
@@ -58,79 +88,91 @@ def _factory_at_work_order(business_authority) -> BusinessFactory:
         proposal_id="proposal-handoff-1",
         scope_summary="Build the authorized sandbox product.",
     )
-    business_authority.allow_once("approval:proposal:handoff-1")
+    authority.allow("approval:proposal:handoff-1")
     factory.approve_proposal(approval_ref="approval:proposal:handoff-1")
-    business_authority.allow_once("approval:work-order:handoff-1")
-    factory.create_work_order(
+    spec = _spec()
+    authority.allow("approval:work-order:handoff-1")
+    order = factory.create_work_order(
         work_order_id="work-order-handoff-1",
         scope="Build the authorized sandbox product.",
+        target_project_id="product-handoff-1",
+        target_project_name="Authorized handoff product",
+        product_spec=spec,
         authorization_ref="approval:work-order:handoff-1",
     )
-    return factory
+    return factory, spec, order
 
 
-def _spec(work_order_ref: str) -> ProductProjectSpec:
-    return ProductProjectSpec(
-        goal="Build the authorized sandbox product",
-        desired_outcome="A QA-reviewed sandbox release candidate",
-        compliance={"business_work_order_ref": work_order_ref},
-    )
-
-
-def test_handoff_rejects_spec_bound_to_another_work_order_before_product_effect(
-    tmp_path,
-    business_authority,
-) -> None:
+def test_handoff_rejects_same_work_order_different_spec_before_product_effect(tmp_path) -> None:
+    authority = _Authority()
     store = SQLiteStore(tmp_path / "nika.sqlite")
     store.initialize()
     products = ProductProjectRepository(store)
-    factory = _factory_at_work_order(business_authority)
+    factory, _, _ = _factory_at_work_order(authority)
+    substituted = _spec(goal="Attacker-substituted product")
 
-    with pytest.raises(BusinessFactoryError, match="exact authorized business WorkOrder"):
+    with pytest.raises(BusinessFactoryError, match="authorized WorkOrder specification"):
         factory.handoff_to_product_factory(
             repository=products,
-            project_id="product-wrong-work-order",
-            project_name="Wrong WorkOrder product",
-            spec=_spec("work-order-other"),
-            idempotency_key="caller-request-wrong-work-order",
+            spec=substituted,
+            idempotency_key="caller-request-substituted-spec",
         )
 
     with pytest.raises(KeyError):
-        products.get("product-wrong-work-order")
+        products.get("product-handoff-1")
 
 
-def test_uncertain_handoff_exact_retry_reconciles_existing_product(
+def test_handoff_creates_exact_bound_product_project_and_records_authority_lineage(
     tmp_path,
-    business_authority,
 ) -> None:
-    database_path = tmp_path / "nika.sqlite"
-    store = SQLiteStore(database_path)
+    authority = _Authority()
+    store = SQLiteStore(tmp_path / "nika.sqlite")
     store.initialize()
     products = ProductProjectRepository(store)
-    business = BusinessFactoryRepository(store)
-    business.initialize()
+    factory, spec, _ = _factory_at_work_order(authority)
 
-    factory = _factory_at_work_order(business_authority)
-    durable_before = factory.snapshot()
-    business.save(durable_before, expected_row_version=0)
-
-    first = factory.handoff_to_product_factory(
+    order = factory.handoff_to_product_factory(
         repository=products,
-        project_id="product-handoff-1",
-        project_name="Authorized handoff product",
-        spec=_spec("work-order-handoff-1"),
+        spec=spec,
         idempotency_key="caller-request-handoff-1",
     )
-    assert first.product_project_id == "product-handoff-1"
+    assert order.product_project_id == "product-handoff-1"
     stored = products.get("product-handoff-1")
+    assert stored.name == "Authorized handoff product"
     assert stored.spec.compliance["business_work_order_ref"] == "work-order-handoff-1"
     assert stored.spec.compliance["business_work_order_authorization_ref"] == (
         "approval:work-order:handoff-1"
     )
     assert stored.spec.compliance["business_work_order_authorization_fingerprint"] == (
-        first.authorization_fingerprint
+        order.authorization_fingerprint
+    )
+    assert stored.spec.compliance["business_product_spec_fingerprint"] == (
+        order.product_spec_fingerprint
     )
     assert stored.spec.compliance["business_objective_ref"] == "objective-handoff-1"
+    assert stored.spec.compliance["business_handoff_effect_key"].startswith(
+        "nika-pf9-handoff-v2:"
+    )
+
+
+def test_uncertain_handoff_retry_reconciles_one_product_even_with_new_request_key(tmp_path) -> None:
+    authority = _Authority()
+    store = SQLiteStore(tmp_path / "nika.sqlite")
+    store.initialize()
+    products = ProductProjectRepository(store)
+    business = BusinessFactoryRepository(store)
+    business.initialize()
+
+    factory, spec, _ = _factory_at_work_order(authority)
+    durable_before = factory.snapshot()
+    business.save(durable_before, expected_row_version=0)
+
+    first = factory.handoff_to_product_factory(
+        repository=products,
+        spec=spec,
+        idempotency_key="caller-request-before-crash",
+    )
+    assert first.product_project_id == "product-handoff-1"
 
     restored_snapshot = business.load("objective-handoff-1")
     assert restored_snapshot is not None
@@ -140,48 +182,99 @@ def test_uncertain_handoff_exact_retry_reconciles_existing_product(
 
     reconciled = restarted.handoff_to_product_factory(
         repository=ProductProjectRepository(store),
-        project_id="product-handoff-1",
-        project_name="Authorized handoff product",
-        spec=_spec("work-order-handoff-1"),
-        idempotency_key="caller-request-handoff-1",
+        spec=spec,
+        idempotency_key="caller-request-after-restart",
     )
     assert reconciled.product_project_id == "product-handoff-1"
     assert restarted.snapshot().audit[-1].event_type == "product_project.linked"
 
+    with store.connection() as conn:
+        count = conn.execute("SELECT COUNT(*) AS count FROM product_projects").fetchone()
+        assert count["count"] == 1
 
-def test_uncertain_handoff_cannot_create_second_product_for_same_work_order(
-    tmp_path,
-    business_authority,
-) -> None:
+
+def test_retry_after_product_spec_revision_still_uses_initial_effect_ledger(tmp_path) -> None:
+    authority = _Authority()
     store = SQLiteStore(tmp_path / "nika.sqlite")
     store.initialize()
     products = ProductProjectRepository(store)
     business = BusinessFactoryRepository(store)
     business.initialize()
 
-    factory = _factory_at_work_order(business_authority)
+    factory, initial_spec = _factory_at_work_order(authority)
     durable_before = factory.snapshot()
     business.save(durable_before, expected_row_version=0)
     factory.handoff_to_product_factory(
         repository=products,
-        project_id="product-handoff-first",
-        project_name="First authorized product effect",
-        spec=_spec("work-order-handoff-1"),
-        idempotency_key="caller-request-first",
+        spec=initial_spec,
+        idempotency_key="caller-request-before-crash",
+    )
+
+    current = products.get("product-handoff-1")
+    revised = ProductProjectSpec(
+        goal="Build the authorized sandbox product",
+        desired_outcome="A deterministic local result with a later revision",
+        compliance={"revision_note": "post-handoff evolution"},
+    )
+    products.update_spec(
+        "product-handoff-1",
+        revised,
+        expected_row_version=current.row_version,
+        change_reason="post-handoff product evolution",
     )
 
     restored_snapshot = business.load("objective-handoff-1")
     assert restored_snapshot is not None
     restarted = BusinessFactory.restore(restored_snapshot)
-    with pytest.raises(BusinessFactoryError, match="durable WorkOrder effect"):
-        restarted.handoff_to_product_factory(
-            repository=products,
-            project_id="product-handoff-second",
-            project_name="Conflicting duplicate product effect",
-            spec=_spec("work-order-handoff-1"),
-            idempotency_key="caller-request-second",
-        )
+    reconciled = restarted.handoff_to_product_factory(
+        repository=products,
+        spec=initial_spec,
+        idempotency_key="caller-request-after-revision",
+    )
+    assert reconciled.product_project_id == "product-handoff-1"
+    assert products.get("product-handoff-1").spec_version == 2
 
-    assert products.get("product-handoff-first").project_id == "product-handoff-first"
+
+def test_deterministic_effect_ledger_blocks_conflicting_target_input(tmp_path) -> None:
+    authority = _Authority()
+    store = SQLiteStore(tmp_path / "nika.sqlite")
+    store.initialize()
+    products = ProductProjectRepository(store)
+    factory, spec, _ = _factory_at_work_order(authority)
+    factory.handoff_to_product_factory(
+        repository=products,
+        spec=spec,
+        idempotency_key="caller-request-first",
+    )
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT operation_key, input_fingerprint FROM product_project_idempotency"
+        ).fetchone()
+        assert row["operation_key"].startswith("nika-pf9-handoff-v2:")
+        assert len(row["input_fingerprint"]) == 64
+
+
+def test_post_authorization_carrier_mutation_cannot_hijack_product_target(tmp_path) -> None:
+    authority = _Authority()
+    store = SQLiteStore(tmp_path / "nika.sqlite")
+    store.initialize()
+    products = ProductProjectRepository(store)
+    factory, spec, returned_order = _factory_at_work_order(authority)
+
+    object.__setattr__(returned_order, "target_project_id", "attacker-project")
+    exposed_snapshot = factory.snapshot()
+    assert exposed_snapshot.work_order is not None
+    object.__setattr__(exposed_snapshot.work_order, "target_project_id", "snapshot-attacker-project")
+
+    linked = factory.handoff_to_product_factory(
+        repository=products,
+        spec=spec,
+        idempotency_key="caller-request-after-alias-attack",
+    )
+    assert linked.product_project_id == "product-handoff-1"
+    assert products.get("product-handoff-1").name == "Authorized handoff product"
     with pytest.raises(KeyError):
-        products.get("product-handoff-second")
+        products.get("attacker-project")
+    with pytest.raises(KeyError):
+        products.get("snapshot-attacker-project")

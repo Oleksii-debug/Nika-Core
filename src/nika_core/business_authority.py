@@ -63,15 +63,14 @@ class BusinessAuthorizationIntent:
 
 
 class BusinessAuthorizationAuthorityPort(Protocol):
-    """Trusted-host boundary for PF9 approval and standing-policy evidence.
+    """Trusted-host boundary for exact PF9 approval evidence.
 
     ONE_TIME evidence must be current, bound to the exact intent fingerprint, and protected
     from reuse for a different intent. An implementation may allow idempotent replay of the
-    same evidence/fingerprint pair so a crash after authority validation can be reconciled.
+    same evidence/fingerprint pair so crash recovery can reconcile an uncertain effect.
 
-    STANDING_POLICY evidence may be reusable only while the host-owned policy remains active
-    and its scope covers the exact intent. The authority must never let the business worker
-    mint or widen that policy.
+    STANDING_POLICY evidence may be reusable only while a host-owned policy remains active
+    and covers the exact intent. A business worker cannot mint or widen that policy.
     """
 
     def authorize(
@@ -93,11 +92,20 @@ def trusted_business_authorization(
     _text(evidence_ref, "business authorization evidence_ref")
     if authority is None:
         return False
+    expected_fingerprint = intent.fingerprint
+    detached_intent = BusinessAuthorizationIntent(
+        objective_id=intent.objective_id,
+        purpose=intent.purpose,
+        subject_id=intent.subject_id,
+        bindings=tuple((key, value) for key, value in intent.bindings),
+        use=intent.use,
+    )
     try:
-        result = authority.authorize(intent=intent, evidence_ref=evidence_ref)
-    except (LookupError, PermissionError, RuntimeError, TypeError, ValueError):
+        result = authority.authorize(intent=detached_intent, evidence_ref=evidence_ref)
+        returned_fingerprint = detached_intent.fingerprint
+    except (AttributeError, LookupError, PermissionError, RuntimeError, TypeError, ValueError):
         return False
-    return result is True
+    return result is True and returned_fingerprint == expected_fingerprint
 
 
 def _text(value: object, label: str) -> None:
