@@ -2193,7 +2193,12 @@ def test_fenced_host_reservation_collision_does_not_cancel_sibling(
         "wrong_carrier",
         "nontext_phase",
         "blank_phase",
+        "surrogate_phase",
+        "oversized_phase",
+        "utf8_oversized_phase",
         "nontext_token",
+        "surrogate_token",
+        "oversized_token",
         "missing_phase",
         "missing_token",
     ),
@@ -2223,7 +2228,17 @@ def test_fenced_recovery_rejects_malformed_state_and_releases_claim_for_retry(
         phase = 1 if malformed == "nontext_phase" else "interrupted"
         if malformed == "blank_phase":
             phase = " "
+        elif malformed == "surrogate_phase":
+            phase = "\\ud800"
+        elif malformed == "oversized_phase":
+            phase = "x" * 1025
+        elif malformed == "utf8_oversized_phase":
+            phase = "€" * 342
         token = b"invalid" if malformed == "nontext_token" else "resume"
+        if malformed == "surrogate_token":
+            token = "\\ud800"
+        elif malformed == "oversized_token":
+            token = "x" * (64 * 1024 + 1)
         if malformed != "missing_phase":
             object.__setattr__(untrusted, "phase", phase)
         if malformed != "missing_token":
