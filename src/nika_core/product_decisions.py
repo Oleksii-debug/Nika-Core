@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
@@ -19,6 +20,47 @@ from nika_core.product_project import (
 from nika_core.research_product_handoff import verify_sealed_handoffs_conn
 from nika_core.security import ActionIntent, ApprovalEvidence, ApprovalVerifier
 from nika_core.tools import ToolRisk
+
+_MAX_STORED_HANDOFF_BYTES = 1024 * 1024
+
+
+def _reject_nonfinite_evidence(_value: str) -> None:
+    raise ValueError("non-finite stored research evidence")
+
+
+def _finite_evidence_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite stored research evidence")
+    return parsed
+
+
+def _unique_evidence_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("duplicate stored research evidence key")
+        value[key] = item
+    return value
+
+
+def _valid_stored_text(value: object) -> bool:
+    if type(value) is not str or not value.strip():
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
+def _decode_stored_utf8(value: object) -> str:
+    if type(value) is not bytes:
+        raise ProductProjectError("stored research handoff is malformed")
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ProductProjectError("stored research handoff is malformed") from exc
 
 
 def _now() -> str:
@@ -556,20 +598,32 @@ class ProductDecisionRepository:
     ) -> str:
         exact_payloads: list[dict[str, str]] = []
         for package_id in evidence_package_ids:
-            row = conn.execute(
-                "SELECT payload_json FROM product_research_handoffs "
-                "WHERE project_id=? AND package_id=?",
+            metadata = conn.execute(
+                "SELECT rowid AS handoff_rowid,typeof(payload_json) AS payload_type,"
+                "length(CAST(payload_json AS BLOB)) AS payload_bytes "
+                "FROM product_research_handoffs WHERE project_id=? AND package_id=?",
                 (project_id, package_id),
             ).fetchone()
-            if row is None:
+            if metadata is None:
                 raise ProductProjectError(
                     f"product option references unknown evidence package: {package_id}"
                 )
-            payload_json = row["payload_json"]
-            if not isinstance(payload_json, str):
-                raise ProductProjectError(
-                    "product research handoff payload must be UTF-8 JSON text"
-                )
+            if (
+                metadata["payload_type"] != "text"
+                or type(metadata["payload_bytes"]) is not int
+                or metadata["payload_bytes"] > _MAX_STORED_HANDOFF_BYTES
+            ):
+                raise ProductProjectError("stored research handoff is malformed")
+            hydrated = conn.execute(
+                "SELECT CAST(payload_json AS BLOB) AS payload_utf8 "
+                "FROM product_research_handoffs WHERE rowid=? AND project_id=?",
+                (metadata["handoff_rowid"], project_id),
+            ).fetchone()
+            if hydrated is None:
+                raise ProductProjectError("stored research handoff is malformed")
+            payload_json = _decode_stored_utf8(hydrated["payload_utf8"])
+            if not _valid_stored_text(payload_json):
+                raise ProductProjectError("stored research handoff is malformed")
             exact_payloads.append(
                 {
                     "package_id": package_id,
@@ -708,50 +762,89 @@ class ProductDecisionRepository:
         option_id: str,
     ) -> tuple[str, ...]:
         rows = conn.execute(
-            "SELECT payload_json FROM product_research_handoffs WHERE project_id=?",
+            "SELECT rowid AS handoff_rowid,typeof(package_id) AS package_type,"
+            "length(CAST(package_id AS BLOB)) AS package_bytes,"
+            "typeof(payload_json) AS payload_type,"
+            "length(CAST(payload_json AS BLOB)) AS payload_bytes "
+            "FROM product_research_handoffs WHERE project_id=?",
             (project_id,),
-        ).fetchall()
+        )
         matches: list[tuple[str, ...]] = []
         for row in rows:
+            if (
+                row["package_type"] != "text"
+                or type(row["package_bytes"]) is not int
+                or row["package_bytes"] > _MAX_STORED_HANDOFF_BYTES
+                or row["payload_type"] != "text"
+                or type(row["payload_bytes"]) is not int
+                or row["payload_bytes"] > _MAX_STORED_HANDOFF_BYTES
+            ):
+                raise ProductProjectError("stored research handoff is malformed")
+            hydrated = conn.execute(
+                "SELECT CAST(package_id AS BLOB) AS package_utf8,"
+                "CAST(payload_json AS BLOB) AS payload_utf8 "
+                "FROM product_research_handoffs WHERE rowid=? AND project_id=?",
+                (row["handoff_rowid"], project_id),
+            ).fetchone()
+            if hydrated is None:
+                raise ProductProjectError("stored research handoff is malformed")
+            row_package_id = _decode_stored_utf8(hydrated["package_utf8"])
+            raw = _decode_stored_utf8(hydrated["payload_utf8"])
+            if not _valid_stored_text(row_package_id):
+                raise ProductProjectError("stored research handoff is malformed")
             try:
-                payload = json.loads(row["payload_json"])
-            except (TypeError, json.JSONDecodeError) as exc:
-                raise ProductProjectError(
-                    "product research handoff contains invalid JSON"
-                ) from exc
-            if not isinstance(payload, dict):
-                raise ProductProjectError(
-                    "product research handoff must contain a JSON object"
+                payload = json.loads(
+                    raw,
+                    parse_constant=_reject_nonfinite_evidence,
+                    parse_float=_finite_evidence_float,
+                    object_pairs_hook=_unique_evidence_keys,
                 )
-            raw_options = payload.get("options", [])
-            if not isinstance(raw_options, list):
-                raise ProductProjectError(
-                    "product research handoff options must be a list"
-                )
-            for option in raw_options:
-                if not isinstance(option, dict):
-                    raise ProductProjectError(
-                        "product research handoff contains invalid option data"
+            except (TypeError, ValueError, RecursionError) as exc:
+                raise ProductProjectError("stored research handoff is malformed") from exc
+            if (
+                type(payload) is not dict
+                or not _valid_stored_text(payload.get("package_id"))
+                or payload["package_id"] != row_package_id
+                or type(payload.get("options")) is not list
+                or type(payload.get("evidence")) is not list
+                or not payload["evidence"]
+            ):
+                raise ProductProjectError("stored research handoff is malformed")
+            evidence_ids: set[str] = set()
+            for evidence in payload["evidence"]:
+                if (
+                    type(evidence) is not dict
+                    or not _valid_stored_text(evidence.get("evidence_id"))
+                    or not _valid_stored_text(evidence.get("provenance_ref"))
+                    or evidence["evidence_id"] in evidence_ids
+                ):
+                    raise ProductProjectError("stored research evidence is malformed")
+                evidence_ids.add(evidence["evidence_id"])
+            option_ids: set[str] = set()
+            for option in payload["options"]:
+                if (
+                    type(option) is not dict
+                    or not _valid_stored_text(option.get("option_id"))
+                    or option["option_id"] in option_ids
+                ):
+                    raise ProductProjectError("stored product option is malformed")
+                option_ids.add(option["option_id"])
+                package_ids = option.get("evidence_package_ids")
+                if (
+                    type(package_ids) is not list
+                    or not package_ids
+                    or any(
+                        not _valid_stored_text(package_id)
+                        for package_id in package_ids
                     )
-                if option.get("option_id") == option_id:
-                    raw_package_ids = option.get("evidence_package_ids", ())
-                    if not isinstance(raw_package_ids, list):
-                        raise ProductProjectError(
-                            "product option evidence_package_ids must be a list"
-                        )
-                    if not raw_package_ids or any(
-                        not isinstance(value, str) or not value.strip()
-                        for value in raw_package_ids
-                    ):
-                        raise ProductProjectError(
-                            "product option evidence package ids must be non-empty strings"
-                        )
-                    package_ids = tuple(raw_package_ids)
-                    if len(set(package_ids)) != len(package_ids):
-                        raise ProductProjectError(
-                            "product option contains duplicate evidence package ids"
-                        )
-                    matches.append(package_ids)
+                    or len(package_ids) != len(set(package_ids))
+                    or row_package_id not in package_ids
+                ):
+                    raise ProductProjectError(
+                        "stored product option evidence is malformed"
+                    )
+                if option["option_id"] == option_id:
+                    matches.append(tuple(package_ids))
         if not matches:
             raise ProductProjectError(f"unknown product option: {option_id}")
         if len(matches) > 1:
