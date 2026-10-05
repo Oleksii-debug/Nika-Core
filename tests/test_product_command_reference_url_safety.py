@@ -3,6 +3,7 @@ from __future__ import annotations
 from urllib.parse import quote
 
 import pytest
+from pydantic import ValidationError
 
 from nika_core.product_command.contracts import EvidenceReference
 from nika_core.product_command.reference_safety import safe_evidence_reference
@@ -140,3 +141,25 @@ def test_public_evidence_preserves_printable_ukrainian_unicode() -> None:
     reference = "evidence://проєкт-1/збірка/готово"
 
     assert safe_evidence_reference(reference) == reference
+
+
+
+class _BehavioralEvidenceText(str):
+    def encode(self, *args, **kwargs):
+        raise AssertionError("behavioral encode must not execute")
+
+    def strip(self, *args, **kwargs):
+        raise AssertionError("behavioral strip must not execute")
+
+    def casefold(self):
+        raise AssertionError("behavioral casefold must not execute")
+
+
+def test_public_evidence_rejects_behavioral_string_before_string_methods() -> None:
+    reference = _BehavioralEvidenceText("evidence://project-1/build/123")
+
+    with pytest.raises(ValueError, match="plain string"):
+        safe_evidence_reference(reference)
+
+    with pytest.raises(ValidationError, match="plain string"):
+        EvidenceReference(kind="test", reference=reference, label="Evidence")
