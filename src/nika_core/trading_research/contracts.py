@@ -108,6 +108,13 @@ class EventTime:
         object.__setattr__(self, "source_at", source_at)
 
 
+def _validate_market_identity(instrument: Instrument, time: EventTime) -> None:
+    if not isinstance(instrument, Instrument):
+        raise TradingResearchError("event instrument must be an Instrument")
+    if not isinstance(time, EventTime):
+        raise TradingResearchError("event time must be an EventTime")
+
+
 @dataclass(frozen=True, slots=True)
 class Bar:
     instrument: Instrument
@@ -120,6 +127,7 @@ class Bar:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
         for field_name in ("open", "high", "low", "close", "volume"):
             _finite_decimal(getattr(self, field_name), field_name)
@@ -142,6 +150,7 @@ class Tick:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
         _finite_decimal(self.price, "price")
         _finite_decimal(self.size, "size")
@@ -160,6 +169,7 @@ class Quote:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
         for field_name in ("bid", "ask", "bid_size", "ask_size"):
             _finite_decimal(getattr(self, field_name), field_name)
@@ -177,6 +187,7 @@ class OddsSnapshot:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
         if not isinstance(self.selections, Mapping):
             raise TradingResearchError("odds selections must be a mapping")
@@ -208,6 +219,7 @@ class OutcomeSettlement:
     source_sequence: int = 0
 
     def __post_init__(self) -> None:
+        _validate_market_identity(self.instrument, self.time)
         _validate_source_sequence(self.source_sequence)
         if type(self.outcome) is not str or not self.outcome.strip():
             raise TradingResearchError("outcome must be nonblank text")
