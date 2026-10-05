@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from threading import Barrier
@@ -430,7 +431,6 @@ def test_record_rejects_behavioral_scalar_subclasses_before_persistence(
     assert row["event_count"] == 0
 
 
-
 def test_record_with_connection_participates_in_caller_transaction(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "Ніка Transaction Evidence" / "nika core.db")
     store.initialize()
@@ -484,3 +484,26 @@ def test_record_with_connection_rejects_noncanonical_connection_before_write(tmp
         ).fetchone()
     assert row is not None
     assert row["event_count"] == 0
+
+
+
+def test_record_with_connection_rejects_tuple_row_connection(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    ledger = ExperienceLedger(store)
+
+    conn = sqlite3.connect(store.path)
+    try:
+        with pytest.raises(TypeError, match="canonical sqlite3.Row row factory"):
+            ledger.record_with_connection(
+                conn,
+                event_key="runtime-connectivity:network_wait_deferred:tuple-row",
+                task_id="task-tuple-row",
+                kind=ContinuityKind.INTERNET,
+                outcome=ContinuityOutcome.WAITING,
+                reason_code="network_wait_deferred",
+            )
+    finally:
+        conn.close()
+
+    assert ledger.list_for_task("task-tuple-row") == ()
