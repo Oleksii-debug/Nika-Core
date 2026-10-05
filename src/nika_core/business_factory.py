@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -369,6 +370,7 @@ class BusinessFactory:
         _text(authorization_ref, "work order authorization_ref")
         if not isinstance(product_spec, ProductProjectSpec):
             raise BusinessFactoryError("work order product_spec must be ProductProjectSpec")
+        product_spec = deepcopy(product_spec)
         _validate_authorized_product_spec(product_spec, work_order_id=work_order_id)
         product_spec_fingerprint = _product_spec_fingerprint(product_spec)
         intent = _work_order_authorization_intent(
@@ -406,6 +408,7 @@ class BusinessFactory:
         _text(idempotency_key, "ProductProject handoff request key")
         if not isinstance(spec, ProductProjectSpec):
             raise BusinessFactoryError("ProductProject handoff requires ProductProjectSpec")
+        spec = deepcopy(spec)
         _validate_authorized_product_spec(spec, work_order_id=order.work_order_id)
         if _product_spec_fingerprint(spec) != order.product_spec_fingerprint:
             raise BusinessFactoryError(
