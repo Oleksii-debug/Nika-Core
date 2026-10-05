@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import replace
+from math import isfinite
 from statistics import fmean
 
 from nika_core.experiments.contracts import (
@@ -77,6 +78,8 @@ class ExperimentEngine:
             candidate_id = challenger.candidate_id
             score = self._mean(snapshot, candidate_id, primary)
             improvement = (score - champion_score) * direction
+            if not isfinite(improvement):
+                raise ValueError("primary metric improvement is not finite")
             if improvement < policy.minimum_improvement:
                 continue
             if self._guardrails_pass(snapshot, champion_id, candidate_id):
@@ -150,6 +153,8 @@ class ExperimentEngine:
         champion = self._mean(snapshot, champion_id, rule.metric)
         challenger = self._mean(snapshot, candidate_id, rule.metric)
         regression = champion - challenger if rule.higher_is_better else challenger - champion
+        if not isfinite(regression):
+            raise ValueError("guardrail regression is not finite")
         return regression <= rule.max_regression
 
     @staticmethod
@@ -160,4 +165,10 @@ class ExperimentEngine:
                 values[item.candidate_id].append(float(item.value))
         if candidate_id not in values:
             raise ValueError(f"missing metric {metric} for candidate {candidate_id}")
-        return fmean(values[candidate_id])
+        try:
+            result = fmean(values[candidate_id])
+        except OverflowError:
+            raise ValueError("metric mean exceeds finite range") from None
+        if not isfinite(result):
+            raise ValueError("metric mean is not finite")
+        return result
