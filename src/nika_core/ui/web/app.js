@@ -1126,12 +1126,13 @@
     setModelControlsDisabled(true);
     let result = null;
     try {
+      const dispatchRequestId = requestId();
       result = await globalThis.pywebview.api.dispatch({
-        request_id: requestId(),
+        request_id: dispatchRequestId,
         action_id: actionId,
         payload,
       });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) {
+      if (!validDispatchResponse(result, dispatchRequestId) || result.status === "accepted") {
         throw new Error("Invalid model settings acknowledgement");
       }
       const failed = result.status !== "completed";
@@ -1209,8 +1210,13 @@
     autostartSave.disabled = true;
     let uncertain = false;
     try {
-      const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) throw new Error("Invalid acknowledgement");
+      const dispatchRequestId = requestId();
+      const result = await globalThis.pywebview.api.dispatch({
+        request_id: dispatchRequestId, action_id: actionId, payload,
+      });
+      if (!validDispatchResponse(result, dispatchRequestId) || result.status === "accepted") {
+        throw new Error("Invalid acknowledgement");
+      }
       const failed = result.status !== "completed";
       if (!failed || !save) autostartDirty = false;
       announce(result.message, failed);
