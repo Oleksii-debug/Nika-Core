@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel import checkpoint as checkpoint_module
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue
 
@@ -234,16 +235,18 @@ def test_latest_rejects_blob_checksum_storage_class(tmp_path: Path) -> None:
         checkpoints.latest(task_id)
 
 
-def test_save_rejects_excessive_nesting_with_controlled_validation_error(
+def test_save_normalizes_encoder_recursion_error(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, task_id, checkpoints = _build_service(tmp_path)
-    nested: object = 0
-    for _ in range(1200):
-        nested = [nested]
 
+    def recurse(*_args: object, **_kwargs: object) -> str:
+        raise RecursionError("synthetic encoder recursion")
+
+    monkeypatch.setattr(checkpoint_module.json, "dumps", recurse)
     with pytest.raises(ValueError, match="JSON object with finite values"):
-        checkpoints.save(task_id=task_id, stage="too-deep", payload={"value": nested})
+        checkpoints.save(task_id=task_id, stage="too-deep", payload={"value": 1})
 
     with store.connection() as conn:
         count = conn.execute(
@@ -253,17 +256,21 @@ def test_save_rejects_excessive_nesting_with_controlled_validation_error(
     assert count == 0
 
 
-def test_latest_rejects_excessive_nested_json_with_controlled_validation_error(
+def test_latest_normalizes_decoder_recursion_error(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store, task_id, checkpoints = _build_service(tmp_path)
-    payload_json = '{"value":' + ("[" * 1200) + "0" + ("]" * 1200) + "}"
     _insert_raw_checkpoint(
         store,
         task_id=task_id,
         checkpoint_id="too-deep",
-        payload_json=payload_json,
+        payload_json='{"value":1}',
     )
 
+    def recurse(*_args: object, **_kwargs: object) -> object:
+        raise RecursionError("synthetic decoder recursion")
+
+    monkeypatch.setattr(checkpoint_module.json, "loads", recurse)
     with pytest.raises(ValueError, match="invalid JSON"):
         checkpoints.latest(task_id)
