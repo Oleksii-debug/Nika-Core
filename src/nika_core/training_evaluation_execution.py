@@ -34,7 +34,9 @@ from nika_core.model_gateway.contracts import (
 )
 from nika_core.resources.contracts import ResourceObserverPort
 from nika_core.training_evaluation_attestation import (
+    AttestedModelCompletionResult,
     AttestedTrainingCandidateGateway,
+    LoadedModelArtifactAttestation,
     LoadedModelAttestedCompletionPort,
 )
 from nika_core.training_evaluation_binding import TrainingEvaluationBinding
@@ -85,6 +87,94 @@ class TrainingEvaluationExecutionError(RuntimeError):
         self.failure_effect = failure_effect
 
 
+@dataclass(frozen=True, slots=True)
+class AttestedCaseReceipt:
+    """Secret-free receipt for one benchmark request accepted by #1298."""
+
+    case_id: str
+    request_id: str
+    binding_sha256: str
+    provider_id: str
+    model_id: str
+    artifact_sha256: str
+    descriptor_digest: str
+    attestor_id: str
+    attestor_sha256: str
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.case_id, "case_id"),
+            (self.request_id, "request_id"),
+            (self.provider_id, "provider_id"),
+            (self.model_id, "model_id"),
+            (self.attestor_id, "attestor_id"),
+        ):
+            _canonical_text(value, name=name)
+        for value, name in (
+            (self.binding_sha256, "binding_sha256"),
+            (self.artifact_sha256, "artifact_sha256"),
+            (self.descriptor_digest, "descriptor_digest"),
+            (self.attestor_sha256, "attestor_sha256"),
+        ):
+            _sha256(value, name=name)
+
+    def revalidated(self) -> AttestedCaseReceipt:
+        if type(self) is not AttestedCaseReceipt:
+            raise TypeError("receipt must be an exact AttestedCaseReceipt")
+        try:
+            return AttestedCaseReceipt(
+                case_id=self.case_id,
+                request_id=self.request_id,
+                binding_sha256=self.binding_sha256,
+                provider_id=self.provider_id,
+                model_id=self.model_id,
+                artifact_sha256=self.artifact_sha256,
+                descriptor_digest=self.descriptor_digest,
+                attestor_id=self.attestor_id,
+                attestor_sha256=self.attestor_sha256,
+            )
+        except AttributeError as exc:
+            raise ValueError("attested case receipt fields are incomplete") from exc
+
+    def evidence_payload(self) -> dict[str, str]:
+        receipt = self.revalidated()
+        return {
+            "schema": "nika-attested-challenger-case-v1",
+            "case_id": receipt.case_id,
+            "request_id": receipt.request_id,
+            "binding_sha256": receipt.binding_sha256,
+            "provider_id": receipt.provider_id,
+            "model_id": receipt.model_id,
+            "artifact_sha256": receipt.artifact_sha256,
+            "descriptor_digest": receipt.descriptor_digest,
+            "attestor_id": receipt.attestor_id,
+            "attestor_sha256": receipt.attestor_sha256,
+        }
+
+    @property
+    def evidence_sha256(self) -> str:
+        encoded = json.dumps(
+            self.evidence_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+
+def _expected_benchmark_request_id(
+    *,
+    run_id: str,
+    configuration_sha256: str,
+    case_id: str,
+) -> str:
+    raw = (
+        f"nika-model-benchmark-v3\0{run_id}\0"
+        f"{configuration_sha256}\0{case_id}"
+    ).encode()
+    return f"model-bench-{hashlib.sha256(raw).hexdigest()[:32]}"
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class AttestedChallengerBenchmarkResult:
     """Complete challenger benchmark bound to Loop-C identity and attestor trust.
@@ -96,6 +186,7 @@ class AttestedChallengerBenchmarkResult:
 
     binding: TrainingEvaluationBinding
     report: CandidateBenchmarkReport
+    case_receipts: tuple[AttestedCaseReceipt, ...]
     attestor_id: str
     attestor_sha256: str
 
@@ -140,6 +231,34 @@ class AttestedChallengerBenchmarkResult:
             raise ValueError(
                 "attested challenger benchmark requires complete successful coverage"
             )
+        if type(self.case_receipts) is not tuple:
+            raise TypeError("case_receipts must be a canonical tuple")
+        if len(self.case_receipts) != len(self.report.case_results):
+            raise ValueError("attested receipt coverage does not match benchmark cases")
+        receipts = tuple(receipt.revalidated() for receipt in self.case_receipts)
+        expected_case_ids = tuple(result.case_id for result in self.report.case_results)
+        if tuple(receipt.case_id for receipt in receipts) != expected_case_ids:
+            raise ValueError("attested receipt case order does not match benchmark report")
+        if len({receipt.request_id for receipt in receipts}) != len(receipts):
+            raise ValueError("attested receipt request identities must be unique")
+        for receipt in receipts:
+            expected_request_id = _expected_benchmark_request_id(
+                run_id=self.report.run.run_id,
+                configuration_sha256=self.report.run.configuration_sha256,
+                case_id=receipt.case_id,
+            )
+            if receipt.request_id != expected_request_id:
+                raise ValueError("attested receipt request identity is inconsistent")
+            if (
+                receipt.binding_sha256 != binding.binding_sha256
+                or receipt.provider_id != binding.challenger_provider_id
+                or receipt.model_id != binding.challenger_model_id
+                or receipt.artifact_sha256 != binding.challenger_sha256
+                or receipt.descriptor_digest != binding.descriptor_digest
+                or receipt.attestor_id != attestor_id
+                or receipt.attestor_sha256 != attestor_sha256
+            ):
+                raise ValueError("attested case receipt does not match benchmark authority")
         # Force validated values to be consumed so mutated/behavioral carriers cannot
         # hide behind dataclass construction history.
         if attestor_id != self.attestor_id or attestor_sha256 != self.attestor_sha256:
@@ -155,6 +274,9 @@ class AttestedChallengerBenchmarkResult:
             return _build_result(
                 binding=self.binding.revalidated(),
                 report=self.report,
+                case_receipts=tuple(
+                    receipt.revalidated() for receipt in self.case_receipts
+                ),
                 attestor_id=self.attestor_id,
                 attestor_sha256=self.attestor_sha256,
             )
@@ -176,6 +298,14 @@ class AttestedChallengerBenchmarkResult:
             "attestor_id": result.attestor_id,
             "attestor_sha256": result.attestor_sha256,
             "case_count": len(result.report.case_results),
+            "case_receipts": [
+                {
+                    "case_id": receipt.case_id,
+                    "request_id": receipt.request_id,
+                    "attestation_sha256": receipt.evidence_sha256,
+                }
+                for receipt in result.case_receipts
+            ],
         }
 
     @property
@@ -193,12 +323,14 @@ def _build_result(
     *,
     binding: TrainingEvaluationBinding,
     report: CandidateBenchmarkReport,
+    case_receipts: tuple[AttestedCaseReceipt, ...],
     attestor_id: str,
     attestor_sha256: str,
 ) -> AttestedChallengerBenchmarkResult:
     result = object.__new__(AttestedChallengerBenchmarkResult)
     object.__setattr__(result, "binding", binding)
     object.__setattr__(result, "report", report)
+    object.__setattr__(result, "case_receipts", case_receipts)
     object.__setattr__(result, "attestor_id", attestor_id)
     object.__setattr__(result, "attestor_sha256", attestor_sha256)
     result._validate()
