@@ -225,18 +225,193 @@ def _canonical_pair(
     return old, new, binding
 
 
+def _observation_key(item: MetricObservation) -> tuple[str, str, str]:
+    return item.candidate_id, item.replay_id, item.metric
+
+
+def _observation_map(
+    observations: tuple[MetricObservation, ...],
+) -> dict[tuple[str, str, str], MetricObservation]:
+    result: dict[tuple[str, str, str], MetricObservation] = {}
+    for item in observations:
+        if type(item) is not MetricObservation:
+            raise TypeError("old/new observations must use exact MetricObservation values")
+        MetricObservation.__post_init__(item)
+        key = _observation_key(item)
+        if key in result:
+            raise AttestedOldVsNewDecisionError(
+                "old/new observations contain duplicate evidence keys"
+            )
+        result[key] = item
+    return result
+
+
 def _run_engine(
     *,
     definition: ExperimentDefinition,
     observations: tuple[MetricObservation, ...],
     repository: ExperimentRepository,
 ) -> ExperimentSnapshot:
+    """Run one clean in-memory decision to establish canonical terminal truth."""
+
     engine = ExperimentEngine(repository)
     engine.create(definition)
     engine.start(definition.experiment_id)
     for observation in observations:
         engine.record(definition.experiment_id, observation)
     return engine.complete(definition.experiment_id)
+
+
+def _get_existing_experiment(
+    repository: ExperimentRepository,
+    experiment_id: str,
+) -> ExperimentSnapshot | None:
+    try:
+        return repository.get(experiment_id)
+    except KeyError:
+        return None
+
+
+def _validate_existing_definition(
+    snapshot: ExperimentSnapshot,
+    definition: ExperimentDefinition,
+) -> None:
+    if type(snapshot) is not ExperimentSnapshot:
+        raise TypeError("experiment repository returned an invalid snapshot carrier")
+    if snapshot.definition != definition:
+        raise AttestedOldVsNewDecisionError(
+            "persisted experiment definition conflicts with attested old/new authority"
+        )
+
+
+def _validate_terminal_snapshot(
+    snapshot: ExperimentSnapshot,
+    *,
+    expected: ExperimentSnapshot,
+) -> ExperimentSnapshot:
+    if snapshot != expected:
+        raise AttestedOldVsNewDecisionError(
+            "persisted terminal experiment conflicts with canonical old/new decision"
+        )
+    return snapshot
+
+
+def _ensure_running_experiment(
+    *,
+    engine: ExperimentEngine,
+    repository: ExperimentRepository,
+    definition: ExperimentDefinition,
+) -> ExperimentSnapshot:
+    experiment_id = definition.experiment_id
+    snapshot = _get_existing_experiment(repository, experiment_id)
+    if snapshot is None:
+        try:
+            engine.create(definition)
+        except ValueError:
+            snapshot = repository.get(experiment_id)
+        else:
+            snapshot = repository.get(experiment_id)
+    _validate_existing_definition(snapshot, definition)
+    if snapshot.status is ExperimentStatus.DRAFT:
+        try:
+            snapshot = engine.start(experiment_id)
+        except ValueError:
+            snapshot = repository.get(experiment_id)
+            _validate_existing_definition(snapshot, definition)
+    return snapshot
+
+
+def _record_missing_observations(
+    *,
+    engine: ExperimentEngine,
+    repository: ExperimentRepository,
+    definition: ExperimentDefinition,
+    observations: tuple[MetricObservation, ...],
+) -> ExperimentSnapshot:
+    experiment_id = definition.experiment_id
+    expected = _observation_map(observations)
+    for key, item in expected.items():
+        snapshot = repository.get(experiment_id)
+        _validate_existing_definition(snapshot, definition)
+        if snapshot.status in {ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED}:
+            return snapshot
+        if snapshot.status is ExperimentStatus.ROLLED_BACK:
+            raise AttestedOldVsNewDecisionError(
+                "rolled-back experiment cannot be reused as fresh old/new evidence"
+            )
+        if snapshot.status is not ExperimentStatus.RUNNING:
+            raise AttestedOldVsNewDecisionError(
+                "persisted experiment is not running while evidence is incomplete"
+            )
+        observed = _observation_map(snapshot.observations)
+        persisted = observed.get(key)
+        if persisted is not None:
+            if float(persisted.value) != float(item.value):
+                raise AttestedOldVsNewDecisionError(
+                    "persisted experiment evidence conflicts with attested benchmark"
+                )
+            continue
+        try:
+            engine.record(experiment_id, item)
+        except ValueError:
+            current = repository.get(experiment_id)
+            _validate_existing_definition(current, definition)
+            persisted = _observation_map(current.observations).get(key)
+            if persisted is not None and float(persisted.value) == float(item.value):
+                continue
+            if current.status in {
+                ExperimentStatus.COMPLETED,
+                ExperimentStatus.PROMOTED,
+            }:
+                return current
+            raise
+    return repository.get(experiment_id)
+
+
+def _run_engine_resumable(
+    *,
+    definition: ExperimentDefinition,
+    observations: tuple[MetricObservation, ...],
+    expected: ExperimentSnapshot,
+    repository: ExperimentRepository,
+) -> ExperimentSnapshot:
+    """Resume the exact durable decision without replaying persisted evidence."""
+
+    engine = ExperimentEngine(repository)
+    snapshot = _ensure_running_experiment(
+        engine=engine,
+        repository=repository,
+        definition=definition,
+    )
+    if snapshot.status in {ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED}:
+        return _validate_terminal_snapshot(snapshot, expected=expected)
+    if snapshot.status is ExperimentStatus.ROLLED_BACK:
+        raise AttestedOldVsNewDecisionError(
+            "rolled-back experiment cannot be reused as fresh old/new evidence"
+        )
+    if snapshot.status is not ExperimentStatus.RUNNING:
+        raise AttestedOldVsNewDecisionError(
+            "persisted experiment cannot resume from its current state"
+        )
+
+    snapshot = _record_missing_observations(
+        engine=engine,
+        repository=repository,
+        definition=definition,
+        observations=observations,
+    )
+    if snapshot.status in {ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED}:
+        return _validate_terminal_snapshot(snapshot, expected=expected)
+    if snapshot.status is ExperimentStatus.ROLLED_BACK:
+        raise AttestedOldVsNewDecisionError(
+            "rolled-back experiment cannot be reused as fresh old/new evidence"
+        )
+    try:
+        snapshot = engine.complete(definition.experiment_id)
+    except ValueError:
+        snapshot = repository.get(definition.experiment_id)
+        _validate_existing_definition(snapshot, definition)
+    return _validate_terminal_snapshot(snapshot, expected=expected)
 
 
 def _prepare_decision(
@@ -589,15 +764,12 @@ def evaluate_attested_old_vs_new(
         policy=policy,
         permission_fingerprint=permission_fingerprint,
     )
-    completed = _run_engine(
+    completed = _run_engine_resumable(
         definition=definition,
         observations=observations,
+        expected=expected,
         repository=repository,
     )
-    if completed != expected:
-        raise RuntimeError(
-            "experiment repository returned a non-canonical terminal decision"
-        )
     return _build_decision(
         snapshot=completed,
         champion_benchmark=old,
