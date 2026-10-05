@@ -163,6 +163,7 @@ def test_build_rejects_nonfinite_unknown_audit_payload(tmp_path) -> None:
     with pytest.raises(ProductProjectError, match="durable JSON column: payload_json"):
         service.build("project-1")
 
+
 @pytest.mark.parametrize(
     "value",
     (
