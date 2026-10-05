@@ -413,8 +413,7 @@ class CaseBenchmarkResult:
         pass_score = float(self.pass_score)
         if not isfinite(pass_score) or not 0 <= pass_score <= 1:
             raise ValueError("pass_score must be finite and in [0, 1]")
-        expected_passed = self.completion_succeeded and score >= pass_score
-        if self.passed is not expected_passed:
+        if self.completion_succeeded and self.passed is not (score >= pass_score):
             raise ValueError("passed must match completion, score and pass_score")
         if self.error_code is not None and not any(
             self.error_code is member for member in ModelErrorCode
