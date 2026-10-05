@@ -5,6 +5,21 @@ from enum import StrEnum
 from math import isfinite
 
 
+def _finite_number(value: object, field: str, *, non_negative: bool = False) -> float:
+    """Admit finite numeric evidence without bool or text coercion."""
+    if type(value) not in (int, float):
+        raise ValueError(f"{field} must be a finite number")
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        raise ValueError(f"{field} must be a finite number") from None
+    if not isfinite(number):
+        raise ValueError(f"{field} must be a finite number")
+    if non_negative and number < 0:
+        raise ValueError(f"{field} must be non-negative")
+    return number
+
+
 class ExperimentStatus(StrEnum):
     DRAFT = "draft"
     RUNNING = "running"
@@ -59,8 +74,7 @@ class MetricObservation:
     def __post_init__(self) -> None:
         if not self.candidate_id.strip() or not self.replay_id.strip() or not self.metric.strip():
             raise ValueError("metric observation identifiers must not be empty")
-        if not isfinite(float(self.value)):
-            raise ValueError("metric observation must be finite")
+        object.__setattr__(self, "value", _finite_number(self.value, "metric observation"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,8 +86,10 @@ class MetricRule:
     def __post_init__(self) -> None:
         if not self.metric.strip():
             raise ValueError("metric must not be empty")
-        if not isfinite(float(self.max_regression)) or self.max_regression < 0:
-            raise ValueError("max_regression must be finite and non-negative")
+        if type(self.higher_is_better) is not bool:
+            raise ValueError("higher_is_better must be boolean")
+        regression = _finite_number(self.max_regression, "max_regression", non_negative=True)
+        object.__setattr__(self, "max_regression", regression)
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,10 +103,14 @@ class PromotionPolicy:
     def __post_init__(self) -> None:
         if not self.primary_metric.strip():
             raise ValueError("primary_metric must not be empty")
-        if not isfinite(float(self.minimum_improvement)) or self.minimum_improvement < 0:
-            raise ValueError("minimum_improvement must be finite and non-negative")
-        if self.minimum_replays < 1:
-            raise ValueError("minimum_replays must be at least 1")
+        improvement = _finite_number(
+            self.minimum_improvement, "minimum_improvement", non_negative=True
+        )
+        object.__setattr__(self, "minimum_improvement", improvement)
+        if type(self.minimum_replays) is not int or self.minimum_replays < 1:
+            raise ValueError("minimum_replays must be a positive integer")
+        if type(self.primary_higher_is_better) is not bool:
+            raise ValueError("primary_higher_is_better must be boolean")
         names = [rule.metric for rule in self.guardrails]
         if len(names) != len(set(names)):
             raise ValueError("guardrail metrics must be unique")
