@@ -187,6 +187,44 @@ def test_redirect_does_not_forward_set_cookie() -> None:
     assert observed == [("example.com", None), ("other.example", None)]
 
 
+def test_redirected_304_without_forwarded_validator_cannot_refresh_cached_source(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/plain", "ETag": '"one"'},
+                content=b"original trusted content",
+            )
+        if calls == 2:
+            assert request.headers["if-none-match"] == '"one"'
+            return httpx.Response(302, headers={"Location": "https://other.example/new"})
+        assert request.headers["host"] == "other.example"
+        assert request.headers.get("if-none-match") is None
+        return httpx.Response(304)
+
+    _, _, network, service = _service(tmp_path, handler=handler)
+    service.register_source(_source())
+    first = service.refresh_source("web-1")
+    original_digest = network.get_source("web-1").current_raw_sha256
+    second = service.refresh_source("web-1")
+
+    assert first.disposition is RefreshDisposition.CHANGED
+    assert second.disposition is RefreshDisposition.FAILED
+    assert second.error_code == "unexpected_not_modified"
+    assert calls == 3
+    assert network.snapshot_count("web-1") == 1
+    assert network.attempt_count("web-1") == 2
+    state = network.get_source("web-1")
+    assert state.freshness is FreshnessState.STALE
+    assert state.current_raw_sha256 == original_digest
+
+
 def test_host_allowlist_and_body_limit_fail_closed() -> None:
     calls = 0
 
