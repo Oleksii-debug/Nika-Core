@@ -402,9 +402,6 @@ class CaseBenchmarkResult:
             and self.total_tokens < self.input_tokens + self.output_tokens
         ):
             raise ValueError("total_tokens is smaller than known token components")
-        expected_passed = self.completion_succeeded and score >= evaluation_pass_score
-        if self.passed is not expected_passed:
-            raise ValueError("passed must match score and evaluation threshold")
         if self.error_code is not None and not any(
             self.error_code is member for member in ModelErrorCode
         ):
@@ -414,6 +411,9 @@ class CaseBenchmarkResult:
                 raise ValueError("successful completion cannot carry error_code")
             if self.response_sha256 is None:
                 raise ValueError("successful completion requires response_sha256")
+            expected_passed = score >= evaluation_pass_score
+            if self.passed is not expected_passed:
+                raise ValueError("passed must match score and evaluation threshold")
         else:
             if self.error_code is None:
                 raise ValueError("failed completion requires error_code")
