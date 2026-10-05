@@ -28,6 +28,9 @@ from nika_core.training_runtime import (
 )
 
 
+_TRAINER_JOB_FINGERPRINT = "9" * 64
+
+
 @pytest.fixture(autouse=True)
 def _windows_report_builder(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
@@ -60,7 +63,7 @@ def _candidate_manifest() -> dict[str, object]:
         "base_artifact_sha256": "a" * 64,
         "candidate_artifact_ref": "models/candidate/pilot",
         "consumed_materials_sha256": "1" * 64,
-        "job_fingerprint": "f" * 64,
+        "job_fingerprint": _TRAINER_JOB_FINGERPRINT,
         "model_dir_manifest_sha256": "2" * 64,
         "trainer_artifact_id": "3" * 64,
         "trainer_implementation_sha256": "4" * 64,
@@ -177,6 +180,7 @@ def _build_report(tmp_path: Path, payload: bytes = b"candidate") -> PhysicalTrai
     candidate = tmp_path / "adapter_model.safetensors"
     candidate.write_bytes(payload)
     return build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
         paused=_run_evidence(
             state=TrainingRunState.PAUSED,
             next_step=1,
@@ -239,6 +243,7 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     descriptor = _descriptor(candidate)
 
     report = build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
         paused=_run_evidence(
             state=TrainingRunState.PAUSED,
             next_step=1,
@@ -252,8 +257,11 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     )
 
     assert report.platform == "windows"
-    assert report.schema_version == 3
+    assert report.schema_version == 4
     assert report.completed_steps == 2
+    assert report.job_fingerprint == "f" * 64
+    assert report.trainer_job_fingerprint == _TRAINER_JOB_FINGERPRINT
+    assert report.job_fingerprint != report.trainer_job_fingerprint
     assert report.consumed_materials_sha256 == "1" * 64
     assert report.model_dir_manifest_sha256 == "2" * 64
     assert report.trainer_artifact_id == "3" * 64
@@ -308,6 +316,7 @@ def test_build_report_rejects_runtime_candidate_digest_mismatch(tmp_path: Path) 
 
     with pytest.raises(PhysicalTrainingPilotError, match="runtime evidence"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -328,6 +337,7 @@ def test_build_report_rejects_descriptor_digest_mismatch(tmp_path: Path) -> None
 
     with pytest.raises(PhysicalTrainingPilotError, match="verification failed"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -350,6 +360,7 @@ def test_build_report_rejects_restart_probe_without_durable_reopen(
 
     with pytest.raises(PhysicalTrainingPilotError, match="reopen"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -372,6 +383,7 @@ def test_build_report_requires_effect_free_restart_probe_reason(
 
     with pytest.raises(PhysicalTrainingPilotError, match="before admission"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -392,6 +404,7 @@ def test_build_report_rejects_restart_identity_drift(tmp_path: Path) -> None:
 
     with pytest.raises(PhysicalTrainingPilotError, match="job_fingerprint"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -424,6 +437,7 @@ def test_build_report_rejects_boolean_step_carrier(tmp_path: Path) -> None:
 
     with pytest.raises(PhysicalTrainingPilotError, match="step boundary"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=paused,
             restart_probe=_restart_probe(),
             completed=_completed_for(payload),
@@ -440,6 +454,7 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
 
     with pytest.raises(PhysicalTrainingPilotError, match="checkpoint"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -471,6 +486,7 @@ def test_build_report_rejects_candidate_manifest_identity_drift(
 
     with pytest.raises(PhysicalTrainingPilotError, match="job fingerprint"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -499,6 +515,7 @@ def test_build_report_rejects_candidate_manifest_reader_failure(
 
     with pytest.raises(PhysicalTrainingPilotError, match="manifest verification failed"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -536,6 +553,7 @@ def test_build_report_holds_candidate_stable_during_manifest_read(
     monkeypatch.setattr(pilot, "candidate_adapter_manifest", racing_reader)
 
     report = build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
         paused=_run_evidence(
             state=TrainingRunState.PAUSED,
             next_step=1,
@@ -619,6 +637,7 @@ def test_build_report_rejects_non_windows_builder(
 
     with pytest.raises(PhysicalTrainingPilotError, match="built on Windows"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=_run_evidence(
                 state=TrainingRunState.PAUSED,
                 next_step=1,
@@ -645,6 +664,7 @@ def test_build_report_requires_explicit_pause_reason(tmp_path: Path) -> None:
 
     with pytest.raises(PhysicalTrainingPilotError, match="explicit pause control"):
         build_physical_training_pilot_report(
+        trainer_job_fingerprint=_TRAINER_JOB_FINGERPRINT,
             paused=paused,
             restart_probe=_restart_probe(),
             completed=_completed_for(payload),
@@ -666,6 +686,7 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             scale_authorization_sha256=report.scale_authorization_sha256,
             execution_plan_sha256=report.execution_plan_sha256,
             job_fingerprint=report.job_fingerprint,
+            trainer_job_fingerprint=report.trainer_job_fingerprint,
             paused_checkpoint_id=report.paused_checkpoint_id,
             restart_checkpoint_id=report.restart_checkpoint_id,
             completed_checkpoint_id=report.completed_checkpoint_id,
@@ -719,6 +740,9 @@ def _install_runner_fakes(
         @property
         def execution_plan_sha256(self) -> str:
             return "e" * 64
+
+        def protocol_job_fingerprint(self, _: object) -> str:
+            return _TRAINER_JOB_FINGERPRINT
 
     class FakeSpec:
         max_steps = 2
