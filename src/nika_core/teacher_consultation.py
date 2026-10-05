@@ -120,6 +120,11 @@ class TeacherConsultationEvidence:
     request_fingerprint: str
     status: TeacherConsultationStatus
     privacy: PrivacyClass
+    temperature: float | None
+    max_request_chars: int
+    max_response_chars: int
+    timeout_seconds: float
+    max_observed_total_tokens: int | None
     request_chars: int
     response_chars: int | None
     response_sha256: str | None
@@ -134,7 +139,7 @@ class TeacherConsultationEvidence:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema": "nika.teacher-consultation-evidence:v1",
+            "schema": "nika.teacher-consultation-evidence:v2",
             "consultation_id": self.consultation_id,
             "provider_id": self.provider_id,
             "provider_kind": self.provider_kind.value,
@@ -142,6 +147,11 @@ class TeacherConsultationEvidence:
             "request_fingerprint": self.request_fingerprint,
             "status": self.status.value,
             "privacy": self.privacy.value,
+            "temperature": self.temperature,
+            "max_request_chars": self.max_request_chars,
+            "max_response_chars": self.max_response_chars,
+            "timeout_seconds": self.timeout_seconds,
+            "max_observed_total_tokens": self.max_observed_total_tokens,
             "request_chars": self.request_chars,
             "response_chars": self.response_chars,
             "response_sha256": self.response_sha256,
@@ -207,6 +217,7 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=status,
                     code=error.code,
                     retryable=error.retryable,
@@ -221,6 +232,7 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=TeacherConsultationStatus.FAILED,
                     code=ModelErrorCode.PROVIDER_ERROR,
                     retryable=False,
@@ -238,6 +250,7 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=TeacherConsultationStatus.FAILED,
                     code=ModelErrorCode.PROVIDER_ERROR,
                     retryable=False,
@@ -252,6 +265,7 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=TeacherConsultationStatus.FAILED,
                     code=ModelErrorCode.PROVIDER_ERROR,
                     retryable=False,
@@ -267,6 +281,7 @@ class TeacherConsultationService:
                     spec=spec,
                     request_chars=request_chars,
                     request_fingerprint=request_fingerprint,
+                    temperature=request.temperature,
                     status=TeacherConsultationStatus.FAILED,
                     code=ModelErrorCode.RESOURCE_LIMIT,
                     retryable=False,
@@ -287,6 +302,11 @@ class TeacherConsultationService:
             request_fingerprint=request_fingerprint,
             status=TeacherConsultationStatus.SUCCEEDED,
             privacy=spec.privacy,
+            temperature=request.temperature,
+            max_request_chars=spec.policy.max_request_chars,
+            max_response_chars=spec.policy.max_response_chars,
+            timeout_seconds=spec.policy.timeout_seconds,
+            max_observed_total_tokens=spec.policy.max_observed_total_tokens,
             request_chars=request_chars,
             response_chars=response_chars,
             response_sha256=response_sha256,
@@ -418,6 +438,7 @@ def _failure_evidence(
     spec: TeacherConsultationSpec,
     request_chars: int,
     request_fingerprint: str,
+    temperature: float | None,
     status: TeacherConsultationStatus,
     code: ModelErrorCode,
     retryable: bool,
@@ -431,6 +452,11 @@ def _failure_evidence(
         request_fingerprint=request_fingerprint,
         status=status,
         privacy=spec.privacy,
+        temperature=temperature,
+        max_request_chars=spec.policy.max_request_chars,
+        max_response_chars=spec.policy.max_response_chars,
+        timeout_seconds=spec.policy.timeout_seconds,
+        max_observed_total_tokens=spec.policy.max_observed_total_tokens,
         request_chars=request_chars,
         response_chars=None,
         response_sha256=None,
