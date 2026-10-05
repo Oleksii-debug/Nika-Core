@@ -345,6 +345,52 @@ class _FakeModel:
         target = Path(path)
         target.mkdir(parents=True, exist_ok=True)
         (target / "adapter_model.safetensors").write_bytes(b"real-adapter-weights")
+        (target / "adapter_config.json").write_text(
+            '{"base_model_name_or_path":"C:/private/model","r":4}',
+            encoding="utf-8",
+        )
+
+
+
+
+class _FakeSafeTensorReader:
+    def __init__(self, path: str) -> None:
+        self._path = Path(path)
+
+    def __enter__(self) -> "_FakeSafeTensorReader":
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        return None
+
+    def keys(self) -> list[str]:
+        return ["lora.weight"]
+
+    def get_tensor(self, name: str) -> bytes:
+        assert name == "lora.weight"
+        return b"tensor-bytes"
+
+
+def _fake_safe_open(path: str, *, framework: str, device: str) -> _FakeSafeTensorReader:
+    assert framework == "pt"
+    assert device == "cpu"
+    return _FakeSafeTensorReader(path)
+
+
+def _fake_safe_save_file(
+    tensors: dict[str, object],
+    path: str,
+    *,
+    metadata: dict[str, str],
+) -> None:
+    assert list(tensors) == ["lora.weight"]
+    payload = json.dumps(
+        {"metadata": metadata, "tensor_names": list(tensors)},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    Path(path).write_bytes(payload)
 
 
 class _FakeModelFactory:
@@ -431,6 +477,8 @@ def _fake_stack() -> tuple[object, ...]:
         _FakePeftModel,
         _FakeTaskType,
         _fake_get_peft_model,
+        _fake_safe_open,
+        _fake_safe_save_file,
         _FakeModelFactory,
         _FakeTokenizerFactory,
         _FakeCollator,
@@ -471,8 +519,11 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
         config.output_root,
         second.candidate_artifact_ref,
     )
-    assert candidate.read_bytes() == b"real-adapter-weights"
-    assert candidate_sha256 == _sha256(b"real-adapter-weights")
+    candidate_bytes = candidate.read_bytes()
+    assert b"nika_adapter_manifest" in candidate_bytes
+    assert candidate_sha256 == _sha256(candidate_bytes)
+    assert b"models/base" in candidate_bytes
+    assert b"C:/private/model" not in candidate_bytes
     assert second_state["checkpoint_step"] == 2
 
 
