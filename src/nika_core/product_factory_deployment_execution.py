@@ -300,6 +300,13 @@ class DeploymentExecutionCoordinator:
                 raise DeploymentExecutionError("invalid snapshot operation state")
             if type(record.attempt) is not int or record.attempt < 0:
                 raise DeploymentExecutionError("invalid snapshot operation attempt")
+            if (
+                (record.state is OperationState.PENDING and record.attempt != 0)
+                or (record.state is not OperationState.PENDING and record.attempt == 0)
+            ):
+                raise DeploymentExecutionError(
+                    "snapshot operation state does not match attempt count"
+                )
             if type(record.evidence_refs) is not tuple or any(
                 type(ref) is not str or not ref.strip() for ref in record.evidence_refs
             ):
