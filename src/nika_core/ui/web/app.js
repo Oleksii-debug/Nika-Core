@@ -106,6 +106,7 @@
   // One outstanding durable task command per UI session: a second click must not mint a new request ID.
   const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
   const inFlightActions = new Set();
+  let keymapMutationPending = false;
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let teamStateSignature = null;
@@ -646,6 +647,48 @@
     }
   }
 
+  async function mutateKeymap(operation, focusId = null, failureTarget = null) {
+    if (keymapMutationPending) return;
+    keymapMutationPending = true;
+    try {
+      let response;
+      try {
+        response = await operation();
+      } catch {
+        const uncertain = "Немає підтвердження зміни клавіш. Перечитайте карту перед повтором.";
+        announce(uncertain, true);
+        appendLog(uncertain);
+        failureTarget?.focus?.();
+        return;
+      }
+      if (!response || typeof response.ok !== "boolean") {
+        const uncertain = "Міст повернув непідтверджену зміну клавіш. Перечитайте карту.";
+        announce(uncertain, true);
+        appendLog(uncertain);
+        failureTarget?.focus?.();
+        return;
+      }
+      const message = typeof response.message === "string" && response.message
+        ? response.message : (response.ok ? "Зміни збережено." : "Зміну відхилено.");
+      announce(message, !response.ok);
+      appendLog(message);
+      if (!response.ok) {
+        failureTarget?.focus?.();
+        return;
+      }
+      try {
+        if (!await refreshKeymap()) throw new Error("keymap unavailable");
+      } catch {
+        actionsReady = false;
+        announce("Зміну підтверджено, але карту клавіш не вдалося перечитати.", true);
+        return;
+      }
+      if (focusId) focusElementById(focusId);
+    } finally {
+      keymapMutationPending = false;
+    }
+  }
+
   async function refreshKeymap() {
     if (!globalThis.pywebview?.api?.list_actions) {
       actionsReady = false;
@@ -680,12 +723,11 @@
           : `Зберегти комбінацію для ${accessibleActionLabel}`,
       );
       save.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(saveFocusId);
-        } else input.focus();
+        await mutateKeymap(
+          () => globalThis.pywebview.api.set_binding(action.action_id, input.value.trim() || null),
+          saveFocusId,
+          input,
+        );
       });
       const restore = document.createElement("button");
       const restoreFocusId = keymapControlId(action.action_id, "restore");
@@ -697,12 +739,11 @@
         `Відновити комбінацію за замовчуванням для ${accessibleActionLabel}`,
       );
       restore.addEventListener("click", async () => {
-        const response = await globalThis.pywebview.api.restore_default(action.action_id);
-        announce(response.message, !response.ok);
-        if (response.ok) {
-          await refreshKeymap();
-          focusElementById(restoreFocusId);
-        }
+        await mutateKeymap(
+          () => globalThis.pywebview.api.restore_default(action.action_id),
+          restoreFocusId,
+          restore,
+        );
       });
       controlCell.append(save, document.createTextNode(" "), restore);
       row.append(labelCell, bindingCell, controlCell);
@@ -754,19 +795,31 @@
   }
 
   document.getElementById("keymap-export").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.export_keymap();
-    announce(response.message, !response.ok);
-    if (response.ok) {
-      keymapJson.value = response.data;
-      keymapJson.focus();
+    if (keymapMutationPending) return;
+    try {
+      const response = await globalThis.pywebview.api.export_keymap();
+      if (!response || typeof response.ok !== "boolean"
+          || (response.ok && typeof response.data !== "string")) {
+        throw new Error("invalid keymap export acknowledgement");
+      }
+      const message = typeof response.message === "string" && response.message
+        ? response.message : (response.ok ? "Карту експортовано." : "Не вдалося експортувати карту.");
+      announce(message, !response.ok);
+      if (response.ok) {
+        keymapJson.value = response.data;
+        keymapJson.focus();
+      }
+    } catch {
+      announce("Не вдалося підтвердити експорт карти клавіш. Повторіть після перевірки мосту.", true);
     }
   });
 
   document.getElementById("keymap-import").addEventListener("click", async () => {
-    const response = await globalThis.pywebview.api.import_keymap(keymapJson.value);
-    announce(response.message, !response.ok);
-    if (response.ok) await refreshKeymap();
-    else keymapJson.focus();
+    await mutateKeymap(
+      () => globalThis.pywebview.api.import_keymap(keymapJson.value),
+      null,
+      keymapJson,
+    );
   });
 
   document.addEventListener("click", (event) => {
