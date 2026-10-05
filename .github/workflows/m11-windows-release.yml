@@ -28,6 +28,7 @@ on:
       - "tests/test_v01_packaged_cloud_authority_composition.py"
       - "tests/test_v01_packaged_runtime_cloud_authority.py"
       - "tests/test_windows_cloud_model_permission.py"
+      - "tests/test_windows_cloud_settings_json_composition.py"
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
@@ -65,6 +66,7 @@ on:
       - "tests/test_v01_packaged_cloud_authority_composition.py"
       - "tests/test_v01_packaged_runtime_cloud_authority.py"
       - "tests/test_windows_cloud_model_permission.py"
+      - "tests/test_windows_cloud_settings_json_composition.py"
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
       - "scripts/v01_autostart_uia_proof.ps1"
@@ -127,6 +129,7 @@ jobs:
           tests/test_v01_packaged_cloud_authority_composition.py
           tests/test_v01_packaged_runtime_cloud_authority.py
           tests/test_windows_cloud_model_permission.py
+          tests/test_windows_cloud_settings_json_composition.py
           -q
       - name: Build standalone one-dir Windows candidate, notices and manifest
         shell: pwsh
