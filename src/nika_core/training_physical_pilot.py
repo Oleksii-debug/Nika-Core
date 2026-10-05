@@ -967,6 +967,8 @@ def run_physical_training_pilot(
         raise TypeError("candidate_descriptor_factory must be callable")
     if canonical_spec.max_steps < 2:
         _fail("physical pilot requires max_steps >= 2")
+    if worker.last_accepted_consumed_materials_sha256 is not None:
+        _fail("initial worker already carries accepted consumed-material evidence")
     initial_execution_plan_sha256 = _require_sha256(
         worker.execution_plan_sha256,
         name="initial worker execution_plan_sha256",
