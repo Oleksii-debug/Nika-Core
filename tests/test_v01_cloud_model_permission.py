@@ -1417,3 +1417,44 @@ def test_injected_live_grant_cannot_bypass_private_data_setting(
     queue.transition(record.task_id, TaskState.RUNNING)
 
     assert service.execution_authority_for_task(record.task_id) is None
+
+
+def test_recovered_reconsent_dates_new_grant_after_confirmation(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+
+    def confirm(request: CloudModelGrantRequest) -> bool:
+        prompts.append(request)
+        if len(prompts) == 2:
+            instant[0] += timedelta(hours=25)
+        return True
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    instant[0] = NOW + timedelta(hours=25)
+
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert instant[0] == NOW + timedelta(hours=50)
+    assert len(prompts) == 2
+    permission_id = service._bound_permission_id(record.task_id, strict=True)
+    assert permission_id is not None
+    permission = service._permissions.get(permission_id)
+    assert permission is not None
+    assert permission.granted_at == instant[0]
+    assert permission.expires_at == instant[0] + timedelta(hours=24)
+    assert service.execution_authority_for_task(record.task_id) is not None

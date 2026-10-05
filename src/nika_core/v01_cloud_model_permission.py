@@ -143,7 +143,6 @@ class V01CloudModelPermissionService:
         self._confirm_and_grant(
             current,
             selection,
-            now=now,
             expected_previous_id=previous_id,
         )
 
@@ -167,7 +166,6 @@ class V01CloudModelPermissionService:
         self._confirm_and_grant(
             current,
             selection,
-            now=now,
             expected_previous_id=previous_id,
         )
 
@@ -242,7 +240,6 @@ class V01CloudModelPermissionService:
         selection: ModelSelection,
         *,
         expected_previous_id: str | None,
-        now: datetime | None = None,
     ) -> None:
         request = self._grant_request(record, selection)
         confirmation_request = CloudModelGrantRequest(
@@ -268,7 +265,7 @@ class V01CloudModelPermissionService:
                 "Зовнішній API для цього завдання не дозволено; завдання не запущено."
             )
 
-        instant = self._utc_now() if now is None else now
+        instant = self._utc_now()
         permission_id = self._new_permission_id(record.task_id)
         try:
             with self._permissions.grant_transaction(
