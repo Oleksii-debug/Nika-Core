@@ -214,6 +214,34 @@ def test_model_directory_manifest_binds_content_and_paths(tmp_path: Path) -> Non
     assert first != second
 
 
+def test_model_directory_manifest_rejects_path_swap_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_dir = tmp_path / "model"
+    model_dir.mkdir()
+    source = model_dir / "config.json"
+    source.write_text('{"a":1}', encoding="utf-8")
+    original = model_dir / "config.original.json"
+    real_open = peft.os.open
+    swapped = False
+
+    def swapping_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+        nonlocal swapped
+        if Path(path) == source and not swapped:
+            swapped = True
+            source.replace(original)
+            source.write_text('{"a":2}', encoding="utf-8")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(peft.os, "open", swapping_open)
+
+    with pytest.raises(ValueError, match="changed before hashing"):
+        peft.model_directory_manifest_sha256(model_dir)
+
+    assert swapped is True
+
+
 def test_model_directory_snapshot_detaches_live_source(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
