@@ -562,7 +562,10 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             ) from exc
 
-        stdout = self._execute(request_bytes + b"\n")
+        stdout = self._execute(
+            request_bytes + b"\n",
+            expected_command_records=command_records,
+        )
         response = self._parse_response(stdout, expected_step_id=current_step_id)
         completed = response["completed"]
         candidate_sha256 = response["candidate_sha256"]
@@ -777,7 +780,19 @@ class SubprocessTrainingWorker:
         except (OSError, ValueError):
             return
 
-    def _execute(self, request_bytes: bytes) -> bytes:
+    @staticmethod
+    def _reap_process(process: subprocess.Popen[bytes]) -> None:
+        try:
+            process.wait(timeout=_STREAM_JOIN_TIMEOUT_SECONDS)
+        except (OSError, subprocess.TimeoutExpired):
+            return
+
+    def _execute(
+        self,
+        request_bytes: bytes,
+        *,
+        expected_command_records: Mapping[int, ArtifactRecord],
+    ) -> bytes:
         try:
             process = subprocess.Popen(
                 self._command,
@@ -805,10 +820,23 @@ class SubprocessTrainingWorker:
 
         if process.stdin is None or process.stdout is None:
             self._kill_process(process)
+            self._reap_process(process)
             raise _error(
                 "training_subprocess_streams_unavailable",
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             )
+
+        try:
+            self._verify_command_artifacts(expected_command_records)
+        except TrainingSubprocessError as exc:
+            self._close_pipe(process.stdin)
+            self._close_pipe(process.stdout)
+            self._kill_process(process)
+            self._reap_process(process)
+            raise _error(
+                "command_artifact_changed_after_process_start",
+                effect=TrainingWorkerFailureEffect.UNKNOWN,
+            ) from exc
 
         stdin = process.stdin
         stdout = process.stdout
