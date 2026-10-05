@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -722,6 +723,9 @@ def _decode_completion_result(
     if not isinstance(raw, dict):
         raise BatchCursorStateError("completed effect result is malformed")
 
+    if _COMPLETION_ENVELOPE_KEY in raw and set(raw) != {_COMPLETION_ENVELOPE_KEY}:
+        raise BatchCursorStateError("completed effect envelope is ambiguous")
+
     if set(raw) == {_COMPLETION_ENVELOPE_KEY}:
         envelope = raw[_COMPLETION_ENVELOPE_KEY]
         if not isinstance(envelope, dict) or set(envelope) != {
@@ -745,15 +749,74 @@ def _decode_completion_result(
     return _json_copy(raw), None
 
 
+_MAX_VALUE_BYTES = 1_048_576
+_MAX_VALUE_NODES = 10_000
+_MAX_VALUE_DEPTH = 32
+_MAX_INTEGER_BITS = 4_096
+
+
+def _validate_json_value(value: Any) -> None:
+    # Inspect before serializing: an untrusted cyclic or very wide structure
+    # must not consume unbounded recursion or reach the durable effect ledger.
+    active: set[int] = set()
+    stack: list[tuple[Any, int, bool]] = [(value, 0, False)]
+    nodes = 0
+    text_bytes = 0
+    while stack:
+        item, depth, leaving = stack.pop()
+        if leaving:
+            active.remove(id(item))
+            continue
+        nodes += 1
+        if nodes > _MAX_VALUE_NODES or depth > _MAX_VALUE_DEPTH:
+            raise ValueError("batch cursor value exceeds structural limits")
+        if type(item) in (dict, list):
+            identity = id(item)
+            if identity in active:
+                raise ValueError("batch cursor value contains a cycle")
+            active.add(identity)
+            stack.append((item, depth, True))
+            if type(item) is dict:
+                for key, child in item.items():
+                    if type(key) is not str:
+                        raise TypeError("batch cursor JSON keys must be text")
+                    text_bytes += len(key.encode("utf-8"))
+                    if text_bytes > _MAX_VALUE_BYTES:
+                        raise ValueError("batch cursor value exceeds the byte limit")
+                    stack.append((child, depth + 1, False))
+            else:
+                stack.extend((child, depth + 1, False) for child in item)
+        elif type(item) is str:
+            if len(item) > _MAX_VALUE_BYTES:
+                raise ValueError("batch cursor value exceeds the byte limit")
+            text_bytes += len(item.encode("utf-8"))
+            if text_bytes > _MAX_VALUE_BYTES:
+                raise ValueError("batch cursor value exceeds the byte limit")
+        elif type(item) is int:
+            if item.bit_length() > _MAX_INTEGER_BITS:
+                raise ValueError("batch cursor integer exceeds the bit limit")
+        elif type(item) is float:
+            if not math.isfinite(item):
+                raise ValueError("batch cursor numbers must be finite")
+        elif item is not None and type(item) is not bool:
+            raise TypeError("batch cursor values must be JSON-native")
+
+
 def _json_copy(value: Any) -> Any:
     try:
-        return json.loads(_canonical_json(value))
-    except (TypeError, ValueError) as exc:
-        raise BatchCursorStateError("batch cursor values must be JSON-serializable") from exc
+        _validate_json_value(value)
+        serialized = _canonical_json(value)
+        if len(serialized.encode("utf-8")) > _MAX_VALUE_BYTES:
+            raise ValueError("batch cursor value exceeds the byte limit")
+        return json.loads(serialized)
+    except (TypeError, ValueError, UnicodeError, RecursionError, OverflowError) as exc:
+        raise BatchCursorStateError("batch cursor values must be bounded JSON") from exc
 
 
 def _canonical_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    )
 
 
 def _sha256(value: str) -> str:
@@ -761,9 +824,15 @@ def _sha256(value: str) -> str:
 
 
 def _required(name: str, value: str) -> str:
+    if type(value) is not str:
+        raise TypeError(f"{name} must be text")
     result = value.strip()
     if not result:
         raise ValueError(f"{name} must not be empty")
+    try:
+        result.encode("utf-8")
+    except UnicodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
     return result
 
 
