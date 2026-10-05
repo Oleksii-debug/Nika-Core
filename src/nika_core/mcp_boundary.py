@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import re
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ _MAX_MCP_SEGMENT_CHARS = 128
 _MAX_MCP_CURSOR_BYTES = 4096
 _MAX_MCP_LIST_PAGES = 1000
 _MAX_MCP_ARGUMENT_DEPTH = 64
+_MAX_MCP_ARGUMENT_NODES = 10_000
+_MAX_MCP_ARGUMENT_BYTES = 1_048_576
+_MAX_MCP_INTEGER_BITS = 4096
 _MCP_TOOL_NAME_RE = re.compile(r"[A-Za-z0-9._-]+")
 
 
@@ -78,25 +82,61 @@ def _exact_tool_risk(value: object) -> ToolRisk:
     return value
 
 
+def _charge_mcp_argument_budget(
+    budget: list[int], *, nodes: int = 0, encoded_bytes: int = 0
+) -> None:
+    if nodes > budget[0]:
+        raise ValueError("MCP arguments exceed safe node limit")
+    if encoded_bytes > budget[1]:
+        raise ValueError("MCP arguments exceed safe UTF-8 byte limit")
+    budget[0] -= nodes
+    budget[1] -= encoded_bytes
+
+
+def _mcp_scalar_bytes(value: str | int | float | bool | None) -> int:
+    if type(value) is str and len(value) > _MAX_MCP_ARGUMENT_BYTES:
+        raise ValueError("MCP arguments exceed safe UTF-8 byte limit")
+    return len(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        .encode("utf-8")
+    )
+
+
 def _snapshot_mcp_json(
     value: object,
     *,
     path: str,
     depth: int = 0,
     active: set[int] | None = None,
+    budget: list[int] | None = None,
 ) -> object:
     if depth > _MAX_MCP_ARGUMENT_DEPTH:
         raise ValueError("MCP arguments exceed safe nesting depth")
-    if value is None or type(value) is bool or type(value) is int:
+    if budget is None:
+        budget = [_MAX_MCP_ARGUMENT_NODES, _MAX_MCP_ARGUMENT_BYTES]
+    _charge_mcp_argument_budget(budget, nodes=1)
+
+    if value is None or type(value) is bool:
+        _charge_mcp_argument_budget(budget, encoded_bytes=_mcp_scalar_bytes(value))
+        return value
+    if type(value) is int:
+        if value.bit_length() > _MAX_MCP_INTEGER_BITS:
+            raise ValueError("MCP arguments exceed safe integer size")
+        _charge_mcp_argument_budget(budget, encoded_bytes=_mcp_scalar_bytes(value))
         return value
     if type(value) is float:
         if not math.isfinite(value):
             raise ValueError(f"{path} must not contain NaN or infinity")
+        _charge_mcp_argument_budget(budget, encoded_bytes=_mcp_scalar_bytes(value))
         return value
     if type(value) is str:
-        return _exact_utf8_text(value, field=path)
+        text = _exact_utf8_text(value, field=path)
+        _charge_mcp_argument_budget(budget, encoded_bytes=_mcp_scalar_bytes(text))
+        return text
     if type(value) is not dict and type(value) is not list:
         raise TypeError(f"{path} must contain only exact JSON values")
+    if len(value) > _MAX_MCP_ARGUMENT_NODES:
+        raise ValueError("MCP arguments exceed safe node limit")
 
     if active is None:
         active = set()
@@ -104,26 +144,35 @@ def _snapshot_mcp_json(
     if identity in active:
         raise ValueError("MCP arguments must not contain recursive containers")
     active.add(identity)
+    _charge_mcp_argument_budget(budget, encoded_bytes=2)
     try:
         if type(value) is list:
-            return [
-                _snapshot_mcp_json(
-                    item,
-                    path=f"{path}[{index}]",
-                    depth=depth + 1,
-                    active=active,
+            snapshot_items: list[object] = []
+            for index, item in enumerate(value):
+                if index:
+                    _charge_mcp_argument_budget(budget, encoded_bytes=1)
+                snapshot_items.append(
+                    _snapshot_mcp_json(
+                        item,
+                        path=f"{path}[{index}]",
+                        depth=depth + 1,
+                        active=active,
+                        budget=budget,
+                    )
                 )
-                for index, item in enumerate(value)
-            ]
+            return snapshot_items
 
         snapshot: dict[str, object] = {}
         for index, (raw_key, item) in enumerate(value.items()):
             key = _exact_utf8_text(raw_key, field=f"{path} key {index}")
+            key_bytes = _mcp_scalar_bytes(key) + 1 + (1 if index else 0)
+            _charge_mcp_argument_budget(budget, encoded_bytes=key_bytes)
             snapshot[key] = _snapshot_mcp_json(
                 item,
-                path=f"{path}.{key}",
+                path=f"{path}[{index}]",
                 depth=depth + 1,
                 active=active,
+                budget=budget,
             )
         return snapshot
     finally:

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from types import SimpleNamespace
 from typing import Self
 
 import pytest
 from mcp.server import MCPServer
 
-from nika_core.mcp_boundary import MCPClientAdapter, MCPServerConfig
+from nika_core.mcp_boundary import (
+    MCPClientAdapter,
+    MCPServerConfig,
+    _snapshot_mcp_arguments,
+)
 from nika_core.tools import ToolCall, ToolResult, ToolRisk
 
 
@@ -558,3 +563,64 @@ def test_mcp_call_rejects_recursive_nested_argument_before_transport() -> None:
             )
         )
 
+
+
+@pytest.mark.parametrize(
+    ("arguments", "error"),
+    [
+        ({"value": "x" * 1_048_576}, "safe UTF-8 byte limit"),
+        ({"value": [0] * 10_001}, "safe node limit"),
+        ({"value": 1 << 4096}, "safe integer size"),
+        ({"value": "\n" * 200_000}, "safe UTF-8 byte limit"),
+        ({"x" * 1_048_576: "small"}, "safe UTF-8 byte limit"),
+    ],
+)
+def test_mcp_rejects_excessive_argument_evidence_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+    arguments: dict[str, object],
+    error: str,
+) -> None:
+    def forbidden_client(_target: object) -> None:
+        raise AssertionError("invalid arguments must not open MCP transport")
+
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", forbidden_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+    with pytest.raises(ValueError, match=error):
+        asyncio.run(
+            adapter.call(
+                ToolCall(
+                    call_id="mcp-budget-negative",
+                    tool_id="mcp:safety:publish",
+                    arguments=arguments,
+                )
+            )
+        )
+
+
+def test_mcp_argument_budget_accepts_exact_byte_and_node_boundaries() -> None:
+    overhead = len('{"value":""}'.encode("utf-8"))
+    value = "x" * (1_048_576 - overhead)
+    payload = {"value": value}
+    assert len(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    ) == 1_048_576
+    assert _snapshot_mcp_arguments(payload) == payload
+
+    bounded_nodes = {"value": [0] * (10_000 - 2)}
+    assert _snapshot_mcp_arguments(bounded_nodes) == bounded_nodes
+    assert _snapshot_mcp_arguments({"value": 1 << 4095}) == {"value": 1 << 4095}
+    assert _snapshot_mcp_arguments({"ключ": "значення"}) == {"ключ": "значення"}
+
+
+def test_mcp_argument_budget_counts_escaped_json_bytes() -> None:
+    # Newlines occupy two bytes (backslash + n) in the canonical JSON encoding.
+    payload = {"value": "\n" * 524_282}
+    assert _snapshot_mcp_arguments(payload) == payload
+    with pytest.raises(ValueError, match="safe UTF-8 byte limit"):
+        _snapshot_mcp_arguments({"value": "\n" * 524_283})
