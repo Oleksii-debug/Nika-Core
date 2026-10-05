@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
 
+_SQLITE_MAX_INT64 = (1 << 63) - 1
+
 
 @dataclass(frozen=True, slots=True)
 class AgentDefinition:
@@ -16,8 +18,8 @@ class AgentDefinition:
     def __post_init__(self) -> None:
         if not self.agent_id.strip():
             raise ValueError("agent_id must not be empty")
-        if self.version < 1:
-            raise ValueError("version must be >= 1")
+        if type(self.version) is not int or not 1 <= self.version <= _SQLITE_MAX_INT64:
+            raise ValueError("version must be a positive SQLite-sized integer")
         if not self.name.strip():
             raise ValueError("name must not be empty")
 
@@ -53,7 +55,7 @@ class AgentRegistry:
                 "ORDER BY version DESC LIMIT 1",
                 (definition.agent_id,),
             ).fetchone()
-            if row is not None and definition.version <= int(row["version"]):
+            if row is not None and definition.version <= _stored_version(row["version"]):
                 raise ValueError("agent version must increase")
             conn.execute(
                 "INSERT INTO agents(agent_id, version, name, goal, created_at) VALUES (?, ?, ?, ?, ?)",
@@ -83,7 +85,7 @@ class AgentRegistry:
                 "ORDER BY a.agent_id"
             ).fetchall()
         return tuple(
-            AgentDefinition(row["agent_id"], row["name"], int(row["version"]), row["goal"])
+            AgentDefinition(row["agent_id"], row["name"], _stored_version(row["version"]), row["goal"])
             for row in rows
         )
 
@@ -98,4 +100,10 @@ class AgentRegistry:
             ).fetchone()
         if row is None:
             return None
-        return AgentDefinition(row["agent_id"], row["name"], int(row["version"]), row["goal"])
+        return AgentDefinition(row["agent_id"], row["name"], _stored_version(row["version"]), row["goal"])
+
+
+def _stored_version(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= _SQLITE_MAX_INT64:
+        raise ValueError("invalid persisted agent version")
+    return value
