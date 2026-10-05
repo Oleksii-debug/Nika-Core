@@ -9,7 +9,9 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_packaged_journey import (
     PackagedProductJourneyError,
     PackagedProductSelectionStore,
+    packaged_current_product_command,
     packaged_product_reopen_target,
+    product_project_identity,
 )
 
 
@@ -115,3 +117,32 @@ def test_packaged_router_rejects_nontext_or_malformed_commands_before_routing(
     with pytest.raises(PackagedProductJourneyError, match="Команда"):
         router.create({"command": invalid})
     assert router.active_project_id is None
+
+class _HostileDirectHelperText(str):
+    def split(self, *args: object, **kwargs: object) -> list[str]:
+        del args, kwargs
+        raise AssertionError("direct helper must not call untrusted string methods")
+
+
+@pytest.mark.parametrize(
+    "helper",
+    (product_project_identity, packaged_product_reopen_target, packaged_current_product_command),
+)
+@pytest.mark.parametrize(
+    "command",
+    (
+        None,
+        17,
+        False,
+        ["Створи застосунок"],
+        _HostileDirectHelperText("Створи застосунок"),
+        type("PlainHelperSubclass", (str,), {})("Створи застосунок"),
+    ),
+)
+def test_direct_product_helpers_reject_noncanonical_text_before_methods(
+    helper: object,
+    command: object,
+) -> None:
+    with pytest.raises(PackagedProductJourneyError, match="звичайним текстом"):
+        helper(command)  # type: ignore[operator]
+
