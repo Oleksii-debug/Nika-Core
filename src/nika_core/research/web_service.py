@@ -180,7 +180,7 @@ class HttpResearchService:
         )
         try:
             self._blobs.resolve(artifact)
-        except (BlobStoreError, OSError, RuntimeError, ValueError):
+        except (BlobStoreError, OSError, RuntimeError, TypeError, ValueError):
             return False
         return True
 

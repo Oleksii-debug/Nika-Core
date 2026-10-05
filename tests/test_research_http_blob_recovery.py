@@ -1,5 +1,6 @@
 """A persisted HTTP digest must not outrank the corresponding raw blob on disk."""
 
+import sqlite3
 from pathlib import Path
 
 import httpx
@@ -80,7 +81,9 @@ def test_missing_raw_blob_is_refetched_without_validator_and_restored(
     assert network.attempt_count("web-1") == 2
 
 
-@pytest.mark.parametrize("corruption", ["wrong_bytes", "wrong_metadata"])
+@pytest.mark.parametrize(
+    "corruption", ["wrong_bytes", "wrong_metadata", "wrong_metadata_type"]
+)
 def test_corrupt_cached_blob_is_not_claimed_current_after_refetch(
     tmp_path: Path, corruption: str,
 ) -> None:
@@ -88,10 +91,15 @@ def test_corrupt_cached_blob_is_not_claimed_current_after_refetch(
     if corruption == "wrong_bytes":
         path.write_bytes(b"x" * len(_BODY))
     else:
+        bad_path = (
+            "nonexistent/artifact"
+            if corruption == "wrong_metadata"
+            else sqlite3.Binary(b"\\xff")
+        )
         with store.connection() as conn:
             conn.execute(
                 "UPDATE corpus_artifacts SET storage_relpath=? WHERE raw_sha256=?",
-                ("nonexistent/artifact", digest),
+                (bad_path, digest),
             )
 
     second = service.refresh_source("web-1")
