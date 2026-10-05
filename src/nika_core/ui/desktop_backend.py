@@ -99,6 +99,7 @@ class DesktopBackend:
         audit: AuditLog,
         runtime: AgentRuntimePort | None = None,
         prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
+        admit_created_task: Callable[[TaskRecord], None] | None = None,
         autostart_service: WindowsAutostartService | None = None,
     ) -> None:
         self._queue = queue
@@ -108,6 +109,7 @@ class DesktopBackend:
         self._coordinator = TaskRuntimeCoordinator(queue, audit)
         self._runtime = runtime or ReferenceRuntime()
         self._prepare_task_payload = prepare_task_payload
+        self._admit_created_task = admit_created_task
         self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.RLock()
@@ -154,6 +156,14 @@ class DesktopBackend:
             agent_id=_DEFAULT_AGENT_ID,
             payload=task_payload,
         )
+        try:
+            if self._admit_created_task is not None:
+                self._admit_created_task(record)
+            if self._queue.get(record.task_id).state is not TaskState.CREATED:
+                raise RuntimeError("task admission changed task state before READY")
+        except BaseException:
+            self._cancel_rejected_admission(record.task_id)
+            raise
         self._queue.transition(record.task_id, TaskState.READY)
         try:
             self._schedule_start(record.task_id, command)
@@ -664,6 +674,24 @@ class DesktopBackend:
             # Never replace the original submission failure with cleanup failure.
             _LOGGER.warning(
                 "Desktop coroutine cleanup failed; exception_type=%s",
+                type(exc).__name__,
+            )
+
+    def _cancel_rejected_admission(self, task_id: str) -> None:
+        """Fail closed before runtime dispatch when created-task admission is rejected."""
+
+        try:
+            if self._queue.get(task_id).state is TaskState.CREATED:
+                self._queue.transition(task_id, TaskState.CANCELLED)
+            self._audit.append(
+                event_type="desktop.task_admission_rejected",
+                entity_type="task",
+                entity_id=task_id,
+                payload={"runtime_id": self._runtime.runtime_id},
+            )
+        except BaseException as exc:
+            _LOGGER.error(
+                "Desktop task-admission reconciliation failed; exception_type=%s",
                 type(exc).__name__,
             )
 
