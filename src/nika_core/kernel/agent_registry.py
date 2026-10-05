@@ -85,7 +85,9 @@ class AgentRegistry:
                 "ORDER BY a.agent_id"
             ).fetchall()
         return tuple(
-            AgentDefinition(row["agent_id"], row["name"], _stored_version(row["version"]), row["goal"])
+            AgentDefinition(
+                row["agent_id"], row["name"], _stored_version(row["version"]), row["goal"]
+            )
             for row in rows
         )
 
@@ -100,7 +102,9 @@ class AgentRegistry:
             ).fetchone()
         if row is None:
             return None
-        return AgentDefinition(row["agent_id"], row["name"], _stored_version(row["version"]), row["goal"])
+        return AgentDefinition(
+            row["agent_id"], row["name"], _stored_version(row["version"]), row["goal"]
+        )
 
 
 def _stored_version(value: object) -> int:
