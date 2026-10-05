@@ -159,6 +159,7 @@ class ToolEffectReservation:
     task_id: str | None = None
     operation_type: str | None = None
     input_fingerprint: str | None = None
+    reservation_generation: str | None = None
     created_at: str | None = None
 
 
@@ -231,15 +232,20 @@ class ToolEffectGuard:
             # ToolExecutor will convert this finalize failure into UNCERTAIN.
             raise ValueError("durable tool result must be JSON-compatible") from exc
 
-        task_id, operation_type, input_fingerprint, created_at = self._reservation_identity(
-            reservation
-        )
+        (
+            task_id,
+            operation_type,
+            input_fingerprint,
+            reservation_generation,
+            created_at,
+        ) = self._reservation_identity(reservation)
         try:
             self._ledger.complete_pending_if_matches(
                 operation_key=reservation.operation_key,
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
+                reservation_generation=reservation_generation,
                 created_at=created_at,
                 result={"completed": True, "output": output},
             )
@@ -249,15 +255,20 @@ class ToolEffectGuard:
             ) from exc
 
     def mark_uncertain(self, reservation: ToolEffectReservation) -> None:
-        task_id, operation_type, input_fingerprint, created_at = self._reservation_identity(
-            reservation
-        )
+        (
+            task_id,
+            operation_type,
+            input_fingerprint,
+            reservation_generation,
+            created_at,
+        ) = self._reservation_identity(reservation)
         try:
             self._ledger.mark_pending_uncertain_if_matches(
                 operation_key=reservation.operation_key,
                 task_id=task_id,
                 operation_type=operation_type,
                 input_fingerprint=input_fingerprint,
+                reservation_generation=reservation_generation,
                 created_at=created_at,
             )
         except (IdempotencyConflictError, KeyError) as exc:
@@ -277,27 +288,36 @@ class ToolEffectGuard:
             task_id=record.task_id,
             operation_type=record.operation_type,
             input_fingerprint=record.input_fingerprint,
+            reservation_generation=record.reservation_generation,
             created_at=record.created_at,
         )
 
     @staticmethod
     def _reservation_identity(
         reservation: ToolEffectReservation,
-    ) -> tuple[str, str, str, str]:
+    ) -> tuple[str, str, str, str, str]:
         task_id = reservation.task_id
         operation_type = reservation.operation_type
         input_fingerprint = reservation.input_fingerprint
+        reservation_generation = reservation.reservation_generation
         created_at = reservation.created_at
         if (
             not task_id
             or not operation_type
             or not input_fingerprint
+            or not reservation_generation
             or not created_at
         ):
             raise ToolEffectConflictError(
                 "tool effect finalization lacks reservation authority"
             )
-        return task_id, operation_type, input_fingerprint, created_at
+        return (
+            task_id,
+            operation_type,
+            input_fingerprint,
+            reservation_generation,
+            created_at,
+        )
 
     @staticmethod
     def _operation_key(*, task_id: str, call_id: str) -> str:
