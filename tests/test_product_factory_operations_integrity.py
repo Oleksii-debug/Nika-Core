@@ -486,11 +486,11 @@ def test_maintenance_authority_provider_and_return_graphs_are_private() -> None:
 @pytest.mark.parametrize(
     "value",
     (
-        "project\\nforged",
-        "project\\x7fforged",
-        "project\\x85forged",
-        "project\\u2028forged",
-        "\\ud800",
+        "project\nforged",
+        "project\x7fforged",
+        "project\x85forged",
+        "project\u2028forged",
+        "\ud800",
         "a" * 4097,
         "€" * 1366,
     ),
@@ -512,10 +512,10 @@ def test_operations_public_scalar_admission_is_exact_and_control_safe() -> None:
     with pytest.raises(ProductOperationsError):
         coordinator.record_node_availability(1, available=False)  # type: ignore[arg-type]
     with pytest.raises(ProductOperationsError, match="canonical bounded text"):
-        coordinator.record_node_availability("node\\nforged", available=False)
+        coordinator.record_node_availability("node\nforged", available=False)
     with pytest.raises(ProductOperationsError, match="boolean"):
         coordinator.record_node_availability("node-a", available=1)  # type: ignore[arg-type]
     with pytest.raises(ProductOperationsError):
-        coordinator.revoke_credential("\\ud800")
+        coordinator.revoke_credential("\ud800")
     assert coordinator.snapshot().unavailable_nodes == ()
     assert coordinator.snapshot().revoked_credentials == ()
