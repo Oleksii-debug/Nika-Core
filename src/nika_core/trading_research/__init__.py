@@ -39,6 +39,7 @@ from .dataset import (
 from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
 from .orders import (
     ExecutionPolicy,
+    OrderAuthority,
     OrderIntent,
     OrderState,
     OrderType,
@@ -47,6 +48,7 @@ from .orders import (
     SimulatedFill,
     apply_slippage,
     fee_for,
+    order_authority_sha256,
 )
 from .persistence import TradingStateRepository
 from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
@@ -72,6 +74,7 @@ __all__ = [
     "InstrumentIdentity",
     "MarketEvent",
     "OddsSnapshot",
+    "OrderAuthority",
     "OrderIntent",
     "OrderState",
     "OrderStrategy",
@@ -112,5 +115,6 @@ __all__ = [
     "fill_missing",
     "instrument_identity",
     "instrument_identity_sha256",
+    "order_authority_sha256",
     "trailing_mean",
 ]
