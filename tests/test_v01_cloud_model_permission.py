@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -282,3 +282,135 @@ def test_paused_task_cannot_spend_existing_grant(tmp_path: Path) -> None:
 
     queue.transition(record.task_id, TaskState.PAUSED)
     assert service.execution_authority_for_task(record.task_id) is None
+
+
+def test_resume_with_live_grant_does_not_reprompt(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    service.admit_resumed_task(queue.get(record.task_id))
+
+    assert len(prompts) == 1
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 1
+
+
+def test_expired_grant_requires_new_resume_consent_and_new_authority(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    queue.transition(record.task_id, TaskState.PAUSED)
+
+    instant[0] = NOW + timedelta(hours=25)
+    assert service.execution_authority_for_task(record.task_id) is None
+    service.admit_resumed_task(queue.get(record.task_id))
+
+    assert len(prompts) == 2
+    with store.connection() as conn:
+        permissions = conn.execute(
+            "SELECT permission_id, revoked_at FROM standing_permissions ORDER BY rowid"
+        ).fetchall()
+        binding = conn.execute(
+            "SELECT permission_id FROM v01_cloud_model_permission_bindings "
+            "WHERE task_id = ?",
+            (record.task_id,),
+        ).fetchone()
+    assert len(permissions) == 2
+    assert permissions[0]["permission_id"] != permissions[1]["permission_id"]
+    assert binding["permission_id"] == permissions[1]["permission_id"]
+
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    _authorize(service, record.task_id)
+
+
+def test_revoked_grant_requires_new_resume_consent(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    service.revoke_task(record.task_id)
+
+    assert service.execution_authority_for_task(record.task_id) is None
+    service.admit_resumed_task(queue.get(record.task_id))
+
+    assert len(prompts) == 2
+    with store.connection() as conn:
+        rows = conn.execute(
+            "SELECT revoked_at FROM standing_permissions ORDER BY rowid"
+        ).fetchall()
+    assert len(rows) == 2
+    assert rows[0]["revoked_at"] is not None
+    assert rows[1]["revoked_at"] is None
+
+
+def test_denied_resume_reconsent_leaves_task_paused_and_old_expired_binding(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    instant = [NOW]
+    decisions = [True, False]
+
+    def confirm(_request: CloudModelGrantRequest) -> bool:
+        return decisions.pop(0)
+
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=confirm,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    instant[0] = NOW + timedelta(hours=25)
+
+    with pytest.raises(CloudModelPermissionDenied, match="не дозволено"):
+        service.admit_resumed_task(queue.get(record.task_id))
+
+    assert queue.get(record.task_id).state is TaskState.PAUSED
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 1
