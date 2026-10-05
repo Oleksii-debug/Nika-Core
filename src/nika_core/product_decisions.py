@@ -68,10 +68,27 @@ def _decision_fingerprint(project_id: str, decision: ProductDecision) -> str:
                 "option_id": decision.option_id,
                 "state": decision.state.value,
                 "rationale": decision.rationale,
-                "decided_by_ref": decision.decided_by_ref,
+                "decided_by_ref": (
+                    None
+                    if decision.state is ProductDecisionState.APPROVED
+                    else decision.decided_by_ref
+                ),
             }
         ).encode()
     ).hexdigest()
+
+
+def _trusted_decided_by_ref(approval: ApprovalEvidence) -> str:
+    digest = hashlib.sha256(
+        _canonical(
+            {
+                "approval_id": approval.approval_id,
+                "issuer_id": approval.issuer_id,
+                "authority_version": approval.authority_version,
+            }
+        ).encode()
+    ).hexdigest()
+    return f"approval://{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,6 +256,14 @@ class ProductDecisionRepository:
                     )
                     verifier.validate_locked(intent, approval, now=current_time)
 
+                persisted_decision = (
+                    replace(
+                        decision,
+                        decided_by_ref=_trusted_decided_by_ref(approval),
+                    )
+                    if approval is not None
+                    else decision
+                )
                 current = self._latest_conn(conn, project_id, decision.decision_id)
                 version = 1 if current is None else current.decision_version + 1
                 now_text = _now()
@@ -258,12 +283,12 @@ class ProductDecisionRepository:
                     "VALUES (?,?,?,?,?,?,?,?,?)",
                     (
                         project_id,
-                        decision.decision_id,
+                        persisted_decision.decision_id,
                         version,
-                        decision.option_id,
-                        decision.state.value,
-                        decision.rationale,
-                        decision.decided_by_ref,
+                        persisted_decision.option_id,
+                        persisted_decision.state.value,
+                        persisted_decision.rationale,
+                        persisted_decision.decided_by_ref,
                         _canonical(list(evidence_package_ids)),
                         now_text,
                     ),
@@ -287,6 +312,7 @@ class ProductDecisionRepository:
                     "decision_version": version,
                     "option_id": decision.option_id,
                     "state": decision.state.value,
+                    "decided_by_ref": persisted_decision.decided_by_ref,
                     "evidence_package_ids": list(evidence_package_ids),
                 }
                 if approval is not None:
