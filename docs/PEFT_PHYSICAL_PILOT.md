@@ -11,15 +11,19 @@ Windows-only. A successful call must:
 
 1. run the canonical `TrainingRuntime` with the canonical
    `SubprocessTrainingWorker`;
-2. execute one trainer step and persist a `PAUSED` checkpoint at `next_step == 1`;
+2. execute one trainer step, persist a `PAUSED` checkpoint at `next_step == 1`, and
+   capture the consumed-byte attestation accepted by the canonical subprocess worker;
 3. construct new runtime and worker objects through the supplied restart factories;
 4. require the restarted worker to expose the same execution-plan digest, trainer-protocol
-   job fingerprint, and Registry-verified trainer deployment identity;
+   job fingerprint, and Registry-verified trainer deployment identity, with no prior accepted
+   consumed-material evidence;
 5. issue an effect-free `PAUSE` probe and require the restarted runtime to reopen
    the same job at `next_step == 1`;
-6. require that probe to stop before resource admission and trainer effects;
+6. require that probe to stop before resource admission and trainer effects and to leave the
+   restarted worker without accepted consumed-material evidence;
 7. persist a distinct restart-probe checkpoint;
-8. resume the same authorized job to `COMPLETED`;
+8. resume the same authorized job to `COMPLETED` and require the resumed worker's accepted
+   consumed-byte attestation to equal the first-step attestation;
 9. require a third distinct durable completion checkpoint;
 10. build the final candidate descriptor only from detached canonical completion evidence;
 11. acquire a Windows read handle that denies write/delete replacement for the final
@@ -33,11 +37,13 @@ Windows-only. A successful call must:
     runtime evidence, require its trainer-protocol job fingerprint to match the exact
     `SubprocessTrainingWorker` protocol identity, require its trainer artifact ID and trainer
     deployment SHA-256 to match the worker's canonical Registry-verified deployment identity,
-    and require its final step number to match the COMPLETED runtime boundary; and
+    require its consumed-material attestation to match the exact attestation accepted by the
+    worker across the physical steps, and require its final step number to match the COMPLETED
+    runtime boundary; and
 16. bind both the runtime job fingerprint and the distinct trainer-protocol job fingerprint,
     plus the independently verified trainer deployment identity, manifest digest, trainer
-    implementation, model directory, consumed-material, and runtime-manifest identities into
-    the report; and
+    implementation, model directory, worker-accepted consumed-material, and runtime-manifest
+    identities into the report; and
 17. when persisted, publish the canonical report through the provided atomic/no-clobber
     writer rather than a direct truncating file write.
 
@@ -70,7 +76,10 @@ runtime must observe `next_step == 1`, persist a new checkpoint with
 store observes step 0 (or an identity mismatch) and is rejected. The worker restart factory must
 construct a new `SubprocessTrainingWorker` from the same Registry-bound command and environment
 authority. The harness re-verifies that trainer deployment through the worker's incumbent
-Artifact Registry before accepting its identity across the restart boundary.
+Artifact Registry before accepting its identity across the restart boundary. It also requires
+the new worker to start without accepted consumed-material evidence, proves the reopen probe
+does not create such evidence, and then requires the resumed physical step to reproduce the
+same consumed-byte attestation that the first worker accepted.
 
 The final candidate descriptor cannot be known before a first real training run completes.
 Pass a `candidate_descriptor_factory` that receives detached canonical COMPLETED evidence.
