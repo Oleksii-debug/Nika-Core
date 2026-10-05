@@ -854,6 +854,7 @@ def _install_runner_fakes(
     resumed_trainer_deployment_identity: ArtifactIdentity = _TRAINER_DEPLOYMENT_IDENTITY,
     initial_consumed_materials_sha256: str = "1" * 64,
     resumed_consumed_materials_sha256: str = "1" * 64,
+    initial_worker_preaccepted_sha256: str | None = None,
 ) -> tuple[object, object, list[tuple[str, bool]]]:
     calls: list[tuple[str, bool]] = []
 
@@ -932,6 +933,9 @@ def _install_runner_fakes(
         initial_trainer_job_fingerprint,
         initial_trainer_deployment_identity,
     )
+    initial_worker.accepted_consumed_materials_sha256 = (
+        initial_worker_preaccepted_sha256
+    )
     resumed_worker = FakeWorker(
         resumed_trainer_job_fingerprint,
         resumed_trainer_deployment_identity,
@@ -981,6 +985,21 @@ def _install_runner_fakes(
         candidate_descriptor_factory=lambda _: object(),  # type: ignore[return-value]
     )
     return result, sentinel, calls
+
+
+def test_physical_runner_rejects_preused_initial_worker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(
+        PhysicalTrainingPilotError,
+        match="initial worker already carries accepted consumed-material evidence",
+    ):
+        _install_runner_fakes(
+            monkeypatch,
+            resumed_probe=_restart_probe(),
+            completed=_completed_for(b"candidate"),
+            initial_worker_preaccepted_sha256="9" * 64,
+        )
 
 
 def test_physical_runner_probes_reopened_checkpoint_before_resume(
