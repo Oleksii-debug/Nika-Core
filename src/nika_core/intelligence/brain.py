@@ -188,6 +188,11 @@ class DeterministicBrain:
         if type(actions) is not tuple:
             raise TypeError("actions must be an exact tuple")
         actions = tuple(DeterministicAction.detached_copy(action) for action in actions)
+        for index, action in enumerate(actions):
+            _require_run_identity(
+                action.action_id,
+                name=f"actions[{index}].action_id",
+            )
         if type(previously_completed_action_ids) is not tuple:
             raise TypeError("previously_completed_action_ids must be an exact tuple")
         if any(type(action_id) is not str for action_id in previously_completed_action_ids):
