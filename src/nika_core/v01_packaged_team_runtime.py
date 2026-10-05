@@ -523,17 +523,7 @@ class V01PackagedThreeAgentRuntime(AgentRuntimePort):
         return runtime
 
     def _task_has_model_selection(self, task_id: str) -> bool:
-        with self._sqlite.connection() as conn:
-            row = conn.execute(
-                "SELECT payload_json FROM tasks WHERE task_id = ?",
-                (task_id,),
-            ).fetchone()
-        if row is None:
-            return False
-        payload = json.loads(row["payload_json"])
-        if not isinstance(payload, dict):
-            raise TypeError("task payload must be an object")
-        return _MODEL_SELECTION_FIELD in payload
+        return self._model_settings.task_has_selection(task_id)
 
     @staticmethod
     def _model_text(result: RuntimeResult) -> str:
