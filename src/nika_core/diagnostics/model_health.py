@@ -170,11 +170,19 @@ class OllamaModelHealthProbe:
                 trust_env=False,
             )
             with client, self._health_deadline(client) as deadline_expired:
-                tags_response = self._bounded_get(
+                tags_response, tags_reachable = self._bounded_get(
                     client,
                     f"{request_base_url}/api/tags",
                     deadline_expired=deadline_expired,
                 )
+                if not tags_reachable:
+                    return ModelHealthSnapshot(
+                        configured=configured,
+                        reachable=ModelHealthFact.UNKNOWN,
+                        model_present=ModelHealthFact.UNKNOWN,
+                        model_ready=ModelHealthFact.UNKNOWN,
+                        inference_proven=inference_proven,
+                    )
                 reachable = ModelHealthFact.YES
                 present = (
                     self._presence_from_response(tags_response)
@@ -198,7 +206,7 @@ class OllamaModelHealthProbe:
                         inference_proven=inference_proven,
                     )
                 try:
-                    running_response = self._bounded_get(
+                    running_response, _ = self._bounded_get(
                         client,
                         f"{request_base_url}/api/ps",
                         deadline_expired=deadline_expired,
@@ -342,24 +350,32 @@ class OllamaModelHealthProbe:
         url: str,
         *,
         deadline_expired: Event | None = None,
-    ) -> httpx.Response | None:
-        """Read provider metadata under wire-byte and total-deadline budgets."""
+    ) -> tuple[httpx.Response | None, bool]:
+        """Read bounded metadata and report whether HTTP response headers were observed."""
 
         if deadline_expired is not None and deadline_expired.is_set():
-            return None
+            return None, False
+
+        headers_observed = False
         stream = getattr(client, "stream", None)
-        if not callable(stream):
-            if deadline_expired is not None and deadline_expired.is_set():
-                return None
-            return client.get(url)
         try:
-            with stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
+            if not callable(stream):
                 if deadline_expired is not None and deadline_expired.is_set():
-                    return None
+                    return None, False
+                response = client.get(url)
+                headers_observed = True
+                if deadline_expired is not None and deadline_expired.is_set():
+                    return None, True
+                return response, True
+
+            with stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
+                headers_observed = True
+                if deadline_expired is not None and deadline_expired.is_set():
+                    return None, True
                 if not OllamaModelHealthProbe._successful_response(response):
-                    return httpx.Response(status_code=response.status_code)
+                    return httpx.Response(status_code=response.status_code), True
                 if response.headers.get("content-encoding", "identity").lower() != "identity":
-                    return None
+                    return None, True
                 declared = response.headers.get("content-length")
                 if declared is not None and (
                     not declared.isascii()
@@ -367,26 +383,37 @@ class OllamaModelHealthProbe:
                     or len(declared) > 7
                     or int(declared) > _MAX_HEALTH_RESPONSE_BYTES
                 ):
-                    return None
+                    return None, True
                 payload = bytearray()
                 try:
                     for chunk in response.iter_raw(chunk_size=16384):
                         if deadline_expired is not None and deadline_expired.is_set():
-                            return None
+                            return None, True
                         if len(chunk) > _MAX_HEALTH_RESPONSE_BYTES - len(payload):
-                            return None
+                            return None, True
                         payload.extend(chunk)
                 except httpx.TransportError:
                     # Headers arrived: keep reachability, but trust no partial catalog.
-                    return None
+                    return None, True
                 if deadline_expired is not None and deadline_expired.is_set():
-                    return None
-                return httpx.Response(
-                    status_code=response.status_code,
-                    content=bytes(payload),
+                    return None, True
+                return (
+                    httpx.Response(
+                        status_code=response.status_code,
+                        content=bytes(payload),
+                    ),
+                    True,
                 )
+        except httpx.TransportError:
+            if deadline_expired is not None and deadline_expired.is_set():
+                return None, headers_observed
+            raise
+        except RuntimeError:
+            if deadline_expired is not None and deadline_expired.is_set():
+                return None, headers_observed
+            raise
         except httpx.StreamError:
-            return None
+            return None, headers_observed
 
     def _presence_from_response(self, response: httpx.Response) -> ModelHealthFact:
         if not self._successful_response(response):
