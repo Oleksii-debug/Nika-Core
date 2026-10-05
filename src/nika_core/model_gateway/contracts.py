@@ -248,6 +248,10 @@ class ModelResponse:
     model: str
     usage: ModelUsage = field(default_factory=ModelUsage)
     latency_ms: float | None = None
+    # Optional provider-side evidence identifying the exact model artifact that
+    # executed this completion. ModelGateway validates the carrier; higher-level
+    # benchmark code decides when this attestation is mandatory.
+    loaded_artifact_sha256: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
