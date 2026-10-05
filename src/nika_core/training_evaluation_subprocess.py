@@ -22,6 +22,12 @@ from nika_core.model_artifacts import (
     ModelArtifactRegistryError,
     ModelIntegrityBasis,
 )
+from nika_core.process_containment import (
+    ProcessContainmentError,
+    WindowsJob,
+    process_group_popen_options,
+    terminate_process_group,
+)
 from nika_core.model_gateway.contracts import (
     ModelErrorCode,
     ModelFailureEffect,
@@ -766,6 +772,8 @@ class RegistrySubprocessLoadedModelAttestor:
         provider_id: str,
         timeout_seconds: float,
     ) -> bytes:
+        creationflags, start_new_session = process_group_popen_options()
+        job = WindowsJob()
         try:
             process = await asyncio.create_subprocess_exec(
                 *self._command,
@@ -773,6 +781,8 @@ class RegistrySubprocessLoadedModelAttestor:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
+                creationflags=creationflags,
+                start_new_session=start_new_session,
             )
         except FileNotFoundError as exc:
             raise _error(
@@ -796,8 +806,19 @@ class RegistrySubprocessLoadedModelAttestor:
                 effect=ModelFailureEffect.NO_EFFECT,
             ) from exc
 
+        try:
+            job.assign_pid(process.pid)
+        except ProcessContainmentError as exc:
+            await self._terminate(process, job)
+            raise _error(
+                ModelErrorCode.PROVIDER_ERROR,
+                "evaluation subprocess containment could not be established",
+                provider_id=provider_id,
+                effect=ModelFailureEffect.UNKNOWN,
+            ) from exc
+
         if process.stdin is None or process.stdout is None:
-            await self._terminate(process)
+            await self._terminate(process, job)
             raise _error(
                 ModelErrorCode.PROVIDER_ERROR,
                 "evaluation subprocess streams are unavailable",
@@ -812,7 +833,7 @@ class RegistrySubprocessLoadedModelAttestor:
                     self._command_records,
                 )
             except ModelGatewayError as exc:
-                await self._terminate(process)
+                await self._terminate(process, job)
                 raise _error(
                     ModelErrorCode.PROVIDER_ERROR,
                     "evaluation command authority changed across process start",
@@ -856,7 +877,7 @@ class RegistrySubprocessLoadedModelAttestor:
                         waiter,
                     )
             except TimeoutError as exc:
-                await self._terminate(process)
+                await self._terminate(process, job)
                 raise _error(
                     ModelErrorCode.TIMEOUT,
                     "evaluation subprocess timed out",
@@ -864,10 +885,10 @@ class RegistrySubprocessLoadedModelAttestor:
                     effect=ModelFailureEffect.UNKNOWN,
                 ) from exc
             except asyncio.CancelledError:
-                await self._terminate(process)
+                await self._terminate(process, job)
                 raise
             except (BrokenPipeError, ConnectionResetError, OSError, ValueError) as exc:
-                await self._terminate(process)
+                await self._terminate(process, job)
                 raise _error(
                     ModelErrorCode.PROVIDER_ERROR,
                     "evaluation subprocess transport failed",
@@ -881,20 +902,28 @@ class RegistrySubprocessLoadedModelAttestor:
                 await asyncio.gather(writer, reader, waiter, return_exceptions=True)
 
             if returncode != 0:
+                await self._terminate(process, job)
                 raise _error(
                     ModelErrorCode.PROVIDER_ERROR,
                     "evaluation subprocess exited unsuccessfully",
                     provider_id=provider_id,
                     effect=ModelFailureEffect.UNKNOWN,
                 )
+            if os.name == "nt":
+                job.close()
             return raw_response
         except asyncio.CancelledError:
-            await self._terminate(process)
+            await self._terminate(process, job)
             raise
 
     @staticmethod
-    async def _terminate(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is None:
+    async def _terminate(
+        process: asyncio.subprocess.Process,
+        job: WindowsJob,
+    ) -> None:
+        if os.name == "nt" and job.active:
+            job.close()
+        elif not terminate_process_group(process.pid) and process.returncode is None:
             try:
                 process.kill()
             except ProcessLookupError:
