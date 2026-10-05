@@ -13,15 +13,6 @@ from urllib.parse import urlsplit
 import httpx
 
 from nika_core.data.sqlite import SQLiteStore
-from nika_core.model_gateway.contracts import (
-    ModelErrorCode,
-    ModelFailureEffect,
-    ModelGatewayError,
-    ModelRequest,
-    ModelResponse,
-    ProviderCapabilities,
-)
-from nika_core.model_gateway.providers import OllamaProvider
 
 _PROVIDER_ID = "ollama"
 _BINDING_SCHEMA = "nika.training.ollama-prepared-model.v1"
@@ -713,71 +704,7 @@ class OllamaManifestAuthority:
         return canonical
 
 
-class ManifestPinnedOllamaProvider:
-    """Ollama provider that enforces prepared manifest identity around inference."""
-
-    def __init__(
-        self,
-        *,
-        binding: OllamaPreparedModelBinding,
-        authority: OllamaManifestAuthority,
-        think: bool | str = False,
-        client_factory: Callable[..., httpx.AsyncClient] = httpx.AsyncClient,
-    ) -> None:
-        canonical = binding.revalidated()
-        if canonical.endpoint_sha256 != authority.endpoint_sha256:
-            raise ValueError("binding and authority endpoints do not match")
-        self._binding = canonical
-        self._authority = authority
-        self._provider = OllamaProvider(
-            default_model=canonical.route_model_id,
-            base_url=authority.base_url,
-            think=think,
-            client_factory=client_factory,
-        )
-
-    @property
-    def capabilities(self) -> ProviderCapabilities:
-        return self._provider.capabilities
-
-    async def complete(self, request: ModelRequest) -> ModelResponse:
-        requested_model = request.model or self._binding.route_model_id
-        if (
-            request.provider_id not in {None, _PROVIDER_ID}
-            or requested_model != self._binding.route_model_id
-        ):
-            raise ModelGatewayError(
-                ModelErrorCode.INVALID_REQUEST,
-                "request does not match the manifest-pinned Ollama route",
-                provider_id=_PROVIDER_ID,
-                failure_effect=ModelFailureEffect.NO_EFFECT,
-            )
-        try:
-            await self._authority.assert_available(self._binding)
-        except OllamaManifestAuthorityError as exc:
-            raise ModelGatewayError(
-                ModelErrorCode.UNAVAILABLE,
-                "prepared Ollama model manifest is not available",
-                provider_id=_PROVIDER_ID,
-                failure_effect=ModelFailureEffect.NO_EFFECT,
-            ) from exc
-
-        response = await self._provider.complete(request)
-
-        try:
-            await self._authority.assert_loaded(self._binding)
-        except OllamaManifestAuthorityError as exc:
-            raise ModelGatewayError(
-                ModelErrorCode.PROVIDER_ERROR,
-                "loaded Ollama model manifest could not be verified",
-                provider_id=_PROVIDER_ID,
-                failure_effect=ModelFailureEffect.UNKNOWN,
-            ) from exc
-        return response
-
-
 __all__ = [
-    "ManifestPinnedOllamaProvider",
     "OllamaManifestAuthority",
     "OllamaManifestAuthorityError",
     "OllamaPromotionManifestStore",
