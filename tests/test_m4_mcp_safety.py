@@ -11,6 +11,7 @@ from mcp.server import MCPServer
 from nika_core.mcp_boundary import (
     MCPClientAdapter,
     MCPServerConfig,
+    _exact_mcp_cursor,
     _snapshot_mcp_arguments,
 )
 from nika_core.tools import ToolCall, ToolResult, ToolRisk
@@ -445,6 +446,36 @@ def test_list_tools_rejects_oversized_cursor(
 
     with pytest.raises(ValueError, match="MCP next cursor must contain at most 4096 UTF-8 bytes"):
         asyncio.run(adapter.list_tools())
+
+
+def test_mcp_bounded_text_rejects_oversize_before_utf8_encoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded_lengths: list[tuple[str, int]] = []
+
+    def tracking_encoder(value: str, *, field: str) -> bytes:
+        if len(value) > 1_048_576:
+            raise AssertionError("oversized text reached UTF-8 encoder")
+        encoded_lengths.append((field, len(value)))
+        return value.encode("utf-8", errors="strict")
+
+    monkeypatch.setattr("nika_core.mcp_boundary._encode_utf8_strict", tracking_encoder)
+
+    with pytest.raises(ValueError, match="server_id must contain at most 128 characters"):
+        MCPServerConfig(server_id="s" * 129, target=object())
+    with pytest.raises(ValueError, match="MCP next cursor must contain at most 4096 UTF-8 bytes"):
+        _exact_mcp_cursor("x" * 4097)
+    with pytest.raises(ValueError, match="safe UTF-8 byte limit"):
+        _snapshot_mcp_arguments({"value": "x" * 1_048_577})
+    with pytest.raises(ValueError, match="safe UTF-8 byte limit"):
+        _snapshot_mcp_arguments({"x" * 1_048_577: "small"})
+
+    assert encoded_lengths == [("arguments key 0", len("value"))]
+
+
+def test_mcp_cursor_keeps_exact_multibyte_byte_limit() -> None:
+    with pytest.raises(ValueError, match="MCP next cursor must contain at most 4096 UTF-8 bytes"):
+        _exact_mcp_cursor("é" * 2049)
 
 
 def test_list_tools_bounds_unique_cursor_pagination(
