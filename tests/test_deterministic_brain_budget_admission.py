@@ -163,3 +163,47 @@ def test_valid_ukrainian_run_and_task_complete_real_deterministic_step() -> None
     assert result.completed_actions == ("advance",)
     assert result.final_state.facts == frozenset({"готово"})
     assert journal.inspected is True
+
+
+@pytest.mark.parametrize("field", ["run_id", "task_id"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        "prefix\u0085suffix",  # C1 control
+        "prefix\u200bsuffix",  # zero-width space
+        "prefix\u202esuffix",  # right-to-left override
+        "prefix\u2066suffix",  # left-to-right isolate
+        "prefix\u2028suffix",  # Unicode line separator
+        "prefix\u2029suffix",  # Unicode paragraph separator
+        "prefix\ufeffsuffix",  # invisible format marker
+    ],
+)
+def test_unicode_control_identities_fail_before_planner_and_journal(
+    field: str, value: str
+) -> None:
+    planner = CountingPlanner()
+    journal = GuardedJournal()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor(), effect_journal=journal)
+    arguments: dict[str, object] = {"task_id": "task-1"}
+    arguments[field] = value
+    with pytest.raises(ValueError, match=field):
+        _run(brain, **arguments)
+    assert planner.calls == 0
+    assert journal.inspected is False
+
+
+@pytest.mark.parametrize("value", [False, b"task", "task\u200bhidden", "\ud800", "x" * 513])
+def test_supplied_task_id_is_validated_without_a_journal(value: object) -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    with pytest.raises(ValueError, match="task_id"):
+        _run(brain, task_id=value)
+    assert planner.calls == 0
+
+
+def test_valid_unicode_task_id_without_a_journal_still_runs() -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    result = _run(brain, run_id="Ніка: запуск 1", task_id="завдання-2")
+    assert result.ok
+    assert planner.calls == 1
