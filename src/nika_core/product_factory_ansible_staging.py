@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -21,6 +22,9 @@ from nika_core.product_factory_deployment import (
 )
 
 _MAX_RUNNER_EVENTS = 10_000
+_MAX_RUNNER_STATUS_CHARS = 64
+_MAX_RUNNER_EVIDENCE_CHARS = 512
+_MAX_CONTRACT_JSON_BYTES = 64 * 1024
 
 
 class StagingAdapterError(DeploymentFabricError):
@@ -79,10 +83,16 @@ class RunnerExecution:
 
     def __post_init__(self) -> None:
         _validate_runner_status_rc(self.status, self.rc)
-        if type(self.evidence_ref) is not str or not self.evidence_ref:
-            raise StagingAdapterError("runner evidence_ref must be non-empty text")
+        if (
+            type(self.evidence_ref) is not str
+            or not self.evidence_ref
+            or len(self.evidence_ref) > _MAX_RUNNER_EVIDENCE_CHARS
+        ):
+            raise StagingAdapterError("runner evidence_ref must be bounded non-empty text")
         if self.contract is not None:
-            object.__setattr__(self, "contract", _snapshot_contract(self.contract))
+            snapshot = _snapshot_contract(self.contract)
+            _canonical_contract_json(snapshot)
+            object.__setattr__(self, "contract", snapshot)
 
 
 class RunnerExecutionPort(Protocol):
@@ -286,8 +296,12 @@ def _load_ansible_runner() -> ModuleType:
 
 
 def _validate_runner_status_rc(status: object, rc: object) -> None:
-    if type(status) is not str or not status:
-        raise StagingAdapterError("ansible-runner status must be non-empty text")
+    if (
+        type(status) is not str
+        or not status
+        or len(status) > _MAX_RUNNER_STATUS_CHARS
+    ):
+        raise StagingAdapterError("ansible-runner status must be bounded non-empty text")
     if rc is not None and type(rc) is not int:
         raise StagingAdapterError("ansible-runner rc must be an integer or null")
 
@@ -301,6 +315,24 @@ def _snapshot_contract(candidate: Mapping[object, object]) -> dict[str, object]:
             raise StagingAdapterError("ansible-runner contract contains duplicate keys")
         snapshot[key] = value
     return snapshot
+
+
+def _canonical_contract_json(contract: Mapping[str, object]) -> str:
+    try:
+        encoded = json.dumps(
+            contract,
+            allow_nan=False,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise StagingAdapterError(
+            "ansible-runner contract must contain JSON-compatible finite values"
+        ) from exc
+    if len(encoded) > _MAX_CONTRACT_JSON_BYTES:
+        raise StagingAdapterError("ansible-runner contract exceeds the evidence size limit")
+    return encoded.decode("utf-8")
 
 
 def _extract_contract(events: Any) -> Mapping[str, object] | None:
@@ -378,8 +410,9 @@ def _evidence_ref(
     rc: int | None,
     contract: Mapping[str, object] | None,
 ) -> str:
-    safe_contract = "none" if contract is None else repr(sorted(contract.items()))
-    digest = sha256(f"{ident}\0{status}\0{rc}\0{safe_contract}".encode()).hexdigest()
+    safe_contract = "null" if contract is None else _canonical_contract_json(contract)
+    payload = f"{ident}\0{status}\0{rc}\0{safe_contract}".encode("utf-8")
+    digest = sha256(payload).hexdigest()
     return f"ansible-runner:{digest}"
 
 
