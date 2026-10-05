@@ -699,7 +699,7 @@ def _evidence_ref(
     )
     payload = (
         f"{ident}\0{status}\0{rc}\0{safe_contract}"
-    ).encode("utf-8")
+    ).encode()
     digest = sha256(payload).hexdigest()
     return f"ansible-runner:{digest}"
 
