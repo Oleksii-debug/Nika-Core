@@ -66,6 +66,10 @@ def _normalized_statement(value: object) -> str:
     if len(value) > _MAX_STATEMENT_RAW_CHARS:
         raise ValueError("statement exceeds the pre-normalization bound")
     normalized = unicodedata.normalize("NFC", value)
+    try:
+        normalized.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("statement must be valid UTF-8 text") from exc
     if not normalized.strip():
         raise ValueError("statement must not be empty")
     if len(normalized) > _MAX_STATEMENT_CHARS:
@@ -160,11 +164,11 @@ class CognitionCandidate:
             raise TypeError("evidence must contain CognitionEvidenceRef values")
         if self.evidence != tuple(sorted(self.evidence, key=_evidence_sort_key)):
             raise ValueError("evidence order is not canonical")
-        identities = [
-            (item.source_type, item.source_id, item.evidence_sha256) for item in self.evidence
+        logical_identities = [
+            (item.source_type, item.source_id) for item in self.evidence
         ]
-        if len(set(identities)) != len(identities):
-            raise ValueError("duplicate evidence references are not allowed")
+        if len(set(logical_identities)) != len(logical_identities):
+            raise ValueError("duplicate logical evidence references are not allowed")
         if self.kind is CognitionCandidateKind.ABSTRACTION and len(self.evidence) < 2:
             raise ValueError("an abstraction requires at least two evidence references")
 

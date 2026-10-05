@@ -157,11 +157,26 @@ def test_duplicate_evidence_reference_is_rejected() -> None:
         _candidate(evidence=(evidence, evidence))
 
 
+def test_same_logical_evidence_source_cannot_carry_conflicting_digests() -> None:
+    with pytest.raises(ValueError, match="duplicate logical evidence"):
+        _candidate(
+            evidence=(
+                _evidence("event-1", "a"),
+                _evidence("event-1", "b"),
+            )
+        )
+
+
 def test_statement_bounds_and_control_characters_fail_closed() -> None:
     with pytest.raises(ValueError, match="supported bound"):
         _candidate(statement="x" * 16_385)
     with pytest.raises(ValueError, match="control characters"):
         _candidate(statement="unsafe\x00statement")
+
+
+def test_statement_rejects_lone_surrogate_before_identity_hashing() -> None:
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        _candidate(statement="\ud800")
 
 
 def test_oversized_statement_is_rejected_before_unicode_normalization(
