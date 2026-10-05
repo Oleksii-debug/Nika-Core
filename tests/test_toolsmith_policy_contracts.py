@@ -19,6 +19,18 @@ def test_spoofed_deny_cannot_carry_approved_hosts() -> None:
         NetworkPolicy(mode="deny", approved_hosts=("unapproved.example",))
 
 
+@pytest.mark.parametrize(
+    "invalid",
+    (["example.com"], "example.com", ("",), (" example.com",), ("example.com ",),
+     (None,), (123,), []),
+)
+def test_network_policy_rejects_malformed_approved_host_carriers(
+    invalid: object,
+) -> None:
+    with pytest.raises(ValueError, match="tuple of nonempty canonical text"):
+        NetworkPolicy(mode=NetworkMode.APPROVED_HOSTS, approved_hosts=invalid)
+
+
 def test_network_policy_preserves_explicit_deny_and_approved_hosts() -> None:
     assert NetworkPolicy().mode is NetworkMode.DENY
     assert NetworkPolicy(mode=NetworkMode.APPROVED_HOSTS, approved_hosts=("example.com",)).mode is (
