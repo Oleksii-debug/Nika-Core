@@ -218,6 +218,7 @@ def _snapshot_spec(spec: TrainingJobSpec) -> TrainingJobSpec:
             base_artifact=base,
             frozen_package_sha256=spec.frozen_package_sha256,
             training_material_sha256=spec.training_material_sha256,
+            scale_authorization_sha256=spec.scale_authorization_sha256,
             candidate_artifact_ref=spec.candidate_artifact_ref,
             max_steps=spec.max_steps,
             resource_scope=spec.resource_scope,
@@ -302,6 +303,10 @@ def _validate_completed_run(
         evidence.training_material_sha256,
         name="training run material SHA-256",
     )
+    observed_scale_authorization_sha256 = _require_sha256(
+        evidence.scale_authorization_sha256,
+        name="training run scale authorization SHA-256",
+    )
     observed_execution_plan_sha256 = _require_sha256(
         evidence.execution_plan_sha256,
         name="training run execution plan SHA-256",
@@ -327,6 +332,8 @@ def _validate_completed_run(
         or observed_base != spec.base_artifact
         or observed_package_sha256 != spec.frozen_package_sha256
         or observed_material_sha256 != spec.training_material_sha256
+        or observed_scale_authorization_sha256
+        != spec.scale_authorization_sha256
         or observed_job_fingerprint != expected_job_fingerprint
         or observed_candidate_ref != spec.candidate_artifact_ref
     ):
