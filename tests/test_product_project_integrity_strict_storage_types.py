@@ -274,6 +274,68 @@ def test_integrity_rejects_object_shaped_decision_evidence_json(
         service_type(store).validate("project-1")
 
 
+def test_historical_integrity_rejects_blob_idempotency_fingerprint(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _decision(store, projects)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_project_mutation_idempotency SET input_fingerprint=? "
+            "WHERE project_id='project-1' "
+            "AND operation_kind='product_decision.record'",
+            (sqlite3.Binary(b"0" * 64),),
+        )
+
+    with pytest.raises(ProductProjectError, match="idempotency record"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_historical_integrity_rejects_blob_creation_timestamp(tmp_path) -> None:
+    store, _ = _project(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at=? "
+            "WHERE entity_type='product_project' AND entity_id='project-1' "
+            "AND event_type='product_project.created'",
+            (sqlite3.Binary(b"2026-10-05T00:00:00+00:00"),),
+        )
+
+    with pytest.raises(ProductProjectError, match="invalid timestamp"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_historical_integrity_rejects_nontext_lifecycle_actor(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    current = projects.get("project-1")
+    from nika_core.product_project_lifecycle import (
+        ProductProjectLifecycleService,
+        ProductProjectState,
+    )
+
+    ProductProjectLifecycleService(store).transition(
+        "project-1",
+        ProductProjectState.PAUSED,
+        expected_row_version=current.row_version,
+        idempotency_key="status:pause:strict-storage",
+        reason="Pause for strict storage verification",
+        changed_by_ref="policy://product-owner",
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT event_id,payload_json FROM audit_events "
+            "WHERE entity_type='product_project' AND entity_id='project-1' "
+            "AND event_type='product_project.status_changed'"
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        payload["changed_by_ref"] = 7
+        conn.execute(
+            "UPDATE audit_events SET payload_json=? WHERE event_id=?",
+            (json.dumps(payload), row["event_id"]),
+        )
+
+    with pytest.raises(ProductProjectError, match="lifecycle audit"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
 def test_historical_integrity_rejects_nontext_spec_revision_reason(tmp_path) -> None:
     store, projects = _project(tmp_path)
     current = projects.get("project-1")
