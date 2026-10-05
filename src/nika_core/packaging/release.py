@@ -436,11 +436,7 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
         or manifest.product != manifest.product.strip()
     ):
         findings.append("manifest:product")
-    if (
-        not isinstance(manifest.version, str)
-        or not manifest.version
-        or manifest.version != manifest.version.strip()
-    ):
+    if not _valid_product_version(manifest.version):
         findings.append("manifest:product-version")
     if (
         not isinstance(manifest.source_sha, str)
