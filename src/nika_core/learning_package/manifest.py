@@ -271,21 +271,48 @@ class FrozenLearningPackage:
             shards=_canonical_shard_order(shard_values),
         )
 
-    def candidate_dataset_payload(self) -> dict[str, object]:
+    def _validated_snapshot(self) -> FrozenLearningPackage:
+        if type(self) is not FrozenLearningPackage:
+            raise LearningPackageValidationError(
+                "package must be an exact FrozenLearningPackage"
+            )
+        try:
+            return FrozenLearningPackage(
+                package_id=self.package_id,
+                package_version=self.package_version,
+                base_artifact_sha256=self.base_artifact_sha256,
+                selection_policy_sha256=self.selection_policy_sha256,
+                verification_sha256=self.verification_sha256,
+                evaluation_set_sha256=self.evaluation_set_sha256,
+                shards=self.shards,
+                schema_version=self.schema_version,
+            )
+        except AttributeError as exc:
+            raise LearningPackageValidationError(
+                "FrozenLearningPackage fields must be complete"
+            ) from exc
+
+    def _candidate_dataset_payload_unchecked(self) -> dict[str, object]:
         return {
             "selection_policy_sha256": self.selection_policy_sha256,
             "shards": [shard.canonical_payload() for shard in self.shards],
             "verification_sha256": self.verification_sha256,
         }
 
+    def candidate_dataset_payload(self) -> dict[str, object]:
+        snapshot = self._validated_snapshot()
+        return snapshot._candidate_dataset_payload_unchecked()
+
     @property
     def candidate_dataset_sha256(self) -> str:
         return _digest_payload(self.candidate_dataset_payload())
 
-    def canonical_payload(self) -> dict[str, object]:
+    def _canonical_payload_unchecked(self) -> dict[str, object]:
         return {
             "base_artifact_sha256": self.base_artifact_sha256,
-            "candidate_dataset_sha256": self.candidate_dataset_sha256,
+            "candidate_dataset_sha256": _digest_payload(
+                self._candidate_dataset_payload_unchecked()
+            ),
             "evaluation_set_sha256": self.evaluation_set_sha256,
             "package_id": self.package_id,
             "package_version": self.package_version,
@@ -294,6 +321,10 @@ class FrozenLearningPackage:
             "shards": [shard.canonical_payload() for shard in self.shards],
             "verification_sha256": self.verification_sha256,
         }
+
+    def canonical_payload(self) -> dict[str, object]:
+        snapshot = self._validated_snapshot()
+        return snapshot._canonical_payload_unchecked()
 
     @property
     def manifest_sha256(self) -> str:
@@ -340,6 +371,10 @@ class FrozenLearningPackage:
             parsed = json.loads(decoded, object_pairs_hook=_reject_duplicate_keys)
         except json.JSONDecodeError as exc:
             raise LearningPackageIntegrityError("serialized package is not valid JSON") from exc
+        except RecursionError as exc:
+            raise LearningPackageIntegrityError(
+                "serialized package nesting is invalid"
+            ) from exc
         if not isinstance(parsed, dict) or frozenset(parsed) != _ENVELOPE_KEYS:
             raise LearningPackageIntegrityError("learning-package envelope keys are invalid")
 
