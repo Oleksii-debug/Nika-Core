@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from nika_core.toolsmith.contracts import NetworkMode, NetworkPolicy, ProcessPolicy
+from nika_core.toolsmith.contracts import AcceptanceCommand, NetworkMode, NetworkPolicy, ProcessPolicy
 
 
 @pytest.mark.parametrize(
@@ -50,3 +50,34 @@ def test_process_policy_requires_exact_disabled_shell_boolean(invalid: object) -
 
 def test_process_policy_preserves_explicit_disabled_shell() -> None:
     assert ProcessPolicy(("python",), shell_allowed=False).shell_allowed is False
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ([], "python", (), ("",), ("   ",), (None,), (123,), ("python\x00",)),
+)
+def test_process_policy_rejects_malformed_executable_allowlist(invalid: object) -> None:
+    with pytest.raises(ValueError, match="executable"):
+        ProcessPolicy(invalid)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    ([], "python", (), ("",), (None,), (123,), ("python\x00",), ("python", 1)),
+)
+def test_acceptance_command_rejects_malformed_argument_carriers(
+    invalid: object,
+) -> None:
+    with pytest.raises(ValueError, match="argv must be nonempty text arguments"):
+        AcceptanceCommand(invalid)
+
+
+def test_acceptance_command_rejects_nontext_cwd() -> None:
+    with pytest.raises(ValueError, match="cwd must be text"):
+        AcceptanceCommand(("python",), cwd=None)
+
+
+def test_valid_unicode_command_and_allowlist_are_preserved() -> None:
+    assert ProcessPolicy(("C:\\Program Files\\Nika\\python.exe",)).shell_allowed is False
+    command = AcceptanceCommand(("python", "-m", "pytest", "тести з пробілами"))
+    assert command.argv[-1] == "тести з пробілами"
