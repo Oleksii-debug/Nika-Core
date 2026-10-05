@@ -424,6 +424,59 @@ def test_ansible_runner_client_rejects_non_iterable_events() -> None:
         )
 
 
+def test_runner_execution_rejects_boolean_rc_at_canonical_carrier() -> None:
+    with pytest.raises(StagingAdapterError, match="rc must be an integer or null"):
+        RunnerExecution(
+            "successful",
+            False,
+            {"applied": True},
+            "ansible-runner:evidence-deploy",
+        )
+
+
+def test_runner_execution_snapshots_mutable_contract() -> None:
+    contract = {"applied": True}
+    execution = RunnerExecution(
+        "successful",
+        0,
+        contract,
+        "ansible-runner:evidence-deploy",
+    )
+    contract["applied"] = False
+    assert execution.contract == {"applied": True}
+
+
+def test_adapter_revalidates_tampered_runner_execution() -> None:
+    execution = RunnerExecution(
+        "successful",
+        0,
+        {"applied": True},
+        "ansible-runner:evidence-deploy",
+    )
+    object.__setattr__(execution, "rc", False)
+    adapter, _ = _adapter(execution)
+
+    with pytest.raises(StagingAdapterError, match="rc must be an integer or null"):
+        adapter.deploy(_intent())
+
+
+def test_ansible_runner_client_bounds_event_stream_before_contract_processing() -> None:
+    events = ({"event": "verbose"} for _ in range(10_001))
+
+    def run(**kwargs: object) -> object:
+        return SimpleNamespace(status="successful", rc=0, events=events)
+
+    client = AnsibleRunnerClient(SimpleNamespace(run=run))
+    with pytest.raises(StagingAdapterError, match="emitted too many events"):
+        client.execute(
+            private_data_dir=_trusted_data_dir(),
+            playbook="nika_pf3_deploy.yml",
+            inventory="inventory/staging.ini",
+            ident="nika-pf3-deploy-1",
+            extravars={"nika_release_sha": _sha(1)},
+        )
+
+
 def test_default_runner_loader_rejects_native_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("nika_core.product_factory_ansible_staging.sys.platform", "win32")
     client = AnsibleRunnerClient()
