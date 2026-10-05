@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -120,12 +121,14 @@ def test_exact_trusted_approval_commits_and_replay_needs_no_second_approval(
     )
     replay = decisions.record(
         "p1",
-        decision,
+        replace(decision, decided_by_ref="user://spoofed-owner"),
         expected_row_version=0,
         idempotency_key="decision:approved",
     )
 
     assert replay == stored
+    assert stored.decision.decided_by_ref.startswith("approval://")
+    assert stored.decision.decided_by_ref != decision.decided_by_ref
     assert projects.get("p1").row_version == 1
     with store.connection() as conn:
         row = conn.execute(
@@ -136,6 +139,8 @@ def test_exact_trusted_approval_commits_and_replay_needs_no_second_approval(
     payload = json.loads(row["payload_json"])
     assert payload["approval_authority"]["approval_id"] == approval.approval_id
     assert payload["approval_authority"]["issuer_id"] == approval.issuer_id
+    assert payload["decided_by_ref"] == stored.decision.decided_by_ref
+    assert "user://owner" not in payload["decided_by_ref"]
 
 
 def test_approval_is_bound_to_exact_evidence_bytes(tmp_path: Path) -> None:
