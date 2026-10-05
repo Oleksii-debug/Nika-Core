@@ -133,6 +133,57 @@ def test_release_archive_rejects_additional_persistent_credential_assignments(
 
 
 @pytest.mark.parametrize(
+    ("relative_path", "header"),
+    [
+        ("identity.pem", b"-----BEGIN PRIVATE KEY-----"),
+        ("legacy.key", b"-----BEGIN RSA PRIVATE KEY-----"),
+        ("ssh.key", b"-----BEGIN OPENSSH PRIVATE KEY-----"),
+        ("encrypted.pem", b"-----BEGIN ENCRYPTED PRIVATE KEY-----"),
+    ],
+)
+def test_release_manifest_rejects_private_key_pem_material(
+    tmp_path: Path,
+    relative_path: str,
+    header: bytes,
+) -> None:
+    bundle = _bundle(tmp_path, relative_path, header + b"\n" + CANARY.encode() + b"\n")
+
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        f"secret-content:{relative_path}",
+    )
+
+
+def test_release_archive_rejects_private_key_pem_material(tmp_path: Path) -> None:
+    bundle = _bundle(
+        tmp_path,
+        "identity.pem",
+        b"-----BEGIN EC PRIVATE KEY-----\n" + CANARY.encode() + b"\n",
+    )
+    artifact = _archive_bundle(tmp_path, bundle)
+
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == (
+        "archive:secret-content:identity.pem",
+    )
+
+
+@pytest.mark.parametrize(
+    ("relative_path", "content"),
+    [
+        ("ca.pem", b"-----BEGIN CERTIFICATE-----\npublic\n"),
+        ("public.key", b"-----BEGIN PUBLIC KEY-----\npublic\n"),
+    ],
+)
+def test_private_key_policy_allows_public_pem_material(
+    tmp_path: Path,
+    relative_path: str,
+    content: bytes,
+) -> None:
+    bundle = _bundle(tmp_path, relative_path, content)
+
+    assert verify_release_manifest(bundle, _manifest(bundle)) == ()
+
+
+@pytest.mark.parametrize(
     "content",
     [
         b'{"api_key":"${NIKA_API_KEY}"}',
