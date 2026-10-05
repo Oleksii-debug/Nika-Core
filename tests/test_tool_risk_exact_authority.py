@@ -425,6 +425,72 @@ def test_standing_permission_rejects_equality_compatible_foreign_risk_carrier() 
         _scope(risk_ceiling=forged)  # type: ignore[arg-type]
 
 
+def test_grant_revalidates_scope_after_retained_object_mutation(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mutated-grant-scope.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    scope = _scope(risk_ceiling=ToolRisk.READ_ONLY)
+    object.__setattr__(scope, "risk_ceiling", ToolRisk.HIGH_IMPACT)
+
+    with pytest.raises(ValueError, match="fresh explicit per-action approval"):
+        permissions.grant(permission_id="mutated-scope", scope=scope)
+
+    assert permissions.get("mutated-scope") is None
+
+
+def test_grant_rejects_mutated_broad_scope_before_durable_write(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mutated-broad-scope.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    scope = _scope(risk_ceiling=ToolRisk.READ_ONLY)
+    object.__setattr__(scope, "targets", ("*",))
+
+    with pytest.raises(ValueError, match="broad or wildcard"):
+        permissions.grant(permission_id="mutated-broad", scope=scope)
+
+    assert permissions.get("mutated-broad") is None
+
+
+def test_delegate_revalidates_mutated_child_scope(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "mutated-delegated-scope.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    parent = StandingPermissionScope(
+        subject_id="agent-parent",
+        context=PermissionContext("user-1", "project-1", "task-1"),
+        action_class="safe.read",
+        targets=("target-1",),
+        sites=(),
+        resources=("resource-1",),
+        risk_ceiling=ToolRisk.EXTERNAL_SIDE_EFFECT,
+        granted_at=datetime(2026, 9, 27, tzinfo=UTC),
+        expires_at=datetime(2026, 9, 27, 0, 5, tzinfo=UTC),
+    )
+    permissions.grant(permission_id="perm-parent", scope=parent)
+    child = StandingPermissionScope(
+        subject_id="agent-child",
+        context=parent.context,
+        action_class=parent.action_class,
+        targets=parent.targets,
+        sites=parent.sites,
+        resources=parent.resources,
+        risk_ceiling=ToolRisk.READ_ONLY,
+        granted_at=parent.granted_at + timedelta(seconds=1),
+        expires_at=parent.expires_at,
+    )
+    object.__setattr__(child, "risk_ceiling", ToolRisk.HIGH_IMPACT)
+
+    with pytest.raises(ValueError, match="fresh explicit per-action approval"):
+        permissions.delegate(
+            parent_permission_id="perm-parent",
+            permission_id="perm-child",
+            scope=child,
+            delegated_by_subject_id="agent-parent",
+        )
+
+    assert permissions.get("perm-child") is None
+
+
 def test_forged_standing_risk_cannot_leave_durable_authority(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "nika.db")
     permissions = StandingPermissionStore(store)
