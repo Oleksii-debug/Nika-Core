@@ -516,7 +516,12 @@ class ProductFactoryProgramHost:
                     self.worker.dispatch(_snapshot_component_work_request(request)),
                 )
             except asyncio.CancelledError:
-                self._mark_uncertain_with_status(operation_key, lease)
+                self._mark_uncertain_with_status(
+                    operation_key,
+                    lease,
+                    host_task_id=host_task_id,
+                    request=request,
+                )
                 self._release_best_effort(lease)
                 raise
             except Exception as exc:  # noqa: BLE001 - isolate one external worker failure
@@ -622,7 +627,12 @@ class ProductFactoryProgramHost:
                             self.worker.dispatch(_snapshot_component_work_request(request)),
                         )
                     except asyncio.CancelledError:
-                        self._mark_uncertain_with_status(operation_key, lease)
+                        self._mark_uncertain_with_status(
+                            operation_key,
+                            lease,
+                            host_task_id=host_task_id,
+                            request=request,
+                        )
                         raise
                     except Exception as exc:  # noqa: BLE001
                         durable_status, marker_detail = self._mark_uncertain_with_status(
@@ -706,13 +716,20 @@ class ProductFactoryProgramHost:
                         self.worker.inspect(request.work_id),
                     )
                 except asyncio.CancelledError:
-                    self._mark_uncertain_and_release_recovery_claim(operation_key, lease)
+                    self._mark_uncertain_and_release_recovery_claim(
+                        operation_key,
+                        lease,
+                        host_task_id=host_task_id,
+                        request=request,
+                    )
                     raise
                 except Exception as exc:  # noqa: BLE001 - isolate one external inspect failure
                     durable_status, marker_detail = (
                         self._mark_uncertain_and_release_recovery_claim(
                             operation_key,
                             lease,
+                            host_task_id=host_task_id,
+                            request=request,
                         )
                     )
                     return _outcome(
@@ -739,6 +756,7 @@ class ProductFactoryProgramHost:
                             operation_key=operation_key,
                             lease=lease,
                             release_recovery_claim=True,
+                            request=request,
                         )
                     except Exception:
                         coordinator.restore(before)
@@ -758,6 +776,8 @@ class ProductFactoryProgramHost:
                         self._mark_uncertain_and_release_recovery_claim(
                             operation_key,
                             lease,
+                            host_task_id=host_task_id,
+                            request=request,
                         )
                     )
                     return _outcome(
@@ -781,13 +801,20 @@ class ProductFactoryProgramHost:
                         ),
                     )
                 except asyncio.CancelledError:
-                    self._mark_uncertain_and_release_recovery_claim(operation_key, lease)
+                    self._mark_uncertain_and_release_recovery_claim(
+                        operation_key,
+                        lease,
+                        host_task_id=host_task_id,
+                        request=request,
+                    )
                     raise
                 except Exception as exc:  # noqa: BLE001 - isolate one external recovery failure
                     durable_status, marker_detail = (
                         self._mark_uncertain_and_release_recovery_claim(
                             operation_key,
                             lease,
+                            host_task_id=host_task_id,
+                            request=request,
                         )
                     )
                     return _outcome(
@@ -839,6 +866,16 @@ class ProductFactoryProgramHost:
             with self.store.connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 self._assert_lease(connection, lease)
+                current = self._require_matching_operation(
+                    connection,
+                    operation_key=operation_key,
+                    host_task_id=host_task_id,
+                    request=request,
+                )
+                if current.status is IdempotencyStatus.COMPLETED:
+                    raise ProductFactoryProgramError(
+                        "worker operation completed before durable result finalization"
+                    )
                 self._checkpoint_on_connection(
                     connection,
                     host_task_id=host_task_id,
@@ -868,6 +905,8 @@ class ProductFactoryProgramHost:
                     self._mark_uncertain_and_release_recovery_claim(
                         operation_key,
                         lease,
+                        host_task_id=host_task_id,
+                        request=request,
                     )
                 )
             else:
@@ -1079,13 +1118,21 @@ class ProductFactoryProgramHost:
         self,
         operation_key: str,
         lease: WorkOwnershipLease,
+        *,
+        host_task_id: str,
+        request: ComponentWorkRequest,
     ) -> tuple[IdempotencyStatus | None, str]:
         try:
             with self.store.connection() as connection:
                 connection.execute("BEGIN IMMEDIATE")
                 self._assert_lease(connection, lease)
+                current = self._require_matching_operation(
+                    connection,
+                    operation_key=operation_key,
+                    host_task_id=host_task_id,
+                    request=request,
+                )
                 self._drop_recovery_claim(connection, operation_key, lease)
-                current = self._ledger._require_with_connection(connection, operation_key)
                 if current.status is IdempotencyStatus.PENDING:
                     current = self._ledger.mark_uncertain_with_connection(
                         connection,
@@ -1093,9 +1140,11 @@ class ProductFactoryProgramHost:
                     )
                 return current.status, ""
         except Exception as exc:  # noqa: BLE001 - never fabricate durable uncertainty
-            return self._durable_operation_status(operation_key), (
-                f"; uncertainty marker failed: {type(exc).__name__}"
-            )
+            return self._matching_operation_status(
+                operation_key,
+                host_task_id=host_task_id,
+                request=request,
+            ), f"; uncertainty marker failed: {type(exc).__name__}"
 
     def _save_fenced(
         self,
@@ -1123,10 +1172,17 @@ class ProductFactoryProgramHost:
         operation_key: str,
         lease: WorkOwnershipLease,
         release_recovery_claim: bool = False,
+        request: ComponentWorkRequest,
     ) -> None:
         with self.store.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_lease(connection, lease)
+            current = self._require_matching_operation(
+                connection,
+                operation_key=operation_key,
+                host_task_id=host_task_id,
+                request=request,
+            )
             self._checkpoint_on_connection(
                 connection,
                 host_task_id=host_task_id,
@@ -1135,7 +1191,6 @@ class ProductFactoryProgramHost:
             )
             if release_recovery_claim:
                 self._drop_recovery_claim(connection, operation_key, lease)
-            current = self._ledger._require_with_connection(connection, operation_key)
             if current.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain_with_connection(connection, operation_key)
 
@@ -1153,15 +1208,47 @@ class ProductFactoryProgramHost:
             checkpoint=binding.checkpoint(coordinator),
         )
 
+    def _require_matching_operation(
+        self,
+        connection,
+        *,
+        operation_key: str,
+        host_task_id: str,
+        request: ComponentWorkRequest,
+    ) -> IdempotencyRecord:
+        try:
+            current = self._ledger._require_with_connection(connection, operation_key)
+        except KeyError as exc:
+            raise ProductFactoryProgramError(
+                "worker operation disappeared before durable mutation"
+            ) from exc
+        if (
+            current.task_id != host_task_id
+            or current.operation_type != _OPERATION_TYPE
+            or current.input_fingerprint != _request_fingerprint(request)
+        ):
+            raise ProductFactoryProgramError(
+                "worker operation identity changed before durable mutation"
+            )
+        return current
+
     def _mark_uncertain_fenced(
         self,
         operation_key: str,
         lease: WorkOwnershipLease,
+        *,
+        host_task_id: str,
+        request: ComponentWorkRequest,
     ) -> None:
         with self.store.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_lease(connection, lease)
-            current = self._ledger._require_with_connection(connection, operation_key)
+            current = self._require_matching_operation(
+                connection,
+                operation_key=operation_key,
+                host_task_id=host_task_id,
+                request=request,
+            )
             if current.status is IdempotencyStatus.PENDING:
                 self._ledger.mark_uncertain_with_connection(connection, operation_key)
 
@@ -1175,17 +1262,50 @@ class ProductFactoryProgramHost:
             return None
         return current.status if current is not None else None
 
+    def _matching_operation_status(
+        self,
+        operation_key: str,
+        *,
+        host_task_id: str,
+        request: ComponentWorkRequest,
+    ) -> IdempotencyStatus | None:
+        try:
+            current = self._ledger.get(operation_key)
+        except Exception:  # noqa: BLE001 - status must not be fabricated on read failure
+            return None
+        if current is None:
+            return None
+        if (
+            current.task_id != host_task_id
+            or current.operation_type != _OPERATION_TYPE
+            or current.input_fingerprint != _request_fingerprint(request)
+        ):
+            return None
+        return current.status
+
     def _mark_uncertain_with_status(
         self,
         operation_key: str,
         lease: WorkOwnershipLease,
+        *,
+        host_task_id: str,
+        request: ComponentWorkRequest,
     ) -> tuple[IdempotencyStatus | None, str]:
         marker_detail = ""
         try:
-            self._mark_uncertain_fenced(operation_key, lease)
+            self._mark_uncertain_fenced(
+                operation_key,
+                lease,
+                host_task_id=host_task_id,
+                request=request,
+            )
         except Exception as exc:  # noqa: BLE001 - PENDING remains replay-blocking
             marker_detail = f"; uncertainty marker failed: {type(exc).__name__}"
-        return self._durable_operation_status(operation_key), marker_detail
+        return self._matching_operation_status(
+            operation_key,
+            host_task_id=host_task_id,
+            request=request,
+        ), marker_detail
 
     def _acquire_if_available(
         self,
