@@ -143,10 +143,11 @@ class ProcessPolicy:
     def __post_init__(self) -> None:
         if type(self.shell_allowed) is not bool or self.shell_allowed:
             raise ValueError("generic shell execution is not allowed")
-        if not self.allowed_executables:
-            raise ValueError("at least one executable must be allowlisted")
-        if any(not item.strip() for item in self.allowed_executables):
-            raise ValueError("allowed executable names must not be empty")
+        if type(self.allowed_executables) is not tuple or not self.allowed_executables:
+            raise ValueError("at least one executable must be allowlisted as a tuple")
+        if any(type(item) is not str or not item.strip() or "\\x00" in item
+               for item in self.allowed_executables):
+            raise ValueError("allowed executable names must be nonempty text without NUL")
 
 
 @dataclass(frozen=True, slots=True)
@@ -187,8 +188,12 @@ class AcceptanceCommand:
     timeout_seconds: int | None = None
 
     def __post_init__(self) -> None:
-        if not self.argv or any(not item for item in self.argv):
-            raise ValueError("acceptance command argv must not be empty")
+        if type(self.argv) is not tuple or not self.argv or any(
+            type(item) is not str or not item or "\\x00" in item for item in self.argv
+        ):
+            raise ValueError("acceptance command argv must be nonempty text arguments")
+        if type(self.cwd) is not str:
+            raise ValueError("acceptance command cwd must be text")
         if self.argv[0].casefold() in {"cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh", "bash", "sh"}:
             raise ValueError("shell executables are not valid acceptance command entrypoints")
         if self.cwd != ".":
