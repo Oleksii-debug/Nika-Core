@@ -19,6 +19,7 @@ from .product_factory_operations_contracts import (
     MaintenanceRequest,
     MaintenanceResult,
     ProductOperationsError,
+    canonical_text,
 )
 
 _OPERATION_TYPE = "product_operations.maintenance"
@@ -33,8 +34,7 @@ class RuntimeIdempotencyMaintenanceJournal:
     """
 
     def __init__(self, ledger: IdempotencyLedger, *, task_id: str) -> None:
-        if not task_id.strip():
-            raise ProductOperationsError("maintenance effect journal task_id must not be empty")
+        canonical_text(task_id, "maintenance effect journal task_id")
         self._ledger = ledger
         self._task_id = task_id
 
@@ -149,8 +149,8 @@ class RuntimeIdempotencyMaintenanceJournal:
 
     @staticmethod
     def _operation_key(project_id: str, request_id: str) -> str:
-        if not project_id.strip() or not request_id.strip():
-            raise ProductOperationsError("maintenance effect identity must not be empty")
+        canonical_text(project_id, "maintenance effect project identity")
+        canonical_text(request_id, "maintenance effect request identity")
         identity = json.dumps(
             {"project_id": project_id, "request_id": request_id},
             ensure_ascii=False,
