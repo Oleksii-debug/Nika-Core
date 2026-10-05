@@ -100,9 +100,11 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     (?:\xef\xbb\xbf)?
     [ \t-]*
     (?P<quote>["'])?
-    (?:"
+    (?:
+    """
     + _SECRET_ASSIGNMENT_KEY_PATTERN
-    + rb")
+    + rb"""
+    )
     (?(quote)(?P=quote))
     \s*[:=]\s*
     (?P<value>
@@ -119,9 +121,11 @@ _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE = re.compile(
     (?:\xef\xbb\xbf)?
     [ \t-]*
     (?P<quote>["'])?
-    (?:"
+    (?:
+    """
     + _SECRET_ASSIGNMENT_KEY_PATTERN
-    + rb")
+    + rb"""
+    )
     (?(quote)(?P=quote))
     \s*[:=]\s*
     (?:
