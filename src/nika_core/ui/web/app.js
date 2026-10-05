@@ -608,12 +608,48 @@
       reportStateUnavailable();
       return false;
     }
-    const state = response.state || {};
+    const state = response.state;
+    if (!state || typeof state !== "object" || Array.isArray(state)) {
+      reportStateUnavailable();
+      return false;
+    }
+    const validSummaryItems = (items, requiredFields) => (
+      Array.isArray(items)
+      && items.every((item) => (
+        item
+        && typeof item === "object"
+        && !Array.isArray(item)
+        && requiredFields.every((field) => typeof item[field] === "string")
+      ))
+    );
+    const tasks = state.tasks ?? [];
+    const agents = state.agents ?? [];
+    const workspaces = state.workspaces ?? [];
+    if (
+      !validSummaryItems(tasks, ["command", "state"])
+      || !validSummaryItems(agents, ["name", "goal"])
+      || !validSummaryItems(workspaces, ["name", "description"])
+    ) {
+      for (const [list, emptyNode, message] of [
+        [tasksList, tasksEmpty, "Список завдань недоступний."],
+        [agentsList, agentsEmpty, "Список агентів недоступний."],
+        [workspacesList, workspacesEmpty, "Список робочих просторів недоступний."],
+      ]) {
+        list.replaceChildren();
+        emptyNode.textContent = message;
+        emptyNode.hidden = false;
+      }
+      reportStateUnavailable();
+      return false;
+    }
+    tasksEmpty.textContent = "Завдань ще немає.";
+    agentsEmpty.textContent = "Агентів ще немає.";
+    workspacesEmpty.textContent = "Робочих просторів ще немає.";
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     renderSourceSetup(state.v01_sources ?? null);
-    renderItems(tasksList, tasksEmpty, state.tasks || [], (item) => `${item.command || "Без назви"} — ${item.state}`);
-    renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
-    renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
+    renderItems(tasksList, tasksEmpty, tasks, (item) => `${item.command || "Без назви"} — ${item.state}`);
+    renderItems(agentsList, agentsEmpty, agents, (item) => `${item.name} — ${item.goal}`);
+    renderItems(workspacesList, workspacesEmpty, workspaces, (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);
     const teamRender = renderTeamTask(state.v01_team_task ?? null);
     if (!teamRender.ok) {
