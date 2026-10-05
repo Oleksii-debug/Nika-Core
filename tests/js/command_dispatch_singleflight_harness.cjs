@@ -6,6 +6,8 @@ const fs = require("node:fs");
 const source = fs.readFileSync(process.argv[2], "utf8");
 const declarationStart = source.indexOf("  const taskMutationActions = new Set(");
 const declarationEnd = source.indexOf("  let bridgeInitializationStarted = false;", declarationStart);
+const dispatchResponseStart = source.indexOf("  function validDispatchResponse(");
+const dispatchResponseEnd = source.indexOf("  function requestId() {", dispatchResponseStart);
 const dispatchStart = source.indexOf("  async function dispatch(actionId, trigger = null) {");
 const dispatchEnd = source.indexOf("  async function refreshKeymap() {", dispatchStart);
 const stateRefreshStart = source.indexOf("  async function refreshState(");
@@ -13,6 +15,7 @@ const stateRefreshEnd = source.indexOf("  async function dispatch(", stateRefres
 const pollingStart = source.indexOf("  function startStatePolling() {");
 const pollingEnd = source.indexOf("  async function initializeBridge() {", pollingStart);
 assert(declarationStart >= 0 && declarationEnd > declarationStart);
+assert(dispatchResponseStart >= 0 && dispatchResponseEnd > dispatchResponseStart);
 assert(dispatchStart >= 0 && dispatchEnd > dispatchStart);
 assert(stateRefreshStart >= 0 && stateRefreshEnd > stateRefreshStart);
 assert(pollingStart >= 0 && pollingEnd > pollingStart);
@@ -27,6 +30,7 @@ const factory = new Function("context", `
   let sourceDirty = true;
   let actionsReady = true;
   ${source.slice(declarationStart, declarationEnd)}
+  ${source.slice(dispatchResponseStart, dispatchResponseEnd)}
   ${source.slice(dispatchStart, dispatchEnd)}
   return {
     dispatch, mutateKeymap, getSourceDirty: () => sourceDirty,
@@ -67,9 +71,19 @@ async function main() {
     focus: () => { focusCount += 1; },
   };
   const context = {
-    globalThis: {pywebview: {api: {dispatch: (request) => {
+    globalThis: {pywebview: {api: {dispatch: async (request) => {
       requests.push(request);
-      return bridge(request);
+      const response = await bridge(request);
+      if (
+        response
+        && typeof response === "object"
+        && !Array.isArray(response)
+        && !Object.hasOwn(response, "request_id")
+        && ["accepted", "completed", "failed", "rejected"].includes(response.status)
+      ) {
+        return {...response, request_id: request.request_id};
+      }
+      return response;
     }}}},
     announce: (message, assertive) => messages.push([message, assertive]),
     appendLog: (message) => logs.push(message),
@@ -187,6 +201,22 @@ async function main() {
   assert.equal(requests.length, 8, "confirmed accepted effect with stale projection must not mint a new request");
   assert(messages.at(-1)[0].includes("Попередню команду"));
   console.log("PASS: confirmed accepted effect with stale projection retains durable mutation lock");
+  ui = factory(context);
+
+  stateRead = async () => true;
+  bridge = async () => ({
+    request_id: "stale-request",
+    status: "completed",
+    message: "STALE_RESPONSE_MUST_NOT_BE_TRUSTED",
+  });
+  await ui.dispatch("task.create", trigger);
+  assert.equal(requests.length, 9);
+  assert(messages.at(-1)[0].includes("Повтор заблоковано до перезапуску"));
+  assert(!logs.includes("STALE_RESPONSE_MUST_NOT_BE_TRUSTED"));
+  await ui.dispatch("task.pause", trigger);
+  assert.equal(requests.length, 9, "mismatched acknowledgement must retain the durable lock");
+  console.log("PASS: mismatched command request ID is reconciled and never trusted");
+
   let finishKeymap;
   const keymapInput = {focus: () => {focusCount += 1;}};
   const saveKeymap = ui.mutateKeymap(
