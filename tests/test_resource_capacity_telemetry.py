@@ -179,6 +179,7 @@ def test_psutil_observer_keeps_optional_telemetry_unavailable_instead_of_guessin
     assert snapshot.battery_percent is None
     assert snapshot.power_plugged is None
 
+
 @pytest.mark.parametrize(
     ("field_name", "value"),
     (
