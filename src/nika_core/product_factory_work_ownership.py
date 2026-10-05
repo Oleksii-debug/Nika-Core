@@ -311,21 +311,21 @@ def _is_busy_or_locked(exc: sqlite3.OperationalError) -> bool:
 
 def _identity(*values: str) -> None:
     if not values:
-        raise WorkOwnershipError("work ownership identity must be canonical bounded text")
+        raise WorkOwnershipError("work ownership identity must be exact canonical bounded non-empty text")
     for value in values:
         if type(value) is not str or not value or value != value.strip():
-            raise WorkOwnershipError("work ownership identity must be canonical bounded text")
+            raise WorkOwnershipError("work ownership identity must be exact canonical bounded non-empty text")
         try:
             encoded = value.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise WorkOwnershipError(
-                "work ownership identity must be canonical bounded text"
+                "work ownership identity must be exact canonical bounded non-empty text"
             ) from exc
         if (
             len(encoded) > _MAX_IDENTITY_UTF8_BYTES
             or any(ord(character) < 32 or ord(character) == 127 for character in value)
         ):
-            raise WorkOwnershipError("work ownership identity must be canonical bounded text")
+            raise WorkOwnershipError("work ownership identity must be exact canonical bounded non-empty text")
 
 
 def _persisted_owner(value: object) -> str:
