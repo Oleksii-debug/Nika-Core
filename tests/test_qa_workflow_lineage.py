@@ -41,6 +41,7 @@ M11_MODEL_RECOVERY_TESTS = (
     "tests/test_diagnostics_health_value_authority.py",
     "tests/test_local_model_health.py",
     "tests/test_local_model_health_default_tag.py",
+    "tests/test_local_model_health_foundry.py",
     "tests/test_local_model_health_provider_identity.py",
     "tests/test_local_model_health_string_authority.py",
     "tests/test_local_model_health_timeout_contract.py",
