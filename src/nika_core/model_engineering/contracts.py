@@ -386,8 +386,11 @@ class CaseBenchmarkResult:
             (self.accelerator_before, "accelerator_before"),
             (self.accelerator_after, "accelerator_after"),
         ):
-            if snapshot is not None and type(snapshot) is not AcceleratorSnapshot:
+            if snapshot is None:
+                continue
+            if type(snapshot) is not AcceleratorSnapshot:
                 raise TypeError(f"{name} must be an exact AcceleratorSnapshot")
+            AcceleratorSnapshot.__post_init__(snapshot)
         for value, name in (
             (self.input_tokens, "input_tokens"),
             (self.output_tokens, "output_tokens"),
@@ -511,6 +514,7 @@ def validate_candidate_benchmark_report(report: CandidateBenchmarkReport) -> Non
 
     if type(report) is not CandidateBenchmarkReport:
         raise TypeError("report must be an exact CandidateBenchmarkReport")
+    CandidateBenchmarkReport.__post_init__(report)
     results = report.case_results
     if type(results) is not tuple:
         raise TypeError("case_results must be a canonical tuple")
