@@ -61,6 +61,10 @@ def _corrupt(payload, case):
         return "[]"
     if case == "scalar":
         return "null"
+    if case == "deep-json":
+        return '{"nested":' + "[" * 2000 + "0" + "]" * 2000 + "}"
+    if case == "exponent-overflow":
+        return json.dumps(payload, ensure_ascii=False)[:-1] + ', "unused": 1e999}'
     if case == "blob":
         return b"\xff"
     if case == "number":
@@ -115,6 +119,8 @@ def _corrupt(payload, case):
         "json",
         "array",
         "scalar",
+        "deep-json",
+        "exponent-overflow",
         "blob",
         "number",
         "wrong-package",
