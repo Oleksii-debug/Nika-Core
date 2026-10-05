@@ -28,18 +28,22 @@ Windows-only. A successful call must:
 13. require the verifier receipt SHA-256 to equal the completed runtime evidence;
 14. under the same stability lock, re-read the canonical strict self-contained PEFT
     candidate manifest through `training_peft_worker.candidate_adapter_manifest`;
-15. require its base reference/digest, candidate reference, job fingerprint, and final
-    step number to match the canonical COMPLETED runtime evidence; and
-16. bind the manifest digest plus trainer deployment, trainer implementation, model
-    directory, consumed-material, and runtime-manifest identities into the report; and
+15. require its base reference/digest and candidate reference to match canonical COMPLETED
+    runtime evidence, require its trainer-protocol job fingerprint to match the exact
+    `SubprocessTrainingWorker` protocol identity, and require its final step number to match
+    the COMPLETED runtime boundary; and
+16. bind both the runtime job fingerprint and the distinct trainer-protocol job fingerprint,
+    plus the manifest digest, trainer deployment, trainer implementation, model directory,
+    consumed-material, and runtime-manifest identities into the report; and
 17. when persisted, publish the canonical report through the provided atomic/no-clobber
     writer rather than a direct truncating file write.
 
 The resulting `PhysicalTrainingPilotReport` is path-free. It contains bounded identifiers,
 SHA-256 identities, descriptor/registry digests, strict PEFT candidate-manifest digest,
-trainer deployment/implementation/runtime provenance, consumed-material and model-directory
-manifest digests, the original pause, restart-probe, and completion checkpoint IDs, candidate
-byte count, completed step count, schema version, and the literal platform value `windows`.
+separate runtime and trainer-protocol job fingerprints, trainer deployment/implementation/runtime
+provenance, consumed-material and model-directory manifest digests, the original pause,
+restart-probe, and completion checkpoint IDs, candidate byte count, completed step count,
+schema version, and the literal platform value `windows`.
 It does not
 serialize training/validation records, model paths, credentials, environment variables,
 prompts, responses, or checkpoint payloads.
@@ -103,8 +107,9 @@ print(report.evidence_sha256)
 ```
 
 The helper supplies both the control sequence required to create the one-step pause and the
-effect-free restart probe. Reports use schema version 3 because strict candidate-manifest and
-persisted trainer/runtime provenance are now part of the evidence identity in addition to the
+effect-free restart probe. Reports use schema version 4 because the runtime job fingerprint and
+the trainer-protocol job fingerprint are distinct authorities and are now recorded separately,
+alongside strict candidate-manifest and persisted trainer/runtime provenance plus the
 durable-reopen checkpoint.
 
 ## Evidence boundaries
