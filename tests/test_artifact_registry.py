@@ -1019,6 +1019,7 @@ def test_read_queries_reject_oversized_text_before_sql(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="4096-byte query limit"):
         registry.list(workspace_id=oversized)
 
+
 @pytest.mark.parametrize(
     ("state", "actual_sha256", "actual_size_bytes"),
     (
