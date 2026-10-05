@@ -305,6 +305,29 @@ def test_save_rejects_excessive_nodes_before_json_encoding(
     assert count == 0
 
 
+def test_save_rejects_aggregate_integer_bytes_before_json_encoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    large_integer = (1 << 4096) - 1
+    payload: dict[str, object] = {"items": [large_integer] * 900}
+
+    def unexpected_encoder(*_args: object, **_kwargs: object) -> str:
+        pytest.fail("oversized canonical JSON reached json.dumps")
+
+    monkeypatch.setattr(checkpoint_module.json, "dumps", unexpected_encoder)
+    with pytest.raises(ValueError, match="UTF-8 byte limit"):
+        checkpoints.save(task_id=task_id, stage="integer-bytes", payload=payload)
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
 def test_save_accepts_exact_node_and_depth_boundaries(tmp_path: Path) -> None:
     _store, task_id, checkpoints = _build_service(tmp_path)
     exact_nodes: dict[str, object] = {"items": [0] * 9_998}
