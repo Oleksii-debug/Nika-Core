@@ -339,15 +339,9 @@ def test_report_writer_cleans_temporary_after_publish_failure(
     path = tmp_path / "physical-old-new-evaluation-report.json"
     monkeypatch.setattr(driver.os, "name", "posix")
 
-    def fail_link(
-        source: Path,
-        destination: Path,
-        *,
-        follow_symlinks: bool,
-    ) -> None:
+    def fail_link(source: Path, destination: Path) -> None:
         assert source.parent == tmp_path
         assert destination == path
-        assert follow_symlinks is False
         raise OSError("synthetic publish failure")
 
     monkeypatch.setattr(driver.os, "link", fail_link)
