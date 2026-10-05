@@ -103,6 +103,9 @@
   });
   let actions = [];
   let actionsReady = false;
+  // One outstanding durable task command per UI session: a second click must not mint a new request ID.
+  const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
+  const inFlightActions = new Set();
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let teamStateSignature = null;
@@ -582,22 +585,65 @@
       await dispatchAutostart(actionId, trigger);
       return;
     }
-    const payload = {};
-    if (actionId === "task.create") payload.command = commandInput.value.trim();
-    if (actionId === "team.sources.configure") {
-      payload.revision = sourceRevision;
-      for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+    // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
+    const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
+    if (inFlightActions.has(lockKey)) return;
+    inFlightActions.add(lockKey);
+    try {
+      const payload = {};
+      if (actionId === "task.create") payload.command = commandInput.value.trim();
+      if (actionId === "team.sources.configure") {
+        payload.revision = sourceRevision;
+        for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
+      }
+      let result;
+      try {
+        result = await globalThis.pywebview.api.dispatch({
+          request_id: requestId(), action_id: actionId, payload,
+        });
+      } catch {
+        // The durable effect may have committed before the bridge disconnected. Never retry blindly.
+        const uncertain = "Немає підтвердження виконання дії. Перечитайте стан перед повтором.";
+        announce(uncertain, true);
+        appendLog(uncertain);
+        trigger?.focus?.();
+        return;
+      }
+      if (!result || !["completed", "failed", "rejected"].includes(result.status)) {
+        const uncertain = "Міст повернув непідтверджений результат. Перечитайте стан перед повтором.";
+        announce(uncertain, true);
+        appendLog(uncertain);
+        trigger?.focus?.();
+        return;
+      }
+      const failed = result.status !== "completed";
+      const message = typeof result.message === "string" && result.message
+        ? result.message : (failed ? "Дію відхилено." : "Виконано.");
+      if (actionId === "team.sources.configure" && !failed) sourceDirty = false;
+      announce(message, failed);
+      appendLog(message);
+      let stateReady = false;
+      try {
+        stateReady = await refreshState();
+      } catch {
+        reportStateUnavailable();
+      }
+      document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
+      if (!stateReady) {
+        announce(
+          failed
+            ? "Не вдалося оновити стан після відхиленої дії. Причина є в журналі."
+            : "Дію підтверджено, але оновлений стан недоступний. Перечитайте стан.",
+          true,
+        );
+      }
+      const focusId = result.focus_id
+        || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
+      if (focusId) focusElementById(focusId);
+      else trigger?.focus?.();
+    } finally {
+      inFlightActions.delete(lockKey);
     }
-    const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-    const failed = result.status === "failed" || result.status === "rejected";
-    if (actionId === "team.sources.configure" && result.status === "completed") sourceDirty = false;
-    announce(result.message || (result.status === "completed" ? "Виконано." : result.status), failed);
-    appendLog(result.message);
-    const stateReady = await refreshState();
-    document.documentElement.dataset.nikaReady = stateReady ? "true" : "false";
-    const focusId = result.focus_id || (failed ? trigger?.dataset?.errorFocusTarget : trigger?.dataset?.focusTarget);
-    if (focusId) focusElementById(focusId);
-    else trigger?.focus?.();
   }
 
   async function refreshKeymap() {
