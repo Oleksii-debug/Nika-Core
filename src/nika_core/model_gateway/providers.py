@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import time
 from collections.abc import Callable
@@ -22,6 +23,20 @@ from nika_core.model_gateway.contracts import (
 
 _OLLAMA_MANIFEST_DIGEST = re.compile(r"^[0-9a-f]{64}$")
 _MAX_OLLAMA_CATALOG_MODELS = 4096
+_MAX_OLLAMA_MANIFEST_BYTES = 1024 * 1024
+
+
+def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _reject_json_constant(value: str) -> None:
+    raise ValueError(f"non-standard JSON constant: {value}")
 
 
 def _require_provider_text(name: str, value: object) -> str:
@@ -345,12 +360,28 @@ class OllamaProvider:
                 trust_env=False,
                 follow_redirects=False,
             ) as client:
-                response = await client.get(f"{self._base_url}/{endpoint}")
-                response.raise_for_status()
-                media_type = response.headers.get("content-type", "").partition(";")[0]
-                if media_type.strip().casefold() != "application/json":
-                    raise ValueError("Ollama manifest endpoint must return JSON")
-                body = response.json()
+                async with client.stream(
+                    "GET",
+                    f"{self._base_url}/{endpoint}",
+                ) as response:
+                    response.raise_for_status()
+                    media_type = response.headers.get(
+                        "content-type", ""
+                    ).partition(";")[0]
+                    if media_type.strip().casefold() != "application/json":
+                        raise ValueError("Ollama manifest endpoint must return JSON")
+                    raw = bytearray()
+                    async for chunk in response.aiter_bytes():
+                        raw.extend(chunk)
+                        if len(raw) > _MAX_OLLAMA_MANIFEST_BYTES:
+                            raise ValueError(
+                                "Ollama manifest response exceeds the byte limit"
+                            )
+                body = json.loads(
+                    bytes(raw).decode("utf-8", errors="strict"),
+                    object_pairs_hook=_strict_json_object,
+                    parse_constant=_reject_json_constant,
+                )
                 return self._catalog_manifest_sha256(body, model=model)
         except httpx.TimeoutException as exc:
             raise ModelGatewayError(
@@ -379,7 +410,14 @@ class OllamaProvider:
                 retryable=failure_effect is ModelFailureEffect.NO_EFFECT,
                 failure_effect=failure_effect,
             ) from exc
-        except (KeyError, TypeError, ValueError) as exc:
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            RecursionError,
+        ) as exc:
             raise ModelGatewayError(
                 ModelErrorCode.PROVIDER_ERROR,
                 "Ollama manifest evidence is invalid",
