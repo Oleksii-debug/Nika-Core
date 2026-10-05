@@ -8,6 +8,8 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.research.models import ResearchWorkspace, SourceKind, SourceSpec
 from nika_core.research.repository import ResearchRepository
 
+BAD_UNICODE = chr(0xD800)
+
 
 def _repository(tmp_path: Path) -> tuple[SQLiteStore, ResearchRepository]:
     store = SQLiteStore(tmp_path / "nika.db")
@@ -114,3 +116,80 @@ def test_local_source_rejects_forged_kind_without_sql_mutation(tmp_path: Path) -
         repository.upsert_source(forged)
     with store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM research_sources").fetchone()[0] == 0
+
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    [
+        ("source_id", BAD_UNICODE),
+        ("workspace_id", BAD_UNICODE),
+        ("locator", BAD_UNICODE),
+    ],
+)
+def test_local_source_rejects_unencodable_identity_before_sql(
+    tmp_path: Path,
+    field_name: str,
+    value: str,
+) -> None:
+    store, repository = _repository(tmp_path)
+    values = {
+        "source_id": "id",
+        "workspace_id": "owner-a",
+        "locator": "/valid/файл.txt",
+    }
+    values[field_name] = value
+    source = SourceSpec(
+        values["source_id"],
+        values["workspace_id"],
+        SourceKind.LOCAL_FILE,
+        values["locator"],
+    )
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        repository.upsert_source(source)
+
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM research_sources").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "/bad\x00name.txt",
+        "/bad\nname.txt",
+        "/bad\tname.txt",
+        "/bad" + chr(0x7F) + "name.txt",
+    ],
+)
+def test_local_source_rejects_control_characters_in_locator_before_sql(
+    tmp_path: Path,
+    locator: str,
+) -> None:
+    store, repository = _repository(tmp_path)
+    source = SourceSpec("id", "owner-a", SourceKind.LOCAL_FILE, locator)
+
+    with pytest.raises(ValueError, match="control characters"):
+        repository.upsert_source(source)
+
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM research_sources").fetchone()[0] == 0
+
+
+def test_local_source_preserves_valid_unicode_locator(tmp_path: Path) -> None:
+    store, repository = _repository(tmp_path)
+    source = SourceSpec(
+        "джерело",
+        "owner-a",
+        SourceKind.LOCAL_FILE,
+        "/дані/партія №1.pgn",
+    )
+
+    repository.upsert_source(source)
+
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT source_id, workspace_id, locator FROM research_sources WHERE source_id=?",
+            (source.source_id,),
+        ).fetchone()
+    assert tuple(row) == (source.source_id, source.workspace_id, source.locator)
