@@ -176,6 +176,79 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
     return normalized
 
 
+def _validate_command_artifact_ids(
+    command: tuple[str, ...],
+    *,
+    trainer_artifact_id: str,
+    command_artifact_ids: Mapping[int, str] | None,
+) -> dict[int, str]:
+    result = {
+        0: _validate_sha256(trainer_artifact_id, name="trainer_artifact_id"),
+    }
+    if command_artifact_ids is not None:
+        for index, artifact_id in command_artifact_ids.items():
+            if type(index) is not int or not 1 <= index < len(command):
+                raise ValueError(
+                    "command artifact indexes must identify non-executable argv entries"
+                )
+            result[index] = _validate_sha256(
+                artifact_id,
+                name=f"command_artifact_ids[{index}]",
+            )
+            if not os.path.isabs(command[index]):
+                raise ValueError("command artifact bindings require absolute file arguments")
+
+    for index, argument in enumerate(command[1:], start=1):
+        if os.path.isabs(argument):
+            if index not in result:
+                raise ValueError(
+                    "absolute command file arguments must be bound through Artifact Registry"
+                )
+            continue
+        separators = tuple(
+            separator for separator in (os.sep, os.altsep) if separator is not None
+        )
+        if any(separator in argument for separator in separators):
+            raise ValueError("relative path command arguments are forbidden")
+        if (
+            len(argument) < 2
+            or not argument.startswith("-")
+            or any(
+                not (
+                    ord(character) < 128
+                    and (character.isalnum() or character in "-_")
+                )
+                for character in argument[1:]
+            )
+        ):
+            raise ValueError(
+                "unbound command arguments must be simple option switches; "
+                "use stdin for trainer data"
+            )
+    return result
+
+
+def _command_sha256(
+    command: tuple[str, ...],
+    command_artifact_ids: Mapping[int, str],
+) -> str:
+    payload = {
+        "argv": list(command),
+        "artifact_ids": {
+            str(index): command_artifact_ids[index]
+            for index in sorted(command_artifact_ids)
+        },
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(b"nika-training-command-v1\x00" + encoded).hexdigest()
+
+
 def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
     if environment is None:
         return {}
@@ -196,13 +269,18 @@ def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, st
     return result
 
 
-def _job_identity(spec: TrainingJobSpec) -> dict[str, object]:
+def _job_identity(
+    spec: TrainingJobSpec,
+    *,
+    command_sha256: str,
+) -> dict[str, object]:
     return {
         "base_artifact": {
             "artifact_ref": spec.base_artifact.artifact_ref,
             "sha256": spec.base_artifact.sha256,
         },
         "candidate_artifact_ref": spec.candidate_artifact_ref,
+        "command_sha256": command_sha256,
         "frozen_package_sha256": spec.frozen_package_sha256,
         "job_id": spec.job_id,
         "max_steps": spec.max_steps,
@@ -214,9 +292,9 @@ def _job_identity(spec: TrainingJobSpec) -> dict[str, object]:
     }
 
 
-def _job_fingerprint(spec: TrainingJobSpec) -> str:
+def _job_fingerprint(spec: TrainingJobSpec, *, command_sha256: str) -> str:
     identity = _canonical_json_bytes(
-        _job_identity(spec),
+        _job_identity(spec, command_sha256=command_sha256),
         max_bytes=_DEFAULT_MAX_REQUEST_BYTES,
         label="training_job_identity",
         effect=TrainingWorkerFailureEffect.NO_EFFECT,
@@ -224,15 +302,9 @@ def _job_fingerprint(spec: TrainingJobSpec) -> str:
     return hashlib.sha256(b"nika-training-job-v2\x00" + identity).hexdigest()
 
 
-def _step_id(
-    job_fingerprint: str,
-    trainer_artifact_id: str,
-    trainer_sha256: str,
-    step_index: int,
-) -> str:
+def _step_id(job_fingerprint: str, trainer_sha256: str, step_index: int) -> str:
     material = (
-        f"nika-training-step-v2\x00{job_fingerprint}\x00{trainer_artifact_id}"
-        f"\x00{trainer_sha256}\x00{step_index}"
+        f"nika-training-step-v2\x00{job_fingerprint}\x00{trainer_sha256}\x00{step_index}"
     ).encode()
     return hashlib.sha256(material).hexdigest()
 
@@ -284,12 +356,13 @@ def _training_material_request(
 
 
 class SubprocessTrainingWorker:
-    """Shell-free TrainingWorkerPort adapter for one Registry-authorized trainer executable.
+    """Shell-free TrainingWorkerPort adapter for one Registry-authorized trainer command.
 
-    Durable resume state binds the exact trainer digest and the exact frozen/material job
-    identities. Physical training paths remain transient request data only. Immediately
-    before spawn, the canonical Artifact Registry verifies the executable and the canonical
-    ResolvedTrainingPackage verifier re-binds every input path to frozen bytes.
+    Durable resume state binds the exact command vector, Registry-bound command artifacts,
+    trainer digest and frozen/material job identities. Absolute command-file arguments must
+    have Artifact Registry authority; relative path arguments are forbidden. Physical training
+    paths remain transient request data only. Immediately before spawn, the canonical Registry
+    verifies every bound command artifact and ResolvedTrainingPackage re-binds all input bytes.
     """
 
     def __init__(
@@ -298,6 +371,7 @@ class SubprocessTrainingWorker:
         *,
         artifact_registry: ArtifactRegistry,
         trainer_artifact_id: str,
+        command_artifact_ids: Mapping[int, str] | None = None,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         environment: Mapping[str, str] | None = None,
         max_request_bytes: int = _DEFAULT_MAX_REQUEST_BYTES,
@@ -307,8 +381,15 @@ class SubprocessTrainingWorker:
         if type(artifact_registry) is not ArtifactRegistry:
             raise TypeError("artifact_registry must be the canonical ArtifactRegistry")
         self._artifact_registry = artifact_registry
-        self._trainer_artifact_id = _validate_sha256(
-            trainer_artifact_id, name="trainer_artifact_id"
+        self._command_artifact_ids = _validate_command_artifact_ids(
+            self._command,
+            trainer_artifact_id=trainer_artifact_id,
+            command_artifact_ids=command_artifact_ids,
+        )
+        self._trainer_artifact_id = self._command_artifact_ids[0]
+        self._command_sha256 = _command_sha256(
+            self._command,
+            self._command_artifact_ids,
         )
         self._timeout_seconds = _validate_timeout(timeout_seconds)
         self._environment = _validate_environment(environment)
@@ -342,23 +423,32 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             )
 
-        trainer_record = self._get_trainer_record()
+        command_records = self._get_command_records()
+        trainer_record = command_records[0]
         trainer_sha256 = trainer_record.sha256
-        job_fingerprint = _job_fingerprint(spec)
+        job_fingerprint = _job_fingerprint(
+            spec,
+            command_sha256=self._command_sha256,
+        )
         trainer_state, previous_step_id = self._unwrap_resume_state(
             resume_state=resume_state,
             job_fingerprint=job_fingerprint,
+            command_sha256=self._command_sha256,
             trainer_sha256=trainer_sha256,
             step_index=step_index,
         )
-        current_step_id = _step_id(
-            job_fingerprint,
-            trainer_record.artifact_id,
-            trainer_sha256,
-            step_index,
-        )
+        current_step_id = _step_id(job_fingerprint, trainer_sha256, step_index)
         request = {
-            "job": _job_identity(spec),
+            "command_artifacts": [
+                {
+                    "argument_index": index,
+                    "artifact_id": record.artifact_id,
+                    "sha256": record.sha256,
+                }
+                for index, record in sorted(command_records.items())
+            ],
+            "command_sha256": self._command_sha256,
+            "job": _job_identity(spec, command_sha256=self._command_sha256),
             "job_fingerprint": job_fingerprint,
             "previous_step_id": previous_step_id,
             "protocol_version": _PROTOCOL_VERSION,
@@ -376,6 +466,7 @@ class SubprocessTrainingWorker:
             effect=TrainingWorkerFailureEffect.NO_EFFECT,
         )
 
+        self._verify_command_artifacts(command_records)
         try:
             training_materials.reverify()
         except TrainingMaterialResolutionError as exc:
@@ -384,8 +475,6 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             ) from exc
 
-        # Keep executable verification as the final authority check before process creation.
-        self._verify_trainer_artifact(trainer_record)
         stdout = self._execute(request_bytes + b"\n")
         response = self._parse_response(stdout, expected_step_id=current_step_id)
         completed = response["completed"]
@@ -397,6 +486,7 @@ class SubprocessTrainingWorker:
 
         wrapped_resume_state = {
             _RESUME_ENVELOPE_KEY: {
+                "command_sha256": self._command_sha256,
                 "job_fingerprint": job_fingerprint,
                 "last_step_id": current_step_id,
                 "protocol_version": _PROTOCOL_VERSION,
@@ -423,68 +513,82 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.UNKNOWN,
             ) from exc
 
-    def _get_trainer_record(self) -> ArtifactRecord:
-        try:
-            record = self._artifact_registry.get(self._trainer_artifact_id)
-        except (ArtifactRegistryError, ValueError) as exc:
-            raise _error(
-                "trainer_artifact_lookup_failed",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            ) from exc
-        if type(record) is not ArtifactRecord:
-            raise _error(
-                "trainer_artifact_invalid_record",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            )
-        if record.location_kind is not ArtifactLocationKind.LOCAL_FILE:
-            raise _error(
-                "trainer_artifact_not_local_file",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            )
-        if _normalized_executable_path(self._command[0]) != _normalized_executable_path(
-            record.locator
-        ):
-            raise _error(
-                "trainer_artifact_command_mismatch",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            )
-        return record
+    def _get_command_records(self) -> dict[int, ArtifactRecord]:
+        records: dict[int, ArtifactRecord] = {}
+        for index, artifact_id in sorted(self._command_artifact_ids.items()):
+            try:
+                record = self._artifact_registry.get(artifact_id)
+            except (ArtifactRegistryError, ValueError) as exc:
+                raise _error(
+                    "command_artifact_lookup_failed",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                ) from exc
+            if type(record) is not ArtifactRecord:
+                raise _error(
+                    "command_artifact_invalid_record",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                )
+            if record.location_kind is not ArtifactLocationKind.LOCAL_FILE:
+                raise _error(
+                    "command_artifact_not_local_file",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                )
+            expected_kind = "training_executable" if index == 0 else "training_command_file"
+            if record.kind != expected_kind:
+                raise _error(
+                    "command_artifact_kind_mismatch",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                )
+            if _normalized_executable_path(self._command[index]) != _normalized_executable_path(
+                record.locator
+            ):
+                raise _error(
+                    "command_artifact_argument_mismatch",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                )
+            records[index] = record
+        return records
 
-    def _verify_trainer_artifact(self, expected: ArtifactRecord) -> None:
-        try:
-            verification = self._artifact_registry.verify(expected.artifact_id)
-            current = self._artifact_registry.get(expected.artifact_id)
-        except (ArtifactRegistryError, ValueError) as exc:
-            raise _error(
-                "trainer_artifact_verification_failed",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            ) from exc
-        if type(current) is not ArtifactRecord or current != expected:
-            raise _error(
-                "trainer_artifact_record_changed",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            )
-        if verification.state is not ArtifactVerificationState.VERIFIED:
-            raise _error(
-                "trainer_artifact_not_verified",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            )
-        if (
-            verification.expected_sha256 != expected.sha256
-            or verification.actual_sha256 != expected.sha256
-            or verification.expected_size_bytes != expected.size_bytes
-            or verification.actual_size_bytes != expected.size_bytes
-        ):
-            raise _error(
-                "trainer_artifact_evidence_mismatch",
-                effect=TrainingWorkerFailureEffect.NO_EFFECT,
-            )
+    def _verify_command_artifacts(
+        self,
+        expected_records: Mapping[int, ArtifactRecord],
+    ) -> None:
+        for expected in expected_records.values():
+            try:
+                verification = self._artifact_registry.verify(expected.artifact_id)
+                current = self._artifact_registry.get(expected.artifact_id)
+            except (ArtifactRegistryError, ValueError) as exc:
+                raise _error(
+                    "command_artifact_verification_failed",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                ) from exc
+            if type(current) is not ArtifactRecord or current != expected:
+                raise _error(
+                    "command_artifact_record_changed",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                )
+            if verification.state is not ArtifactVerificationState.VERIFIED:
+                raise _error(
+                    "command_artifact_not_verified",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                )
+            if (
+                verification.expected_sha256 != expected.sha256
+                or verification.actual_sha256 != expected.sha256
+                or verification.expected_size_bytes != expected.size_bytes
+                or verification.actual_size_bytes != expected.size_bytes
+            ):
+                raise _error(
+                    "command_artifact_evidence_mismatch",
+                    effect=TrainingWorkerFailureEffect.NO_EFFECT,
+                )
 
     def _unwrap_resume_state(
         self,
         *,
         resume_state: dict[str, object],
         job_fingerprint: str,
+        command_sha256: str,
         trainer_sha256: str,
         step_index: int,
     ) -> tuple[dict[str, object], str | None]:
@@ -514,6 +618,7 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             )
         expected_keys = {
+            "command_sha256",
             "job_fingerprint",
             "last_step_id",
             "protocol_version",
@@ -534,6 +639,11 @@ class SubprocessTrainingWorker:
                 "resume_state_unsupported_protocol",
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             )
+        if envelope["command_sha256"] != command_sha256:
+            raise _error(
+                "resume_state_command_mismatch",
+                effect=TrainingWorkerFailureEffect.NO_EFFECT,
+            )
         if envelope["job_fingerprint"] != job_fingerprint:
             raise _error(
                 "resume_state_job_mismatch",
@@ -550,12 +660,7 @@ class SubprocessTrainingWorker:
                 effect=TrainingWorkerFailureEffect.NO_EFFECT,
             )
 
-        expected_previous_step_id = _step_id(
-            job_fingerprint,
-            self._trainer_artifact_id,
-            trainer_sha256,
-            step_index - 1,
-        )
+        expected_previous_step_id = _step_id(job_fingerprint, trainer_sha256, step_index - 1)
         if envelope["last_step_id"] != expected_previous_step_id:
             raise _error(
                 "resume_state_previous_step_mismatch",

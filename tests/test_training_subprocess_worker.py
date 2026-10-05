@@ -963,3 +963,73 @@ def test_caller_supplied_trainer_digest_is_not_adapter_api(tmp_path: Path) -> No
             trainer_artifact_id=artifact_id,
             trainer_sha256="c" * 64,  # type: ignore[call-arg]
         )
+
+
+def test_command_option_values_are_rejected_from_process_argv(tmp_path: Path) -> None:
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
+
+    with pytest.raises(ValueError, match="simple option switches"):
+        SubprocessTrainingWorker(
+            (str(executable), "--token=secret"),
+            artifact_registry=registry,
+            trainer_artifact_id=artifact_id,
+        )
+
+
+def test_simple_option_switch_is_admitted(tmp_path: Path) -> None:
+    registry, artifact_id, executable, _ = _registry_for_python(tmp_path)
+
+    worker = SubprocessTrainingWorker(
+        (str(executable), "-u"),
+        artifact_registry=registry,
+        trainer_artifact_id=artifact_id,
+    )
+
+    assert isinstance(worker, SubprocessTrainingWorker)
+
+
+def test_command_artifact_kind_mismatch_fails_before_process_effect(tmp_path: Path) -> None:
+    marker = tmp_path / "started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    executable = Path(sys.executable).resolve()
+    registry = ArtifactRegistry.from_store(
+        SQLiteStore(tmp_path / "wrong-kind.sqlite3"),
+        local_file_roots=(executable.parent, tmp_path),
+    )
+    executable_record = registry.register_file(
+        workspace_id="trainer-tests",
+        idempotency_key="python-executable",
+        path=executable,
+        kind="training_executable",
+    )
+    script_record = registry.register_file(
+        workspace_id="trainer-tests",
+        idempotency_key="trainer-script",
+        path=trainer,
+        kind="dataset",
+    )
+    worker = SubprocessTrainingWorker(
+        (str(executable), str(trainer)),
+        artifact_registry=registry,
+        trainer_artifact_id=executable_record.artifact_id,
+        command_artifact_ids={1: script_record.artifact_id},
+    )
+    materials = _resolved_materials(tmp_path)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials, max_steps=1),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "command_artifact_kind_mismatch"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
