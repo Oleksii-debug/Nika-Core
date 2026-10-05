@@ -222,3 +222,31 @@ def test_imported_agent_rejects_raw_surrogates() -> None:
     raw = _definition("web.read", RiskTier.R0_READ_ONLY).export_json()
     with pytest.raises(ValueError, match="invalid Unicode"):
         AgentDefinition.import_json(raw + "\ud800")
+
+@pytest.mark.parametrize("untrusted", (0, 1, "true", "false", "yes", "off", 0.0, 1.0))
+def test_agent_enabled_rejects_coercive_boolean_inputs(untrusted: object) -> None:
+    fields = _definition("web.read", RiskTier.R0_READ_ONLY).model_dump()
+    fields["enabled"] = untrusted
+    with pytest.raises(ValidationError):
+        AgentDefinition.model_validate(fields)
+
+
+@pytest.mark.parametrize("encoded", ("0", "1", '"true"', '"false"', "0.0", "1.0"))
+def test_imported_agent_enabled_rejects_nonboolean_json(encoded: str) -> None:
+    raw = _definition("web.read", RiskTier.R0_READ_ONLY).export_json()
+    assert '"enabled": true' in raw
+    with pytest.raises(ValidationError):
+        AgentDefinition.import_json(raw.replace('"enabled": true', '"enabled": ' + encoded, 1))
+
+
+@pytest.mark.parametrize("enabled", (True, False))
+def test_agent_enabled_preserves_actual_boolean_on_round_trip(enabled: bool) -> None:
+    fields = _definition("web.read", RiskTier.R0_READ_ONLY).model_dump()
+    fields["enabled"] = enabled
+    agent = AgentDefinition.model_validate(fields)
+    restored = AgentDefinition.import_json(agent.export_json())
+    assert restored.enabled is enabled
+
+
+def test_agent_enabled_default_is_true() -> None:
+    assert _definition("web.read", RiskTier.R0_READ_ONLY).enabled is True
