@@ -15,6 +15,7 @@ from nika_core.trading_research.contracts import (
     TradingResearchError,
     Venue,
 )
+from nika_core.trading_research.identity import instrument_identity
 from nika_core.trading_research.orders import (
     ExecutionPolicy,
     OrderIntent,
@@ -84,7 +85,7 @@ def _fill(fill_id: str = "fill-1") -> SimulatedFill:
 def _snapshot(fill: SimulatedFill):
     ledger = PortfolioLedger(Decimal(1000))
     ledger.apply_fill(fill)
-    return ledger.snapshot({INSTRUMENT.instrument_id: Decimal(100)})
+    return ledger.snapshot({instrument_identity(INSTRUMENT): Decimal(100)})
 
 
 def test_replay_phase_order_is_binding_and_deterministic() -> None:
