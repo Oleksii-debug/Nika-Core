@@ -72,5 +72,5 @@ def test_attestation_verification_accepts_exact_byte_limit(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "verification.json"
-    path.write_bytes(b"[" + b" " * (2 * 1024 * 1024 - 3) + b"{}]")
+    path.write_bytes(b"[" + b" " * (2 * 1024 * 1024 - 4) + b"{}]")
     assert _read_verification(path) == [{}]
