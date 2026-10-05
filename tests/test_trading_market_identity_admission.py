@@ -71,7 +71,7 @@ def test_event_time_normalizes_valid_offsets_and_rejects_naive_values() -> None:
     event = EventTime(offset, offset + timedelta(minutes=1))
     assert event.event_at == NOW + timedelta(hours=2)
     with pytest.raises(TradingResearchError, match="event_at must be timezone-aware"):
-        EventTime(datetime(2026, 1, 1), NOW)
+        EventTime(NOW.replace(tzinfo=None), NOW)
     # Conversion at the representable boundary must produce a domain error,
     # not leak OverflowError from datetime.astimezone().
     near_min = datetime.min.replace(tzinfo=timezone(timedelta(hours=14)))
