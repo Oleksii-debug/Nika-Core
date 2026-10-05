@@ -149,6 +149,18 @@
     );
   }
 
+  function validDispatchResponse(response, expectedRequestId, allowedStatuses) {
+    return Boolean(
+      response
+      && typeof response === "object"
+      && !Array.isArray(response)
+      && response.request_id === expectedRequestId
+      && allowedStatuses.includes(response.status)
+      && typeof response.message === "string"
+      && (response.focus_id == null || typeof response.focus_id === "string"),
+    );
+  }
+
   function requestId() {
     if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
     return `ui-${Date.now()}-${Math.random().toString(16).slice(2)}`;
@@ -521,8 +533,15 @@
     autostartInput.disabled = true;
     autostartSave.disabled = true;
     try {
-      const result = await globalThis.pywebview.api.dispatch({ request_id: requestId(), action_id: actionId, payload });
-      if (!["completed", "failed", "rejected"].includes(result?.status)) throw new Error("Invalid acknowledgement");
+      const currentRequestId = requestId();
+      const result = await globalThis.pywebview.api.dispatch({
+        request_id: currentRequestId, action_id: actionId, payload,
+      });
+      if (!validDispatchResponse(
+        result, currentRequestId, ["completed", "failed", "rejected"],
+      )) {
+        throw new Error("Invalid acknowledgement");
+      }
       const failed = result.status !== "completed";
       if (!failed || !save) autostartDirty = false;
       announce(result.message, failed);
@@ -661,10 +680,11 @@
         payload.revision = sourceRevision;
         for (const [key, input] of Object.entries(sourceInputs)) payload[key] = input?.value ?? "";
       }
+      const currentRequestId = requestId();
       let result;
       try {
         result = await globalThis.pywebview.api.dispatch({
-          request_id: requestId(), action_id: actionId, payload,
+          request_id: currentRequestId, action_id: actionId, payload,
         });
       } catch {
         // The durable effect may have committed before the bridge disconnected. Never retry blindly.
@@ -673,7 +693,9 @@
         );
         return;
       }
-      if (!result || !["accepted", "completed", "failed", "rejected"].includes(result.status)) {
+      if (!validDispatchResponse(
+        result, currentRequestId, ["accepted", "completed", "failed", "rejected"],
+      )) {
         await reconcileUncertain(
           "Міст повернув непідтверджений результат. Стан буде перечитано перед можливим повтором.",
         );
