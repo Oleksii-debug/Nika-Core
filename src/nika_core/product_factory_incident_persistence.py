@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-import math
 from datetime import UTC, datetime
 from enum import StrEnum
+from math import isfinite
 
 from .product_factory_coordinator import CoordinatorSnapshot
 from .product_factory_deployment import DeploymentFabricSnapshot
@@ -510,7 +510,7 @@ def _reject_nonfinite(_value: str) -> object:
 
 def _finite_float(value: str) -> float:
     parsed = float(value)
-    if not math.isfinite(parsed):
+    if not isfinite(parsed):
         raise ProductIncidentError("incident snapshot contains non-finite JSON numbers")
     return parsed
 
