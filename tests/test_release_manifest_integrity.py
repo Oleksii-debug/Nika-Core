@@ -153,6 +153,31 @@ def test_verifier_rejects_noncanonical_manifest_paths(tmp_path: Path, path: str)
 
 
 @pytest.mark.parametrize(
+    "product",
+    [
+        "N" * 129,
+        "NikaCore\x1f",
+    ],
+)
+def test_manifest_rejects_product_name_outside_canonical_boundary(
+    tmp_path: Path,
+    product: str,
+) -> None:
+    bundle, valid = _bundle(tmp_path)
+    manifest = ReleaseManifest(
+        product=product,
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+        files=(valid,),
+    )
+    assert verify_release_manifest(bundle, manifest) == (
+        "manifest:product",
+    )
+    with pytest.raises(ValueError, match="manifest:product"):
+        write_release_manifest(bundle, manifest)
+
+
+@pytest.mark.parametrize(
     "version",
     [
         "v" * 129,
