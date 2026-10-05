@@ -27,6 +27,7 @@ on:
       - "tests/test_v01_source_settings_json_admission.py"
       - "tests/test_v01_packaged_cloud_authority_composition.py"
       - "tests/test_v01_packaged_runtime_cloud_authority.py"
+      - "tests/test_v01_packaged_startup_recovery.py"
       - "tests/test_windows_cloud_model_permission.py"
       - "tests/test_windows_cloud_settings_json_composition.py"
       - "scripts/m11_release.py"
@@ -65,6 +66,7 @@ on:
       - "tests/test_v01_source_settings_json_admission.py"
       - "tests/test_v01_packaged_cloud_authority_composition.py"
       - "tests/test_v01_packaged_runtime_cloud_authority.py"
+      - "tests/test_v01_packaged_startup_recovery.py"
       - "tests/test_windows_cloud_model_permission.py"
       - "tests/test_windows_cloud_settings_json_composition.py"
       - "scripts/m11_release.py"
@@ -128,6 +130,7 @@ jobs:
           tests/test_v01_source_settings_json_admission.py
           tests/test_v01_packaged_cloud_authority_composition.py
           tests/test_v01_packaged_runtime_cloud_authority.py
+          tests/test_v01_packaged_startup_recovery.py
           tests/test_windows_cloud_model_permission.py
           tests/test_windows_cloud_settings_json_composition.py
           -q

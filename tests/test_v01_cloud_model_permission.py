@@ -1104,3 +1104,87 @@ def test_cloud_permission_clock_rejects_datetime_subclass(tmp_path: Path) -> Non
         assert conn.execute(
             "SELECT COUNT(*) FROM standing_permissions"
         ).fetchone()[0] == 0
+
+
+def test_recovered_running_task_with_live_grant_does_not_reprompt(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 1
+    assert service.execution_authority_for_task(record.task_id) is not None
+
+
+def test_recovered_running_task_with_expired_grant_requires_new_consent(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    prompts: list[CloudModelGrantRequest] = []
+    instant = [NOW]
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: instant[0],
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    first_id = service._bound_permission_id(record.task_id, strict=True)
+    instant[0] = NOW + timedelta(hours=25)
+
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert len(prompts) == 2
+    second_id = service._bound_permission_id(record.task_id, strict=True)
+    assert first_id is not None
+    assert second_id is not None
+    assert second_id != first_id
+    assert service.execution_authority_for_task(record.task_id) is not None
+
+
+def test_recovered_legacy_task_without_frozen_model_selection_never_prompts(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    prompts: list[CloudModelGrantRequest] = []
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+    queue = TaskQueue(store)
+    record = queue.create(
+        workspace_id="default",
+        agent_id="nika.default",
+        payload={"command": "legacy deterministic crash-left work"},
+    )
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+
+    service.admit_recovered_task(queue.get(record.task_id))
+
+    assert prompts == []
+    assert service.execution_authority_for_task(record.task_id) is None
+
