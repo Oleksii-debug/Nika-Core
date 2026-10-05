@@ -257,6 +257,81 @@ def test_conditional_put_rejects_non_datetime_revision_before_sql(
         assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 0
 
 
+class _BehavioralDateTime(datetime):
+    def astimezone(self, tz=None):  # type: ignore[override]
+        raise AssertionError("datetime subclass behavior must not execute")
+
+
+@pytest.mark.parametrize("operation", ["put", "get", "list_namespace", "purge_expired"])
+def test_public_temporal_boundaries_reject_datetime_subclasses_before_behavior(
+    tmp_path: Path,
+    operation: str,
+) -> None:
+    store = _store(tmp_path)
+    memory = MemoryService(store)
+    hostile = _BehavioralDateTime(2026, 10, 5, 8, 0, tzinfo=UTC)
+
+    with pytest.raises(ValueError, match="datetime must be an exact datetime"):
+        if operation == "put":
+            memory.put(**_identity(), value={"state": "unsafe"}, expires_at=hostile)
+        elif operation == "get":
+            memory.get(**_identity(), now=hostile)
+        elif operation == "list_namespace":
+            memory.list_namespace(
+                scope=MemoryScope.WORKSPACE,
+                owner_id="research",
+                namespace="policy",
+                now=hostile,
+            )
+        else:
+            memory.purge_expired(now=hostile)
+
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("invalid_now", [False, 0, "", object()])
+@pytest.mark.parametrize("operation", ["get", "list_namespace", "purge_expired"])
+def test_explicit_invalid_now_is_not_silently_treated_as_omitted(
+    tmp_path: Path,
+    operation: str,
+    invalid_now: object,
+) -> None:
+    memory = MemoryService(_store(tmp_path))
+
+    with pytest.raises(ValueError, match="datetime must be an exact datetime"):
+        if operation == "get":
+            memory.get(**_identity(), now=invalid_now)  # type: ignore[arg-type]
+        elif operation == "list_namespace":
+            memory.list_namespace(
+                scope=MemoryScope.WORKSPACE,
+                owner_id="research",
+                namespace="policy",
+                now=invalid_now,  # type: ignore[arg-type]
+            )
+        else:
+            memory.purge_expired(now=invalid_now)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("invalid_expiry", [False, 0, "", object()])
+def test_explicit_invalid_expiry_fails_before_memory_mutation(
+    tmp_path: Path,
+    invalid_expiry: object,
+) -> None:
+    store = _store(tmp_path)
+    memory = MemoryService(store)
+
+    with pytest.raises(ValueError, match="datetime must be an exact datetime"):
+        memory.put(
+            **_identity(),
+            value={"state": "unsafe"},
+            expires_at=invalid_expiry,  # type: ignore[arg-type]
+        )
+
+    with store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM memory_records").fetchone()[0] == 0
+
+
 def test_expired_write_commits_cleanup_and_audit_before_runtime_error(
     tmp_path: Path,
 ) -> None:
