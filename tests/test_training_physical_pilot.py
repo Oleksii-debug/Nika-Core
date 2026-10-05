@@ -480,6 +480,7 @@ def _install_runner_fakes(
     *,
     resumed_probe: TrainingRunEvidence,
     completed: TrainingRunEvidence,
+    initial_pause: TrainingRunEvidence | None = None,
 ) -> tuple[object, object, list[tuple[str, bool]]]:
     calls: list[tuple[str, bool]] = []
 
@@ -492,6 +493,8 @@ def _install_runner_fakes(
             self.calls += 1
             calls.append((self.name, control is not None))
             if self.name == "initial":
+                if initial_pause is not None:
+                    return initial_pause
                 return _run_evidence(
                     state=TrainingRunState.PAUSED,
                     next_step=1,
@@ -576,6 +579,25 @@ def test_physical_runner_probes_reopened_checkpoint_before_resume(
         ("resumed", True),
         ("resumed", False),
     ]
+
+
+def test_physical_runner_rejects_non_control_initial_pause_before_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    initial_pause = _run_evidence(
+        state=TrainingRunState.PAUSED,
+        next_step=1,
+        checkpoint_id="checkpoint-paused",
+        reason="resource_revalidation:denied",
+    )
+
+    with pytest.raises(PhysicalTrainingPilotError, match="explicit pause control"):
+        _install_runner_fakes(
+            monkeypatch,
+            initial_pause=initial_pause,
+            resumed_probe=_restart_probe(),
+            completed=_completed_for(b"candidate"),
+        )
 
 
 def test_physical_runner_rejects_empty_restart_store_before_resume(
