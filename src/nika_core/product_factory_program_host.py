@@ -175,7 +175,10 @@ class ProductFactoryProgramHost:
         ):
             raise ValueError("max_parallel and max_count must be exact positive integers")
 
-        ready = coordinator.ready_requests()[:max_count]
+        ready = tuple(
+            _snapshot_component_work_request(request)
+            for request in coordinator.ready_requests()[:max_count]
+        )
         if not ready:
             return ()
 
@@ -202,9 +205,17 @@ class ProductFactoryProgramHost:
                     continue
                 leases.append(lease)
                 admitted.append(request)
-            started = tuple(
-                coordinator.start(request.component_id) for request in admitted
-            )
+            started_list: list[ComponentWorkRequest] = []
+            for request in admitted:
+                started_request = _snapshot_component_work_request(
+                    coordinator.start(request.component_id)
+                )
+                if started_request != request:
+                    raise ProductFactoryProgramError(
+                        "Product Factory request authority changed before dispatch"
+                    )
+                started_list.append(started_request)
+            started = tuple(started_list)
             if started:
                 self._checkpoint_running(
                     host_task_id=host_task_id,
@@ -494,7 +505,7 @@ class ProductFactoryProgramHost:
                 envelope, lease = await self._run_effect_with_lease(
                     request,
                     lease,
-                    self.worker.dispatch(request),
+                    self.worker.dispatch(_snapshot_component_work_request(request)),
                 )
             except asyncio.CancelledError:
                 self._mark_uncertain_with_status(operation_key, lease)
@@ -539,7 +550,7 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         record: WorkRecord,
     ) -> ProgramWorkOutcome:
-        request = record.request
+        request = _snapshot_component_work_request(record.request)
         operation_key = _operation_key(request)
         lease = self._acquire_if_available(request)
         if lease is None:
@@ -600,7 +611,7 @@ class ProductFactoryProgramHost:
                         envelope, lease = await self._run_effect_with_lease(
                             request,
                             lease,
-                            self.worker.dispatch(request),
+                            self.worker.dispatch(_snapshot_component_work_request(request)),
                         )
                     except asyncio.CancelledError:
                         self._mark_uncertain_with_status(operation_key, lease)
@@ -756,7 +767,10 @@ class ProductFactoryProgramHost:
                     envelope, lease = await self._run_effect_with_lease(
                         request,
                         lease,
-                        self.worker.recover(request, recovery_state),
+                        self.worker.recover(
+                            _snapshot_component_work_request(request),
+                            recovery_state,
+                        ),
                     )
                 except asyncio.CancelledError:
                     self._mark_uncertain_and_release_recovery_claim(operation_key, lease)
@@ -1473,6 +1487,51 @@ def _canonical_recovery_text(value: object, *, label: str) -> str:
     ):
         raise ValueError(f"{label} must be canonical bounded single-line text")
     return value
+
+
+def _snapshot_component_work_request(request: object) -> ComponentWorkRequest:
+    if type(request) is not ComponentWorkRequest:
+        raise TypeError("invalid Product Factory work request carrier")
+    for value, label in (
+        (request.work_id, "work_id"),
+        (request.project_id, "project_id"),
+        (request.component_id, "component_id"),
+        (request.repository_id, "repository_id"),
+        (request.goal, "goal"),
+        (request.base_sha, "base_sha"),
+    ):
+        if type(value) is not str:
+            raise TypeError(f"{label} must be exact text")
+    if type(request.allowed_paths) is not tuple or any(
+        type(path) is not str for path in request.allowed_paths
+    ):
+        raise TypeError("allowed_paths must be an exact tuple of text")
+    if type(request.permission_ceiling) is not frozenset or any(
+        type(permission) is not str for permission in request.permission_ceiling
+    ):
+        raise TypeError("permission_ceiling must be an exact frozenset of text")
+    if type(request.acceptance_commands) is not tuple or any(
+        type(command) is not tuple
+        or any(type(argument) is not str for argument in command)
+        for command in request.acceptance_commands
+    ):
+        raise TypeError("acceptance_commands must be exact tuples of text")
+    if type(request.attempt) is not int:
+        raise TypeError("attempt must be an exact integer")
+    return ComponentWorkRequest(
+        work_id=request.work_id,
+        project_id=request.project_id,
+        component_id=request.component_id,
+        repository_id=request.repository_id,
+        goal=request.goal,
+        base_sha=request.base_sha,
+        allowed_paths=tuple(request.allowed_paths),
+        permission_ceiling=frozenset(request.permission_ceiling),
+        acceptance_commands=tuple(
+            tuple(command) for command in request.acceptance_commands
+        ),
+        attempt=request.attempt,
+    )
 
 
 def _snapshot_recovery_state(state: object) -> RecoveryState:
