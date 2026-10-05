@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 from collections.abc import Callable
 
 from nika_core.kernel.checkpoint import Checkpoint, CheckpointService
 from nika_core.resources.manager import ResourceManager
+from nika_core.training_materials import ResolvedTrainingPackage, TrainingMaterialResolutionError
 from nika_core.training_runtime.contracts import (
     TrainingControl,
     TrainingJobSpec,
@@ -17,8 +19,8 @@ from nika_core.training_runtime.contracts import (
     TrainingWorkerPort,
 )
 
-_CHECKPOINT_PREFIX = "training_runtime/v2/"
-_CHECKPOINT_SCHEMA_VERSION = 2
+_CHECKPOINT_PREFIX = "training_runtime/v3/"
+_CHECKPOINT_SCHEMA_VERSION = 3
 _TERMINAL_STATES = {
     TrainingRunState.COMPLETED,
     TrainingRunState.CANCELLED,
@@ -40,6 +42,7 @@ def _job_fingerprint(spec: TrainingJobSpec) -> str:
         "base_artifact_ref": spec.base_artifact.artifact_ref,
         "base_sha256": spec.base_artifact.sha256,
         "frozen_package_sha256": spec.frozen_package_sha256,
+        "training_material_sha256": spec.training_material_sha256,
         "candidate_artifact_ref": spec.candidate_artifact_ref,
         "max_steps": spec.max_steps,
         "resource_scope": spec.resource_scope,
@@ -59,6 +62,29 @@ def _read_control(control: Callable[[], TrainingControl]) -> TrainingControl:
     return value
 
 
+def _material_identity_matches(
+    spec: TrainingJobSpec,
+    materials: ResolvedTrainingPackage,
+) -> bool:
+    try:
+        return (
+            hmac.compare_digest(
+                materials.training_material_sha256,
+                spec.training_material_sha256,
+            )
+            and hmac.compare_digest(
+                materials.evidence.package_manifest_sha256,
+                spec.frozen_package_sha256,
+            )
+            and hmac.compare_digest(
+                materials.evidence.base_artifact_sha256,
+                spec.base_artifact.sha256,
+            )
+        )
+    except (AttributeError, TypeError, ValueError):
+        return False
+
+
 class TrainingRuntime:
     """Executes bounded model-training work without owning scheduling or promotion policy.
 
@@ -68,9 +94,18 @@ class TrainingRuntime:
     untyped worker exception therefore leaves durable uncertainty and can never blindly replay.
     """
 
-    def __init__(self, *, resources: ResourceManager, checkpoints: CheckpointService) -> None:
+    def __init__(
+        self,
+        *,
+        resources: ResourceManager,
+        checkpoints: CheckpointService,
+        training_materials: ResolvedTrainingPackage,
+    ) -> None:
+        if type(training_materials) is not ResolvedTrainingPackage:
+            raise TypeError("training_materials must be an exact ResolvedTrainingPackage")
         self._resources = resources
         self._checkpoints = checkpoints
+        self._training_materials = training_materials
 
     def run(
         self,
@@ -167,6 +202,7 @@ class TrainingRuntime:
                 next_step=next_step,
                 base_artifact=spec.base_artifact,
                 frozen_package_sha256=spec.frozen_package_sha256,
+                training_material_sha256=spec.training_material_sha256,
                 candidate_artifact_ref=spec.candidate_artifact_ref,
                 candidate_sha256=candidate_sha256,
                 reason=decision.reason,
@@ -222,11 +258,50 @@ class TrainingRuntime:
                     candidate_sha256=None,
                     reason=None,
                 )
+                if not _material_identity_matches(spec, self._training_materials):
+                    saved = self._save(
+                        spec,
+                        fingerprint=fingerprint,
+                        state=TrainingRunState.FAILED,
+                        next_step=step_index,
+                        resume_state=resume_state,
+                        candidate_sha256=None,
+                        reason="training_material_identity_mismatch",
+                    )
+                    return self._evidence(
+                        spec,
+                        state=TrainingRunState.FAILED,
+                        next_step=step_index,
+                        candidate_sha256=None,
+                        checkpoint=saved,
+                        reason="training_material_identity_mismatch",
+                    )
+                try:
+                    self._training_materials.reverify()
+                except TrainingMaterialResolutionError:
+                    saved = self._save(
+                        spec,
+                        fingerprint=fingerprint,
+                        state=TrainingRunState.FAILED,
+                        next_step=step_index,
+                        resume_state=resume_state,
+                        candidate_sha256=None,
+                        reason="training_material_verification_failed",
+                    )
+                    return self._evidence(
+                        spec,
+                        state=TrainingRunState.FAILED,
+                        next_step=step_index,
+                        candidate_sha256=None,
+                        checkpoint=saved,
+                        reason="training_material_verification_failed",
+                    )
                 try:
                     step_result = worker.step(
                         spec=spec,
                         step_index=step_index,
                         resume_state=dict(resume_state),
+                        training_materials=self._training_materials,
                     )
                 except TrainingWorkerError as exc:
                     failure_state = (
@@ -346,6 +421,7 @@ class TrainingRuntime:
             next_step=next_step,
             base_artifact=spec.base_artifact,
             frozen_package_sha256=spec.frozen_package_sha256,
+            training_material_sha256=spec.training_material_sha256,
             candidate_artifact_ref=spec.candidate_artifact_ref,
             candidate_sha256=candidate_sha256,
             checkpoint_id=None if checkpoint is None else checkpoint.checkpoint_id,
@@ -368,6 +444,7 @@ class TrainingRuntime:
             "job_id": spec.job_id,
             "job_fingerprint": fingerprint,
             "frozen_package_sha256": spec.frozen_package_sha256,
+            "training_material_sha256": spec.training_material_sha256,
             "next_step": next_step,
             "resume_state": resume_state,
             "candidate_artifact_ref": spec.candidate_artifact_ref,
@@ -408,6 +485,8 @@ class TrainingRuntime:
             raise TrainingCheckpointError("training checkpoint identity mismatch")
         if payload.get("frozen_package_sha256") != spec.frozen_package_sha256:
             raise TrainingCheckpointError("training frozen-package identity mismatch")
+        if payload.get("training_material_sha256") != spec.training_material_sha256:
+            raise TrainingCheckpointError("training material identity mismatch")
         if payload.get("candidate_artifact_ref") != spec.candidate_artifact_ref:
             raise TrainingCheckpointError("training candidate artifact identity mismatch")
 
