@@ -431,6 +431,69 @@ def test_inconsistent_complete_usage_fails_closed_without_budget_success() -> No
     assert result.evidence.budget_status is TeacherBudgetStatus.UNKNOWN
 
 
+@pytest.mark.parametrize(
+    ("input_tokens", "output_tokens", "total_tokens"),
+    [
+        (11, None, 10),
+        (None, 11, 10),
+    ],
+)
+def test_impossible_partial_usage_fails_closed_without_budget_success(
+    input_tokens: int | None,
+    output_tokens: int | None,
+    total_tokens: int,
+) -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        total_tokens=total_tokens,
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=100,
+        max_observed_total_tokens=10,
+    )
+
+    result = asyncio.run(service.consult(_spec(policy=policy)))
+
+    assert result.text is None
+    assert result.evidence.status is TeacherConsultationStatus.FAILED
+    assert result.evidence.error_code is ModelErrorCode.PROVIDER_ERROR
+    assert result.evidence.total_tokens is None
+    assert result.evidence.budget_status is TeacherBudgetStatus.UNKNOWN
+
+
+def test_partial_usage_with_possible_total_remains_truthful() -> None:
+    provider = _FakeProvider(
+        provider_id="teacher-local",
+        kind=ProviderKind.LOCAL,
+        input_tokens=8,
+        output_tokens=None,
+        total_tokens=10,
+    )
+    gateway = ModelGateway()
+    gateway.register(provider)
+    service = TeacherConsultationService(gateway)
+    policy = TeacherConsultationPolicy(
+        max_request_chars=100,
+        max_response_chars=100,
+        max_observed_total_tokens=10,
+    )
+
+    result = asyncio.run(service.consult(_spec(policy=policy)))
+
+    assert result.evidence.status is TeacherConsultationStatus.SUCCEEDED
+    assert result.evidence.input_tokens == 8
+    assert result.evidence.output_tokens is None
+    assert result.evidence.total_tokens == 10
+    assert result.evidence.budget_status is TeacherBudgetStatus.WITHIN
+
+
 def test_mismatched_teacher_response_identity_fails_closed() -> None:
     provider = _FakeProvider(
         provider_id="teacher-local",

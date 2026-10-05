@@ -411,13 +411,17 @@ def _validated_usage(response: ModelResponse) -> tuple[int | None, int | None, i
         if value is not None and (type(value) is not int or value < 0):
             raise ValueError("model usage counters must be non-negative integers or None")
     input_tokens, output_tokens, total_tokens = values
-    if (
-        input_tokens is not None
-        and output_tokens is not None
-        and total_tokens is not None
-        and total_tokens != input_tokens + output_tokens
-    ):
-        raise ValueError("model usage total_tokens contradicts observed token counters")
+    if total_tokens is not None:
+        if input_tokens is not None and total_tokens < input_tokens:
+            raise ValueError("model usage total_tokens contradicts observed token counters")
+        if output_tokens is not None and total_tokens < output_tokens:
+            raise ValueError("model usage total_tokens contradicts observed token counters")
+        if (
+            input_tokens is not None
+            and output_tokens is not None
+            and total_tokens != input_tokens + output_tokens
+        ):
+            raise ValueError("model usage total_tokens contradicts observed token counters")
     return values
 
 
