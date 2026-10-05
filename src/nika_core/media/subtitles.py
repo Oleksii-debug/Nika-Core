@@ -15,7 +15,7 @@ from nika_core.media.contracts import (
 from nika_core.media.errors import MediaError, MediaErrorCode
 from nika_core.media.hashing import sha256_file, sha256_json
 
-_TAG_RE = re.compile(r"\{[^}]*\}|<[^>]+>")
+_TAG_RE = re.compile(r"\{\\[^}]*\}|</?[A-Za-z][^>]*>|<\d{2}:\d{2}(?::\d{2})?\.\d{3}>")
 _SPACE_RE = re.compile(r"[ \t\r\f\v]+")
 
 
