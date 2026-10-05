@@ -291,11 +291,18 @@ class DeterministicBrain:
             available_actions = tuple(
                 action for action in actions if action.action_id not in completed_set
             )
+            # Planner adapters are not execution authority. Give them detached context so
+            # re-entrant or hostile mutation cannot rewrite the state/rules used afterward.
+            planner_state = _snapshot_world_state(current_state, name="planner state")
+            planner_goal = _snapshot_goal(goal)
+            planner_actions = tuple(
+                action.detached_copy() for action in available_actions
+            )
             plan = _snapshot_plan(
                 await self._plan(
-                    state=current_state,
-                    goal=goal,
-                    actions=available_actions,
+                    state=planner_state,
+                    goal=planner_goal,
+                    actions=planner_actions,
                     planning_deadline=planning_deadline,
                 )
             )
@@ -539,7 +546,7 @@ class DeterministicBrain:
         try:
             reservation = journal.reserve(
                 task_id=task_id,
-                action=action,
+                action=action.detached_copy(),
             )
         except DeterministicEffectConflictError as exc:
             return _ToolExecutionFailure(

@@ -9,13 +9,15 @@ import pytest
 from nika_core.intelligence.brain import DeterministicBrain
 from nika_core.intelligence.contracts import (
     DeterministicAction,
+    DeterministicEffectReservation,
+    DeterministicEffectStatus,
     DeterministicErrorCode,
     DeterministicGoal,
     DeterministicPlan,
     PlanStep,
     WorldState,
 )
-from nika_core.tools import ToolExecutor
+from nika_core.tools import ToolExecutor, ToolRisk, ToolSpec
 
 
 class CountingPlanner:
@@ -190,3 +192,107 @@ def test_tampered_observed_state_is_normalized_to_fail_closed_result() -> None:
     assert not result.ok
     assert result.error_code is DeterministicErrorCode.STATE_OBSERVATION_FAILED
     assert result.completed_actions == ()
+
+
+def test_planner_cannot_mutate_brain_execution_authority() -> None:
+    original = DeterministicAction(
+        action_id="advance",
+        adds=frozenset({"done"}),
+    )
+
+    class AuthorityMutatingPlanner:
+        def plan(self, *, state, goal, actions) -> DeterministicPlan:
+            object.__setattr__(state, "facts", frozenset({"planner-state"}))
+            object.__setattr__(goal, "required", frozenset({"planner-goal"}))
+            object.__setattr__(actions[0], "adds", frozenset({"planner-goal"}))
+            return DeterministicPlan(steps=(PlanStep(action_id="advance"),))
+
+    result = asyncio.run(
+        DeterministicBrain(
+            planner=AuthorityMutatingPlanner(),
+            tools=ToolExecutor(),
+        ).run(
+            run_id="planner-authority-isolation",
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(original,),
+        )
+    )
+
+    assert result.ok
+    assert result.final_state.facts == frozenset({"done"})
+    assert original.adds == frozenset({"done"})
+
+
+def test_effect_journal_cannot_mutate_action_used_for_execution() -> None:
+    class MutatingJournal:
+        def unresolved_operation_keys(self, *, task_id: str) -> tuple[str, ...]:
+            return ()
+
+        def reserve(
+            self,
+            *,
+            task_id: str,
+            action: DeterministicAction,
+        ) -> DeterministicEffectReservation:
+            object.__setattr__(action, "adds", frozenset({"journal-hijacked"}))
+            return DeterministicEffectReservation(
+                operation_key="journal-isolation:1",
+                status=DeterministicEffectStatus.PENDING,
+                created=True,
+            )
+
+        def complete(self, operation_key: str) -> None:
+            assert operation_key == "journal-isolation:1"
+
+        def mark_uncertain(self, operation_key: str) -> None:
+            raise AssertionError("effect should not become uncertain")
+
+        def release_pending(self, operation_key: str) -> None:
+            raise AssertionError("effect reservation should not be released")
+
+    seen_arguments: list[dict[str, object]] = []
+
+    async def write_result(arguments: dict[str, object]) -> object:
+        seen_arguments.append(dict(arguments))
+        return "written"
+
+    tools = ToolExecutor()
+    tools.register(
+        ToolSpec(
+            tool_id="write.result",
+            description="write deterministic result",
+            risk=ToolRisk.LOCAL_WRITE,
+        ),
+        write_result,
+    )
+    action = DeterministicAction(
+        action_id="write",
+        adds=frozenset({"done"}),
+        tool_id="write.result",
+        arguments={"target": "safe.txt"},
+    )
+
+    class WritePlanner:
+        def plan(self, *, state, goal, actions) -> DeterministicPlan:
+            return DeterministicPlan(
+                steps=(PlanStep(action_id="write", tool_id="write.result"),)
+            )
+
+    result = asyncio.run(
+        DeterministicBrain(
+            planner=WritePlanner(),
+            tools=tools,
+            effect_journal=MutatingJournal(),
+        ).run(
+            run_id="journal-authority-isolation",
+            task_id="journal-task",
+            state=WorldState(),
+            goal=DeterministicGoal(required=frozenset({"done"})),
+            actions=(action,),
+        )
+    )
+
+    assert result.ok
+    assert result.final_state.facts == frozenset({"done"})
+    assert seen_arguments == [{"target": "safe.txt"}]
