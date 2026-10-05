@@ -271,7 +271,6 @@ def _job_fingerprint(job: CodingJob) -> str:
         "lease_id": job.lease.lease_id,
         "workspace_root": str(job.lease.workspace_root),
         "isolation_class": job.lease.isolation_class.value,
-        "expires_at": job.lease.expires_at,
         "allowed_paths": list(job.allowed_paths.roots),
         "allowed_executables": list(job.process_policy.allowed_executables),
         "network_mode": job.network_policy.mode.value,
@@ -550,6 +549,13 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             )
 
         try:
+            prior = self._load_state(exact.job_id)
+        except ContainedLocalWorkerError:
+            return self._manual_reconcile(exact.job_id)
+        if prior is not None:
+            return self._existing_result(exact, prior)
+
+        try:
             self._validate_job(exact)
         except (ValueError, WorkspaceSecurityError, ContainedLocalWorkerError) as exc:
             result = self._failure(
@@ -560,13 +566,6 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             )
             self._save_terminal_without_candidate(exact, result)
             return result
-
-        try:
-            prior = self._load_state(exact.job_id)
-        except ContainedLocalWorkerError:
-            return self._manual_reconcile(exact.job_id)
-        if prior is not None:
-            return self._existing_result(exact, prior)
 
         try:
             proposed = await self.planner.plan(exact)
