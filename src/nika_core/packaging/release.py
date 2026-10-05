@@ -25,7 +25,22 @@ _MAX_PRODUCT_VERSION_CHARS = 128
 _MANIFEST_KEYS = frozenset({"manifest_version", "product", "version", "source_sha", "files"})
 _RELEASE_FILE_KEYS = frozenset({"path", "size", "sha256"})
 _WINDOWS_FORBIDDEN_CHARS = frozenset('<>"|?*')
-_SECRET_RELEASE_BASENAMES = frozenset({".env", "token.json", "cookies.txt"})
+_SECRET_RELEASE_BASENAMES = frozenset(
+    {
+        ".env",
+        "token.json",
+        "tokens.json",
+        "credentials.json",
+        "client_secret.json",
+        "client_secrets.json",
+        "oauth.json",
+        "oauth_credentials.json",
+        "cookies.txt",
+        "cookies.sqlite",
+        "cookies.db",
+    }
+)
+_SECRET_RELEASE_SUFFIXES = frozenset({".session"})
 _SECRET_CONTENT_SUFFIXES = frozenset(
     {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties", ".txt", ".log"}
 )
@@ -80,7 +95,9 @@ _SECRET_ASSIGNMENT_RE = re.compile(
     [ \t-]*
     (?P<quote>["'])?
     (?:
-        api[_-]?key|apikey|access[_-]?token|auth[_-]?token|client[_-]?secret|
+        api[_-]?key|apikey|api[_-]?hash|access[_-]?token|auth[_-]?token|
+        refresh[_-]?token|id[_-]?token|session[_-]?token|token|authorization|
+        bearer[_-]?token|oauth[_-]?token|oauth[_-]?secret|client[_-]?secret|
         secret[_-]?key|password|passwd|private[_-]?key
     )
     (?(quote)(?P=quote))
@@ -188,6 +205,8 @@ def _release_path_is_secret(value: object) -> bool:
         identity = part.casefold()
         if identity in _SECRET_RELEASE_BASENAMES:
             return True
+        if any(identity.endswith(suffix) for suffix in _SECRET_RELEASE_SUFFIXES):
+            return True
         if identity.startswith(".env.") and identity != ".env.example":
             return True
     return False
@@ -209,6 +228,10 @@ def _valid_product_version(value: object) -> bool:
 
 def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
     normalized = value.strip().strip(b"\"'").strip().lower()
+    for prefix in (b"bearer ", b"basic "):
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :].strip()
+            break
     if not normalized or normalized in _SECRET_PLACEHOLDER_VALUES:
         return True
     if normalized.startswith(b"${") and normalized.endswith(b"}"):
