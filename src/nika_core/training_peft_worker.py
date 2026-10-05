@@ -1934,6 +1934,7 @@ def _candidate_manifest_json(
             "seed": config.seed,
         },
     }
+    _validate_candidate_manifest_payload(payload)
     return _canonical_json_bytes(payload).decode("utf-8")
 
 
