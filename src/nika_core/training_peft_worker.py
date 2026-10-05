@@ -989,6 +989,23 @@ def _reserve_candidate_temporary(candidate: Path) -> Path:
     return temporary
 
 
+def _best_effort_unlink_identity(path: Path, identity: tuple[int, int]) -> None:
+    try:
+        value = os.lstat(path)
+    except OSError:
+        return
+    if (
+        stat.S_ISREG(value.st_mode)
+        and not stat.S_ISLNK(value.st_mode)
+        and not _is_reparse(value)
+        and (value.st_dev, value.st_ino) == identity
+    ):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
 def _job_root(config: TrainerConfig, request: ParsedRequest) -> Path:
     return config.output_root / _candidate_key(request.candidate_artifact_ref)
 
@@ -1455,6 +1472,8 @@ def _train_one_step(
         or not stat.S_ISDIR(parent_stat.st_mode)
     ):
         _fail("candidate_publish_failed")
+    if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+        _fail("checkpoint_payload_changed_before_candidate")
     temporary = _reserve_candidate_temporary(candidate)
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
@@ -1464,6 +1483,8 @@ def _train_one_step(
         adapter_config=adapter_config,
     )
     temporary_sha256: str | None = None
+    temporary_identity: tuple[int, int] | None = None
+    published = False
     try:
         with safe_open(os.fspath(adapter_file), framework="pt", device="cpu") as source:
             tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
@@ -1474,9 +1495,19 @@ def _train_one_step(
             os.fspath(temporary),
             metadata={"nika_adapter_manifest": manifest_json},
         )
-        _require_regular_unlinked(temporary, code="candidate_publish_failed")
-        temporary_sha256 = _sha256_file(temporary)
+        if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+            _fail("checkpoint_payload_changed_during_candidate")
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="candidate_publish_failed",
+        )
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        temporary_sha256, _ = _hash_regular_snapshot(
+            temporary,
+            code="candidate_publish_failed",
+        )
         os.link(temporary, candidate)
+        published = True
     except FileExistsError:
         _fail("candidate_publish_conflict")
     except PeftTrainerError:
@@ -1484,13 +1515,47 @@ def _train_one_step(
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_publish_failed")
     finally:
-        try:
-            if temporary.exists():
-                temporary.unlink()
-        except OSError:
-            pass
-    candidate_sha256 = _sha256_file(candidate)
-    if temporary_sha256 is None or candidate_sha256 != temporary_sha256:
+        if not published:
+            try:
+                os.unlink(temporary)
+            except OSError:
+                pass
+
+    try:
+        os.unlink(temporary)
+    except OSError:
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("candidate_publish_cleanup_failed")
+
+    candidate_stat = _require_regular_unlinked(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    if (
+        temporary_identity is None
+        or (candidate_stat.st_dev, candidate_stat.st_ino) != temporary_identity
+        or candidate_stat.st_nlink != 1
+    ):
+        if temporary_identity is not None:
+            _best_effort_unlink_identity(candidate, temporary_identity)
+        _fail("candidate_publish_digest_mismatch")
+
+    candidate_sha256, _ = _hash_regular_snapshot(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    candidate_after = _require_regular_unlinked(
+        candidate,
+        code="candidate_publish_digest_mismatch",
+    )
+    if (
+        (candidate_after.st_dev, candidate_after.st_ino) != temporary_identity
+        or candidate_after.st_nlink != 1
+        or temporary_sha256 is None
+        or candidate_sha256 != temporary_sha256
+    ):
+        _best_effort_unlink_identity(candidate, temporary_identity)
         _fail("candidate_publish_digest_mismatch")
     return resume_state, candidate_sha256
 
