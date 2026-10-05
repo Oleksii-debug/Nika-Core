@@ -409,6 +409,42 @@ async def test_post_effect_identity_forgery_is_unknown(
 
 
 @pytest.mark.asyncio
+async def test_nonzero_evaluator_kills_descendant_before_inherited_stdout_eof(
+    tmp_path: Path,
+) -> None:
+    spawned = tmp_path / "nonzero-evaluator-descendant-spawned.txt"
+    survived = tmp_path / "nonzero-evaluator-descendant-survived.txt"
+    child_code = (
+        "import pathlib,sys,time; "
+        "time.sleep(1.5); "
+        "pathlib.Path(sys.argv[1]).write_text('survived', encoding='utf-8')"
+    )
+    script = _script(
+        tmp_path,
+        f"""
+import pathlib
+import subprocess
+import sys
+
+sys.stdin.buffer.read()
+subprocess.Popen([sys.executable, "-c", {child_code!r}, {str(survived)!r}])
+pathlib.Path({str(spawned)!r}).write_text("spawned", encoding="utf-8")
+raise SystemExit(7)
+""".strip(),
+    )
+    adapter, _, _, descriptor = _adapter(tmp_path, script)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await adapter.complete_attested(_request(), binding=_binding(descriptor))
+
+    assert exc_info.value.code is ModelErrorCode.PROVIDER_ERROR
+    assert exc_info.value.failure_effect is ModelFailureEffect.UNKNOWN
+    assert spawned.exists(), "test did not prove that an evaluator descendant was started"
+    await asyncio.sleep(1.0)
+    assert not survived.exists(), "evaluator descendant escaped nonzero containment"
+
+
+@pytest.mark.asyncio
 async def test_malformed_json_is_unknown_after_process_start(tmp_path: Path) -> None:
     script = _script(
         tmp_path,
