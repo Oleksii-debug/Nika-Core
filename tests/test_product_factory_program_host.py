@@ -2092,7 +2092,6 @@ def test_reconcile_durable_results_rejects_concurrent_operation_rebinding(tmp_pa
     assert durable.result is None
 
 
-
 def test_reconcile_durable_results_skips_owned_item_and_reconciles_sibling(
     tmp_path: Path,
 ) -> None:
