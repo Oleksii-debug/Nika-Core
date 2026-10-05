@@ -446,3 +446,91 @@ def test_latest_rejects_oversized_checksum_without_unbounded_read(tmp_path: Path
 
     with pytest.raises(ValueError, match="checksum is invalid"):
         checkpoints.latest(task_id)
+
+def test_save_rejects_non_string_stage_before_persistence(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+
+    with pytest.raises(TypeError, match="stage must be str"):
+        checkpoints.save(task_id=task_id, stage=1, payload={"revision": 1})  # type: ignore[arg-type]
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_save_rejects_oversized_stage_before_persistence(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+
+    with pytest.raises(ValueError, match="stage exceeds"):
+        checkpoints.save(
+            task_id=task_id,
+            stage="с" * 4097,
+            payload={"revision": 1},
+        )
+
+    with store.connection() as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM checkpoints WHERE task_id = ?",
+            (task_id,),
+        ).fetchone()[0]
+    assert count == 0
+
+
+def test_unicode_stage_round_trips_with_same_type_and_value(tmp_path: Path) -> None:
+    _store, task_id, checkpoints = _build_service(tmp_path)
+
+    saved = checkpoints.save(
+        task_id=task_id,
+        stage="етап-відновлення",
+        payload={"revision": 1},
+    )
+    loaded = checkpoints.latest(task_id)
+
+    assert type(saved.stage) is str
+    assert loaded is not None
+    assert loaded.stage == saved.stage
+
+
+def test_latest_rejects_blob_stage_storage_class(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    saved = checkpoints.save(task_id=task_id, stage="valid", payload={"revision": 1})
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET stage = ? WHERE checkpoint_id = ?",
+            (b"raw-stage", saved.checkpoint_id),
+        )
+
+    with pytest.raises(TypeError, match="stage storage must be SQLite TEXT"):
+        checkpoints.latest(task_id)
+
+
+def test_latest_rejects_oversized_checkpoint_identity(tmp_path: Path) -> None:
+    store, task_id, checkpoints = _build_service(tmp_path)
+    saved = checkpoints.save(task_id=task_id, stage="valid", payload={"revision": 1})
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET checkpoint_id = ? WHERE checkpoint_id = ?",
+            ("x" * 4097, saved.checkpoint_id),
+        )
+
+    with pytest.raises(ValueError, match="checkpoint_id exceeds"):
+        checkpoints.latest(task_id)
+
+
+def test_latest_rejects_invalid_task_id_utf8_before_sql(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _task_id, checkpoints = _build_service(tmp_path)
+
+    def unexpected_connection() -> object:
+        pytest.fail("invalid task_id reached SQLite")
+
+    monkeypatch.setattr(store, "connection", unexpected_connection)
+    with pytest.raises(ValueError, match="task_id must be valid UTF-8"):
+        checkpoints.latest("\ud800")
