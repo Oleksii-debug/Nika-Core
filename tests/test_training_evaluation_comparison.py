@@ -772,6 +772,11 @@ async def test_attested_promotion_activates_future_tasks_and_rolls_back_durably(
         expected_revision=2,
     )
     assert rolled_back.rollback_revision == 3
+    assert rolled_back.activation_request_sha256 == receipt.activation_request_sha256
+    assert (
+        rolled_back.activation_attestation_sha256
+        == receipt.activation_attestation_sha256
+    )
     assert restarted.snapshot()["model"] == "base-model"
     assert restarted.snapshot()["revision"] == 3
 
