@@ -9,6 +9,7 @@ from nika_core.model_engineering.contracts import (
     BenchmarkSuiteReport,
     CandidateBenchmarkReport,
     CaseBenchmarkResult,
+    validate_candidate_benchmark_report,
 )
 from nika_core.model_engineering.resource_evidence import (
     benchmark_resource_evidence_payload,
@@ -58,6 +59,7 @@ def benchmark_accessible_report_payload(
 
     if type(report) is not CandidateBenchmarkReport:
         raise TypeError("report must be an exact CandidateBenchmarkReport")
+    validate_candidate_benchmark_report(report)
     resources = benchmark_resource_evidence_payload(report)
     failures = [
         {
@@ -204,6 +206,7 @@ def _evidence_limitations(
     return limitations
 
 def benchmark_report_payload(report: CandidateBenchmarkReport) -> dict[str, Any]:
+    validate_candidate_benchmark_report(report)
     return {
         "schema": "nika-model-benchmark-report-v1",
         "candidate": {
@@ -252,6 +255,7 @@ def _case_payload(result: CaseBenchmarkResult) -> dict[str, Any]:
         "candidate_id": result.candidate_id,
         "case_id": result.case_id,
         "score": result.score,
+        "evaluation_weight": result.evaluation_weight,
         "passed": result.passed,
         "completion_succeeded": result.completion_succeeded,
         "latency_ms": result.latency_ms,
