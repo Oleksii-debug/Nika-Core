@@ -14,6 +14,7 @@ from nika_core.packaging.release import verify_distributable_evidence
 
 _SLSA_PROVENANCE_V1 = "https://slsa.dev/provenance/v1"
 _MAX_VERIFICATION_JSON_BYTES = 2 * 1024 * 1024
+_MAX_VERIFICATION_JSON_DEPTH = 64
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
@@ -67,12 +68,39 @@ def _reject_json_constant(_raw: str) -> None:
     raise ValueError("non-JSON numeric constant")
 
 
+def _require_bounded_json_depth(content: bytes) -> None:
+    # Scan syntax bytes before decoding nested JSON. Brackets inside quoted or
+    # escaped strings are data, and UTF-8 continuation bytes cannot be brackets.
+    depth = 0
+    quoted = False
+    escaped = False
+    for byte in content:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 0x5C:
+                escaped = True
+            elif byte == 0x22:
+                quoted = False
+        elif byte == 0x22:
+            quoted = True
+        elif byte in (0x5B, 0x7B):
+            depth += 1
+            if depth > _MAX_VERIFICATION_JSON_DEPTH:
+                raise ValueError("attestation verification output exceeds JSON depth limit")
+        elif byte in (0x5D, 0x7D):
+            depth -= 1
+            if depth < 0:
+                raise ValueError("attestation verification output is unbalanced JSON")
+
+
 def _read_verification(path: Path) -> list[dict[str, Any]]:
     try:
         with path.open("rb") as handle:
             content = handle.read(_MAX_VERIFICATION_JSON_BYTES + 1)
         if len(content) > _MAX_VERIFICATION_JSON_BYTES:
             raise ValueError("attestation verification output exceeds the byte limit")
+        _require_bounded_json_depth(content)
         payload = json.loads(
             content.decode("utf-8-sig"),
             object_pairs_hook=_unique_json_object,
