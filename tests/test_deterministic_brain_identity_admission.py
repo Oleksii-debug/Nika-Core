@@ -48,7 +48,7 @@ def _run(brain: DeterministicBrain, **overrides: object):
 
 @pytest.mark.parametrize(
     "value",
-    [None, False, 1, 1.0, [], b"run", "", "   ", "\\ud800", HostileStr("run")],
+    [None, False, 1, 1.0, [], b"run", "", "   ", "\${v}", HostileStr("run")],
 )
 def test_invalid_run_id_never_reaches_planner_or_journal(value: object) -> None:
     planner = CountingPlanner()
@@ -62,7 +62,7 @@ def test_invalid_run_id_never_reaches_planner_or_journal(value: object) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    [None, False, 1, 1.0, [], b"task", "", "   ", "\\udfff", HostileStr("task")],
+    [None, False, 1, 1.0, [], b"task", "", "   ", "\${v}", HostileStr("task")],
 )
 def test_invalid_task_id_never_reaches_planner_or_journal(value: object) -> None:
     planner = CountingPlanner()
@@ -78,7 +78,7 @@ def test_supplied_invalid_task_id_is_rejected_even_without_a_journal() -> None:
     planner = CountingPlanner()
     brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
     with pytest.raises(ValueError, match="task_id"):
-        _run(brain, task_id="\\ud800")
+        _run(brain, task_id="\${v}")
     assert planner.calls == 0
 
 
