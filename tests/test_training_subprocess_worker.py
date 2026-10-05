@@ -1692,6 +1692,55 @@ sys.stdout.write(json.dumps(response))
     assert trainer.read_text(encoding="utf-8") == "raise SystemExit(97)\n"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows file-sharing semantics")
+def test_windows_launch_guard_reverifies_swap_before_popen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "unexpected-start"
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('started', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    worker, _, _ = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    real_verify = worker._verify_command_artifacts
+    verify_calls = 0
+
+    def verify_then_swap(records: object) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        real_verify(records)  # type: ignore[arg-type]
+        if verify_calls == 1:
+            os.replace(replacement, trainer)
+
+    def process_must_not_start(*args: object, **kwargs: object) -> object:
+        raise AssertionError("process effect reached after command artifact replacement")
+
+    monkeypatch.setattr(worker, "_verify_command_artifacts", verify_then_swap)
+    monkeypatch.setattr(
+        subprocess_worker_module.subprocess,
+        "Popen",
+        process_must_not_start,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert verify_calls == 2
+    assert exc_info.value.code == "command_artifact_not_verified"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
 def test_runtime_registry_metadata_drift_fails_before_process_effect(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
