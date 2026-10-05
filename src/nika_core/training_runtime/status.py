@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from nika_core.kernel.checkpoint import Checkpoint, CheckpointService
-from nika_core.training_runtime.contracts import TrainingRunState
+from nika_core.training_runtime.contracts import (
+    TrainingRunState,
+    TrainingStepResult,
+    _require_bounded_text,
+)
 from nika_core.training_runtime.runtime import (
     _CHECKPOINT_PREFIX,
     _CHECKPOINT_SCHEMA_VERSION,
@@ -114,17 +118,14 @@ def _project_checkpoint(task_id: str, checkpoint: Checkpoint) -> TrainingStatusP
     if payload.get("schema_version") != _CHECKPOINT_SCHEMA_VERSION:
         raise TrainingStatusError("unsupported training checkpoint schema")
 
-    job_id = payload.get("job_id")
-    candidate_artifact_ref = payload.get("candidate_artifact_ref")
-    if (
-        type(job_id) is not str
-        or not job_id
-        or len(job_id.encode("utf-8")) > 512
-        or type(candidate_artifact_ref) is not str
-        or not candidate_artifact_ref
-        or len(candidate_artifact_ref.encode("utf-8")) > 512
-    ):
-        raise TrainingStatusError("invalid training checkpoint identity")
+    try:
+        _require_bounded_text(payload.get("job_id"), name="job_id")
+        _require_bounded_text(
+            payload.get("candidate_artifact_ref"),
+            name="candidate_artifact_ref",
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise TrainingStatusError("invalid training checkpoint identity") from exc
     _require_sha256(payload.get("job_fingerprint"), field_name="job fingerprint")
     _require_sha256(payload.get("frozen_package_sha256"), field_name="frozen package")
     _require_sha256(payload.get("training_material_sha256"), field_name="training material")
@@ -137,16 +138,16 @@ def _project_checkpoint(task_id: str, checkpoint: Checkpoint) -> TrainingStatusP
     if reason is not None and (type(reason) is not str or _REASON_RE.fullmatch(reason) is None):
         raise TrainingStatusError("invalid training checkpoint reason")
 
-    candidate_sha256 = payload.get("candidate_sha256")
-    if state is TrainingRunState.COMPLETED:
-        _require_sha256(candidate_sha256, field_name="candidate result")
-        if next_step == 0:
-            raise TrainingStatusError("completed training checkpoint has no completed step")
-    elif candidate_sha256 is not None:
-        raise TrainingStatusError("non-completed training checkpoint published a candidate result")
-
-    if type(payload.get("resume_state")) is not dict:
-        raise TrainingStatusError("invalid training checkpoint resume state")
+    try:
+        TrainingStepResult(
+            resume_state=payload.get("resume_state"),
+            completed=state is TrainingRunState.COMPLETED,
+            candidate_sha256=payload.get("candidate_sha256"),
+        )
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise TrainingStatusError("invalid training checkpoint result evidence") from exc
+    if state is TrainingRunState.COMPLETED and next_step == 0:
+        raise TrainingStatusError("completed training checkpoint has no completed step")
 
     try:
         checkpoint_uuid = UUID(checkpoint.checkpoint_id)
