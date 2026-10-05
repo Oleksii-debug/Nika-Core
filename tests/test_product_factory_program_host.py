@@ -940,3 +940,285 @@ def test_program_host_dispatches_through_existing_public_coding_worker_adapter(t
         "pytest",
         "tests/component-0",
     )
+
+
+@pytest.mark.parametrize("collision", ("task", "operation_type", "fingerprint"))
+def test_existing_foreign_worker_reservation_requires_reconciliation_before_recovery(
+    tmp_path, collision: str
+) -> None:
+    from nika_core.product_factory_program_host import _request_fingerprint
+
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+    foreign_task_id = task_id
+    if collision == "task":
+        foreign_task_id = TaskQueue(store).create(
+            workspace_id="ws-product",
+            agent_id="foreign-product-factory",
+            payload={"kind": "product_factory", "product_project_id": "project-1"},
+        ).task_id
+    reservation = {
+        "operation_key": operation_key,
+        "task_id": foreign_task_id,
+        "operation_type": (
+            "different.operation"
+            if collision == "operation_type"
+            else "product_factory.coding_worker"
+        ),
+        "input_fingerprint": (
+            "f" * 64 if collision == "fingerprint" else _request_fingerprint(request)
+        ),
+    }
+    ledger = IdempotencyLedger(store)
+    operation, created = ledger.reserve_once(**reservation)
+    assert created
+    assert operation.status is IdempotencyStatus.PENDING
+
+    host = ProductFactoryProgramHost(store, worker)
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
+    assert outcomes[0].operation_status is IdempotencyStatus.PENDING
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+    assert ledger.require(operation_key).status is IdempotencyStatus.PENDING
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    recovery = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=restored,
+        )
+    )
+    assert recovery[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+
+def test_existing_matching_worker_reservation_preserves_safe_recovery(tmp_path) -> None:
+    from nika_core.product_factory_program_host import _request_fingerprint
+
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+    ledger = IdempotencyLedger(store)
+    operation, created = ledger.reserve_once(
+        operation_key=operation_key,
+        task_id=task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint=_request_fingerprint(request),
+    )
+    assert created
+    assert operation.status is IdempotencyStatus.PENDING
+
+    outcomes = _run(
+        ProductFactoryProgramHost(store, worker).dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECOVERY
+    assert outcomes[0].operation_status is IdempotencyStatus.PENDING
+    assert ledger.require(operation_key).status is IdempotencyStatus.PENDING
+    assert worker.dispatch_calls == []
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+
+
+def test_worker_reservation_collision_does_not_cancel_independent_component(
+    tmp_path,
+) -> None:
+    from nika_core.product_factory_program_host import _request_fingerprint
+
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    ready = coordinator.ready_requests()
+    assert len(ready) == 2
+    collided, independent = ready
+    ledger = IdempotencyLedger(store)
+    foreign_task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="foreign-product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
+    ledger.reserve_once(
+        operation_key=f"pf-worker:{collided.work_id}",
+        task_id=foreign_task.task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint=_request_fingerprint(collided),
+    )
+
+    host = ProductFactoryProgramHost(store, worker)
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_parallel=2,
+            max_count=2,
+        )
+    )
+    by_component = {item.component_id: item for item in outcomes}
+    assert by_component[collided.component_id].disposition is (
+        ProgramWorkDisposition.NEEDS_RECONCILIATION
+    )
+    assert by_component[independent.component_id].disposition is (
+        ProgramWorkDisposition.REVIEW_REQUIRED
+    )
+    assert [item.work_id for item in worker.dispatch_calls] == [independent.work_id]
+    assert ledger.require(f"pf-worker:{collided.work_id}").status is (
+        IdempotencyStatus.PENDING
+    )
+    assert ledger.require(f"pf-worker:{independent.work_id}").status is (
+        IdempotencyStatus.COMPLETED
+    )
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    assert _record(restored, collided.component_id).state is WorkState.RUNNING
+    assert _record(restored, independent.component_id).state is WorkState.REVIEW_REQUIRED
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    (
+        "wrong_carrier",
+        "nontext_phase",
+        "blank_phase",
+        "nontext_token",
+        "missing_phase",
+        "missing_token",
+    ),
+)
+def test_invalid_inspected_recovery_state_cannot_reach_worker_and_can_retry(
+    tmp_path, malformed: str
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    worker.fail_dispatch.add(request.component_id)
+    host = ProductFactoryProgramHost(store, worker)
+    _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+
+    if malformed == "wrong_carrier":
+        untrusted = {"phase": "interrupted", "opaque_token": "resume"}
+    else:
+        # Simulate an external adapter bypassing frozen-dataclass construction.
+        untrusted = object.__new__(RecoveryState)
+        phase = 1 if malformed == "nontext_phase" else "interrupted"
+        if malformed == "blank_phase":
+            phase = " "
+        token = b"invalid" if malformed == "nontext_token" else "resume"
+        if malformed != "missing_phase":
+            object.__setattr__(untrusted, "phase", phase)
+        if malformed != "missing_token":
+            object.__setattr__(untrusted, "opaque_token", token)
+    worker.recovery_states[request.work_id] = untrusted  # type: ignore[assignment]
+    first = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+    assert len(first) == 1
+    assert first[0].disposition is ProgramWorkDisposition.UNCERTAIN
+    assert worker.recover_calls == []
+    assert worker.inspect_calls == [request.work_id]
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.UNCERTAIN
+
+    # An invalid inspection is not a terminal block: a later valid observation
+    # can reconcile the original exact work ID without a duplicate dispatch.
+    worker.recovery_states[request.work_id] = RecoveryState("interrupted", "resume")
+    recovered = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+    assert len(recovered) == 1
+    assert recovered[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    assert len(worker.dispatch_calls) == 1
+    assert len(worker.recover_calls) == 1
+    assert worker.recover_calls[0][0].work_id == request.work_id
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.COMPLETED
+
+
+@pytest.mark.parametrize("field", ("max_parallel", "max_count"))
+@pytest.mark.parametrize("invalid", (True, 1.5, float("inf"), float("nan"), 0, -1, "2", None))
+def test_invalid_dispatch_budget_fails_before_durable_state_change(
+    tmp_path, field: str, invalid: object
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    original = coordinator.snapshot()
+    checkpoint_host = ProductFactoryCheckpointHost(store)
+    original_checkpoint = checkpoint_host.latest(
+        host_task_id=task_id, project_id="project-1"
+    )
+    kwargs = {"max_parallel": 2, "max_count": 1}
+    kwargs[field] = invalid
+    with pytest.raises(ValueError, match="positive integers"):
+        _run(
+            ProductFactoryProgramHost(store, worker).dispatch_ready(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                **kwargs,
+            )
+        )
+    assert coordinator.snapshot() == original
+    assert checkpoint_host.latest(
+        host_task_id=task_id, project_id="project-1"
+    ) == original_checkpoint
+    assert IdempotencyLedger(store).list_for_task(task_id) == ()
+    assert worker.dispatch_calls == []
+
+
+@pytest.mark.parametrize("invalid", (True, 1.5, float("inf"), float("nan"), 0, -1, "2", None))
+def test_invalid_recovery_concurrency_budget_fails_before_worker_access(
+    tmp_path, invalid: object
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    before = coordinator.snapshot()
+    with pytest.raises(ValueError, match="positive integer"):
+        _run(
+            ProductFactoryProgramHost(store, worker).recover_running(
+                host_task_id=task_id,
+                binding=binding,
+                coordinator=coordinator,
+                max_parallel=invalid,
+            )
+        )
+    assert coordinator.snapshot() == before
+    assert worker.inspect_calls == []
+    assert worker.dispatch_calls == []

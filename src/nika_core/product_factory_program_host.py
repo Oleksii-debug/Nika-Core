@@ -22,6 +22,7 @@ from nika_core.product_factory_coordinator import (
 )
 from nika_core.product_factory_project_binding import ProductProjectCoordinatorBinding
 from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
     IdempotencyLedger,
     IdempotencyRecord,
     IdempotencyStatus,
@@ -132,8 +133,13 @@ class ProductFactoryProgramHost:
         max_parallel: int = 4,
         max_count: int = 32,
     ) -> tuple[ProgramWorkOutcome, ...]:
-        if max_parallel <= 0 or max_count <= 0:
-            raise ValueError("max_parallel and max_count must be positive")
+        if (
+            type(max_parallel) is not int
+            or max_parallel <= 0
+            or type(max_count) is not int
+            or max_count <= 0
+        ):
+            raise ValueError("max_parallel and max_count must be positive integers")
 
         ready = coordinator.ready_requests()[:max_count]
         if not ready:
@@ -170,8 +176,8 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         max_parallel: int = 4,
     ) -> tuple[ProgramWorkOutcome, ...]:
-        if max_parallel <= 0:
-            raise ValueError("max_parallel must be positive")
+        if type(max_parallel) is not int or max_parallel <= 0:
+            raise ValueError("max_parallel must be a positive integer")
 
         self.reconcile_durable_results(host_task_id=host_task_id, coordinator=coordinator)
         running = tuple(
@@ -294,13 +300,39 @@ class ProductFactoryProgramHost:
     ) -> ProgramWorkOutcome:
         async with semaphore:
             operation_key = _operation_key(request)
-            operation, created = self._ledger.reserve_once(
-                operation_key=operation_key,
-                task_id=host_task_id,
-                operation_type=_OPERATION_TYPE,
-                input_fingerprint=_request_fingerprint(request),
-            )
+            try:
+                operation, created = self._ledger.reserve_once(
+                    operation_key=operation_key,
+                    task_id=host_task_id,
+                    operation_type=_OPERATION_TYPE,
+                    input_fingerprint=_request_fingerprint(request),
+                )
+            except IdempotencyConflictError:
+                # A different task/type/input already owns this work key. This is
+                # not an external worker failure and must not abort sibling work.
+                occupied = self._ledger.get(operation_key)
+                return _outcome(
+                    request,
+                    coordinator,
+                    ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                    occupied.status if occupied is not None else None,
+                    "worker reservation identity requires explicit reconciliation",
+                )
             if not created:
+                # An occupied work ID is not proof that this host/request owns it.
+                # Check the exact reserved authority before allowing recovery.
+                if (
+                    operation.task_id != host_task_id
+                    or operation.operation_type != _OPERATION_TYPE
+                    or operation.input_fingerprint != _request_fingerprint(request)
+                ):
+                    return _outcome(
+                        request,
+                        coordinator,
+                        ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                        operation.status,
+                        "existing worker operation has a different host or request identity",
+                    )
                 return _existing_operation_outcome(request, operation)
             try:
                 envelope = await self.worker.dispatch(request)
@@ -409,8 +441,30 @@ class ProductFactoryProgramHost:
                     operation_status=IdempotencyStatus.UNCERTAIN,
                     detail="worker state is missing; duplicate execution is forbidden",
                 )
+            # inspect() is an external boundary: do not let a forged/malformed
+            # state carrier reach worker.recover(), even after a valid work-ID lookup.
             try:
-                envelope = await self.worker.recover(request, state)
+                if type(state) is not RecoveryState:
+                    raise TypeError("invalid recovery state carrier")
+                # Read the two slots exactly once: a forged incomplete carrier or
+                # a concurrent mutation must not turn inspection into an effect.
+                phase, token = state.phase, state.opaque_token
+                if type(phase) is not str or not phase.strip():
+                    raise ValueError("invalid recovery phase")
+                if token is not None and type(token) is not str:
+                    raise TypeError("invalid recovery token")
+                recovery_state = RecoveryState(phase, token)
+            except (AttributeError, TypeError, ValueError):
+                self._mark_uncertain(operation_key)
+                return _outcome(
+                    request,
+                    coordinator,
+                    ProgramWorkDisposition.UNCERTAIN,
+                    IdempotencyStatus.UNCERTAIN,
+                    "worker inspection returned invalid recovery state",
+                )
+            try:
+                envelope = await self.worker.recover(request, recovery_state)
             except asyncio.CancelledError:
                 self._mark_uncertain(operation_key)
                 raise
