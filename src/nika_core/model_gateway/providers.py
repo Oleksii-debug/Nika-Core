@@ -218,14 +218,27 @@ class OllamaProvider:
     ) -> None:
         default_model = _require_provider_text("default_model", default_model)
         base_url = _require_provider_text("base_url", base_url)
-        parsed = urlsplit(base_url)
-        if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        if "\\" in base_url:
+            raise ValueError("Ollama base_url contains unsafe characters")
+        try:
+            parsed = urlsplit(base_url)
+            hostname = parsed.hostname
+            port = parsed.port
+        except ValueError:
+            raise ValueError("Ollama base_url is invalid") from None
+        if parsed.scheme.lower() not in {"http", "https"} or not hostname:
             raise ValueError("Ollama base_url requires an HTTP(S) loopback host")
-        if parsed.hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
+        if hostname.lower() not in {"localhost", "127.0.0.1", "::1"}:
             raise ValueError("Ollama local route must use a loopback host")
+        if "%" in parsed.netloc or port == 0 or parsed.netloc.endswith(":"):
+            raise ValueError("Ollama base_url has an invalid authority")
         if parsed.username is not None or parsed.password is not None:
             raise ValueError("Ollama base_url must not contain userinfo")
-        if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        if (
+            parsed.path not in {"", "/"}
+            or "?" in base_url
+            or "#" in base_url
+        ):
             raise ValueError("Ollama base_url must not contain path, query, or fragment")
         self._capabilities = ProviderCapabilities(
             provider_id="ollama",
