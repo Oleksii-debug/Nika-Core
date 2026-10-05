@@ -229,11 +229,22 @@ class PackagedProductCommandRouter:
         )
 
     def create(self, payload: Mapping[str, Any]) -> UIResult:
-        command = str(payload.get("command", "")).strip()
+        raw_command = payload.get("command", "")
+        if type(raw_command) is not str:
+            raise PackagedProductJourneyError("Команда повинна бути текстом.")
+        command = raw_command.strip()
         if not command:
             raise PackagedProductJourneyError(
                 "Введіть команду перед створенням завдання."
             )
+        if "\x00" in command:
+            raise PackagedProductJourneyError("Команда містить недопустимий NUL-символ.")
+        try:
+            command.encode("utf-8")
+        except UnicodeEncodeError:
+            raise PackagedProductJourneyError(
+                "Команда містить некоректний текст Unicode."
+            ) from None
 
         if packaged_current_product_command(command):
             return self._describe_current_project()
