@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from threading import Barrier
@@ -341,3 +342,119 @@ def test_read_only_tool_remains_compatible_without_guard() -> None:
 
     assert result.ok
     assert result.output == 7
+
+
+@pytest.mark.parametrize(
+    "corrupt_json",
+    [
+        "{}",
+        "null",
+        "[]",
+        '{"completed": false, "output": "forged"}',
+        '{"completed": 1, "output": "forged"}',
+        '{"completed": true}',
+        '{"completed": true, "output": NaN}',
+        '{"completed": true, "output": {"nested": 1e400}}',
+        r'{"completed": true, "output": "\ud800"}',
+    ],
+)
+def test_corrupt_completed_effect_does_not_replay_as_success(
+    tmp_path: Path, corrupt_json: str
+) -> None:
+    database = tmp_path / "state.db"
+    guard, ledger = _guard(database, "task-proof")
+    calls = 0
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        nonlocal calls
+        calls += 1
+        return {"published": True}
+
+    call = ToolCall(
+        call_id="call-proof",
+        tool_id="publish",
+        task_id="task-proof",
+        arguments={},
+    )
+    executor = ToolExecutor(approval_policy=_approve, effect_guard=guard)
+    executor.register(_external_spec(), handler)
+    assert asyncio.run(executor.execute(call)).ok
+    assert calls == 1
+
+    operation_key = ledger.list_for_task("task-proof")[0].operation_key
+    with SQLiteStore(database).connection() as conn:
+        conn.execute(
+            "UPDATE idempotency_records SET result_json = ? WHERE operation_key = ?",
+            (corrupt_json, operation_key),
+        )
+
+    replay = asyncio.run(executor.execute(call))
+    assert replay.error == "tool effect not safe to execute"
+    assert calls == 1
+    with SQLiteStore(database).connection() as conn:
+        saved = conn.execute(
+            "SELECT status, result_json FROM idempotency_records WHERE operation_key = ?",
+            (operation_key,),
+        ).fetchone()
+    assert saved["status"] == IdempotencyStatus.COMPLETED.value
+    assert saved["result_json"] == corrupt_json
+
+
+def test_legitimate_completed_effect_with_null_output_replays_once(
+    tmp_path: Path,
+) -> None:
+    guard, _ledger = _guard(tmp_path / "state.db", "task-null")
+    calls = 0
+
+    async def handler(_arguments: dict[str, object]) -> None:
+        nonlocal calls
+        calls += 1
+
+    call = ToolCall(
+        call_id="call-null", tool_id="publish", task_id="task-null", arguments={}
+    )
+    executor = ToolExecutor(approval_policy=_approve, effect_guard=guard)
+    executor.register(_external_spec(), handler)
+    first = asyncio.run(executor.execute(call))
+    replay = asyncio.run(executor.execute(call))
+
+    assert first.ok and replay.ok
+    assert first.output is None and replay.output is None
+    assert calls == 1
+
+
+@pytest.mark.parametrize("after_race", [False, True])
+def test_strict_ledger_corruption_denies_effect_without_raw_exception(
+    after_race: bool,
+) -> None:
+    class StrictLedger:
+        calls = 0
+
+        def reserve_once(self, **_kwargs: object) -> object:
+            self.calls += 1
+            if after_race and self.calls == 1:
+                raise sqlite3.IntegrityError("simulated concurrent reservation")
+            raise RuntimeError("persisted idempotency result_json invalid")
+
+    ledger = StrictLedger()
+    effect_calls = 0
+
+    async def handler(_arguments: dict[str, object]) -> object:
+        nonlocal effect_calls
+        effect_calls += 1
+        return "unsafe"
+
+    executor = ToolExecutor(
+        approval_policy=_approve,
+        effect_guard=ToolEffectGuard(ledger),  # type: ignore[arg-type]
+    )
+    executor.register(_external_spec(), handler)
+    result = asyncio.run(
+        executor.execute(
+            ToolCall(call_id="strict", tool_id="publish", task_id="task", arguments={})
+        )
+    )
+
+    assert result.error == "tool effect not safe to execute"
+    assert ledger.calls == (2 if after_race else 1)
+    assert effect_calls == 0
