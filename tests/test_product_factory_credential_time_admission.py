@@ -16,9 +16,10 @@ _NOW = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 class _Store:
     def __init__(self) -> None:
         self.issued = 0
+        self.available = True
 
     def contains(self, secret_ref: str, generation: int) -> bool:
-        return secret_ref == "secret-a" and generation == 1
+        return self.available and secret_ref == "secret-a" and generation == 1
 
     def issue_handle(
         self,
@@ -130,3 +131,30 @@ def test_lease_still_expires_at_exact_boundary() -> None:
             scope="repo:read",
             now=_NOW + timedelta(seconds=5),
         )
+
+def test_removed_protected_material_cannot_authorize_or_audit_stale_handle() -> None:
+    broker, store = _broker()
+    lease = _issue(broker)
+    before = broker.snapshot()
+    store.available = False
+
+    with pytest.raises(CredentialBrokerError, match="material is unavailable"):
+        broker.authorize_use(
+            lease_id=lease.lease_id,
+            project_id="project-a",
+            scope="repo:read",
+            now=_NOW + timedelta(seconds=1),
+        )
+
+    assert broker.snapshot() == before
+    store.available = True
+    with pytest.raises(CredentialBrokerError, match="unknown or invalidated"):
+        broker.authorize_use(
+            lease_id=lease.lease_id,
+            project_id="project-a",
+            scope="repo:read",
+            now=_NOW + timedelta(seconds=2),
+        )
+
+    replacement = _issue(broker)
+    assert replacement.lease_id != lease.lease_id
