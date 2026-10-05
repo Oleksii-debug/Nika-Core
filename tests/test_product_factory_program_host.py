@@ -952,9 +952,16 @@ def test_existing_foreign_worker_reservation_requires_reconciliation_before_reco
     worker = FakeProgramWorker()
     request = coordinator.ready_requests()[0]
     operation_key = f"pf-worker:{request.work_id}"
+    foreign_task_id = task_id
+    if collision == "task":
+        foreign_task_id = TaskQueue(store).create(
+            workspace_id="ws-product",
+            agent_id="foreign-product-factory",
+            payload={"kind": "product_factory", "product_project_id": "project-1"},
+        ).task_id
     reservation = {
         "operation_key": operation_key,
-        "task_id": "foreign-task" if collision == "task" else task_id,
+        "task_id": foreign_task_id,
         "operation_type": (
             "different.operation"
             if collision == "operation_type"
@@ -1045,9 +1052,14 @@ def test_worker_reservation_collision_does_not_cancel_independent_component(
     assert len(ready) == 2
     collided, independent = ready
     ledger = IdempotencyLedger(store)
+    foreign_task = TaskQueue(store).create(
+        workspace_id="ws-product",
+        agent_id="foreign-product-factory",
+        payload={"kind": "product_factory", "product_project_id": "project-1"},
+    )
     ledger.reserve_once(
         operation_key=f"pf-worker:{collided.work_id}",
-        task_id="foreign-host-task",
+        task_id=foreign_task.task_id,
         operation_type="product_factory.coding_worker",
         input_fingerprint=_request_fingerprint(collided),
     )
