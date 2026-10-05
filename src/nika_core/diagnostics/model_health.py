@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
@@ -16,7 +15,6 @@ _MAX_HEALTH_TIMEOUT_SECONDS = 30.0
 _MAX_MODEL_ID_CHARS = 512
 _MAX_BASE_URL_CHARS = 2048
 _MAX_MODEL_CATALOG_ENTRIES = 10_000
-_FORBIDDEN_IDENTITY_CATEGORIES = frozenset({"Cc", "Cf", "Cs", "Zl", "Zp"})
 
 
 class ModelHealthFact(StrEnum):
@@ -247,10 +245,7 @@ class OllamaModelHealthProbe:
             value.encode("utf-8")
         except UnicodeEncodeError:
             return False
-        return not any(
-            unicodedata.category(char) in _FORBIDDEN_IDENTITY_CATEGORIES
-            for char in value
-        )
+        return all(char.isprintable() for char in value)
 
     @staticmethod
     def _valid_timeout(value: object) -> bool:
