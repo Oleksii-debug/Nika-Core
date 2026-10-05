@@ -573,3 +573,64 @@ async def test_unknown_request_metadata_is_rejected_before_subprocess_effect(
 
     assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
     assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+
+
+
+@pytest.mark.parametrize(
+    "key",
+    ["NIKA_AUTHOR_MODE", "TOKENIZER_MODE", "AUTHORITY_MODE"],
+)
+def test_environment_allows_noncredential_substring_names(
+    tmp_path: Path,
+    key: str,
+) -> None:
+    script = _success_script(tmp_path)
+
+    adapter, _, _, _ = _adapter(tmp_path, script, environment={key: "enabled"})
+
+    assert len(adapter.attestor_sha256) == 64
+
+
+def test_environment_rejects_case_insensitive_duplicate_keys(tmp_path: Path) -> None:
+    script = _success_script(tmp_path)
+
+    with pytest.raises(ValueError, match="unique ignoring case"):
+        _adapter(
+            tmp_path,
+            script,
+            environment={"NIKA_MODE": "one", "nika_mode": "two"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "environment"),
+    [
+        ("key", {"NIKA_\ud800": "value"}),
+        ("value", {"NIKA_MODE": "\ud800"}),
+        ("key-control", {"NIKA\nMODE": "value"}),
+        ("value-control", {"NIKA_MODE": "line\nbreak"}),
+    ],
+)
+def test_environment_rejects_noncanonical_text(
+    tmp_path: Path,
+    field: str,
+    environment: dict[str, str],
+) -> None:
+    del field
+    script = _success_script(tmp_path)
+
+    with pytest.raises(ValueError):
+        _adapter(tmp_path, script, environment=environment)
+
+
+def test_command_rejects_noncanonical_text_before_registry_access(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError):
+        RegistrySubprocessLoadedModelAttestor(
+            (str(tmp_path / "evaluator"), "\ud800"),
+            artifact_registry=object(),  # type: ignore[arg-type]
+            evaluator_artifact_id="0" * 64,
+            candidate_path=str(tmp_path / "candidate.bin"),
+            descriptor=object(),  # type: ignore[arg-type]
+        )
