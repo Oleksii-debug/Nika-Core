@@ -100,6 +100,7 @@ class DesktopBackend:
         prepare_task_payload: Callable[[Mapping[str, Any]], Mapping[str, Any]] | None = None,
         admit_created_task: Callable[[TaskRecord], None] | None = None,
         admit_resumed_task: Callable[[TaskRecord], None] | None = None,
+        admit_recovered_task: Callable[[TaskRecord], None] | None = None,
         autostart_service: WindowsAutostartService | None = None,
     ) -> None:
         self._queue = queue
@@ -111,6 +112,7 @@ class DesktopBackend:
         self._prepare_task_payload = prepare_task_payload
         self._admit_created_task = admit_created_task
         self._admit_resumed_task = admit_resumed_task
+        self._admit_recovered_task = admit_recovered_task
         self.autostart_settings = AutostartSettings(autostart_service, audit)
         self._runtime_loop: _DesktopRuntimeLoop | None = None
         self._active_lock = threading.Lock()
@@ -349,6 +351,18 @@ class DesktopBackend:
         if not auto_resume:
             return self.startup_recovery_snapshot()
 
+        if self._admit_recovered_task is not None:
+            self._admit_startup_recovery(auto_resume)
+            candidates = recovery.inspect()
+            self._set_startup_recovery_state(self._recovery_projection(candidates))
+            auto_resume = tuple(
+                item
+                for item in candidates
+                if item.disposition is RecoveryDisposition.AUTO_RESUME_CRASH
+            )
+            if not auto_resume:
+                return self.startup_recovery_snapshot()
+
         future = self._host().submit(recovery.resume_safe_crash_sessions())
         with self._startup_recovery_lock:
             self._startup_recovery_future = future
@@ -431,6 +445,37 @@ class DesktopBackend:
         if self._runtime_loop is not None:
             self._runtime_loop.close()
             self._runtime_loop = None
+
+    def _admit_startup_recovery(
+        self,
+        candidates: tuple[RecoveryCandidate, ...],
+    ) -> None:
+        """Apply host-specific authority admission before canonical crash auto-resume."""
+
+        admit = self._admit_recovered_task
+        if admit is None:
+            return
+        for candidate in candidates:
+            try:
+                record = self._queue.get(candidate.task_id)
+                if record.state is not TaskState.RUNNING:
+                    raise RuntimeError("startup recovery task is no longer crash-left RUNNING")
+                admit(record)
+                if self._queue.get(candidate.task_id) != record:
+                    raise RuntimeError("startup recovery admission changed the task record")
+            except Exception as exc:  # noqa: BLE001 - host admission must fail closed per task
+                current = self._queue.get(candidate.task_id)
+                if current.state is TaskState.RUNNING:
+                    self._queue.transition(candidate.task_id, TaskState.PAUSED)
+                self._audit.append(
+                    event_type="desktop.startup_recovery_admission_rejected",
+                    entity_type="task",
+                    entity_id=candidate.task_id,
+                    payload={
+                        "runtime_id": candidate.runtime_id,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
 
     def _set_startup_recovery_state(self, state: Mapping[str, Any]) -> None:
         with self._startup_recovery_lock:

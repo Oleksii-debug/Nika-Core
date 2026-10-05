@@ -21,6 +21,7 @@ on:
       - "tests/test_v01_model_settings.py"
       - "tests/test_v01_packaged_cloud_authority_composition.py"
       - "tests/test_v01_packaged_runtime_cloud_authority.py"
+      - "tests/test_v01_packaged_startup_recovery.py"
       - "tests/test_windows_cloud_model_permission.py"
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
@@ -52,6 +53,7 @@ on:
       - "tests/test_v01_model_settings.py"
       - "tests/test_v01_packaged_cloud_authority_composition.py"
       - "tests/test_v01_packaged_runtime_cloud_authority.py"
+      - "tests/test_v01_packaged_startup_recovery.py"
       - "tests/test_windows_cloud_model_permission.py"
       - "scripts/m11_release.py"
       - "scripts/m5_uia_proof.ps1"
@@ -110,6 +112,7 @@ jobs:
           tests/test_v01_model_settings.py
           tests/test_v01_packaged_cloud_authority_composition.py
           tests/test_v01_packaged_runtime_cloud_authority.py
+          tests/test_v01_packaged_startup_recovery.py
           tests/test_windows_cloud_model_permission.py
           -q
       - name: Build standalone one-dir Windows candidate, notices and manifest

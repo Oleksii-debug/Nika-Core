@@ -32,6 +32,7 @@ _CLOUD_SUBJECT_ID = "nika.packaged.model"
 _LOCAL_USER_ID = "nika.local.user"
 _GRANT_TTL = timedelta(hours=24)
 _BINDING_SCHEMA_VERSION = 1
+_TASK_SELECTION_FIELD = "v01_model_selection"
 
 
 class CloudModelPermissionDenied(ValueError):
@@ -131,6 +132,30 @@ class V01CloudModelPermissionService:
             raise CloudModelPermissionDenied(
                 "Неможливо безпечно підтвердити зовнішню модель для зміненого продовження."
             )
+        selection = self._cloud_selection(current.task_id)
+        if selection is None:
+            return
+        previous_id = self._bound_permission_id(current.task_id, strict=True)
+        now = self._utc_now()
+        if self._active_bound_permission(current.task_id, now=now) is not None:
+            return
+        self._confirm_and_grant(
+            current,
+            selection,
+            now=now,
+            expected_previous_id=previous_id,
+        )
+
+    def admit_recovered_task(self, record: TaskRecord) -> None:
+        """Refresh cloud authority before a crash-left RUNNING task auto-resumes."""
+
+        current = self._queue.get(record.task_id)
+        if current != record or current.state is not TaskState.RUNNING:
+            raise CloudModelPermissionDenied(
+                "Неможливо безпечно підтвердити зовнішню модель для аварійного відновлення."
+            )
+        if _TASK_SELECTION_FIELD not in current.payload:
+            return
         selection = self._cloud_selection(current.task_id)
         if selection is None:
             return
