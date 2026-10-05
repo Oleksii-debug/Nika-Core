@@ -60,8 +60,9 @@ Current limit: Batch 2 stores the resulting account snapshot as deterministic De
 Paper-trading authority uses one complete immutable identity tuple:
 venue ID, venue timezone, native instrument ID and currency. Portfolio positions,
 risk marks/deltas and replay matching no longer key by the native instrument ID alone.
-Deterministic fill IDs also bind a SHA-256 digest of that complete identity, so equal
-native IDs on different venues cannot alias the same simulated fill.
+Risk-generated approval IDs, ReplayBook internal order state and deterministic fill IDs
+bind that same full identity (fill IDs use its SHA-256 digest), so equal native IDs on
+different venues cannot alias approval, pending/terminal replay state or a simulated fill.
 
 Durable Trader schema v2 stores the venue ID/timezone and currency beside the native
 instrument ID and repeats the same fields in account-position evidence. An empty
@@ -71,7 +72,12 @@ recorded venue identity and Nika must not invent that missing authority.
 
 Limit-order simulation applies deterministic adverse slippage but caps the final
 paper fill at the legal limit: BUY fills never exceed the limit and SELL fills never
-fall below it. This remains simulation-only; there is no broker/network order route.
+fall below it. Full OHLC bars are not executable market data because the current Bar
+contract does not yet prove interval-end chronology; quote execution remains the bounded
+safe surface. Within one slice, conflicting events with the same full instrument identity,
+availability/event time and source sequence fail closed instead of inheriting caller tuple
+order. Distinct source sequence values remain the explicit deterministic ordering authority.
+This remains simulation-only; there is no broker/network order route.
 
 ## Numerical oracle set
 
