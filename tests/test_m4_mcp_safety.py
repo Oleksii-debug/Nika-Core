@@ -536,6 +536,68 @@ def test_mcp_call_rejects_behavioral_nested_argument_before_transport() -> None:
     assert events == []
 
 
+@pytest.mark.parametrize(
+    ("arguments", "error"),
+    [
+        ({"value": "x" * 1_048_576}, "safe JSON byte limit"),
+        ({"value": "\\n" * 600_000}, "safe JSON byte limit"),
+        ({"values": list(range(10_001))}, "safe node limit"),
+        ({"value": 1 << 4_096}, "oversized integer"),
+    ],
+)
+def test_mcp_arguments_reject_resource_exhaustion_before_transport(
+    arguments: dict[str, object],
+    error: str,
+) -> None:
+    adapter = MCPClientAdapter(
+        MCPServerConfig(
+            server_id="safety",
+            target=object(),
+            default_risk=ToolRisk.READ_ONLY,
+        )
+    )
+    with pytest.raises(ValueError, match=error):
+        asyncio.run(
+            adapter.call(
+                ToolCall(
+                    call_id="mcp-bounded-arguments",
+                    tool_id="mcp:safety:publish",
+                    arguments=arguments,
+                )
+            )
+        )
+
+
+def test_mcp_argument_budget_allows_reasonable_unicode_and_repeated_aliases() -> None:
+    from nika_core.mcp_boundary import _snapshot_mcp_arguments
+
+    shared = ["ї" * 128]
+    snapshot = _snapshot_mcp_arguments({"left": shared, "right": shared})
+    assert snapshot == {"left": ["ї" * 128], "right": ["ї" * 128]}
+    assert snapshot["left"] is not snapshot["right"]
+
+
+def test_mcp_discovery_caps_tools_across_pages_before_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_cursors: list[str | None] = []
+    fake_client = _list_tools_client(
+        {
+            None: ([_listed_tool("first")], "next"),
+            "next": ([_listed_tool("second"), _listed_tool("third")], None),
+        },
+        seen_cursors,
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    monkeypatch.setattr("nika_core.mcp_boundary._MAX_MCP_LIST_TOOLS", 2)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+    with pytest.raises(ValueError, match="safe tool limit"):
+        asyncio.run(adapter.list_tools())
+    assert seen_cursors == [None, "next"]
+
+
 def test_mcp_call_rejects_recursive_nested_argument_before_transport() -> None:
     recursive: list[object] = []
     recursive.append(recursive)
