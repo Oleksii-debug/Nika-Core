@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PRODUCT_PROJECT_SCHEMA_VERSION = 2
+PRODUCT_PROJECT_SCHEMA_VERSION = 4
 
 PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -77,5 +77,46 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
             "CREATE INDEX IF NOT EXISTS idx_product_decisions_option "
             "ON product_decisions(project_id, option_id, decision_version DESC)"
         ),
+    ),
+    3: (
+        """CREATE TABLE IF NOT EXISTS product_factory_work_ownership (
+            project_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            owner_id TEXT,
+            fence INTEGER NOT NULL CHECK(fence > 0),
+            issued_at TEXT,
+            expires_at TEXT,
+            PRIMARY KEY (project_id, work_id)
+        )""",
+    ),
+    4: (
+        """CREATE TABLE IF NOT EXISTS product_factory_recovery_claims (
+            operation_key TEXT PRIMARY KEY,
+            project_id TEXT NOT NULL,
+            work_id TEXT NOT NULL,
+            owner_id TEXT NOT NULL,
+            fence INTEGER NOT NULL CHECK(fence > 0),
+            FOREIGN KEY(operation_key) REFERENCES idempotency_records(operation_key)
+                ON DELETE CASCADE
+        )""",
+        """CREATE TRIGGER IF NOT EXISTS product_factory_recovery_blocks_completion
+        BEFORE UPDATE OF status ON idempotency_records
+        WHEN NEW.status = 'completed'
+          AND EXISTS (
+              SELECT 1 FROM product_factory_recovery_claims
+              WHERE operation_key = OLD.operation_key
+          )
+        BEGIN
+            SELECT RAISE(ABORT, 'active Product Factory recovery claim blocks completion');
+        END""",
+        """CREATE TRIGGER IF NOT EXISTS product_factory_recovery_blocks_release
+        BEFORE DELETE ON idempotency_records
+        WHEN EXISTS (
+            SELECT 1 FROM product_factory_recovery_claims
+            WHERE operation_key = OLD.operation_key
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'active Product Factory recovery claim blocks release');
+        END""",
     ),
 }
