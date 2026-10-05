@@ -293,12 +293,7 @@ class StudyQueue:
                     break
 
                 for row in rows:
-                    try:
-                        payload = json.loads(row["payload_json"])
-                    except (TypeError, json.JSONDecodeError) as exc:
-                        raise ValueError("invalid canonical task payload") from exc
-                    if not isinstance(payload, dict):
-                        raise TypeError("invalid canonical task payload")
+                    payload = task_queue.decode_task_payload(row["payload_json"])
                     if payload.get("nika_kind") != _STUDY_PAYLOAD_KIND:
                         continue
                     selected.append(row["task_id"])
