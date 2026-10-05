@@ -343,6 +343,51 @@ def test_complete_unquoted_environment_reference_is_not_a_packaged_secret(
     assert verify_release_manifest(bundle, _manifest(bundle)) == ()
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"OPENAI_API_KEY=NIKA_QA_W081_PACKAGE_CONTENT_CANARY_7ef390\\n",
+        b'TELEGRAM_API_HASH="NIKA_QA_W081_PACKAGE_CONTENT_CANARY_7ef390"\\n',
+        b"NIKA_ACCESS_TOKEN=NIKA_QA_W081_PACKAGE_CONTENT_CANARY_7ef390\\n",
+        b"DB_PASSWORD=NIKA_QA_W081_PACKAGE_CONTENT_CANARY_7ef390\\n",
+    ],
+)
+def test_env_example_rejects_namespaced_secret_assignments(
+    tmp_path: Path,
+    content: bytes,
+) -> None:
+    bundle = _bundle(tmp_path, ".env.example", content)
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:.env.example",
+    )
+    artifact = _archive_bundle(tmp_path, bundle)
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == (
+        "archive:secret-content:.env.example",
+    )
+
+
+def test_env_example_allows_namespaced_environment_reference(tmp_path: Path) -> None:
+    bundle = _bundle(
+        tmp_path,
+        ".env.example",
+        b"OPENAI_API_KEY=${OPENAI_API_KEY}\\n",
+    )
+    assert verify_release_manifest(bundle, _manifest(bundle)) == ()
+    artifact = _archive_bundle(tmp_path, bundle)
+    assert verify_release_archive(artifact, source_sha=SOURCE_SHA) == ()
+
+
+def test_namespaced_secret_assignment_across_scan_chunk_boundary_is_detected(
+    tmp_path: Path,
+) -> None:
+    prefix = b"x" * (64 * 1024 - 24)
+    content = prefix + b"\\nOPENAI_API_KEY=" + CANARY.encode() + b"\\n"
+    bundle = _bundle(tmp_path, ".env.example", content)
+    assert verify_release_manifest(bundle, _manifest(bundle)) == (
+        "secret-content:.env.example",
+    )
+
+
 def test_unquoted_environment_reference_with_appended_value_is_rejected(
     tmp_path: Path,
 ) -> None:
