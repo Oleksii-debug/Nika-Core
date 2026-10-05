@@ -101,6 +101,93 @@ def test_schema_rejects_non_integer_migration_storage(tmp_path: Path) -> None:
         initialize_artifact_registry_schema(store)
 
 
+def test_schema_rejects_missing_required_index(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    initialize_artifact_registry_schema(store)
+    with store.connection() as conn:
+        conn.execute("DROP INDEX idx_artifact_registry_sha256")
+
+    with pytest.raises(RuntimeError, match="index schema mismatch"):
+        initialize_artifact_registry_schema(store)
+
+
+def test_schema_rejects_missing_idempotency_unique_constraint(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    initialize_artifact_registry_schema(store)
+    with store.connection() as conn:
+        conn.execute("DROP TABLE artifact_registry_verifications")
+        conn.execute(
+            "ALTER TABLE artifact_registry_records RENAME TO artifact_registry_records_old"
+        )
+        conn.execute(
+            """CREATE TABLE artifact_registry_records (
+                artifact_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                idempotency_key TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                sha256 TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK(size_bytes >= 0),
+                location_kind TEXT NOT NULL CHECK(location_kind IN ('local_file','opaque_reference')),
+                producer_id TEXT,
+                record_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute("DROP TABLE artifact_registry_records_old")
+        conn.execute(
+            "CREATE INDEX idx_artifact_registry_workspace_kind "
+            "ON artifact_registry_records(workspace_id, kind, created_at, artifact_id)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_artifact_registry_sha256 "
+            "ON artifact_registry_records(sha256, artifact_id)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_artifact_registry_workspace_producer "
+            "ON artifact_registry_records(workspace_id, producer_id, created_at, artifact_id)"
+        )
+        conn.execute(
+            """CREATE TABLE artifact_registry_verifications (
+                verification_id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('verified','missing','mismatch','unavailable')),
+                verification_json TEXT NOT NULL,
+                checked_at TEXT NOT NULL,
+                FOREIGN KEY(artifact_id) REFERENCES artifact_registry_records(artifact_id)
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX idx_artifact_registry_verifications "
+            "ON artifact_registry_verifications(artifact_id, checked_at, verification_id)"
+        )
+
+    with pytest.raises(RuntimeError, match="unique constraint schema mismatch"):
+        initialize_artifact_registry_schema(store)
+
+
+def test_schema_rejects_missing_verification_foreign_key(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "state.sqlite3")
+    initialize_artifact_registry_schema(store)
+    with store.connection() as conn:
+        conn.execute("DROP TABLE artifact_registry_verifications")
+        conn.execute(
+            """CREATE TABLE artifact_registry_verifications (
+                verification_id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('verified','missing','mismatch','unavailable')),
+                verification_json TEXT NOT NULL,
+                checked_at TEXT NOT NULL
+            )"""
+        )
+        conn.execute(
+            "CREATE INDEX idx_artifact_registry_verifications "
+            "ON artifact_registry_verifications(artifact_id, checked_at, verification_id)"
+        )
+
+    with pytest.raises(RuntimeError, match="foreign key schema mismatch"):
+        initialize_artifact_registry_schema(store)
+
+
 def test_register_file_is_durable_and_idempotent_across_restart(tmp_path: Path) -> None:
     db_path = tmp_path / "state.sqlite3"
     source = tmp_path / "дані з пробілами.txt"

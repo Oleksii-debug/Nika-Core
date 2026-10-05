@@ -66,6 +66,35 @@ _VERIFICATION_COLUMNS = {
 }
 
 
+_REQUIRED_INDEXES = {
+    "idx_artifact_registry_workspace_kind": (
+        "artifact_registry_records",
+        ("workspace_id", "kind", "created_at", "artifact_id"),
+    ),
+    "idx_artifact_registry_sha256": (
+        "artifact_registry_records",
+        ("sha256", "artifact_id"),
+    ),
+    "idx_artifact_registry_workspace_producer": (
+        "artifact_registry_records",
+        ("workspace_id", "producer_id", "created_at", "artifact_id"),
+    ),
+    "idx_artifact_registry_verifications": (
+        "artifact_registry_verifications",
+        ("artifact_id", "checked_at", "verification_id"),
+    ),
+}
+_REQUIRED_RECORD_UNIQUE_COLUMNS = ("workspace_id", "idempotency_key")
+_REQUIRED_VERIFICATION_FOREIGN_KEY = (
+    "artifact_registry_records",
+    "artifact_id",
+    "artifact_id",
+    "NO ACTION",
+    "NO ACTION",
+    "NONE",
+)
+
+
 def _stored_schema_version(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise TypeError("artifact registry schema version must be stored as SQLite INTEGER")
@@ -108,6 +137,72 @@ def _validate_table(
         raise RuntimeError(f"artifact registry table schema mismatch: {table_name}")
 
 
+def _index_columns(conn: sqlite3.Connection, index_name: str) -> tuple[str, ...]:
+    rows = conn.execute(
+        "SELECT name FROM pragma_index_info(?) ORDER BY seqno",
+        (index_name,),
+    ).fetchall()
+    return tuple(str(row["name"]) for row in rows)
+
+
+def _validate_required_index(
+    conn: sqlite3.Connection,
+    *,
+    index_name: str,
+    table_name: str,
+    expected_columns: tuple[str, ...],
+) -> None:
+    rows = conn.execute(
+        'SELECT name, "unique", origin, partial FROM pragma_index_list(?)',
+        (table_name,),
+    ).fetchall()
+    row = next((item for item in rows if str(item["name"]) == index_name), None)
+    if row is None:
+        raise RuntimeError(f"artifact registry index schema mismatch: {index_name}")
+    if (
+        int(row["unique"]) != 0
+        or str(row["origin"]) != "c"
+        or int(row["partial"]) != 0
+        or _index_columns(conn, index_name) != expected_columns
+    ):
+        raise RuntimeError(f"artifact registry index schema mismatch: {index_name}")
+
+
+def _validate_record_unique_authority(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        'SELECT name, "unique", origin, partial '
+        "FROM pragma_index_list('artifact_registry_records')"
+    ).fetchall()
+    for row in rows:
+        if (
+            int(row["unique"]) == 1
+            and str(row["origin"]) == "u"
+            and int(row["partial"]) == 0
+            and _index_columns(conn, str(row["name"])) == _REQUIRED_RECORD_UNIQUE_COLUMNS
+        ):
+            return
+    raise RuntimeError("artifact registry unique constraint schema mismatch")
+
+
+def _validate_verification_foreign_key(conn: sqlite3.Connection) -> None:
+    rows = conn.execute(
+        "SELECT * FROM pragma_foreign_key_list('artifact_registry_verifications')"
+    ).fetchall()
+    actual = {
+        (
+            str(row["table"]),
+            str(row["from"]),
+            str(row["to"]),
+            str(row["on_update"]).upper(),
+            str(row["on_delete"]).upper(),
+            str(row["match"]).upper(),
+        )
+        for row in rows
+    }
+    if actual != {_REQUIRED_VERIFICATION_FOREIGN_KEY}:
+        raise RuntimeError("artifact registry foreign key schema mismatch")
+
+
 def _validate_owned_schema(conn: sqlite3.Connection) -> None:
     _validate_table(
         conn,
@@ -119,6 +214,15 @@ def _validate_owned_schema(conn: sqlite3.Connection) -> None:
         table_name="artifact_registry_verifications",
         expected=_VERIFICATION_COLUMNS,
     )
+    for index_name, (table_name, expected_columns) in _REQUIRED_INDEXES.items():
+        _validate_required_index(
+            conn,
+            index_name=index_name,
+            table_name=table_name,
+            expected_columns=expected_columns,
+        )
+    _validate_record_unique_authority(conn)
+    _validate_verification_foreign_key(conn)
 
 
 def initialize_artifact_registry_schema(store: SQLiteStore) -> None:
