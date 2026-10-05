@@ -145,12 +145,13 @@ def test_incident_record_requires_exact_state_carrier() -> None:
 
 
 def test_valid_snapshot_remains_dump_load_stable() -> None:
-    record = IncidentRecord("incident-1", _trigger(), IncidentState.OPEN)
+    trigger = _trigger()
+    record = IncidentRecord("incident-1", trigger, IncidentState.OPEN)
     snapshot = IncidentLifecycleSnapshot(
         INCIDENT_LIFECYCLE_SCHEMA,
         "project-a",
         (record,),
-        (("fingerprint-1", "incident-1"),),
+        ((trigger.fingerprint, "incident-1"),),
     )
 
     payload = dump_incident_snapshot(snapshot)
