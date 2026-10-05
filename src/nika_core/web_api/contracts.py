@@ -14,7 +14,6 @@ _MAX_TEXT_BYTES: Final = 16 * 1024
 _MAX_KEY_BYTES: Final = 256
 _MAX_INT_BITS: Final = 4096
 _MACHINE_ID_RE: Final = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,159}$")
-_ACTION_ID_RE: Final = re.compile(r"^[a-z0-9][a-z0-9_.-]{2,119}$")
 _RESULT_STATUSES: Final = frozenset({"accepted", "completed", "rejected", "failed"})
 
 
@@ -163,8 +162,8 @@ class WebCommand:
             field_name="action_id",
             max_bytes=120,
         )
-        if _ACTION_ID_RE.fullmatch(action_id) is None:
-            raise ValueError("action_id must use the canonical lowercase action identifier format")
+        if "." not in action_id:
+            raise ValueError("action_id must be a stable dotted identifier")
         payload_json = _snapshot_json_object(value["payload"])
         return cls(
             request_id=request_id,
