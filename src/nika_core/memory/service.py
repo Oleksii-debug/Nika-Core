@@ -9,6 +9,7 @@ from typing import Any
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
 from nika_core.memory.contracts import MemoryRecord, MemoryScope
+from nika_core.memory.minimization import minimize_for_persistence
 
 
 class MemoryService:
@@ -39,7 +40,11 @@ class MemoryService:
             expires_at = _as_utc(expires_at)
         now = datetime.now(UTC)
         body = json.dumps(
-            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+            minimize_for_persistence(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
         )
         try:
             body.encode("utf-8")
