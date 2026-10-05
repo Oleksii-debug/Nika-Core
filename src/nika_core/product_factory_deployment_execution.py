@@ -115,15 +115,19 @@ class DeploymentExecutionCoordinator:
         if type(spec) is not DeploymentExecutionSpec:
             raise DeploymentExecutionError("invalid deployment execution spec")
         spec.__post_init__()
-        existing = self._records.get(spec.operation_id)
+        private_spec = _snapshot_execution_spec(spec)
+        existing = self._records.get(private_spec.operation_id)
         if existing is not None:
-            if existing.spec != spec:
+            if existing.spec != private_spec:
                 raise DeploymentExecutionError("operation id conflicts with prior deployment payload")
-            return existing
+            return _snapshot_execution_record(existing)
         instant = _aware(now or datetime.now(UTC))
-        record = DeploymentExecutionRecord(spec, OperationState.PENDING, updated_at=instant)
-        self._records[spec.operation_id] = record
-        return record
+        record = DeploymentExecutionRecord(
+            private_spec,
+            OperationState.PENDING,
+            updated_at=instant,
+        )
+        return self._save(record)
 
     def prepare(self, operation_id: str, *, now: datetime | None = None) -> DeploymentExecutionRecord:
         instant = _aware(now or datetime.now(UTC))
@@ -134,7 +138,7 @@ class DeploymentExecutionCoordinator:
             OperationState.ROLLED_BACK,
             OperationState.RECONCILE_REQUIRED,
         }:
-            return record
+            return _snapshot_execution_record(record)
         self._release_ephemeral(operation_id)
         try:
             node_lease = self.nodes.acquire(
@@ -210,7 +214,7 @@ class DeploymentExecutionCoordinator:
         instant = _aware(now or datetime.now(UTC))
         record = self._record(operation_id)
         if record.state is not OperationState.PREPARED:
-            return record
+            return _snapshot_execution_record(record)
         node_lease = self._node_leases.get(operation_id)
         credential_lease_id = self._credential_leases.get(operation_id)
         if node_lease is None or credential_lease_id is None:
@@ -255,7 +259,7 @@ class DeploymentExecutionCoordinator:
         instant = _aware(now or datetime.now(UTC))
         record = self._record(operation_id)
         if record.state is not OperationState.RECONCILE_REQUIRED:
-            return record
+            return _snapshot_execution_record(record)
         deployment = self.deployments.reconcile(record.spec.intent.intent_id)
         evidence = record.evidence_refs + deployment.provider_evidence_refs
         return self._save(self._from_deployment(record, deployment, evidence, instant))
@@ -267,7 +271,7 @@ class DeploymentExecutionCoordinator:
             OperationState.BLOCKED_CREDENTIAL,
             OperationState.RECOVERY_REQUIRED,
         }:
-            return record
+            return _snapshot_execution_record(record)
         return self.prepare(operation_id, now=now)
 
     def snapshot(self) -> DeploymentExecutionSnapshot:
@@ -275,7 +279,9 @@ class DeploymentExecutionCoordinator:
         for key in sorted(self._records):
             record = self._records[key]
             state = OperationState.RECOVERY_REQUIRED if record.state is OperationState.PREPARED else record.state
-            safe_records.append(replace(record, state=state, node_id=None))
+            safe_records.append(
+                _snapshot_execution_record(replace(record, state=state, node_id=None))
+            )
         return DeploymentExecutionSnapshot(tuple(safe_records))
 
     def restore(self, snapshot: DeploymentExecutionSnapshot) -> None:
@@ -340,13 +346,13 @@ class DeploymentExecutionCoordinator:
             _aware(record.updated_at)
             if record.state is OperationState.PREPARED or record.node_id is not None:
                 raise DeploymentExecutionError("snapshot must not serialize active execution leases")
-            restored[operation_id] = record
+            restored[operation_id] = _snapshot_execution_record(record)
         self._records = restored
         self._node_leases = {}
         self._credential_leases = {}
 
     def get(self, operation_id: str) -> DeploymentExecutionRecord:
-        return self._record(operation_id)
+        return _snapshot_execution_record(self._record(operation_id))
 
     def _from_deployment(
         self,
@@ -390,8 +396,71 @@ class DeploymentExecutionCoordinator:
         return record
 
     def _save(self, record: DeploymentExecutionRecord) -> DeploymentExecutionRecord:
-        self._records[record.spec.operation_id] = record
-        return record
+        private_record = _snapshot_execution_record(record)
+        self._records[private_record.spec.operation_id] = private_record
+        return _snapshot_execution_record(private_record)
+
+
+def _snapshot_execution_spec(spec: DeploymentExecutionSpec) -> DeploymentExecutionSpec:
+    if type(spec) is not DeploymentExecutionSpec:
+        raise DeploymentExecutionError("invalid deployment execution spec")
+    spec.__post_init__()
+    request = spec.request
+    intent = spec.intent
+    return DeploymentExecutionSpec(
+        operation_id=spec.operation_id,
+        request=ExecutionRequest(
+            project_id=request.project_id,
+            work_id=request.work_id,
+            platform=request.platform,
+            required_features=frozenset(request.required_features),
+            required_toolchains=frozenset(request.required_toolchains),
+            resources=ResourceEnvelope(
+                request.resources.cpu_cores,
+                request.resources.memory_mb,
+                request.resources.disk_mb,
+            ),
+            require_gpu=request.require_gpu,
+        ),
+        intent=DeploymentIntent(
+            intent_id=intent.intent_id,
+            project_id=intent.project_id,
+            environment=EnvironmentIdentity(
+                environment_id=intent.environment.environment_id,
+                project_id=intent.environment.project_id,
+                tier=intent.environment.tier,
+                provider_ref=intent.environment.provider_ref,
+            ),
+            release=ReleaseRef(
+                project_id=intent.release.project_id,
+                version=intent.release.version,
+                source_sha=intent.release.source_sha,
+                artifact_digest=intent.release.artifact_digest,
+            ),
+            migration_refs=tuple(intent.migration_refs),
+        ),
+        credential_ref=spec.credential_ref,
+        credential_audience=spec.credential_audience,
+        credential_scope=spec.credential_scope,
+        credential_ttl_seconds=spec.credential_ttl_seconds,
+        node_lease_seconds=spec.node_lease_seconds,
+    )
+
+
+def _snapshot_execution_record(
+    record: DeploymentExecutionRecord,
+) -> DeploymentExecutionRecord:
+    if type(record) is not DeploymentExecutionRecord:
+        raise DeploymentExecutionError("invalid deployment execution record")
+    return DeploymentExecutionRecord(
+        spec=_snapshot_execution_spec(record.spec),
+        state=record.state,
+        node_id=record.node_id,
+        deployment_state=record.deployment_state,
+        evidence_refs=tuple(record.evidence_refs),
+        attempt=record.attempt,
+        updated_at=record.updated_at,
+    )
 
 
 def _validate_execution_request(request: ExecutionRequest) -> None:
