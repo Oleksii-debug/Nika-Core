@@ -527,11 +527,12 @@ class V01ModelSettings:
                     )
                 current = ModelSelection.from_stored(row["selection_json"])
                 if (
-                    current.route_kind not in {"foundry_local", "ollama"}
+                    current.route_kind != "ollama"
                     or current.provider_kind is not ProviderKind.LOCAL
+                    or current.provider_id != "ollama"
                 ):
                     raise ModelSetupError(
-                        "Автоматичне просування дозволене лише для локальної моделі."
+                        "Автоматичне просування зараз підтримує лише локальний Ollama."
                     )
                 if (
                     current.provider_id != base_provider_id
