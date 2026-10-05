@@ -25,6 +25,7 @@ from nika_core.model_engineering.contracts import (
 )
 from nika_core.model_gateway.contracts import (
     ModelGatewayError,
+    ModelMessage,
     ModelRequest,
     ModelResponse,
     ModelUsage,
@@ -111,10 +112,8 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> CandidateBenchmarkReport:
-        if type(candidate) is not ModelCandidate:
-            raise TypeError("candidate must be an exact ModelCandidate")
-        if type(evaluation_set) is not EvaluationSet:
-            raise TypeError("evaluation_set must be an exact EvaluationSet")
+        self._validate_candidate(candidate)
+        self._validate_evaluation_set(evaluation_set)
         execution_config = BenchmarkExecutionConfig(
             timeout_seconds=timeout_seconds,
             temperature=temperature,
@@ -158,14 +157,13 @@ class ModelBenchmarkRunner:
         timeout_seconds: float = 60.0,
         temperature: float | None = 0.0,
     ) -> BenchmarkSuiteReport:
-        if type(evaluation_set) is not EvaluationSet:
-            raise TypeError("evaluation_set must be an exact EvaluationSet")
+        self._validate_evaluation_set(evaluation_set)
         if type(candidates) is not tuple:
             raise TypeError("benchmark suite candidates must be a canonical tuple")
         if not candidates:
             raise ValueError("benchmark suite requires at least one candidate")
-        if any(type(candidate) is not ModelCandidate for candidate in candidates):
-            raise TypeError("benchmark suite candidates must use exact ModelCandidate values")
+        for candidate in candidates:
+            self._validate_candidate(candidate)
         ids = [candidate.candidate_id for candidate in candidates]
         if len(ids) != len(set(ids)):
             raise ValueError("benchmark suite candidate IDs must be unique")
@@ -192,6 +190,22 @@ class ModelBenchmarkRunner:
             execution_config_sha256=execution_config.evidence_sha256,
             reports=tuple(reports),
         )
+
+    @staticmethod
+    def _validate_candidate(candidate: ModelCandidate) -> None:
+        if type(candidate) is not ModelCandidate:
+            raise TypeError("candidate must be an exact ModelCandidate")
+        ModelCandidate.__post_init__(candidate)
+
+    @staticmethod
+    def _validate_evaluation_set(evaluation_set: EvaluationSet) -> None:
+        if type(evaluation_set) is not EvaluationSet:
+            raise TypeError("evaluation_set must be an exact EvaluationSet")
+        EvaluationSet.__post_init__(evaluation_set)
+        for case in evaluation_set.cases:
+            EvaluationCase.__post_init__(case)
+            for message in case.messages:
+                ModelMessage.__post_init__(message)
 
     async def _run_case(
         self,
