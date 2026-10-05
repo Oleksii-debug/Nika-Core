@@ -1477,6 +1477,7 @@ def _write_report(path: Path, payload: dict[str, object]) -> None:
     temporary: Path | None = None
     descriptor: int | None = None
     published_identity: tuple[int, int] | None = None
+    published_by_writer = False
     try:
         descriptor, temporary_name = tempfile.mkstemp(
             prefix=".physical-evaluation-report.",
@@ -1519,6 +1520,7 @@ def _write_report(path: Path, payload: dict[str, object]) -> None:
             raise PhysicalEvaluationDriverError(
                 "physical evaluation report already exists"
             ) from exc
+        published_by_writer = True
         linked_snapshot = os.lstat(destination)
         if (
             stat.S_ISLNK(linked_snapshot.st_mode)
@@ -1566,10 +1568,12 @@ def _write_report(path: Path, payload: dict[str, object]) -> None:
         finally:
             _close_windows_stability_lock(destination_lock)
     except PhysicalEvaluationDriverError:
-        _unlink_report_if_owned(destination, published_identity)
+        if published_by_writer:
+            _unlink_report_if_owned(destination, published_identity)
         raise
     except OSError as exc:
-        _unlink_report_if_owned(destination, published_identity)
+        if published_by_writer:
+            _unlink_report_if_owned(destination, published_identity)
         raise PhysicalEvaluationDriverError(
             "physical evaluation report could not be persisted"
         ) from exc
