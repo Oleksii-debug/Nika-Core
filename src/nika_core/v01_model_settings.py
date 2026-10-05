@@ -98,7 +98,11 @@ class ModelSelection(BaseModel):
     def clean_text(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if value != value.strip() or not value or any(not char.isprintable() for char in value):
+        if (
+            value != value.strip()
+            or not value
+            or any(not char.isprintable() for char in value)
+        ):
             raise ValueError("invalid model route text")
         return value
 
