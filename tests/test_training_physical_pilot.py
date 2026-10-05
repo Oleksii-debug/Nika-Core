@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -32,10 +33,60 @@ def _windows_report_builder(monkeypatch: pytest.MonkeyPatch) -> None:
         "nika_core.training_physical_pilot._is_windows",
         lambda: True,
     )
+    monkeypatch.setattr(
+        pilot,
+        "candidate_adapter_manifest",
+        lambda _: _candidate_manifest(),
+    )
 
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _candidate_manifest() -> dict[str, object]:
+    return {
+        "adapter_config": {
+            "base_model_name_or_path": "models/base",
+            "bias": "none",
+            "lora_alpha": 16,
+            "lora_dropout": 0.0,
+            "r": 8,
+            "target_modules": ["q_proj"],
+            "task_type": "CAUSAL_LM",
+        },
+        "base_artifact_ref": "models/base",
+        "base_artifact_sha256": "a" * 64,
+        "candidate_artifact_ref": "models/candidate/pilot",
+        "consumed_materials_sha256": "1" * 64,
+        "job_fingerprint": "f" * 64,
+        "model_dir_manifest_sha256": "2" * 64,
+        "trainer_artifact_id": "3" * 64,
+        "trainer_implementation_sha256": "4" * 64,
+        "trainer_sha256": "5" * 64,
+        "training_runtime_manifest_sha256": "6" * 64,
+        "training_runtime_versions": {
+            "accelerate": "1.0",
+            "gguf": "1.0",
+            "peft": "1.0",
+            "safetensors": "1.0",
+            "torch": "1.0",
+            "transformers": "1.0",
+        },
+        "schema": "nika-peft-candidate-v1",
+        "step_number": 2,
+        "trainer_parameters": {
+            "learning_rate": 0.0002,
+            "lora_alpha": 16,
+            "lora_dropout": 0.0,
+            "lora_r": 8,
+            "lora_target_modules": ["q_proj"],
+            "max_records": 100,
+            "max_sequence_length": 64,
+            "seed": 1,
+            "torch_num_threads": 1,
+        },
+    }
 
 
 def _descriptor(path: Path, *, payload: bytes | None = None) -> ModelArtifactDescriptor:
@@ -202,8 +253,15 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     )
 
     assert report.platform == "windows"
-    assert report.schema_version == 2
+    assert report.schema_version == 3
     assert report.completed_steps == 2
+    assert report.consumed_materials_sha256 == "1" * 64
+    assert report.model_dir_manifest_sha256 == "2" * 64
+    assert report.trainer_artifact_id == "3" * 64
+    assert report.trainer_implementation_sha256 == "4" * 64
+    assert report.trainer_deployment_sha256 == "5" * 64
+    assert report.training_runtime_manifest_sha256 == "6" * 64
+    assert len(report.candidate_manifest_sha256) == 64
     assert report.candidate_sha256 == _sha256(payload)
     assert report.candidate_byte_count == len(payload)
     assert report.candidate_descriptor_sha256 == descriptor.descriptor_digest
@@ -402,6 +460,105 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
 
 
 
+
+
+def test_build_report_rejects_candidate_manifest_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    manifest = _candidate_manifest()
+    manifest["job_fingerprint"] = "0" * 64
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", lambda _: manifest)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="job fingerprint"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+def test_build_report_rejects_candidate_manifest_reader_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+
+    def fail_reader(_: Path) -> dict[str, object]:
+        raise pilot.PeftTrainerError("candidate_manifest_invalid")
+
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", fail_reader)
+
+    with pytest.raises(PhysicalTrainingPilotError, match="manifest verification failed"):
+        build_physical_training_pilot_report(
+            paused=_run_evidence(
+                state=TrainingRunState.PAUSED,
+                next_step=1,
+                checkpoint_id="checkpoint-paused",
+            ),
+            restart_probe=_restart_probe(),
+            completed=_completed_for(payload),
+            candidate_path=candidate,
+            candidate_descriptor=_descriptor(candidate),
+            candidate_root=tmp_path,
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics required")
+def test_build_report_holds_candidate_stable_during_manifest_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    replacement = tmp_path / "replacement.safetensors"
+    replacement.write_bytes(b"replacement")
+    blocked: list[int | None] = []
+
+    def racing_reader(path: Path) -> dict[str, object]:
+        try:
+            os.replace(replacement, path)
+        except OSError as exc:
+            blocked.append(getattr(exc, "winerror", None))
+        else:
+            raise AssertionError("candidate replacement must be blocked during evidence read")
+        return _candidate_manifest()
+
+    monkeypatch.setattr(pilot, "candidate_adapter_manifest", racing_reader)
+
+    report = build_physical_training_pilot_report(
+        paused=_run_evidence(
+            state=TrainingRunState.PAUSED,
+            next_step=1,
+            checkpoint_id="checkpoint-paused",
+        ),
+        restart_probe=_restart_probe(),
+        completed=_completed_for(payload),
+        candidate_path=candidate,
+        candidate_descriptor=_descriptor(candidate),
+        candidate_root=tmp_path,
+    )
+
+    assert report.candidate_sha256 == _sha256(payload)
+    assert blocked
+    assert replacement.exists()
+    os.replace(replacement, candidate)
+    assert candidate.read_bytes() == b"replacement"
+
+
 def test_build_report_rejects_non_windows_builder(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -470,6 +627,13 @@ def test_report_rejects_non_windows_platform(tmp_path: Path) -> None:
             candidate_registry_key=report.candidate_registry_key,
             candidate_sha256=report.candidate_sha256,
             candidate_byte_count=report.candidate_byte_count,
+            candidate_manifest_sha256=report.candidate_manifest_sha256,
+            consumed_materials_sha256=report.consumed_materials_sha256,
+            model_dir_manifest_sha256=report.model_dir_manifest_sha256,
+            trainer_artifact_id=report.trainer_artifact_id,
+            trainer_deployment_sha256=report.trainer_deployment_sha256,
+            trainer_implementation_sha256=report.trainer_implementation_sha256,
+            training_runtime_manifest_sha256=report.training_runtime_manifest_sha256,
             completed_steps=report.completed_steps,
             platform="linux",
         )
