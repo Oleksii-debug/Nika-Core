@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -27,6 +28,13 @@ def _canonical(value: Any) -> str:
 
 def _reject_nonfinite_evidence(_value: str) -> None:
     raise ValueError("non-finite stored research evidence")
+
+
+def _finite_evidence_float(value: str) -> float:
+    parsed = float(value)
+    if not math.isfinite(parsed):
+        raise ValueError("non-finite stored research evidence")
+    return parsed
 
 
 def _unique_evidence_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -406,9 +414,10 @@ class ProductDecisionRepository:
                 payload = json.loads(
                     raw,
                     parse_constant=_reject_nonfinite_evidence,
+                    parse_float=_finite_evidence_float,
                     object_pairs_hook=_unique_evidence_keys,
                 )
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, RecursionError) as exc:
                 raise ProductProjectError("stored research handoff is malformed") from exc
             if (
                 type(payload) is not dict
