@@ -323,6 +323,7 @@ def test_environment_identity_rejects_empty_scope(
             provider_ref,
         )
 
+
 class _MutatedDeployResultProvider(FakeProvider):
     def deploy(self, intent: DeploymentIntent) -> ProviderDeploymentResult:
         result = ProviderDeploymentResult(
