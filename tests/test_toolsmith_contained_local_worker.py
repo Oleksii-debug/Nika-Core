@@ -380,6 +380,48 @@ def test_corrupt_durable_state_fails_closed_to_manual_reconciliation(
     assert recovered.failure.retryable is False
 
 
+@pytest.mark.parametrize(
+    "corrupt_state",
+    [
+        b'{"nested":' + b"[" * 65 + b"0" + b"]" * 65 + b"}",
+        b'{"value":1e400}',
+        b'{"value":' + b"9" * 1235 + b"}",
+    ],
+)
+def test_invalid_resource_bound_state_requires_manual_reconciliation(
+    tmp_path: pathlib.Path,
+    corrupt_state: bytes,
+) -> None:
+    repository, base_sha = _repository(tmp_path)
+    worker = _worker(
+        tmp_path,
+        repository,
+        _Planner(LocalFileEdit("src/value.py", b"VALUE = 2\n")),
+    )
+    job = _job(worker, base_sha)
+    first = _run(worker.execute(job))
+    assert first.failure is None
+
+    state_path = worker.workspace_root_for(job.job_id) / "_nika_local_worker_state.json"
+    state_path.write_bytes(corrupt_state)
+
+    reconstructed = ContainedLocalCodingWorker(
+        workspace_parent=worker.workspace_parent,
+        repositories={"repo-1": repository},
+        planner=_MustNotPlan(),
+    )
+    inspected = _run(reconstructed.inspect(job.job_id))
+    replayed = _run(reconstructed.execute(job))
+
+    assert inspected is not None
+    assert inspected.phase == "manual_reconcile_required"
+    assert replayed.failure is not None
+    assert replayed.failure.kind is WorkerFailureKind.INTERNAL_ERROR
+    assert replayed.failure.retryable is False
+    assert replayed.recovery_state is not None
+    assert replayed.recovery_state.phase == "manual_reconcile_required"
+
+
 def test_worker_configuration_mappings_are_detached_and_read_only(
     tmp_path: pathlib.Path,
 ) -> None:
