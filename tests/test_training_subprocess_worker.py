@@ -4,8 +4,8 @@ import hashlib
 import json
 import os
 import subprocess
-import threading
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -16,7 +16,11 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
 from nika_core.research.blobs import ContentAddressedBlobStore
 from nika_core.training_adapters import SubprocessTrainingWorker, TrainingSubprocessError
-from nika_core.training_materials import ResolvedTrainingPackage, resolve_training_materials
+from nika_core.training_materials import (
+    ResolvedTrainingPackage,
+    TrainingMaterialEvidence,
+    resolve_training_materials,
+)
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
@@ -584,6 +588,80 @@ sys.stdout.write(json.dumps(response))
 
     assert exc_info.value.code == "training_material_changed_after_process_start"
     assert exc_info.value.effect is TrainingWorkerFailureEffect.UNKNOWN
+    assert not marker.exists()
+
+
+def test_inner_material_evidence_cannot_diverge_from_frozen_package_before_effect(
+    tmp_path: Path,
+) -> None:
+    marker = tmp_path / "trainer-started"
+    trainer = _script(
+        tmp_path,
+        f"""
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+request = json.loads(sys.stdin.buffer.read())
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+observations = []
+for item in request["training_materials"]["materials"]:
+    body = Path(item["path"]).read_bytes()
+    observations.append({{
+        "artifact_sha256": hashlib.sha256(body).hexdigest(),
+        "byte_count": len(body),
+        "split": item["split"],
+    }})
+encoded = json.dumps(
+    observations,
+    allow_nan=False,
+    ensure_ascii=False,
+    separators=(",", ":"),
+    sort_keys=True,
+).encode("utf-8")
+domain = b"nika-training-consumed-materials-v1" + bytes([0])
+response = {{
+    "candidate_sha256": None,
+    "completed": False,
+    "consumed_materials_sha256": hashlib.sha256(domain + encoded).hexdigest(),
+    "protocol_version": request["protocol_version"],
+    "resume_state": {{}},
+    "step_id": request["step_id"],
+}}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    materials = _resolved_materials(tmp_path)
+    spec = _spec(materials, max_steps=1)
+    material = materials.materials[0]
+    original_evidence = material.evidence
+    replacement = b"x" * original_evidence.byte_count
+    material.path.write_bytes(replacement)
+    object.__setattr__(
+        material,
+        "evidence",
+        TrainingMaterialEvidence(
+            split=original_evidence.split,
+            artifact_sha256=_sha256(replacement),
+            provenance_sha256=original_evidence.provenance_sha256,
+            license_evidence_sha256=original_evidence.license_evidence_sha256,
+            record_count=original_evidence.record_count,
+            byte_count=original_evidence.byte_count,
+        ),
+    )
+    worker, _, _ = _worker(tmp_path, trainer)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=spec,
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_materials_invalid"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
     assert not marker.exists()
 
 
