@@ -173,9 +173,10 @@ class PackagedProductSelectionStore:
 
 
 class PackagedProductCommandRouter:
-    """Route packaged command input to durable ProductProject or ordinary task handling.
+    """Route packaged command input to durable ProductProject, read-only report, or task handling.
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
+    Explicit daily-report intent may call one injected read-only canonical report handler.
     This boundary deliberately does not dispatch workers, deploy providers, Toolsmith, or any
     high-impact external action. Those remain downstream explicit factory/security boundaries.
     """
