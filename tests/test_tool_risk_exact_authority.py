@@ -672,6 +672,42 @@ def test_text_migration_schema_is_rejected_before_version_coercion(tmp_path) -> 
         permissions.initialize()
 
 
+def test_standing_permission_migration_history_rejects_extra_rows(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "extra-standing-migration.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO standing_permission_schema_migrations(version, applied_at) "
+            "VALUES (?, ?)",
+            (0, datetime(2026, 9, 26, tzinfo=UTC).isoformat()),
+        )
+
+    with pytest.raises(
+        StandingPermissionIntegrityError,
+        match="migration history is invalid",
+    ):
+        StandingPermissionStore(store).initialize()
+
+
+def test_standing_permission_migration_timestamp_storage_is_validated(tmp_path) -> None:
+    store = SQLiteStore(tmp_path / "blob-standing-migration.db")
+    permissions = StandingPermissionStore(store)
+    permissions.initialize()
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE standing_permission_schema_migrations SET applied_at = ? "
+            "WHERE version = 1",
+            (sqlite3.Binary(b"2026-09-27T00:00:00+00:00"),),
+        )
+
+    with pytest.raises(
+        StandingPermissionIntegrityError,
+        match="migration timestamp is invalid",
+    ):
+        StandingPermissionStore(store).initialize()
+
+
 def test_standing_permission_schema_shape_is_validated(tmp_path) -> None:
     store = SQLiteStore(tmp_path / "bad-shape.db")
     with store.connection() as conn:
