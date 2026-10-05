@@ -3,7 +3,15 @@ from __future__ import annotations
 import json
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    StrictInt,
+    field_validator,
+    model_validator,
+)
 
 
 _MAX_AGENT_JSON_BYTES = 1024 * 1024
