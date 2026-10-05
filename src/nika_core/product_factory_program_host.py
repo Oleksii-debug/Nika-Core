@@ -301,6 +301,20 @@ class ProductFactoryProgramHost:
                 input_fingerprint=_request_fingerprint(request),
             )
             if not created:
+                # An occupied work ID is not proof that this host/request owns it.
+                # Check the exact reserved authority before allowing recovery.
+                if (
+                    operation.task_id != host_task_id
+                    or operation.operation_type != _OPERATION_TYPE
+                    or operation.input_fingerprint != _request_fingerprint(request)
+                ):
+                    return _outcome(
+                        request,
+                        coordinator,
+                        ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                        operation.status,
+                        "existing worker operation has a different host or request identity",
+                    )
                 return _existing_operation_outcome(request, operation)
             try:
                 envelope = await self.worker.dispatch(request)
