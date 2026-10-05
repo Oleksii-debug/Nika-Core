@@ -40,9 +40,22 @@ _SECRET_RELEASE_BASENAMES = frozenset(
         "cookies.db",
     }
 )
-_SECRET_RELEASE_SUFFIXES = frozenset({".session"})
+_SECRET_RELEASE_SUFFIXES = frozenset({".jks", ".keystore", ".p12", ".pfx", ".pkcs12", ".session"})
 _SECRET_CONTENT_SUFFIXES = frozenset(
-    {".json", ".toml", ".yaml", ".yml", ".ini", ".cfg", ".conf", ".properties", ".txt", ".log"}
+    {
+        ".cfg",
+        ".conf",
+        ".ini",
+        ".json",
+        ".key",
+        ".log",
+        ".pem",
+        ".properties",
+        ".toml",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
 )
 _SECRET_SCAN_CHUNK_BYTES = 64 * 1024
 _SECRET_SCAN_OVERLAP_BYTES = 8 * 1024
@@ -135,6 +148,11 @@ _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE = re.compile(
     """,
     re.IGNORECASE | re.VERBOSE,
 )
+_PRIVATE_KEY_PEM_RE = re.compile(
+    rb"-----BEGIN (?:ENCRYPTED |RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----",
+    re.IGNORECASE,
+)
+
 _SECRET_PLACEHOLDER_VALUES = frozenset(
     {
         b"none",
@@ -278,6 +296,8 @@ def _stream_contains_secret_assignment(handle: Any) -> bool:
         raw_window = overlap + chunk
         window = b"\n" + raw_window if first_window else raw_window
         first_window = False
+        if _PRIVATE_KEY_PEM_RE.search(window):
+            return True
         if _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE.search(window):
             return True
         for match in _SECRET_ASSIGNMENT_RE.finditer(window):
