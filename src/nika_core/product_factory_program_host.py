@@ -436,8 +436,29 @@ class ProductFactoryProgramHost:
                     operation_status=IdempotencyStatus.UNCERTAIN,
                     detail="worker state is missing; duplicate execution is forbidden",
                 )
+            # inspect() is an external boundary: do not let a forged/malformed
+            # state carrier reach worker.recover(), even after a valid work-ID lookup.
+            if (
+                type(state) is not RecoveryState
+                or type(state.phase) is not str
+                or not state.phase.strip()
+                or (
+                    state.opaque_token is not None
+                    and type(state.opaque_token) is not str
+                )
+            ):
+                self._mark_uncertain(operation_key)
+                return _outcome(
+                    request,
+                    coordinator,
+                    ProgramWorkDisposition.UNCERTAIN,
+                    IdempotencyStatus.UNCERTAIN,
+                    "worker inspection returned invalid recovery state",
+                )
+            # Snapshot the admitted built-in scalars independently of the provider.
+            recovery_state = RecoveryState(state.phase, state.opaque_token)
             try:
-                envelope = await self.worker.recover(request, state)
+                envelope = await self.worker.recover(request, recovery_state)
             except asyncio.CancelledError:
                 self._mark_uncertain(operation_key)
                 raise
