@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -210,6 +211,68 @@ def test_download_broker_rejects_racing_destination_without_overwriting(
     assert destination.read_text(encoding="utf-8") == "concurrent artifact"
     assert broker.saved == []
     assert list(broker.approved_root.glob(".nika-download-*.part")) == []
+
+
+def test_download_broker_stages_outside_approved_root_before_publication(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    victim = tmp_path / "victim.txt"
+    victim.write_text("protected", encoding="utf-8")
+
+    class ApprovedRootEntryAttacker(_FakeDownload):
+        def save_as(self, destination: str) -> None:
+            staging = Path(destination)
+            if staging.parent == broker.approved_root:
+                staging.unlink()
+                os.link(victim, staging)
+            super().save_as(destination)
+
+    download = ApprovedRootEntryAttacker("evidence.txt", "downloaded")
+    broker.handle(download)
+
+    assert victim.read_text(encoding="utf-8") == "protected"
+    assert broker.saved == [(broker.approved_root / "evidence.txt").resolve()]
+    assert broker.saved[0].read_text(encoding="utf-8") == "downloaded"
+
+
+def test_download_broker_rejects_replaced_approved_root_before_save(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    original_root = broker.approved_root
+    moved_root = tmp_path / "downloads-moved"
+    original_root.rename(moved_root)
+    original_root.mkdir()
+    download = _FakeDownload("evidence.txt", "must not be written")
+
+    with pytest.raises(UnsupportedInteractionError, match="root identity"):
+        broker.handle(download)
+
+    assert download.destination is None
+    assert list(original_root.iterdir()) == []
+    assert list(moved_root.iterdir()) == []
+
+
+def test_download_broker_rejects_root_replacement_during_save_before_publish(
+    tmp_path: Path,
+) -> None:
+    broker = DownloadBroker(tmp_path / "downloads")
+    original_root = broker.approved_root
+    moved_root = tmp_path / "downloads-moved"
+
+    class RootReplacingDownload(_FakeDownload):
+        def save_as(self, destination: str) -> None:
+            super().save_as(destination)
+            original_root.rename(moved_root)
+            original_root.mkdir()
+
+    with pytest.raises(UnsupportedInteractionError, match="root identity"):
+        broker.handle(RootReplacingDownload("evidence.txt", "private payload"))
+
+    assert list(original_root.iterdir()) == []
+    assert list(moved_root.iterdir()) == []
+    assert broker.saved == []
 
 
 def test_failed_download_removes_partial_staging_and_does_not_publish(
