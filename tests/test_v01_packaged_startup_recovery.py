@@ -4,6 +4,8 @@ from threading import Event
 
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.agent_registry import AgentRegistry
+from nika_core.kernel.audit import AuditLog
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.kernel.task_state import TaskState
 from nika_core.runtime.contracts import (
@@ -15,6 +17,8 @@ from nika_core.runtime.contracts import (
 )
 from nika_core.runtime.idempotency import IdempotencyLedger, IdempotencyStatus
 from nika_core.runtime.session_store import RuntimeSessionStore
+from nika_core.kernel.workspace_registry import WorkspaceRegistry
+from nika_core.ui.desktop_backend import DesktopBackend
 from scripts import nika_windows
 
 
@@ -178,3 +182,36 @@ def test_packaged_reopen_promotes_unresolved_effect_before_shell_and_never_resum
     assert runtime.resume_calls == 0
     assert queue.get(task_id).state is TaskState.RUNNING
     assert ledger.require(operation_key).status is IdempotencyStatus.UNCERTAIN
+
+def test_startup_recovery_admission_rejection_demotes_to_manual_resume(
+    tmp_path,
+) -> None:
+    runtime = _PackagedRecoveryRuntime()
+    database = tmp_path / "Ніка denied recovery" / "nika core.db"
+    store, queue, task_id = _crash_left_running_task(database, runtime)
+    admission_calls: list[str] = []
+
+    def reject_recovery(record) -> None:
+        admission_calls.append(record.task_id)
+        raise PermissionError("test recovery authority denied")
+
+    backend = DesktopBackend(
+        queue=queue,
+        agents=AgentRegistry(store),
+        workspaces=WorkspaceRegistry(store),
+        audit=AuditLog(store),
+        runtime=runtime,
+        admit_recovered_task=reject_recovery,
+    )
+
+    recovery = backend.start_startup_recovery(startup_wait_seconds=0)
+
+    assert admission_calls == [task_id]
+    assert runtime.resume_calls == 0
+    assert queue.get(task_id).state is TaskState.PAUSED
+    assert recovery["status"] == "manual"
+    assert recovery["auto_resume_count"] == 0
+    assert recovery["manual_resume_count"] == 1
+    assert recovery["resume_failed_count"] == 0
+    backend.close()
+
