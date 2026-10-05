@@ -642,6 +642,39 @@ def test_persisted_identity_requires_exact_text_storage(tmp_path):
         log.inspect()
 
 
+@pytest.mark.parametrize(
+    "corrupted",
+    [
+        "not-a-timestamp",
+        "2026-10-05T07:00:00",
+        "2026-10-05T09:00:00+02:00",
+        "2026-10-05 07:00:00+00:00",
+        "2026-10-05T07:00:00Z",
+        b"2026-10-05T07:00:00+00:00",
+    ],
+)
+def test_persisted_timestamp_requires_canonical_utc_writer_form(
+    tmp_path,
+    corrupted,
+):
+    store, log = _make_log(tmp_path)
+    event_id = log.append(
+        event_type="task.created",
+        entity_type="task",
+        entity_id="bad-created-at",
+        payload={"ok": True},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE audit_events SET created_at = ? WHERE event_id = ?",
+            (corrupted, event_id),
+        )
+    with pytest.raises(AuditIntegrityError, match="invalid durable evidence"):
+        log.inspect()
+    with pytest.raises(AuditIntegrityError, match="invalid durable evidence"):
+        log.list_for(entity_type="task", entity_id="bad-created-at")
+
+
 def test_persisted_payload_depth_is_revalidated_before_presentation(tmp_path):
     store, log = _make_log(tmp_path)
     event_id = log.append(

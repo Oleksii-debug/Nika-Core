@@ -88,7 +88,8 @@ string keys plus dict/list/string/integer/finite-float/bool/null values only. Be
 again after durable decode, each payload is bounded to 1 MiB encoded JSON, 10,000 value nodes,
 32 levels of nesting and 4096-bit integers. Recursive containers, behavioral subclasses, invalid
 UTF-8, non-TEXT persisted carriers and oversized/deep evidence fail closed before SQLite effects or
-user-facing redaction. These bounds make the per-page row limit a real resource bound rather than
+user-facing redaction. Persisted `created_at` must also be the exact aware UTC ISO-8601 form emitted
+by the writer; malformed, naive, non-UTC or alternate timestamp spellings fail closed on readback. These bounds make the per-page row limit a real resource bound rather than
 allowing one pathological event to dominate inspection.
 
 No migration is needed because the existing `audit_events(event_id, event_type, entity_type,

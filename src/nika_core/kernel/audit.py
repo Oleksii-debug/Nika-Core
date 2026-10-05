@@ -6,7 +6,7 @@ import re
 import sqlite3
 import unicodedata
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Final
 from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
@@ -271,9 +271,7 @@ class AuditLog:
             event_type = _audit_identity(row["event_type"], field="event_type")
             entity_type = _audit_identity(row["entity_type"], field="entity_type")
             entity_id = _audit_identity(row["entity_id"], field="entity_id")
-            created_at = _persisted_text(
-                row["created_at"], field="created_at", max_bytes=128
-            )
+            created_at = _persisted_utc_timestamp(row["created_at"])
             payload_json = _persisted_text(
                 row["payload_json"], field="payload_json", max_bytes=_MAX_PAYLOAD_BYTES
             )
@@ -330,6 +328,21 @@ def _persisted_text(value: object, *, field: str, max_bytes: int) -> str:
     if len(encoded) > max_bytes:
         raise ValueError(f"persisted {field} exceeds the byte limit")
     return value
+
+
+def _persisted_utc_timestamp(value: object) -> str:
+    text = _persisted_text(value, field="created_at", max_bytes=128)
+    try:
+        timestamp = datetime.fromisoformat(text)
+    except (ValueError, OverflowError) as exc:
+        raise ValueError("persisted created_at must be canonical UTC ISO-8601") from exc
+    if (
+        timestamp.tzinfo is None
+        or timestamp.utcoffset() != timedelta(0)
+        or timestamp.isoformat() != text
+    ):
+        raise ValueError("persisted created_at must be canonical UTC ISO-8601")
+    return text
 
 
 def _snapshot_audit_payload(value: object | None) -> dict[str, object]:
