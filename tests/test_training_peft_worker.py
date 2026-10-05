@@ -764,6 +764,44 @@ def test_training_step_rejects_unchanged_adapter_weights(
     ).exists()
 
 
+def test_resumed_training_rejects_unchanged_weights_and_preserves_prior_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
+    first_marker = job_root / "trainer" / "checkpoint-1" / peft._CHECKPOINT_MARKER
+    first_marker_bytes = first_marker.read_bytes()
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = "3" * 64
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _no_mutation_fake_stack)
+
+    with pytest.raises(peft.PeftTrainerError, match="training_step_no_weight_mutation"):
+        peft._train_one_step(second, config, second_consumed)
+
+    assert first_marker.read_bytes() == first_marker_bytes
+    assert not (
+        job_root / "trainer" / "checkpoint-2" / peft._CHECKPOINT_MARKER
+    ).exists()
+    assert not peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    ).exists()
+
+
 def test_final_candidate_is_never_overwritten(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
