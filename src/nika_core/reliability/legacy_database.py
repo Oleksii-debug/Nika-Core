@@ -23,6 +23,7 @@ from nika_core.data.multi_agent_state_schema import MULTI_AGENT_STATE_SCHEMA_VER
 from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.audit import AuditLog
+from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.reliability.backup import BackupRecoveryError, SQLiteRecoveryManager
 from nika_core.research.knowledge_schema import KNOWLEDGE_SCHEMA_VERSION
@@ -32,6 +33,7 @@ _EMPTY_TABLES = {
     "schema_migrations",
     "experience_ledger_schema_migrations",
     "multi_agent_state_schema_migrations",
+    "model_artifact_schema_migrations",
     "product_project_schema_migrations",
     "knowledge_schema_migrations",
     "sqlite_sequence",
@@ -118,6 +120,7 @@ def _inspect(path: Path, *, canonical: bool = False) -> _State | None:
         for name, supported in (
             ("experience_ledger_schema_migrations", EXPERIENCE_LEDGER_SCHEMA_VERSION),
             ("multi_agent_state_schema_migrations", MULTI_AGENT_STATE_SCHEMA_VERSION),
+            ("model_artifact_schema_migrations", MODEL_ARTIFACT_SCHEMA_VERSION),
             ("product_project_schema_migrations", PRODUCT_PROJECT_SCHEMA_VERSION),
             ("knowledge_schema_migrations", KNOWLEDGE_SCHEMA_VERSION),
         ):
