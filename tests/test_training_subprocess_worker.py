@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.training_adapters.subprocess_worker as subprocess_worker_module
 from nika_core.artifacts import ArtifactRegistry
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.learning_package import FrozenLearningPackage, LearningDataSplit, LearningShard
@@ -1617,6 +1618,126 @@ def test_runtime_environment_manifest_digest_must_match_versions(tmp_path: Path)
             trainer_metadata=metadata,
             environment=environment,
         )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows file-sharing semantics")
+def test_windows_launch_guard_blocks_replace_at_popen_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    trainer = _script(
+        tmp_path,
+        """
+import json
+import sys
+
+request = json.loads(sys.stdin.buffer.read())
+response = {
+    "candidate_sha256": None,
+    "consumed_materials_sha256": (
+        request["training_materials"]["required_consumed_materials_sha256"]
+    ),
+    "completed": False,
+    "protocol_version": request["protocol_version"],
+    "resume_state": {"guarded": True},
+    "step_id": request["step_id"],
+}
+sys.stdout.write(json.dumps(response))
+""".strip(),
+    )
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text("raise SystemExit(97)\n", encoding="utf-8")
+    worker, _, _ = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    real_popen = subprocess.Popen
+    attempts = 0
+
+    def racing_popen(*args: object, **kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal attempts
+        attempts += 1
+        try:
+            os.replace(replacement, trainer)
+        except OSError as exc:
+            assert getattr(exc, "winerror", None) in {5, 32, 33}
+        else:
+            raise AssertionError(
+                "Registry-bound command artifact was replaceable at process launch"
+            )
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(
+        subprocess_worker_module.subprocess,
+        "Popen",
+        racing_popen,
+    )
+
+    result = worker.step(
+        spec=_spec(materials),
+        step_index=0,
+        resume_state={},
+        training_materials=materials,
+    )
+
+    assert attempts == 1
+    envelope = result.resume_state["_nika_subprocess"]
+    assert isinstance(envelope, dict)
+    trainer_state = envelope["trainer_state"]
+    assert isinstance(trainer_state, dict)
+    assert trainer_state["guarded"] is True
+
+    # The guard is scoped to the child lifetime rather than permanently locking
+    # Registry-owned files.
+    os.replace(replacement, trainer)
+    assert trainer.read_text(encoding="utf-8") == "raise SystemExit(97)\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows file-sharing semantics")
+def test_windows_launch_guard_reverifies_swap_before_popen(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "unexpected-start"
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    replacement = tmp_path / "replacement.py"
+    replacement.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('started', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    worker, _, _ = _worker(tmp_path, trainer)
+    materials = _resolved_materials(tmp_path)
+    real_verify = worker._verify_command_artifacts
+    verify_calls = 0
+
+    def verify_then_swap(records: object) -> None:
+        nonlocal verify_calls
+        verify_calls += 1
+        real_verify(records)  # type: ignore[arg-type]
+        if verify_calls == 1:
+            os.replace(replacement, trainer)
+
+    def process_must_not_start(*args: object, **kwargs: object) -> object:
+        raise AssertionError("process effect reached after command artifact replacement")
+
+    monkeypatch.setattr(worker, "_verify_command_artifacts", verify_then_swap)
+    monkeypatch.setattr(
+        subprocess_worker_module.subprocess,
+        "Popen",
+        process_must_not_start,
+    )
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert verify_calls == 2
+    assert exc_info.value.code == "command_artifact_not_verified"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
 
 
 def test_runtime_registry_metadata_drift_fails_before_process_effect(
