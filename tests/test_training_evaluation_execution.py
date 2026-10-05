@@ -185,8 +185,17 @@ async def test_complete_attested_challenger_benchmark_emits_bound_evidence() -> 
     assert port.calls == 2
     assert result.report.completion_rate == 1.0
     assert all(item.completion_succeeded for item in result.report.case_results)
+    assert [receipt.case_id for receipt in result.case_receipts] == [
+        "case-1",
+        "case-2",
+    ]
+    assert all(
+        receipt.binding_sha256 == result.binding.binding_sha256
+        for receipt in result.case_receipts
+    )
     assert result.binding.binding_sha256 == result.evidence_payload()["binding_sha256"]
     assert result.evidence_payload()["case_count"] == 2
+    assert len(result.evidence_payload()["case_receipts"]) == 2
     assert len(result.evidence_sha256) == 64
     assert result.revalidated().evidence_sha256 == result.evidence_sha256
 
@@ -356,6 +365,41 @@ async def test_result_revalidation_rejects_mutated_binding() -> None:
         ValueError,
         match="benchmark candidate does not match training binding",
     ):
+        result.evidence_payload()
+
+
+@pytest.mark.asyncio
+async def test_result_revalidation_rejects_receipt_artifact_substitution() -> None:
+    result = await _run(_AttestedEffectPort())
+    object.__setattr__(
+        result.case_receipts[0],
+        "artifact_sha256",
+        _sha(b"substituted-artifact"),
+    )
+
+    with pytest.raises(ValueError, match="receipt does not match benchmark authority"):
+        result.evidence_payload()
+
+
+@pytest.mark.asyncio
+async def test_result_revalidation_rejects_receipt_request_substitution() -> None:
+    result = await _run(_AttestedEffectPort())
+    object.__setattr__(
+        result.case_receipts[0],
+        "request_id",
+        "model-bench-substituted-request",
+    )
+
+    with pytest.raises(ValueError, match="request identity is inconsistent"):
+        result.evidence_payload()
+
+
+@pytest.mark.asyncio
+async def test_result_revalidation_rejects_missing_case_receipt() -> None:
+    result = await _run(_AttestedEffectPort())
+    object.__setattr__(result, "case_receipts", result.case_receipts[:1])
+
+    with pytest.raises(ValueError, match="receipt coverage"):
         result.evidence_payload()
 
 
