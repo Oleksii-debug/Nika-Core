@@ -616,7 +616,15 @@ def write_physical_training_pilot_report(
             ) from exc
         if not hmac.compare_digest(published_payload, payload):
             _fail("published pilot report bytes changed during publication")
-        PhysicalTrainingPilotReport.from_json(published_payload)
+        try:
+            published_text = published_payload.decode("utf-8", errors="strict")
+        except UnicodeDecodeError as exc:
+            raise PhysicalTrainingPilotError(
+                "published pilot report is not valid UTF-8"
+            ) from exc
+        restored = PhysicalTrainingPilotReport.from_json(published_text)
+        if restored != report:
+            _fail("published pilot report changed during parse-back verification")
     except PhysicalTrainingPilotError:
         if published:
             try:
