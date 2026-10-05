@@ -212,6 +212,30 @@ def test_result_data_is_detached() -> None:
     assert result.data == {"items": [{"id": 1}]}
 
 
+
+def test_wide_top_level_command_is_rejected_before_key_snapshot() -> None:
+    command = _command()
+    command.update({f"extra-{index}": index for index in range(10000)})
+    with pytest.raises(ValueError, match="exactly"):
+        WebCommand.from_untrusted(command)
+
+
+def test_handler_failure_is_not_automatically_retried() -> None:
+    class FailingHandler:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def handle(self, principal: WebPrincipal, command: WebCommand) -> WebCommandResult:
+            del principal, command
+            self.calls += 1
+            raise RuntimeError("effect outcome is unknown")
+
+    handler = FailingHandler()
+    boundary = WebApplicationBoundary(authorization=_Allow(True), handler=handler)
+    with pytest.raises(RuntimeError, match="unknown"):
+        boundary.dispatch(principal=_principal(), command=_command())
+    assert handler.calls == 1
+
 def test_result_constructor_rejects_noncanonical_internal_json() -> None:
     with pytest.raises(ValueError, match="canonical JSON|finite"):
         WebCommandResult(
