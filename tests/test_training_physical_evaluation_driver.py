@@ -333,7 +333,6 @@ def test_candidate_descriptor_metadata_substitution_is_rejected() -> None:
         driver._candidate_descriptor(substituted, report=_pilot_report())
 
 
-
 def test_windows_pe_header_admission_accepts_canonical_signature(
     tmp_path: Path,
 ) -> None:
@@ -574,8 +573,6 @@ def test_idempotency_reservation_blocks_same_effect_with_changed_input(
             operation_key=first.operation_key,
             input_fingerprint="sha256:" + "c" * 64,
         )
-
-
 
 
 def test_interrupted_effect_reservation_becomes_uncertain(
