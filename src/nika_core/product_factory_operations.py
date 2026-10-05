@@ -740,6 +740,148 @@ class ProductOperationsCoordinator:
         return set(values)
 
 
+_MAX_SNAPSHOT_ITEMS = 4096
+
+
+def _private_replica(value: object) -> ServiceReplica:
+    if type(value) is not ServiceReplica:
+        raise ProductOperationsError("service replica carrier must be exact")
+    return ServiceReplica(value.replica_id, value.node_id)
+
+
+def _private_service(value: object) -> DeployableService:
+    if type(value) is not DeployableService:
+        raise ProductOperationsError("deployable service carrier must be exact")
+    if type(value.replicas) is not tuple:
+        raise ProductOperationsError("service replicas carrier must be exact tuple")
+    return DeployableService(
+        value.service_id,
+        value.project_id,
+        value.environment_id,
+        value.release_sha,
+        value.wave,
+        tuple(_private_replica(replica) for replica in value.replicas),
+        value.min_healthy_replicas,
+        _private_ref_tuple(value.dependencies, "service dependency"),
+        _private_ref_tuple(value.credential_refs, "service credential reference"),
+    )
+
+
+def _private_observation(value: object) -> ServiceObservation:
+    if type(value) is not ServiceObservation:
+        raise ProductOperationsError("service observation carrier must be exact")
+    return ServiceObservation(
+        value.service_id,
+        value.release_sha,
+        _private_ref_tuple(value.healthy_replica_ids, "healthy replica"),
+        _private_ref_tuple(value.failed_replica_ids, "failed replica"),
+        _private_ref_tuple(value.evidence_refs, "service observation evidence"),
+        value.observed_at,
+    )
+
+
+def _private_rollback(value: object) -> RollbackObservation:
+    if type(value) is not RollbackObservation:
+        raise ProductOperationsError("rollback observation carrier must be exact")
+    return RollbackObservation(
+        value.service_id,
+        value.failed_release_sha,
+        value.restored_release_sha,
+        value.succeeded,
+        _private_ref_tuple(value.evidence_refs, "rollback evidence"),
+        value.observed_at,
+    )
+
+
+def _private_request(value: object) -> MaintenanceRequest:
+    if type(value) is not MaintenanceRequest:
+        raise ProductOperationsError("maintenance request carrier must be exact")
+    return MaintenanceRequest(
+        value.request_id,
+        value.service_id,
+        value.action,
+        value.reason,
+        _private_ref_tuple(value.evidence_refs, "maintenance evidence"),
+        value.approval_ref,
+    )
+
+
+def _private_result(value: object) -> MaintenanceResult:
+    if type(value) is not MaintenanceResult:
+        raise ProductOperationsError("maintenance result carrier must be exact")
+    return MaintenanceResult(
+        value.applied,
+        value.uncertain,
+        _private_ref_tuple(value.evidence_refs, "maintenance result evidence"),
+    )
+
+
+def _private_reservation(value: object) -> MaintenanceEffectReservation:
+    if type(value) is not MaintenanceEffectReservation:
+        raise ProductOperationsError("maintenance effect reservation carrier must be exact")
+    return MaintenanceEffectReservation(
+        value.operation_key,
+        value.state,
+        value.created,
+        None if value.result is None else _private_result(value.result),
+    )
+
+
+def _private_service_record(value: object) -> ServiceRecord:
+    if type(value) is not ServiceRecord:
+        raise ProductOperationsError("service record carrier must be exact")
+    if type(value.health) is not ServiceHealth or type(value.maintenance) is not MaintenanceState:
+        raise ProductOperationsError("service record state carrier is invalid")
+    return ServiceRecord(
+        _private_service(value.service),
+        value.health,
+        value.maintenance,
+        None if value.observation is None else _private_observation(value.observation),
+        None if value.rollback is None else _private_rollback(value.rollback),
+        _private_ref_tuple(value.blocked_credentials, "blocked credential"),
+        _private_ref_tuple(value.node_loss, "node loss"),
+    )
+
+
+def _private_maintenance_record(value: object) -> MaintenanceRecord:
+    if type(value) is not MaintenanceRecord:
+        raise ProductOperationsError("maintenance record carrier must be exact")
+    return MaintenanceRecord(
+        _private_request(value.request),
+        _private_result(value.result),
+        value.reconciled,
+    )
+
+
+def _private_snapshot(value: object) -> ProductOperationsSnapshot:
+    if type(value) is not ProductOperationsSnapshot:
+        raise ProductOperationsError("operations snapshot carrier must be exact")
+    canonical_text(value.project_id, "operations snapshot project_id")
+    if type(value.services) is not tuple or len(value.services) > _MAX_SNAPSHOT_ITEMS:
+        raise ProductOperationsError("operations snapshot services carrier is invalid")
+    if (
+        type(value.maintenance_records) is not tuple
+        or len(value.maintenance_records) > _MAX_SNAPSHOT_ITEMS
+    ):
+        raise ProductOperationsError("operations snapshot maintenance carrier is invalid")
+    return ProductOperationsSnapshot(
+        value.project_id,
+        tuple(_private_service_record(record) for record in value.services),
+        tuple(
+            _private_maintenance_record(record)
+            for record in value.maintenance_records
+        ),
+        _private_ref_tuple(value.revoked_credentials, "revoked credential"),
+        _private_ref_tuple(value.unavailable_nodes, "unavailable node"),
+    )
+
+
+def _private_ref_tuple(value: object, label: str) -> tuple[str, ...]:
+    if type(value) is not tuple or len(value) > _MAX_SNAPSHOT_ITEMS:
+        raise ProductOperationsError(f"{label} carrier must be bounded exact tuple")
+    return tuple(canonical_text(item, label) for item in value)
+
+
 def _maintenance_state(
     action: MaintenanceAction,
     result: MaintenanceResult,
