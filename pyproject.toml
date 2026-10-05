@@ -21,6 +21,7 @@ dependencies = [
 [project.scripts]
 nika-peft-trainer = "nika_core.training_peft_worker:main"
 nika-peft-physical-pilot = "nika_core.training_physical_pilot_driver:main"
+nika-peft-physical-evaluation = "nika_core.training_physical_evaluation_driver:main"
 
 [project.optional-dependencies]
 agent = [
