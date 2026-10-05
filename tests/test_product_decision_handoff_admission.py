@@ -207,12 +207,13 @@ def test_oversized_handoff_fails_before_json_decode(tmp_path, monkeypatch):
     def unexpected_json_loads(*_args, **_kwargs):
         raise AssertionError("oversized handoff reached json.loads")
 
-    monkeypatch.setattr(
-        "nika_core.product_decisions.json.loads",
-        unexpected_json_loads,
-    )
-    with pytest.raises(ProductProjectError, match="malformed"):
-        _approve(decisions)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            "nika_core.product_decisions.json.loads",
+            unexpected_json_loads,
+        )
+        with pytest.raises(ProductProjectError, match="malformed"):
+            _approve(decisions)
 
     assert projects.get("p1").row_version == 0
     with store.connection() as conn:
