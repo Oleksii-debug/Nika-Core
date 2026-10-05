@@ -85,7 +85,7 @@ class ArtifactRecord(FrozenModel):
     location_kind: ArtifactLocationKind
     locator: str = Field(min_length=1, max_length=4096)
     sha256: str = Field(pattern="^[0-9a-f]{64}$")
-    size_bytes: int = Field(ge=0)
+    size_bytes: int = Field(strict=True, ge=0)
     media_type: str = Field(default="application/octet-stream", min_length=1, max_length=200)
     producer_type: str | None = Field(default=None, max_length=120)
     producer_id: str | None = Field(default=None, max_length=300)
@@ -147,8 +147,8 @@ class ArtifactVerification(FrozenModel):
     state: ArtifactVerificationState
     expected_sha256: str = Field(pattern="^[0-9a-f]{64}$")
     actual_sha256: str | None = Field(default=None, pattern="^[0-9a-f]{64}$")
-    expected_size_bytes: int = Field(ge=0)
-    actual_size_bytes: int | None = Field(default=None, ge=0)
+    expected_size_bytes: int = Field(strict=True, ge=0)
+    actual_size_bytes: int | None = Field(default=None, strict=True, ge=0)
     checked_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
     detail: str = Field(default="", max_length=500)
 
