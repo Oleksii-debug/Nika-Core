@@ -4,7 +4,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from pydantic_settings import SettingsError
 
 from nika_core.config import AppConfig
