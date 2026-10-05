@@ -407,6 +407,33 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
         peft._resume_checkpoint(job_root, tampered)
 
 
+def test_checkpoint_payload_rejects_late_enumeration_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checkpoint = tmp_path / "checkpoint-enumeration-race"
+    checkpoint.mkdir()
+    payload = checkpoint / "optimizer.pt"
+    payload.write_bytes(b"optimizer")
+    real_hash = peft._hash_regular_snapshot
+    mutated = False
+
+    def mutating_hash(path: Path, *, code: str) -> tuple[str, int]:
+        nonlocal mutated
+        result = real_hash(path, code=code)
+        if not mutated:
+            (checkpoint / "late-state.bin").write_bytes(b"late")
+            mutated = True
+        return result
+
+    monkeypatch.setattr(peft, "_hash_regular_snapshot", mutating_hash)
+
+    with pytest.raises(peft.PeftTrainerError, match="checkpoint_payload_changed"):
+        peft._checkpoint_payload_manifest_sha256(checkpoint)
+
+    assert mutated is True
+
+
 def test_resume_rejects_tampered_checkpoint_payload(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
