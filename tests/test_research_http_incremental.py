@@ -254,6 +254,46 @@ def test_etag_304_and_same_raw_200_do_not_duplicate_snapshots(tmp_path: Path) ->
     assert network.get_source("web-1").freshness is FreshnessState.CURRENT
 
 
+@pytest.mark.parametrize("with_prior_content", [False, True])
+def test_unsolicited_304_cannot_mark_unvalidated_source_current(
+    tmp_path: Path,
+    with_prior_content: bool,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        del request
+        calls += 1
+        if with_prior_content and calls == 1:
+            return httpx.Response(
+                200,
+                headers={"Content-Type": "text/plain"},
+                content=b"verified first version",
+            )
+        return httpx.Response(304)
+
+    _, _, network, service = _service(tmp_path, handler=handler)
+    service.register_source(_source())
+    prior = service.refresh_source("web-1") if with_prior_content else None
+    result = service.refresh_source("web-1")
+
+    assert result.disposition is RefreshDisposition.FAILED
+    assert result.error_code == "unexpected_not_modified"
+    assert result.attempts == 1
+    assert network.attempt_count("web-1") == calls
+    assert network.snapshot_count("web-1") == int(with_prior_content)
+    state = network.get_source("web-1")
+    assert state.freshness is (
+        FreshnessState.STALE if with_prior_content else FreshnessState.ERROR
+    )
+    if prior is not None:
+        assert prior.disposition is RefreshDisposition.CHANGED
+        assert state.current_raw_sha256 is not None
+    else:
+        assert state.current_raw_sha256 is None
+
+
 def test_changed_raw_bytes_can_deduplicate_to_same_normalized_document(tmp_path: Path) -> None:
     calls = 0
 
