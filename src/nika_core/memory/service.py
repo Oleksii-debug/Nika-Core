@@ -194,17 +194,22 @@ class MemoryService:
             # An explicit global purge must obey the same offset-aware expiry
             # semantics as get() and scoped reads; invalid dates roll back.
             rows = conn.execute(
-                "SELECT scope, owner_id, namespace, memory_key, expires_at "
-                "FROM memory_records WHERE expires_at IS NOT NULL"
+                "SELECT * FROM memory_records WHERE expires_at IS NOT NULL"
             ).fetchall()
             deleted = 0
             for row in rows:
-                expiry = _parse_optional(row["expires_at"])
+                record = _record_from_row(row)
+                expiry = record.expires_at
                 if expiry is not None and _as_utc(expiry) <= current:
                     cursor = conn.execute(
                         "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
                         "AND namespace = ? AND memory_key = ?",
-                        (row["scope"], row["owner_id"], row["namespace"], row["memory_key"]),
+                        (
+                            record.scope.value,
+                            record.owner_id,
+                            record.namespace,
+                            record.key,
+                        ),
                     )
                     deleted += cursor.rowcount
         return deleted
