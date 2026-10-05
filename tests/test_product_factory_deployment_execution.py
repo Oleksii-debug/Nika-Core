@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 
 import pytest
@@ -356,3 +356,87 @@ def test_scale_many_services_remain_independent_across_restart() -> None:
     assert len(provider.deploy_calls) == 30
     assert len(set(provider.deploy_calls)) == 30
     assert all(restored.get(spec.operation_id).state is OperationState.SUCCEEDED for spec in specs)
+
+
+@pytest.mark.parametrize(
+    ("changes", "error"),
+    [
+        ({"attempt": True}, "attempt"),
+        ({"attempt": 1.5}, "attempt"),
+        ({"state": "pending"}, "state"),
+        ({"state": "succeeded"}, "state"),
+        ({"deployment_state": "healthy"}, "deployment state"),
+        ({"evidence_refs": ["provider:ok"]}, "evidence"),
+        ({"evidence_refs": (3,)}, "evidence"),
+        ({"evidence_refs": (" ",)}, "evidence"),
+        ({"spec": None}, "snapshot record"),
+    ],
+)
+def test_restore_rejects_ambiguous_snapshot_carriers_without_mutation(
+    changes: dict[str, object], error: str
+) -> None:
+    source, _, _, _ = _coordinator()
+    spec = _spec("project-a", "source")
+    source.submit(spec, now=NOW)
+    bad_record = replace(source.snapshot().records[0], **changes)
+
+    target, _, _, _ = _coordinator()
+    existing = _spec("project-a", "existing")
+    target.submit(existing, now=NOW)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match=error):
+        target.restore(DeploymentExecutionSnapshot((bad_record,)))
+    assert target.snapshot() == before
+
+
+@pytest.mark.parametrize("records", [None, [], [object()], (object(),)])
+def test_restore_rejects_invalid_snapshot_structure_before_mutation(records: object) -> None:
+    coordinator, _, _, _ = _coordinator()
+    spec = _spec("project-a", "existing")
+    coordinator.submit(spec, now=NOW)
+    before = coordinator.snapshot()
+
+    with pytest.raises(DeploymentExecutionError, match="snapshot"):
+        coordinator.restore(DeploymentExecutionSnapshot(records))
+    assert coordinator.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("attribute", "value", "error"),
+    [
+        ("attempt", -1, "attempt"),
+        ("attempt", False, "attempt"),
+        ("updated_at", "2026-08-21", "timestamp"),
+        ("updated_at", None, "timestamp"),
+        ("spec", object(), "snapshot record"),
+    ],
+)
+def test_restore_rejects_corrupted_record_after_frozen_dataclass_mutation(
+    attribute: str, value: object, error: str
+) -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    corrupt = replace(source.snapshot().records[0])
+    object.__setattr__(corrupt, attribute, value)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+    with pytest.raises(DeploymentExecutionError, match=error):
+        target.restore(DeploymentExecutionSnapshot((corrupt,)))
+    assert target.snapshot() == before
+
+
+def test_restore_invalid_later_record_cannot_partially_replace_existing_state() -> None:
+    source, _, _, _ = _coordinator()
+    source.submit(_spec("project-a", "source"), now=NOW)
+    good = source.snapshot().records[0]
+    malformed = replace(good, spec=_spec("project-a", "another"), attempt=True)
+
+    target, _, _, _ = _coordinator()
+    target.submit(_spec("project-a", "existing"), now=NOW)
+    before = target.snapshot()
+    with pytest.raises(DeploymentExecutionError, match="attempt"):
+        target.restore(DeploymentExecutionSnapshot((good, malformed)))
+    assert target.snapshot() == before
