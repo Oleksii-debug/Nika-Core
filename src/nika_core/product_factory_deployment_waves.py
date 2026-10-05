@@ -202,17 +202,52 @@ class DeploymentWaveCoordinator:
             raise DeploymentWaveError("invalid rollout snapshot structure")
         if any(type(record) is not DeploymentWaveRecord for record in snapshot.plans):
             raise DeploymentWaveError("invalid rollout snapshot plan record")
-        plan_ids = [record.plan.plan_id for record in snapshot.plans]
+
+        plan_ids: list[str] = []
+        for record in snapshot.plans:
+            if (
+                type(record.plan) is not DeploymentWavePlan
+                or type(record.services) is not tuple
+                or type(record.plan.services) is not tuple
+                or any(
+                    type(service) is not ServiceRolloutSpec
+                    for service in record.plan.services
+                )
+                or any(
+                    type(service) is not ServiceRolloutRecord
+                    for service in record.services
+                )
+            ):
+                raise DeploymentWaveError("invalid rollout snapshot plan structure")
+            try:
+                for service in record.plan.services:
+                    service.__post_init__()
+                record.plan.__post_init__()
+            except (DeploymentWaveError, AttributeError, TypeError, ValueError) as exc:
+                raise DeploymentWaveError("invalid rollout snapshot plan structure") from exc
+            if type(record.plan.plan_id) is not str or not record.plan.plan_id.strip():
+                raise DeploymentWaveError("invalid rollout snapshot plan identity")
+            plan_ids.append(record.plan.plan_id)
         if len(plan_ids) != len(set(plan_ids)):
             raise DeploymentWaveError("rollout snapshot contains duplicate plans")
 
-        execution_records = {
-            item.spec.operation_id: item for item in snapshot.execution.records
-        }
+        if type(snapshot.execution.records) is not tuple or any(
+            type(item) is not DeploymentExecutionRecord
+            or type(item.spec) is not DeploymentExecutionSpec
+            for item in snapshot.execution.records
+        ):
+            raise DeploymentWaveError("invalid rollout execution snapshot structure")
+        execution_records: dict[str, DeploymentExecutionRecord] = {}
+        for item in snapshot.execution.records:
+            operation_id = item.spec.operation_id
+            if type(operation_id) is not str or not operation_id.strip():
+                raise DeploymentWaveError("invalid rollout execution operation identity")
+            if operation_id in execution_records:
+                raise DeploymentWaveError("rollout execution snapshot contains duplicate operations")
+            execution_records[operation_id] = item
+
         restored: dict[str, DeploymentWaveRecord] = {}
         for record in snapshot.plans:
-            if type(record.plan) is not DeploymentWavePlan or type(record.services) is not tuple:
-                raise DeploymentWaveError("invalid rollout snapshot plan structure")
             planned = {service.service_id: service for service in record.plan.services}
             expected = {service.execution.operation_id for service in record.plan.services}
             actual = {service.operation_id for service in record.services}
