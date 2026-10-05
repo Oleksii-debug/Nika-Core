@@ -88,24 +88,45 @@ _PREHUMAN_EVIDENCE_KEYS = frozenset(
         *_PREHUMAN_REQUIRED_FALSE_FIELDS,
     }
 )
+_SECRET_ASSIGNMENT_KEY_PATTERN = rb"""
+    api[_-]?key|apikey|api[_-]?hash|access[_-]?token|auth[_-]?token|
+    refresh[_-]?token|id[_-]?token|session[_-]?token|token|authorization|
+    bearer[_-]?token|oauth[_-]?token|oauth[_-]?secret|client[_-]?secret|
+    secret[_-]?key|password|passwd|private[_-]?key
+"""
 _SECRET_ASSIGNMENT_RE = re.compile(
     rb"""
     [\r\n{,\[]
     (?:\xef\xbb\xbf)?
     [ \t-]*
     (?P<quote>["'])?
-    (?:
-        api[_-]?key|apikey|api[_-]?hash|access[_-]?token|auth[_-]?token|
-        refresh[_-]?token|id[_-]?token|session[_-]?token|token|authorization|
-        bearer[_-]?token|oauth[_-]?token|oauth[_-]?secret|client[_-]?secret|
-        secret[_-]?key|password|passwd|private[_-]?key
-    )
+    (?:"
+    + _SECRET_ASSIGNMENT_KEY_PATTERN
+    + rb")
     (?(quote)(?P=quote))
     \s*[:=]\s*
     (?P<value>
         "(?:\\.|[^"\\\r\n]){1,4096}"|
         '(?:\\.|[^'\\\r\n]){1,4096}'|
         [^\s,\#;}{\]\r\n]{1,4096}
+    )
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
+_OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE = re.compile(
+    rb"""
+    [\r\n{,\[]
+    (?:\xef\xbb\xbf)?
+    [ \t-]*
+    (?P<quote>["'])?
+    (?:"
+    + _SECRET_ASSIGNMENT_KEY_PATTERN
+    + rb")
+    (?(quote)(?P=quote))
+    \s*[:=]\s*
+    (?:
+        "(?:\\.|[^"\\\r\n]){4097}|
+        '(?:\\.|[^'\\\r\n]){4097}
     )
     """,
     re.IGNORECASE | re.VERBOSE,
@@ -253,6 +274,8 @@ def _stream_contains_secret_assignment(handle: Any) -> bool:
         raw_window = overlap + chunk
         window = b"\n" + raw_window if first_window else raw_window
         first_window = False
+        if _OVERSIZED_QUOTED_SECRET_ASSIGNMENT_RE.search(window):
+            return True
         for match in _SECRET_ASSIGNMENT_RE.finditer(window):
             if not _secret_assignment_value_is_placeholder(match.group("value")):
                 return True
