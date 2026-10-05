@@ -463,9 +463,7 @@ class DeploymentFabric:
         record = self._record(intent_id)
         if record.state is not DeploymentState.UNCERTAIN:
             return record
-        inspection = _snapshot_provider_inspection(
-            self.provider.inspect(record.intent)
-        )
+        inspection = self._inspect_provider(record.intent)
         if not inspection.evidence_refs:
             raise DeploymentFabricError("provider inspection requires evidence refs")
         if inspection.release_sha is None:
@@ -756,6 +754,9 @@ class DeploymentFabric:
                 previous_release=record.previous_release,
             )
         )
+
+    def _inspect_provider(self, intent: DeploymentIntent) -> ProviderInspection:
+        return _snapshot_provider_inspection(self.provider.inspect(intent))
 
     def _record(self, intent_id: str) -> DeploymentRecord:
         try:
