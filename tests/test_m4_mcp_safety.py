@@ -26,6 +26,10 @@ class _BehavioralDict(dict[str, object]):
         self.events.append("items")
         return super().items()
 
+    def __bool__(self) -> bool:
+        self.events.append("bool")
+        return True
+
 
 class _BehavioralToolId(str):
     def __new__(cls, value: str, events: list[str]) -> Self:
@@ -40,6 +44,17 @@ class _BehavioralToolId(str):
     def removeprefix(self, prefix: str) -> str:
         self.events.append("removeprefix")
         return "publish"
+
+
+class _BehavioralMetadataText(str):
+    def __new__(cls, value: str, events: list[str]) -> Self:
+        instance = super().__new__(cls, value)
+        instance.events = events
+        return instance
+
+    def __bool__(self) -> bool:
+        self.events.append("bool")
+        return True
 
 
 def _server(called: list[dict[str, object]], label: str = "published") -> MCPServer:
@@ -655,3 +670,110 @@ def test_mcp_argument_budget_counts_escaped_json_bytes() -> None:
     assert _snapshot_mcp_arguments(payload) == payload
     with pytest.raises(ValueError, match="safe UTF-8 byte limit"):
         _snapshot_mcp_arguments({"value": "\n" * 524_283})
+def test_mcp_discovery_rejects_cumulative_metadata_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _listed_tool("first")
+    second = _listed_tool("second")
+    first.description = "x" * 70
+    second.description = "y" * 70
+    fake_client = _list_tools_client(
+        {None: ([first, second], None)}
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    monkeypatch.setattr("nika_core.mcp_boundary._MAX_MCP_DISCOVERY_BYTES", 100)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+    with pytest.raises(ValueError, match="safe metadata limit"):
+        asyncio.run(adapter.list_tools())
+
+
+def test_mcp_discovery_rejects_oversized_nested_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _listed_tool("first")
+    tool.input_schema = {
+        "properties": {"value": {"description": "x" * 1_048_576}}
+    }
+    fake_client = _list_tools_client({None: ([tool], None)})
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+    with pytest.raises(ValueError, match="safe UTF-8 byte limit"):
+        asyncio.run(adapter.list_tools())
+
+
+def test_mcp_discovery_snapshots_nested_schema(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool = _listed_tool("first")
+    tool.input_schema = {"properties": {"value": {"type": "string"}}}
+    fake_client = _list_tools_client({None: ([tool], None)})
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+    specs = asyncio.run(adapter.list_tools())
+    tool.input_schema["properties"]["value"]["type"] = "integer"
+    assert specs[0].input_schema == {
+        "properties": {"value": {"type": "string"}}
+    }
+
+
+def test_mcp_discovery_caps_tools_across_pages_before_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen_cursors: list[str | None] = []
+    fake_client = _list_tools_client(
+        {
+            None: ([_listed_tool("first")], "next"),
+            "next": ([_listed_tool("second"), _listed_tool("third")], None),
+        },
+        seen_cursors,
+    )
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    monkeypatch.setattr("nika_core.mcp_boundary._MAX_MCP_LIST_TOOLS", 2)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+    with pytest.raises(ValueError, match="safe tool limit"):
+        asyncio.run(adapter.list_tools())
+    assert seen_cursors == [None, "next"]
+
+
+def test_mcp_discovery_rejects_behavioral_description_before_truthiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    tool = _listed_tool("first")
+    tool.description = _BehavioralMetadataText("unsafe", events)
+    fake_client = _list_tools_client({None: ([tool], None)})
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+
+    with pytest.raises(TypeError, match="description must be an exact string"):
+        asyncio.run(adapter.list_tools())
+
+    assert events == []
+
+
+def test_mcp_discovery_rejects_behavioral_schema_before_truthiness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    tool = _listed_tool("first")
+    tool.input_schema = _BehavioralDict(events)
+    fake_client = _list_tools_client({None: ([tool], None)})
+    monkeypatch.setattr("nika_core.mcp_boundary.Client", fake_client)
+    adapter = MCPClientAdapter(
+        MCPServerConfig(server_id="safety", target=object())
+    )
+
+    with pytest.raises(TypeError, match="arguments must be an exact dict"):
+        asyncio.run(adapter.list_tools())
+
+    assert events == []

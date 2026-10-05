@@ -21,6 +21,8 @@ from nika_core.tools import (
 _MAX_MCP_SEGMENT_CHARS = 128
 _MAX_MCP_CURSOR_BYTES = 4096
 _MAX_MCP_LIST_PAGES = 1000
+_MAX_MCP_LIST_TOOLS = 10_000
+_MAX_MCP_DISCOVERY_BYTES = 8_388_608
 _MAX_MCP_ARGUMENT_DEPTH = 64
 _MAX_MCP_ARGUMENT_NODES = 10_000
 _MAX_MCP_ARGUMENT_BYTES = 1_048_576
@@ -278,6 +280,7 @@ class MCPClientAdapter:
         seen_cursors: set[str] = set()
         cursor: str | None = None
         pages = 0
+        discovery_bytes = 0
 
         async with Client(self._target) as client:
             while True:
@@ -292,6 +295,8 @@ class MCPClientAdapter:
                     raise ValueError("MCP tools page is incomplete") from exc
                 if type(page_tools) is not list:
                     raise TypeError("MCP tools page must contain an exact list")
+                if len(page_tools) > _MAX_MCP_LIST_TOOLS - len(specs):
+                    raise ValueError("MCP tools discovery exceeds safe tool limit")
 
                 for tool in page_tools:
                     tool_name = _exact_mcp_tool_name(tool.name)
@@ -299,12 +304,63 @@ class MCPClientAdapter:
                     if tool_id in seen_tool_ids:
                         raise ValueError(f"duplicate MCP tool id: {tool_id}")
                     seen_tool_ids.add(tool_id)
+                    try:
+                        raw_description = tool.description
+                        raw_title = tool.title
+                        raw_schema = tool.input_schema
+                    except AttributeError as exc:
+                        raise ValueError("MCP tool metadata is incomplete") from exc
+
+                    description: str | None = None
+                    if raw_description is not None:
+                        if type(raw_description) is not str:
+                            raise TypeError(
+                                "MCP tool description must be an exact string"
+                            )
+                        if len(raw_description) > _MAX_MCP_DISCOVERY_BYTES:
+                            raise ValueError(
+                                "MCP discovery exceeds safe metadata limit"
+                            )
+                        description = _exact_utf8_text(
+                            raw_description, field="MCP tool description"
+                        )
+                    if not description and raw_title is not None:
+                        if type(raw_title) is not str:
+                            raise TypeError("MCP tool title must be an exact string")
+                        if len(raw_title) > _MAX_MCP_DISCOVERY_BYTES:
+                            raise ValueError(
+                                "MCP discovery exceeds safe metadata limit"
+                            )
+                        description = _exact_utf8_text(
+                            raw_title, field="MCP tool title"
+                        )
+                    if not description:
+                        description = tool_name
+
+                    if raw_schema is None:
+                        schema: dict[str, object] = {}
+                    else:
+                        schema = _snapshot_mcp_arguments(raw_schema)
+                    discovery_bytes += (
+                        len(tool_id.encode("utf-8"))
+                        + len(description.encode("utf-8"))
+                        + len(
+                            json.dumps(
+                                schema,
+                                ensure_ascii=False,
+                                allow_nan=False,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        )
+                    )
+                    if discovery_bytes > _MAX_MCP_DISCOVERY_BYTES:
+                        raise ValueError("MCP discovery exceeds safe metadata limit")
                     specs.append(
                         ToolSpec(
                             tool_id=tool_id,
-                            description=tool.description or tool.title or tool_name,
+                            description=description,
                             risk=self._default_risk,
-                            input_schema=dict(tool.input_schema or {}),
+                            input_schema=schema,
                         )
                     )
 
