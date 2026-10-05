@@ -6,6 +6,7 @@ from decimal import Decimal
 
 from .accounting import AccountSnapshot
 from .contracts import TradingResearchError, require_aware_utc
+from .identity import InstrumentIdentity, instrument_identity
 from .orders import (
     ExecutionPolicy,
     OrderIntent,
@@ -108,8 +109,8 @@ class RiskEngine:
                 "use pending_orders or legacy pending_signed_quantity, not both"
             )
 
-        marks: dict[str, Decimal] = {}
-        deltas: dict[str, Decimal] = {}
+        marks: dict[InstrumentIdentity, Decimal] = {}
+        deltas: dict[InstrumentIdentity, Decimal] = {}
         total_equity_cost = Decimal(0)
         total_cash_required = Decimal(0)
 
@@ -124,7 +125,7 @@ class RiskEngine:
             ):
                 raise TradingResearchError("pending order cannot come from a future decision")
             pending_intent = pending.order.intent
-            key = pending_intent.instrument.instrument_id
+            key = instrument_identity(pending_intent.instrument)
             _record_mark(marks, key, pending.mark_price)
             remaining = pending.remaining_quantity
             assert remaining is not None
@@ -143,7 +144,7 @@ class RiskEngine:
             total_equity_cost += reservation.equity_cost
             total_cash_required += reservation.cash_required
 
-        candidate_key = intent.instrument.instrument_id
+        candidate_key = instrument_identity(intent.instrument)
         _record_mark(marks, candidate_key, mark_price)
 
         if pending_signed_quantity != 0:
@@ -174,15 +175,15 @@ class RiskEngine:
 
         projected_net = snapshot.net_exposure
         projected_gross = snapshot.gross_exposure
-        for instrument_id, delta in deltas.items():
-            current_qty = _position_quantity(snapshot, instrument_id)
+        for identity, delta in deltas.items():
+            current_qty = _position_quantity(snapshot, identity)
             projected_qty = current_qty + delta
             if not self._limits.allow_short and projected_qty < 0:
                 raise RiskRejected("short positions are disabled")
             if abs(projected_qty) > self._limits.max_abs_position:
                 raise RiskRejected("max_abs_position exceeded")
 
-            instrument_mark = marks[instrument_id]
+            instrument_mark = marks[identity]
             current_value = current_qty * instrument_mark
             projected_value = projected_qty * instrument_mark
             projected_net += projected_value - current_value
@@ -245,15 +246,23 @@ class RiskEngine:
             raise RiskRejected("post-fill drawdown breach")
 
 
-def _record_mark(marks: dict[str, Decimal], instrument_id: str, mark_price: Decimal) -> None:
-    existing = marks.get(instrument_id)
+def _record_mark(
+    marks: dict[InstrumentIdentity, Decimal],
+    identity: InstrumentIdentity,
+    mark_price: Decimal,
+) -> None:
+    existing = marks.get(identity)
     if existing is not None and existing != mark_price:
-        raise TradingResearchError(f"inconsistent risk marks for instrument {instrument_id}")
-    marks[instrument_id] = mark_price
+        raise TradingResearchError(f"inconsistent risk marks for instrument {identity!r}")
+    marks[identity] = mark_price
 
 
-def _add_delta(deltas: dict[str, Decimal], instrument_id: str, quantity: Decimal) -> None:
-    deltas[instrument_id] = deltas.get(instrument_id, Decimal(0)) + quantity
+def _add_delta(
+    deltas: dict[InstrumentIdentity, Decimal],
+    identity: InstrumentIdentity,
+    quantity: Decimal,
+) -> None:
+    deltas[identity] = deltas.get(identity, Decimal(0)) + quantity
 
 
 def _policy_has_execution_cost(policy: ExecutionPolicy) -> bool:
@@ -319,8 +328,8 @@ def _worst_case_fill_price(
     return apply_slippage(mark_price, intent.side, policy.slippage_bps)
 
 
-def _position_quantity(snapshot: AccountSnapshot, instrument_id: str) -> Decimal:
+def _position_quantity(snapshot: AccountSnapshot, identity: InstrumentIdentity) -> Decimal:
     for position in snapshot.positions:
-        if position.instrument.instrument_id == instrument_id:
+        if instrument_identity(position.instrument) == identity:
             return position.quantity
     return Decimal(0)
