@@ -1619,6 +1619,7 @@ def _import_training_stack() -> tuple[Any, ...]:
         import torch
         from peft import LoraConfig, PeftModel, TaskType, get_peft_model
         from safetensors import safe_open
+        from safetensors.torch import save as safe_serialize
         from safetensors.torch import save_file as safe_save_file
         from transformers import (
             AutoModelForCausalLM,
@@ -1638,6 +1639,7 @@ def _import_training_stack() -> tuple[Any, ...]:
         get_peft_model,
         safe_open,
         safe_save_file,
+        safe_serialize,
         AutoModelForCausalLM,
         AutoTokenizer,
         DataCollatorForLanguageModeling,
@@ -1645,6 +1647,29 @@ def _import_training_stack() -> tuple[Any, ...]:
         TrainingArguments,
         set_seed,
     )
+
+
+def _adapter_tensor_sha256(
+    path: Path,
+    *,
+    safe_open: Any,
+    safe_serialize: Any,
+) -> str:
+    _require_regular_unlinked(path, code="adapter_candidate_invalid")
+    try:
+        with safe_open(os.fspath(path), framework="pt", device="cpu") as source:
+            names = tuple(sorted(source.keys()))
+            if not names:
+                _fail("adapter_candidate_empty")
+            tensors = {name: source.get_tensor(name) for name in names}
+        serialized = safe_serialize(tensors)
+    except PeftTrainerError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _fail("adapter_tensor_digest_failed")
+    if type(serialized) is not bytes or not serialized:
+        _fail("adapter_tensor_digest_failed")
+    return hashlib.sha256(serialized).hexdigest()
 
 
 def _train_one_step(
@@ -1660,6 +1685,7 @@ def _train_one_step(
         get_peft_model,
         safe_open,
         safe_save_file,
+        safe_serialize,
         AutoModelForCausalLM,
         AutoTokenizer,
         DataCollatorForLanguageModeling,
@@ -1794,20 +1820,22 @@ def _train_one_step(
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
     _require_regular_unlinked(adapter_file, code="adapter_candidate_missing")
-    trained_adapter_sha256, _ = _hash_regular_snapshot(
+    trained_adapter_tensors_sha256 = _adapter_tensor_sha256(
         adapter_file,
-        code="adapter_candidate_invalid",
+        safe_open=safe_open,
+        safe_serialize=safe_serialize,
     )
-    previous_adapter_sha256: str | None = None
+    previous_adapter_tensors_sha256: str | None = None
     if previous_checkpoint is not None:
         previous_adapter_file = previous_checkpoint / "adapter" / _CANDIDATE_FILE
         _require_regular_unlinked(
             previous_adapter_file,
             code="previous_adapter_candidate_missing",
         )
-        previous_adapter_sha256, _ = _hash_regular_snapshot(
+        previous_adapter_tensors_sha256 = _adapter_tensor_sha256(
             previous_adapter_file,
-            code="previous_adapter_candidate_invalid",
+            safe_open=safe_open,
+            safe_serialize=safe_serialize,
         )
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
@@ -1845,8 +1873,8 @@ def _train_one_step(
         config=config,
         consumed=consumed,
         adapter_config=adapter_config,
-        previous_adapter_sha256=previous_adapter_sha256,
-        trained_adapter_sha256=trained_adapter_sha256,
+        previous_adapter_tensors_sha256=previous_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256=trained_adapter_tensors_sha256,
     )
     temporary_sha256: str | None = None
     temporary_identity: tuple[int, int] | None = None
@@ -2003,8 +2031,8 @@ def _candidate_manifest_json(
     config: TrainerConfig,
     consumed: ConsumedMaterials,
     adapter_config: dict[str, object],
-    previous_adapter_sha256: str | None,
-    trained_adapter_sha256: str,
+    previous_adapter_tensors_sha256: str | None,
+    trained_adapter_tensors_sha256: str,
 ) -> str:
     payload = {
         "adapter_config": adapter_config,
@@ -2014,8 +2042,8 @@ def _candidate_manifest_json(
         "consumed_materials_sha256": consumed.attestation_sha256,
         "job_fingerprint": request.job_fingerprint,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
-        "previous_adapter_sha256": previous_adapter_sha256,
-        "trained_adapter_sha256": trained_adapter_sha256,
+        "previous_adapter_tensors_sha256": previous_adapter_tensors_sha256,
+        "trained_adapter_tensors_sha256": trained_adapter_tensors_sha256,
         "trainer_artifact_id": request.trainer_artifact_id,
         "trainer_implementation_sha256": config.trainer_implementation_sha256,
         "trainer_sha256": request.trainer_sha256,
@@ -2052,8 +2080,8 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
-        "previous_adapter_sha256",
-        "trained_adapter_sha256",
+        "previous_adapter_tensors_sha256",
+        "trained_adapter_tensors_sha256",
         "trainer_artifact_id",
         "trainer_implementation_sha256",
         "trainer_sha256",
@@ -2093,7 +2121,7 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
-        "trained_adapter_sha256",
+        "trained_adapter_tensors_sha256",
         "trainer_artifact_id",
         "trainer_implementation_sha256",
         "trainer_sha256",
@@ -2117,15 +2145,15 @@ def _validate_candidate_manifest_payload(
     step_number = value["step_number"]
     if type(step_number) is not int or not 1 <= step_number <= 100_000:
         _fail("candidate_manifest_invalid")
-    previous_adapter_sha256 = value["previous_adapter_sha256"]
-    if previous_adapter_sha256 is not None and (
-        type(previous_adapter_sha256) is not str
-        or _HEX_RE.fullmatch(previous_adapter_sha256) is None
+    previous_adapter_tensors_sha256 = value["previous_adapter_tensors_sha256"]
+    if previous_adapter_tensors_sha256 is not None and (
+        type(previous_adapter_tensors_sha256) is not str
+        or _HEX_RE.fullmatch(previous_adapter_tensors_sha256) is None
     ):
         _fail("candidate_manifest_invalid")
     if (
-        (step_number == 1 and previous_adapter_sha256 is not None)
-        or (step_number > 1 and previous_adapter_sha256 is None)
+        (step_number == 1 and previous_adapter_tensors_sha256 is not None)
+        or (step_number > 1 and previous_adapter_tensors_sha256 is None)
     ):
         _fail("candidate_manifest_invalid")
 
