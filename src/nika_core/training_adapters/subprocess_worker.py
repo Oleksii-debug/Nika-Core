@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import pathlib
 import subprocess
 import threading
 from collections.abc import Mapping, Sequence
@@ -144,6 +145,35 @@ def _validate_command(command: Sequence[str]) -> tuple[str, ...]:
     return normalized
 
 
+def _sha256_file(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(_READ_CHUNK_BYTES), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _validate_trainer_artifact_path(
+    value: object,
+    command: tuple[str, ...],
+) -> pathlib.Path:
+    if type(value) is not str or not value or "\x00" in value:
+        raise ValueError("trainer_artifact_path must be a non-empty NUL-free string")
+    if not os.path.isabs(value):
+        raise ValueError("trainer_artifact_path must use an absolute path")
+    try:
+        resolved = pathlib.Path(value).resolve(strict=True)
+    except OSError as exc:
+        raise ValueError("trainer artifact does not exist") from exc
+    if str(resolved) != value:
+        raise ValueError("trainer_artifact_path must already be canonical")
+    if not resolved.is_file():
+        raise ValueError("trainer artifact must be a regular file")
+    if value not in command:
+        raise ValueError("trainer artifact path must appear exactly in command")
+    return resolved
+
+
 def _validate_environment(environment: Mapping[str, str] | None) -> dict[str, str]:
     if environment is None:
         return {}
@@ -209,6 +239,7 @@ class SubprocessTrainingWorker:
         self,
         command: Sequence[str],
         *,
+        trainer_artifact_path: str,
         trainer_sha256: str,
         timeout_seconds: float = _DEFAULT_TIMEOUT_SECONDS,
         environment: Mapping[str, str] | None = None,
@@ -217,6 +248,16 @@ class SubprocessTrainingWorker:
     ) -> None:
         self._command = _validate_command(command)
         self._trainer_sha256 = _validate_sha256(trainer_sha256, name="trainer_sha256")
+        self._trainer_artifact = _validate_trainer_artifact_path(
+            trainer_artifact_path,
+            self._command,
+        )
+        try:
+            observed_sha256 = _sha256_file(self._trainer_artifact)
+        except OSError as exc:
+            raise ValueError("trainer artifact could not be read") from exc
+        if observed_sha256 != self._trainer_sha256:
+            raise ValueError("trainer_sha256 does not match the trainer artifact")
         self._timeout_seconds = _validate_timeout(timeout_seconds)
         self._environment = _validate_environment(environment)
         self._max_request_bytes = _validate_positive_byte_limit(
@@ -261,6 +302,7 @@ class SubprocessTrainingWorker:
             label="training subprocess request",
         )
 
+        self._verify_trainer_artifact()
         stdout = self._execute(request_bytes + b"\n")
         response = self._parse_response(stdout, expected_step_id=current_step_id)
         completed = response["completed"]
@@ -289,6 +331,18 @@ class SubprocessTrainingWorker:
             completed=completed,
             candidate_sha256=candidate_sha256,
         )
+
+    def _verify_trainer_artifact(self) -> None:
+        try:
+            observed_sha256 = _sha256_file(self._trainer_artifact)
+        except OSError as exc:
+            raise TrainingSubprocessError(
+                "trainer artifact could not be revalidated"
+            ) from exc
+        if observed_sha256 != self._trainer_sha256:
+            raise TrainingSubprocessError(
+                "trainer artifact no longer matches the configured SHA-256"
+            )
 
     def _unwrap_resume_state(
         self,
