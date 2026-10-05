@@ -101,7 +101,7 @@ class ChampionEvaluationBinding:
             raise TypeError("binding must be an exact ChampionEvaluationBinding")
         try:
             return ChampionEvaluationBinding(
-                training_binding_sha256=self.training_binding_sha256,
+                training_binding=self.training_binding.revalidated(),
                 job_id=self.job_id,
                 candidate_id=self.candidate_id,
                 provider_id=self.provider_id,
@@ -276,7 +276,7 @@ def _build_effect_binding(
 
 @dataclass(frozen=True, slots=True, init=False)
 class AttestedChampionBenchmarkResult:
-    training_binding_sha256: str
+    training_binding: TrainingEvaluationBinding
     champion_binding: ChampionEvaluationBinding
     effect_binding_sha256: str
     benchmark: AttestedChallengerBenchmarkResult
@@ -285,13 +285,23 @@ class AttestedChampionBenchmarkResult:
         raise TypeError("AttestedChampionBenchmarkResult cannot be subclassed")
 
     def _validate(self) -> None:
-        _sha256(self.training_binding_sha256, name="training_binding_sha256")
+        try:
+            training_binding = self.training_binding.revalidated()
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("training binding must be canonical") from exc
         champion_binding = self.champion_binding.revalidated()
-        if champion_binding.training_binding_sha256 != self.training_binding_sha256:
+        if champion_binding.training_binding_sha256 != training_binding.binding_sha256:
             raise ValueError("champion binding training authority changed")
         _sha256(self.effect_binding_sha256, name="effect_binding_sha256")
+        expected_effect_binding = _build_effect_binding(
+            training_binding,
+            champion_binding,
+        )
         benchmark = self.benchmark.revalidated()
-        if benchmark.binding.binding_sha256 != self.effect_binding_sha256:
+        if (
+            benchmark.binding != expected_effect_binding
+            or benchmark.binding.binding_sha256 != self.effect_binding_sha256
+        ):
             raise ValueError("champion effect binding evidence changed")
         candidate = benchmark.report.candidate
         if (
@@ -341,7 +351,7 @@ class AttestedChampionBenchmarkResult:
         benchmark = result.benchmark
         return {
             "schema": "nika-attested-champion-benchmark-v1",
-            "training_binding_sha256": result.training_binding_sha256,
+            "training_binding_sha256": result.training_binding.binding_sha256,
             "champion_binding_sha256": result.champion_binding.binding_sha256,
             "effect_binding_sha256": result.effect_binding_sha256,
             "job_id": result.champion_binding.job_id,
@@ -370,13 +380,13 @@ class AttestedChampionBenchmarkResult:
 
 def _build_result(
     *,
-    training_binding_sha256: str,
+    training_binding: TrainingEvaluationBinding,
     champion_binding: ChampionEvaluationBinding,
     effect_binding_sha256: str,
     benchmark: AttestedChallengerBenchmarkResult,
 ) -> AttestedChampionBenchmarkResult:
     result = object.__new__(AttestedChampionBenchmarkResult)
-    object.__setattr__(result, "training_binding_sha256", training_binding_sha256)
+    object.__setattr__(result, "training_binding", training_binding)
     object.__setattr__(result, "champion_binding", champion_binding)
     object.__setattr__(result, "effect_binding_sha256", effect_binding_sha256)
     object.__setattr__(result, "benchmark", benchmark)
@@ -441,7 +451,7 @@ async def run_attested_champion_benchmark(
         accelerator_observer=accelerator_observer,
     )
     return _build_result(
-        training_binding_sha256=training.binding_sha256,
+        training_binding=training,
         champion_binding=physical,
         effect_binding_sha256=effect_binding.binding_sha256,
         benchmark=benchmark,
