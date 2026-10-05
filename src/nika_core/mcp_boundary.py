@@ -22,6 +22,7 @@ _MAX_MCP_SEGMENT_CHARS = 128
 _MAX_MCP_CURSOR_BYTES = 4096
 _MAX_MCP_LIST_PAGES = 1000
 _MAX_MCP_LIST_TOOLS = 10_000
+_MAX_MCP_DISCOVERY_BYTES = 8_388_608
 _MAX_MCP_ARGUMENT_DEPTH = 64
 _MAX_MCP_ARGUMENT_NODES = 10_000
 _MAX_MCP_ARGUMENT_BYTES = 1_048_576
@@ -247,6 +248,7 @@ class MCPClientAdapter:
         seen_cursors: set[str] = set()
         cursor: str | None = None
         pages = 0
+        discovery_bytes = 0
 
         async with Client(self._target) as client:
             while True:
@@ -270,12 +272,36 @@ class MCPClientAdapter:
                     if tool_id in seen_tool_ids:
                         raise ValueError(f"duplicate MCP tool id: {tool_id}")
                     seen_tool_ids.add(tool_id)
+                    raw_description = tool.description or tool.title or tool_name
+                    if (
+                        type(raw_description) is str
+                        and len(raw_description) > _MAX_MCP_DISCOVERY_BYTES
+                    ):
+                        raise ValueError("MCP discovery exceeds safe metadata limit")
+                    description = _exact_utf8_text(
+                        raw_description, field="MCP tool description"
+                    )
+                    schema = _snapshot_mcp_arguments(tool.input_schema or {})
+                    discovery_bytes += (
+                        len(tool_id.encode("utf-8"))
+                        + len(description.encode("utf-8"))
+                        + len(
+                            json.dumps(
+                                schema,
+                                ensure_ascii=False,
+                                allow_nan=False,
+                                separators=(",", ":"),
+                            ).encode("utf-8")
+                        )
+                    )
+                    if discovery_bytes > _MAX_MCP_DISCOVERY_BYTES:
+                        raise ValueError("MCP discovery exceeds safe metadata limit")
                     specs.append(
                         ToolSpec(
                             tool_id=tool_id,
-                            description=tool.description or tool.title or tool_name,
+                            description=description,
                             risk=self._default_risk,
-                            input_schema=dict(tool.input_schema or {}),
+                            input_schema=schema,
                         )
                     )
 
