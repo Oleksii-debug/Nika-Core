@@ -39,6 +39,8 @@ from nika_core.toolsmith.contracts import RecoveryState
 
 _OPERATION_TYPE = "product_factory.coding_worker"
 _EFFECT_CANCEL_GRACE_SECONDS = 0.1
+_RECOVERY_PHASE_MAX_UTF8_BYTES = 1024
+_RECOVERY_TOKEN_MAX_UTF8_BYTES = 64 * 1024
 _T = TypeVar("_T")
 
 
@@ -697,11 +699,20 @@ class ProductFactoryProgramHost:
                 try:
                     if type(state) is not RecoveryState:
                         raise TypeError("invalid recovery state carrier")
-                    phase, token = state.phase, state.opaque_token
-                    if type(phase) is not str or not phase.strip():
-                        raise ValueError("invalid recovery phase")
-                    if token is not None and type(token) is not str:
-                        raise TypeError("invalid recovery token")
+                    phase = _bounded_recovery_text(
+                        state.phase,
+                        field="phase",
+                        max_utf8_bytes=_RECOVERY_PHASE_MAX_UTF8_BYTES,
+                        require_nonblank=True,
+                    )
+                    token = state.opaque_token
+                    if token is not None:
+                        token = _bounded_recovery_text(
+                            token,
+                            field="opaque_token",
+                            max_utf8_bytes=_RECOVERY_TOKEN_MAX_UTF8_BYTES,
+                            require_nonblank=False,
+                        )
                     recovery_state = RecoveryState(phase, token)
                 except (AttributeError, TypeError, ValueError):
                     durable_status, marker_detail = (
@@ -1318,6 +1329,26 @@ class _BorrowedSQLiteStore:
     @contextmanager
     def connection(self) -> Iterator:
         yield self._connection
+
+
+def _bounded_recovery_text(
+    value: object,
+    *,
+    field: str,
+    max_utf8_bytes: int,
+    require_nonblank: bool,
+) -> str:
+    if type(value) is not str:
+        raise TypeError(f"invalid recovery {field}")
+    if require_nonblank and not value.strip():
+        raise ValueError(f"invalid recovery {field}")
+    try:
+        encoded = value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"invalid recovery {field} Unicode") from exc
+    if len(encoded) > max_utf8_bytes:
+        raise ValueError(f"recovery {field} exceeds bounded UTF-8 size")
+    return value
 
 
 def _request_for_component(
