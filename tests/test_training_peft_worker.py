@@ -668,6 +668,77 @@ def test_environment_builder_binds_implementation_model_dir_and_hyperparameters(
     assert loaded.seed == 99
 
 
+def test_candidate_manifest_semantics_fail_closed_on_tampering(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    raw = peft._candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+    )
+    manifest = json.loads(raw)
+    assert peft._validate_candidate_manifest_payload(manifest) == manifest
+
+    bad_sha = json.loads(raw)
+    bad_sha["base_artifact_sha256"] = "0" * 63
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_sha)
+
+    bad_parameter = json.loads(raw)
+    bad_parameter["trainer_parameters"]["lora_r"] = config.lora_r + 1
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(bad_parameter)
+
+    private_ref = json.loads(raw)
+    private_ref["base_artifact_ref"] = "C:/private/base.gguf"
+    private_ref["adapter_config"]["base_model_name_or_path"] = "C:/private/base.gguf"
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(private_ref)
+
+    unknown_field = json.loads(raw)
+    unknown_field["unexpected"] = True
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(unknown_field)
+
+
+def test_candidate_manifest_rejects_unhashable_target_carrier(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    manifest = json.loads(
+        peft._candidate_manifest_json(
+            request=request,
+            config=config,
+            consumed=consumed,
+            adapter_config=adapter_config,
+        )
+    )
+    manifest["trainer_parameters"]["lora_target_modules"] = [["q_proj"]]
+
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(manifest)
+
+
 def test_adapter_config_snapshot_rejects_training_plan_mismatch(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
