@@ -133,6 +133,38 @@ def test_job_spec_snapshot_rejects_boolean_step_carrier() -> None:
         pilot._snapshot_job_spec(spec)
 
 
+def test_descriptor_factory_runs_after_completed_evidence_and_receives_detached_copy(
+    tmp_path: Path,
+) -> None:
+    payload = b"candidate"
+    candidate = tmp_path / "adapter_model.safetensors"
+    candidate.write_bytes(payload)
+    completed = _completed_for(payload)
+    observed: list[TrainingRunEvidence] = []
+
+    def factory(evidence: TrainingRunEvidence) -> ModelArtifactDescriptor:
+        observed.append(evidence)
+        object.__setattr__(evidence, "job_id", "mutated-callback-copy")
+        return _descriptor(candidate)
+
+    descriptor = pilot._resolve_candidate_descriptor(factory, completed)
+
+    assert type(descriptor) is ModelArtifactDescriptor
+    assert len(observed) == 1
+    assert observed[0] is not completed
+    assert completed.job_id == "pilot-job"
+
+
+def test_descriptor_factory_requires_canonical_descriptor() -> None:
+    completed = _completed_for(b"candidate")
+
+    with pytest.raises(TypeError, match="exact ModelArtifactDescriptor"):
+        pilot._resolve_candidate_descriptor(
+            lambda _: object(),  # type: ignore[return-value]
+            completed,
+        )
+
+
 def test_build_report_binds_restart_and_canonical_candidate_receipt(
     tmp_path: Path,
 ) -> None:
@@ -388,5 +420,5 @@ def test_physical_runner_refuses_non_windows_execution(monkeypatch: pytest.Monke
             restart_worker=lambda: object(),  # type: ignore[return-value]
             scale_authorization=object(),  # type: ignore[arg-type]
             candidate_path=Path("candidate"),
-            candidate_descriptor=object(),  # type: ignore[arg-type]
+            candidate_descriptor_factory=lambda _: object(),  # type: ignore[return-value]
         )

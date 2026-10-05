@@ -41,11 +41,14 @@ The restart factory must reopen durable state rather than returning the original
 `TrainingRuntime` object. The worker restart factory must construct a new
 `SubprocessTrainingWorker` from the same Registry-bound command and environment authority.
 
-Create or retrieve the canonical SHA-256 `ModelArtifactDescriptor` for the final published
-`adapter_model.safetensors`. Its size and digest must describe those exact bytes. Pass the
-artifact path, descriptor, and preferably its containing artifact root to the pilot harness.
-The harness delegates physical byte/containment/Windows handle verification to the existing
-candidate-artifact integrity authority rather than implementing another verifier.
+The final candidate descriptor cannot be known before a first real training run completes.
+Pass a `candidate_descriptor_factory` that receives detached canonical COMPLETED evidence.
+Only then should it create or retrieve the SHA-256 `ModelArtifactDescriptor` for the final
+published `adapter_model.safetensors`; its size and digest must describe those exact bytes.
+The factory may use the completed candidate digest plus the now-materialized file size and the
+project's canonical public provenance/license references. The harness then delegates physical
+byte/containment/Windows-handle verification to the existing candidate-artifact integrity
+authority rather than implementing another verifier.
 
 Keep generated report JSON outside Git when it contains run-specific operational identifiers.
 A report can be shared as evidence after reviewing it for the intended run.
@@ -63,7 +66,7 @@ report = run_physical_training_pilot(
     restart_worker=reopen_worker,
     scale_authorization=authorization,
     candidate_path=candidate_safetensors_path,
-    candidate_descriptor=candidate_descriptor,
+    candidate_descriptor_factory=build_candidate_descriptor_after_completion,
     candidate_root=candidate_artifact_root,
 )
 report_path.write_text(report.to_json(), encoding="utf-8")

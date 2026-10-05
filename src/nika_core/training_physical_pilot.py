@@ -483,6 +483,26 @@ def _snapshot_job_spec(spec: object) -> TrainingJobSpec:
         ) from exc
 
 
+
+def _resolve_candidate_descriptor(
+    factory: Callable[[TrainingRunEvidence], ModelArtifactDescriptor],
+    completed: TrainingRunEvidence,
+) -> ModelArtifactDescriptor:
+    if not callable(factory):
+        raise TypeError("candidate_descriptor_factory must be callable")
+    callback_evidence = _snapshot_run_evidence(
+        completed,
+        state=TrainingRunState.COMPLETED,
+        label="candidate descriptor context",
+    )
+    descriptor = factory(callback_evidence)
+    if type(descriptor) is not ModelArtifactDescriptor:
+        raise TypeError(
+            "candidate_descriptor_factory must return exact ModelArtifactDescriptor"
+        )
+    return descriptor
+
+
 def run_physical_training_pilot(
     *,
     runtime: TrainingRuntime,
@@ -492,7 +512,10 @@ def run_physical_training_pilot(
     restart_worker: Callable[[], SubprocessTrainingWorker],
     scale_authorization: TrainingScaleAuthorization,
     candidate_path: Path,
-    candidate_descriptor: ModelArtifactDescriptor,
+    candidate_descriptor_factory: Callable[
+        [TrainingRunEvidence],
+        ModelArtifactDescriptor,
+    ],
     candidate_root: Path | None = None,
 ) -> PhysicalTrainingPilotReport:
     """Exercise one real Windows subprocess step, reopen, resume, and verify candidate bytes."""
@@ -506,10 +529,10 @@ def run_physical_training_pilot(
         raise TypeError("worker must be the canonical SubprocessTrainingWorker")
     if type(scale_authorization) is not TrainingScaleAuthorization:
         raise TypeError("scale_authorization must be exact TrainingScaleAuthorization")
-    if type(candidate_descriptor) is not ModelArtifactDescriptor:
-        raise TypeError("candidate_descriptor must be exact ModelArtifactDescriptor")
     if not callable(restart_runtime) or not callable(restart_worker):
         raise TypeError("restart factories must be callable")
+    if not callable(candidate_descriptor_factory):
+        raise TypeError("candidate_descriptor_factory must be callable")
     if canonical_spec.max_steps < 2:
         _fail("physical pilot requires max_steps >= 2")
     initial_execution_plan_sha256 = _require_sha256(
@@ -562,6 +585,15 @@ def run_physical_training_pilot(
         canonical_spec,
         resumed_worker,
         scale_authorization=scale_authorization,
+    )
+    completed = _snapshot_run_evidence(
+        completed,
+        state=TrainingRunState.COMPLETED,
+        label="completed run",
+    )
+    candidate_descriptor = _resolve_candidate_descriptor(
+        candidate_descriptor_factory,
+        completed,
     )
     return build_physical_training_pilot_report(
         paused=paused,
