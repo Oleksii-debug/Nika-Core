@@ -47,12 +47,14 @@ class MemoryService:
             raise ValueError("memory JSON contains invalid Unicode") from exc
         with self._store.connection() as conn:
             existing = conn.execute(
-                "SELECT created_at FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
                 "AND namespace = ? AND memory_key = ?",
                 (scope.value, owner_id, namespace, key),
             ).fetchone()
             if existing is not None:
-                _parse_stored_datetime("created_at", existing["created_at"])
+                # Replacement mutates durable evidence, so validate the complete
+                # incumbent carrier before allowing it to be overwritten.
+                _record_from_row(existing)
                 created_at = existing["created_at"]
             else:
                 created_at = now.isoformat()
