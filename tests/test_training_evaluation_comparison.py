@@ -68,6 +68,8 @@ _CHAMPION_ATTESTOR_ID = "test-shared-attestor"
 _CHAMPION_ATTESTOR_SHA256 = _sha(b"shared-attestor")
 _CHALLENGER_ATTESTOR_ID = _CHAMPION_ATTESTOR_ID
 _CHALLENGER_ATTESTOR_SHA256 = _CHAMPION_ATTESTOR_SHA256
+_BASE_PROVIDER_MANIFEST_SHA256 = _sha(b"base-provider-manifest")
+_CHALLENGER_PROVIDER_MANIFEST_SHA256 = _sha(b"challenger-provider-manifest")
 
 
 def _evaluation_set() -> EvaluationSet:
@@ -162,8 +164,14 @@ def _champion_descriptor() -> ModelArtifactDescriptor:
 
 
 class _ChampionPort:
-    def __init__(self, text: str) -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        provider_manifest_sha256: str | None = None,
+    ) -> None:
         self.text = text
+        self.provider_manifest_sha256 = provider_manifest_sha256
 
     async def complete_attested(
         self,
@@ -189,13 +197,20 @@ class _ChampionPort:
                 descriptor_digest=binding.descriptor_digest,
                 attestor_id=_CHAMPION_ATTESTOR_ID,
                 attestor_sha256=_CHAMPION_ATTESTOR_SHA256,
+                provider_manifest_sha256=self.provider_manifest_sha256,
             ),
         )
 
 
 class _ChallengerPort:
-    def __init__(self, text: str) -> None:
+    def __init__(
+        self,
+        text: str,
+        *,
+        provider_manifest_sha256: str | None = None,
+    ) -> None:
         self.text = text
+        self.provider_manifest_sha256 = provider_manifest_sha256
         self.calls = 0
 
     async def complete_attested(
@@ -223,11 +238,17 @@ class _ChallengerPort:
                 descriptor_digest=binding.descriptor_digest,
                 attestor_id=_CHALLENGER_ATTESTOR_ID,
                 attestor_sha256=_CHALLENGER_ATTESTOR_SHA256,
+                provider_manifest_sha256=self.provider_manifest_sha256,
             ),
         )
 
 
-async def _attested_results(tmp_path):
+async def _attested_results(
+    tmp_path,
+    *,
+    champion_provider_manifest_sha256: str | None = None,
+    challenger_provider_manifest_sha256: str | None = None,
+):
     evaluation = _evaluation_set()
     training_binding = _training_binding(evaluation)
     base_path = tmp_path / "base-model.bin"
@@ -243,7 +264,10 @@ async def _attested_results(tmp_path):
         binding=champion_binding,
         champion=_champion(),
         evaluation_set=evaluation,
-        effect_port=_ChampionPort("old-answer"),
+        effect_port=_ChampionPort(
+            "old-answer",
+            provider_manifest_sha256=champion_provider_manifest_sha256,
+        ),
         expected_attestor_id=_CHAMPION_ATTESTOR_ID,
         expected_attestor_sha256=_CHAMPION_ATTESTOR_SHA256,
         timeout_seconds=5,
@@ -253,7 +277,10 @@ async def _attested_results(tmp_path):
         binding=training_binding,
         challenger=_challenger(),
         evaluation_set=evaluation,
-        effect_port=_ChallengerPort("answer"),
+        effect_port=_ChallengerPort(
+            "answer",
+            provider_manifest_sha256=challenger_provider_manifest_sha256,
+        ),
         expected_attestor_id=_CHALLENGER_ATTESTOR_ID,
         expected_attestor_sha256=_CHALLENGER_ATTESTOR_SHA256,
         timeout_seconds=5,
@@ -305,6 +332,70 @@ async def test_attested_old_vs_new_comparison_promotes_only_from_both_attested_r
     assert payload["attestor_id"] == _CHAMPION_ATTESTOR_ID
     assert payload["attestor_sha256"] == _CHAMPION_ATTESTOR_SHA256
     assert len(result.evidence_sha256) == 64
+    assert result.champion_provider_manifest_sha256 is None
+    assert result.challenger_provider_manifest_sha256 is None
+
+
+@pytest.mark.asyncio
+async def test_comparison_binds_distinct_old_new_provider_manifests(
+    tmp_path,
+) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(
+        tmp_path,
+        champion_provider_manifest_sha256=_BASE_PROVIDER_MANIFEST_SHA256,
+        challenger_provider_manifest_sha256=_CHALLENGER_PROVIDER_MANIFEST_SHA256,
+    )
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new-manifests",
+        repository=InMemoryExperimentRepository(),
+    )
+
+    assert (
+        result.champion_provider_manifest_sha256
+        == _BASE_PROVIDER_MANIFEST_SHA256
+    )
+    assert (
+        result.challenger_provider_manifest_sha256
+        == _CHALLENGER_PROVIDER_MANIFEST_SHA256
+    )
+    assert (
+        result.champion_provider_manifest_sha256
+        != result.challenger_provider_manifest_sha256
+    )
+    payload = result.evidence_payload()
+    assert (
+        payload["champion_provider_manifest_sha256"]
+        == _BASE_PROVIDER_MANIFEST_SHA256
+    )
+    assert (
+        payload["challenger_provider_manifest_sha256"]
+        == _CHALLENGER_PROVIDER_MANIFEST_SHA256
+    )
+
+
+@pytest.mark.asyncio
+async def test_comparison_legacy_evidence_omits_provider_manifests(tmp_path) -> None:
+    evaluation, champion_result, challenger_result = await _attested_results(tmp_path)
+    result = run_attested_old_vs_new_comparison(
+        champion_result=champion_result,
+        challenger_result=challenger_result,
+        evaluation_set=evaluation,
+        execution_config=_config(),
+        policy=_policy(),
+        permission_fingerprint="perm:test",
+        experiment_id="training-job-1-old-vs-new-legacy-manifests",
+        repository=InMemoryExperimentRepository(),
+    )
+
+    payload = result.evidence_payload()
+    assert "champion_provider_manifest_sha256" not in payload
+    assert "challenger_provider_manifest_sha256" not in payload
 
 
 @pytest.mark.asyncio
