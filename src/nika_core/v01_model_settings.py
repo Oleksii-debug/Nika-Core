@@ -38,6 +38,7 @@ from nika_core.model_gateway.contracts import (
 from nika_core.model_gateway.foundry_local import FoundryLocalProvider
 from nika_core.model_gateway.gateway import ModelGateway, model_identity_fingerprint
 from nika_core.model_gateway.providers import OllamaProvider
+from nika_core.model_artifacts import ModelArtifactRegistry, ModelArtifactRegistryError
 from nika_core.multi_agent.model_gateway_runtime import ModelGatewayAgentRuntime
 from nika_core.multi_agent.store import MultiAgentStore
 from nika_core.multi_agent.supervisor import MultiAgentSupervisor
@@ -404,8 +405,55 @@ class V01ModelSettings:
             focus_id="model-provider",
         )
 
+    def _artifact_snapshot(self, selection: ModelSelection) -> dict[str, Any]:
+        """Project only validated, public model-artifact provenance for the packaged UI."""
+
+        if selection.route_kind == "deterministic":
+            return {"status": "not_applicable"}
+        provider_id = selection.provider_id
+        model_id = selection.model
+        if provider_id is None or model_id is None:
+            return {"status": "invalid"}
+        try:
+            descriptor = ModelArtifactRegistry(self._store).get(provider_id, model_id)
+        except KeyError:
+            return {"status": "unregistered"}
+        except (ModelArtifactRegistryError, TypeError, ValueError):
+            return {"status": "invalid"}
+
+        resources = descriptor.resources
+
+        def optional_decimal(value: int | None) -> str | None:
+            return None if value is None else str(value)
+
+        return {
+            "status": "registered",
+            "kind": descriptor.kind.value,
+            "model_version": descriptor.model_version,
+            "source_reference": descriptor.source_reference,
+            "license_reference": descriptor.license_reference,
+            "integrity_basis": descriptor.integrity_basis.value,
+            "sha256": descriptor.sha256,
+            "size_bytes": optional_decimal(descriptor.size_bytes),
+            "descriptor_digest": descriptor.descriptor_digest,
+            "capabilities": list(descriptor.capabilities),
+            "resources": {
+                "min_system_memory_bytes": optional_decimal(
+                    resources.min_system_memory_bytes
+                ),
+                "min_available_memory_bytes": optional_decimal(
+                    resources.min_available_memory_bytes
+                ),
+                "min_vram_bytes": optional_decimal(resources.min_vram_bytes),
+                "recommended_memory_bytes": optional_decimal(
+                    resources.recommended_memory_bytes
+                ),
+                "cpu_architectures": list(resources.cpu_architectures),
+            },
+        }
+
     def snapshot(self) -> dict[str, Any]:
-        """Return only UI-safe route identity; never expose the credential reference."""
+        """Return UI-safe route identity plus bounded public artifact provenance."""
 
         try:
             with self._store.connection() as conn:
@@ -428,6 +476,7 @@ class V01ModelSettings:
                 "timeout_seconds": selection.timeout_seconds,
                 "private_data_allowed": selection.effective_private_data_allowed,
                 "credential_configured": selection.credential_ref is not None,
+                "artifact": self._artifact_snapshot(selection),
             }
         except (sqlite3.Error, ModelSetupError, ValidationError):
             return {"status": "invalid"}
