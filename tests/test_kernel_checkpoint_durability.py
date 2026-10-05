@@ -447,11 +447,16 @@ def test_latest_rejects_oversized_checksum_without_unbounded_read(tmp_path: Path
     with pytest.raises(ValueError, match="checksum is invalid"):
         checkpoints.latest(task_id)
 
+
 def test_save_rejects_non_string_stage_before_persistence(tmp_path: Path) -> None:
     store, task_id, checkpoints = _build_service(tmp_path)
 
     with pytest.raises(TypeError, match="stage must be str"):
-        checkpoints.save(task_id=task_id, stage=1, payload={"revision": 1})  # type: ignore[arg-type]
+        checkpoints.save(
+            task_id=task_id,
+            stage=1,  # type: ignore[arg-type]
+            payload={"revision": 1},
+        )
 
     with store.connection() as conn:
         count = conn.execute(
