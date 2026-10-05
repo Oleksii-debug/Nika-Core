@@ -37,7 +37,11 @@ def _require_text(value: object, name: str) -> str:
 def _require_number(value: object, name: str) -> int | float:
     if type(value) not in (int, float):
         raise TypeError(f"{name} must be numeric")
-    if not isfinite(float(value)):
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        raise ValueError(f"{name} must be finite") from None
+    if not isfinite(number):
         raise ValueError(f"{name} must be finite")
     return value
 

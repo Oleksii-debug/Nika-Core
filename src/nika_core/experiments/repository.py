@@ -4,6 +4,7 @@ import json
 import sqlite3
 from copy import deepcopy
 from datetime import UTC, datetime
+from math import isfinite
 from typing import Protocol
 
 from nika_core.data.sqlite import SQLiteStore
@@ -331,7 +332,7 @@ def _encode_definition(definition: ExperimentDefinition) -> str:
         },
         "evaluation_cutoff": _encode_datetime(definition.evaluation_cutoff),
     }
-    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), allow_nan=False)
 
 
 def _strategy_payload(item: StrategyRef) -> dict[str, object]:
@@ -346,7 +347,10 @@ def _strategy_payload(item: StrategyRef) -> dict[str, object]:
 
 
 def _decode_definition(raw: str) -> ExperimentDefinition:
-    payload = json.loads(raw)
+    def reject_nonfinite(_value: str) -> None:
+        raise ValueError("experiment definition contains a nonfinite JSON number")
+
+    payload = json.loads(raw, parse_constant=reject_nonfinite)
     if not isinstance(payload, dict):
         raise TypeError("persisted experiment definition must be an object")
     policy = _required_mapping(payload.get("policy"), "policy")
@@ -491,4 +495,10 @@ def _required_integer(value: object, field: str) -> int:
 def _required_number(value: object, field: str) -> float:
     if type(value) not in (int, float):
         raise TypeError(f"persisted {field} must be numeric")
-    return float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        raise ValueError(f"persisted {field} must be finite") from None
+    if not isfinite(number):
+        raise ValueError(f"persisted {field} must be finite")
+    return number
