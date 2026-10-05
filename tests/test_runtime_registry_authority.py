@@ -77,6 +77,7 @@ def test_registry_malformed_lookup_preserves_unknown_runtime_contract() -> None:
         "reference\u200bforged",
         "reference\u2028forged",
         "reference\u202eforged",
+        "reference\ud800forged",
         "r" * 129,
     ):
         with pytest.raises(KeyError, match="Unknown runtime identifier"):
@@ -113,6 +114,24 @@ def test_registry_rejects_unsafe_unicode_runtime_ids(runtime_id: str) -> None:
     runtime.runtime_id = runtime_id
 
     with pytest.raises(ValueError, match="control, format, or line-separator"):
+        registry.register(runtime)
+
+    assert registry.describe() == ()
+
+
+@pytest.mark.parametrize(
+    "runtime_id",
+    (
+        "reference\ud800forged",
+        "reference\udfffforged",
+    ),
+)
+def test_registry_rejects_non_utf8_runtime_ids(runtime_id: str) -> None:
+    registry = RuntimeRegistry()
+    runtime = ReferenceRuntime()
+    runtime.runtime_id = runtime_id
+
+    with pytest.raises(ValueError, match="runtime_id must be valid UTF-8"):
         registry.register(runtime)
 
     assert registry.describe() == ()
