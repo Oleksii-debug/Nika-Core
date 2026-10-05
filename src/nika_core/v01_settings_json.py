@@ -11,9 +11,17 @@ import math
 from typing import Any
 
 
+def _require_utf8_text(value: str) -> None:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("stored JSON contains invalid Unicode") from exc
+
+
 def _unique_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
+        _require_utf8_text(key)
         if key in result:
             raise ValueError("duplicate stored JSON key")
         result[key] = value
@@ -29,6 +37,18 @@ def _finite_float(raw: str) -> float:
 
 def _reject_nonfinite_constant(_raw: str) -> None:
     raise ValueError("nonfinite stored JSON constant")
+
+
+def _require_utf8_tree(value: Any) -> None:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if type(current) is str:
+            _require_utf8_text(current)
+        elif type(current) is dict:
+            pending.extend(current.values())
+        elif type(current) is list:
+            pending.extend(current)
 
 
 def bounded_stored_utf8(value: str, *, max_bytes: int) -> bytes:
@@ -57,6 +77,7 @@ def load_persisted_json_object(value: str, *, max_bytes: int) -> dict[str, Any]:
         parse_float=_finite_float,
         parse_constant=_reject_nonfinite_constant,
     )
+    _require_utf8_tree(decoded)
     if type(decoded) is not dict:
         raise ValueError("stored JSON must be an object")
     return decoded
