@@ -1667,6 +1667,49 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
     assert not marker.exists()
 
 
+def test_runtime_registry_trainer_digest_drift_fails_before_process_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    worker, registry, artifact_id = _worker(
+        tmp_path,
+        trainer,
+        trainer_metadata=metadata,
+    )
+    real_get = registry.get
+    original = real_get(artifact_id)
+    drifted_record = original.model_copy(update={"sha256": "0" * 64})
+
+    def changed_get(requested_artifact_id: str) -> object:
+        if requested_artifact_id == artifact_id:
+            return drifted_record
+        return real_get(requested_artifact_id)
+
+    monkeypatch.setattr(registry, "get", changed_get)
+    materials = _resolved_materials(tmp_path)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_execution_plan_changed"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
 def test_training_runtime_registry_metadata_rejects_invalid_versions() -> None:
     missing = dict(_RUNTIME_VERSIONS)
     del missing["gguf"]
