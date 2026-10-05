@@ -11,6 +11,8 @@ on:
       - "src/nika_core/security/standing_permission.py"
       - "src/nika_core/v01_cloud_model_permission.py"
       - "src/nika_core/v01_model_settings.py"
+      - "src/nika_core/v01_settings_json.py"
+      - "src/nika_core/v01_source_settings.py"
       - "src/nika_core/v01_packaged_team_runtime.py"
       - "scripts/nika_windows.py"
       - "tests/test_model_gateway_cloud_authority.py"
@@ -19,6 +21,10 @@ on:
       - "tests/test_v01_cloud_model_permission.py"
       - "tests/test_v01_desktop_task_admission.py"
       - "tests/test_v01_model_settings.py"
+      - "tests/test_v01_model_settings_json_admission.py"
+      - "tests/test_v01_settings_json_unicode_admission.py"
+      - "tests/test_v01_source_settings.py"
+      - "tests/test_v01_source_settings_json_admission.py"
       - "tests/test_v01_packaged_cloud_authority_composition.py"
       - "tests/test_v01_packaged_runtime_cloud_authority.py"
       - "tests/test_windows_cloud_model_permission.py"
@@ -42,6 +48,8 @@ on:
       - "src/nika_core/security/standing_permission.py"
       - "src/nika_core/v01_cloud_model_permission.py"
       - "src/nika_core/v01_model_settings.py"
+      - "src/nika_core/v01_settings_json.py"
+      - "src/nika_core/v01_source_settings.py"
       - "src/nika_core/v01_packaged_team_runtime.py"
       - "scripts/nika_windows.py"
       - "tests/test_model_gateway_cloud_authority.py"
@@ -50,6 +58,10 @@ on:
       - "tests/test_v01_cloud_model_permission.py"
       - "tests/test_v01_desktop_task_admission.py"
       - "tests/test_v01_model_settings.py"
+      - "tests/test_v01_model_settings_json_admission.py"
+      - "tests/test_v01_settings_json_unicode_admission.py"
+      - "tests/test_v01_source_settings.py"
+      - "tests/test_v01_source_settings_json_admission.py"
       - "tests/test_v01_packaged_cloud_authority_composition.py"
       - "tests/test_v01_packaged_runtime_cloud_authority.py"
       - "tests/test_windows_cloud_model_permission.py"
@@ -108,6 +120,10 @@ jobs:
           tests/test_v01_cloud_model_permission.py
           tests/test_v01_desktop_task_admission.py
           tests/test_v01_model_settings.py
+          tests/test_v01_model_settings_json_admission.py
+          tests/test_v01_settings_json_unicode_admission.py
+          tests/test_v01_source_settings.py
+          tests/test_v01_source_settings_json_admission.py
           tests/test_v01_packaged_cloud_authority_composition.py
           tests/test_v01_packaged_runtime_cloud_authority.py
           tests/test_windows_cloud_model_permission.py
