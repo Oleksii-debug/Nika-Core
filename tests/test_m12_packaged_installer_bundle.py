@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 from pathlib import Path
 
 import pytest
@@ -81,6 +82,35 @@ def test_staging_canonical_installer_fails_closed_when_source_is_missing(
 
     with pytest.raises(RuntimeError, match="canonical Windows installer is missing or unsafe"):
         _stage_canonical_installer(project_root, bundle)
+
+
+def test_staging_rejects_source_changed_between_lstat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "repo"
+    scripts = project_root / "scripts"
+    scripts.mkdir(parents=True)
+    canonical = scripts / "install_nika_core.ps1"
+    canonical.write_bytes(b"original installer\n")
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+
+    real_open = os.open
+    swapped = False
+
+    def swapping_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if Path(path) == canonical and not swapped:
+            swapped = True
+            canonical.write_bytes(b"changed installer bytes\n")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    with pytest.raises(RuntimeError, match="changed during staging"):
+        _stage_canonical_installer(project_root, bundle)
+    assert not (bundle / "install_nika_core.ps1").exists()
+    assert not list(bundle.glob(".install_nika_core-*.tmp"))
 
 
 def _create_continuity_project(data_path: Path) -> None:

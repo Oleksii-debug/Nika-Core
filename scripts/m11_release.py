@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import time
@@ -71,17 +72,74 @@ def _require_exact_nonnegative_int(payload: dict[str, object], field: str) -> in
 
 
 def _stage_canonical_installer(project_root: Path, bundle_dir: Path) -> Path:
-    """Stage the canonical Windows installer inside the manifest-bound release bundle."""
+    """Stage one stable regular installer without following a mutable target."""
     source = project_root / "scripts" / _PACKAGED_INSTALLER_NAME
-    if not source.is_file() or source.is_symlink():
+    try:
+        before = source.lstat()
+    except OSError as exc:
+        raise RuntimeError(
+            f"canonical Windows installer is missing or unsafe: {source}"
+        ) from exc
+    if not stat.S_ISREG(before.st_mode):
         raise RuntimeError(f"canonical Windows installer is missing or unsafe: {source}")
-    if not bundle_dir.is_dir():
-        raise RuntimeError(f"Windows release bundle is missing: {bundle_dir}")
+    if not bundle_dir.is_dir() or bundle_dir.is_symlink():
+        raise RuntimeError(f"Windows release bundle is missing or unsafe: {bundle_dir}")
 
     target = bundle_dir / _PACKAGED_INSTALLER_NAME
     if target.is_symlink():
         raise RuntimeError(f"packaged Windows installer target is unsafe: {target}")
-    shutil.copy2(source, target)
+
+    descriptor = -1
+    temporary: Path | None = None
+    try:
+        flags = os.O_RDONLY
+        flags |= getattr(os, "O_BINARY", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_NONBLOCK", 0)
+        descriptor = os.open(source, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            != (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        ):
+            raise RuntimeError("canonical Windows installer changed during staging")
+
+        with os.fdopen(descriptor, "rb", closefd=True) as input_stream:
+            descriptor = -1
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                prefix=".install_nika_core-",
+                suffix=".tmp",
+                dir=bundle_dir,
+                delete=False,
+            ) as output:
+                temporary = Path(output.name)
+                shutil.copyfileobj(input_stream, output)
+                output.flush()
+                os.fsync(output.fileno())
+            after = os.fstat(input_stream.fileno())
+
+        current = source.lstat()
+        if (
+            not stat.S_ISREG(current.st_mode)
+            or (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+            or (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+            != (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+        ):
+            raise RuntimeError("canonical Windows installer changed during staging")
+
+        os.replace(temporary, target)
+        temporary = None
+    except OSError as exc:
+        raise RuntimeError("canonical Windows installer could not be staged safely") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
     return target
 
 
