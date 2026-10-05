@@ -294,6 +294,47 @@ def _canonical_file(path: Path, *, name: str) -> os.stat_result:
     return snapshot
 
 
+def _require_windows_pe_executable(path: Path, *, name: str) -> None:
+    before = _canonical_file(path, name=name)
+    descriptor: int | None = None
+    try:
+        flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+        flags |= int(getattr(os, "O_NOFOLLOW", 0))
+        descriptor = os.open(path, flags)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (before.st_dev, before.st_ino) != (opened.st_dev, opened.st_ino)
+        ):
+            _fail(f"{name} changed before its PE header was opened")
+        dos_header = os.read(descriptor, 64)
+        if len(dos_header) != 64 or dos_header[:2] != b"MZ":
+            _fail(f"{name} is not a valid Windows PE executable")
+        pe_offset = int.from_bytes(dos_header[60:64], "little")
+        if not 64 <= pe_offset <= 16 * 1024 * 1024:
+            _fail(f"{name} has an invalid Windows PE header offset")
+        os.lseek(descriptor, pe_offset, os.SEEK_SET)
+        signature = os.read(descriptor, 4)
+        after = os.fstat(descriptor)
+    except PhysicalEvaluationDriverError:
+        raise
+    except OSError as exc:
+        raise PhysicalEvaluationDriverError(
+            f"{name} Windows PE header could not be read"
+        ) from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    if signature != b"PE\0\0":
+        _fail(f"{name} is not a valid Windows PE executable")
+    if (
+        (opened.st_dev, opened.st_ino) != (after.st_dev, after.st_ino)
+        or opened.st_size != after.st_size
+        or getattr(opened, "st_mtime_ns", None) != getattr(after, "st_mtime_ns", None)
+    ):
+        _fail(f"{name} changed while its PE header was read")
+
+
 def _read_regular_file(path: Path, *, name: str, max_bytes: int) -> bytes:
     before = _canonical_file(path, name=name)
     if before.st_size > max_bytes:
@@ -873,6 +914,7 @@ def _register_evaluator(
     _canonical_file(executable, name="evaluator executable")
     if executable.suffix.casefold() != ".exe":
         _fail("evaluator executable must be a Windows .exe file")
+    _require_windows_pe_executable(executable, name="evaluator executable")
     command_files = evaluator.command_files
     for path in command_files:
         _canonical_file(path, name="evaluator command file")
@@ -1217,16 +1259,7 @@ def _mark_evaluation_uncertain(
             task_id=record.task_id,
             operation_type=record.operation_type,
             input_fingerprint=record.input_fingerprint,
-            created_at=record.created_at,
-        )
-    except (IdempotencyConflictError, KeyError, RuntimeError, TypeError, ValueError):
-        _LOG.exception(
-            "failed to mark interrupted physical evaluation as uncertain; "
-            "its existing ledger reservation still blocks automatic replay"
-        )
-
-
-def _canonical_report_output_path(path: Path) -> tuple[Path, os.stat_result]:
+            created_at=record.cdef _canonical_report_output_path(path: Path) -> tuple[Path, os.stat_result]:
     if type(path) is not type(Path()) or not path.is_absolute():
         _fail("physical evaluation report path must be an absolute canonical platform Path")
     parent = path.parent
@@ -1543,6 +1576,16 @@ def _write_report(path: Path, payload: dict[str, object]) -> None:
             except OSError:
                 pass
         _close_windows_stability_lock(parent_lock)
+xc:
+        raise PhysicalEvaluationDriverError(
+            "physical evaluation report could not be persisted"
+        ) from exc
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _is_windows() -> bool:
