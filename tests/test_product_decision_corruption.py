@@ -4,9 +4,10 @@ import json
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
-from nika_core.security import ApprovalAuthority
 from nika_core.product_project import (
     EvidenceRef,
     ProductDecision,
@@ -17,51 +18,6 @@ from nika_core.product_project import (
     ProductProjectSpec,
     ResearchEvidencePackage,
 )
-
-
-_TEST_APPROVAL_SECRET = b"nika-product-decision-test-authority-seed-0001"
-
-
-class _AuthorizingProductDecisionRepository(ProductDecisionRepository):
-    def __init__(self, store: SQLiteStore) -> None:
-        self._authority = ApprovalAuthority(
-            issuer_id="test-product-owner-authority",
-            secret=_TEST_APPROVAL_SECRET,
-        )
-        super().__init__(store, approval_verifier=self._authority.verifier())
-
-    def record(
-        self,
-        project_id: str,
-        decision: ProductDecision,
-        *,
-        expected_row_version: int,
-        idempotency_key: str,
-    ):
-        if decision.state is ProductDecisionState.PROPOSED:
-            return super().record(
-                project_id,
-                decision,
-                expected_row_version=expected_row_version,
-                idempotency_key=idempotency_key,
-            )
-        task_id = f"test-product-decision:{decision.decision_id}"
-        intent = self.approval_intent(
-            project_id,
-            decision,
-            expected_row_version=expected_row_version,
-            task_id=task_id,
-        )
-        request = self._authority.request(intent)
-        approval = self._authority.approve(request.request_id)
-        return super().record(
-            project_id,
-            decision,
-            expected_row_version=expected_row_version,
-            idempotency_key=idempotency_key,
-            approval=approval,
-            approval_task_id=task_id,
-        )
 
 
 def _environment(tmp_path):
@@ -89,7 +45,7 @@ def _environment(tmp_path):
             ),
         ),
     )
-    return store, _AuthorizingProductDecisionRepository(store)
+    return store, AuthorizingProductDecisionRepository(store)
 
 
 def _decision() -> ProductDecision:
