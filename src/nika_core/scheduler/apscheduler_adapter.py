@@ -168,7 +168,10 @@ class APSchedulerAdapter(SchedulerPort):
                     continue
                 if not self._task_authority_allows(current):
                     after_authority = self._jobs.get(job_id)
-                    if after_authority is not None and not _same_job_snapshot(after_authority, current):
+                    if (
+                        after_authority is not None
+                        and not _same_job_snapshot(after_authority, current)
+                    ):
                         continue
                     self._remove_runtime_job(job_id)
                     return None
