@@ -137,6 +137,10 @@ def benchmark_observations(
             result.completion_succeeded
             and result.score >= float(case.pass_score)
         )
+        if result.pass_score != float(case.pass_score):
+            raise ValueError(
+                "benchmark case pass-score evidence does not match the evaluation set"
+            )
         if result.passed is not expected_pass:
             raise ValueError(
                 "benchmark case pass evidence does not match the evaluation threshold"
