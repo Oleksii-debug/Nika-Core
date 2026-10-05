@@ -49,6 +49,7 @@ class ParsedRequest:
     step_index: int
     job_fingerprint: str
     candidate_artifact_ref: str
+    base_artifact_ref: str
     base_artifact_sha256: str
     max_steps: int
     required_consumed_materials_sha256: str
@@ -262,7 +263,10 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
     if type(base) is not dict or set(base) != {"artifact_ref", "sha256"}:
         _fail("base_artifact_invalid")
     base_sha256 = _require_sha256(base["sha256"], field="base_artifact_sha256")
-    _require_bounded_text(base["artifact_ref"], field="base_artifact_ref")
+    base_artifact_ref = _require_bounded_text(
+        base["artifact_ref"],
+        field="base_artifact_ref",
+    )
     candidate_ref = _require_bounded_text(
         job["candidate_artifact_ref"],
         field="candidate_artifact_ref",
@@ -326,6 +330,7 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
         step_index=step_index,
         job_fingerprint=job_fingerprint,
         candidate_artifact_ref=candidate_ref,
+        base_artifact_ref=base_artifact_ref,
         base_artifact_sha256=base_sha256,
         max_steps=max_steps,
         required_consumed_materials_sha256=required_attestation,
@@ -952,6 +957,8 @@ def _import_training_stack() -> tuple[Any, ...]:
     try:
         import torch
         from peft import LoraConfig, PeftModel, TaskType, get_peft_model
+        from safetensors import safe_open
+        from safetensors.torch import save_file as safe_save_file
         from transformers import (
             AutoModelForCausalLM,
             AutoTokenizer,
@@ -968,6 +975,8 @@ def _import_training_stack() -> tuple[Any, ...]:
         PeftModel,
         TaskType,
         get_peft_model,
+        safe_open,
+        safe_save_file,
         AutoModelForCausalLM,
         AutoTokenizer,
         DataCollatorForLanguageModeling,
@@ -988,6 +997,8 @@ def _train_one_step(
         PeftModel,
         TaskType,
         get_peft_model,
+        safe_open,
+        safe_save_file,
         AutoModelForCausalLM,
         AutoTokenizer,
         DataCollatorForLanguageModeling,
@@ -1125,15 +1136,28 @@ def _train_one_step(
     if candidate.exists():
         _fail("candidate_publish_conflict")
     temporary = candidate.parent / f".{_CANDIDATE_FILE}.tmp"
+    adapter_config = _adapter_config_snapshot(adapter_dir, request)
+    manifest_json = _candidate_manifest_json(
+        request=request,
+        config=config,
+        consumed=consumed,
+        adapter_config=adapter_config,
+    )
     try:
-        with adapter_file.open("rb") as src, temporary.open("xb") as dst:
-            shutil.copyfileobj(src, dst, length=_READ_CHUNK_BYTES)
-            dst.flush()
-            os.fsync(dst.fileno())
+        with safe_open(os.fspath(adapter_file), framework="pt", device="cpu") as source:
+            tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
+        if not tensors:
+            _fail("adapter_candidate_empty")
+        safe_save_file(
+            tensors,
+            os.fspath(temporary),
+            metadata={"nika_adapter_manifest": manifest_json},
+        )
+        _require_regular_unlinked(temporary, code="candidate_publish_failed")
         os.replace(temporary, candidate)
-    except FileExistsError:
-        _fail("candidate_publish_conflict")
-    except OSError:
+    except PeftTrainerError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError):
         _fail("candidate_publish_failed")
     finally:
         try:
@@ -1143,6 +1167,100 @@ def _train_one_step(
             pass
     candidate_sha256 = _sha256_file(candidate)
     return resume_state, candidate_sha256
+
+
+def _adapter_config_snapshot(path: Path, request: ParsedRequest) -> dict[str, object]:
+    config_path = path / "adapter_config.json"
+    _require_regular_unlinked(config_path, code="adapter_config_missing")
+    try:
+        with config_path.open("rb") as handle:
+            raw = handle.read(256 * 1024 + 1)
+    except OSError:
+        _fail("adapter_config_read_failed")
+    if len(raw) > 256 * 1024:
+        _fail("adapter_config_too_large")
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+        _bounded_json_tree(value)
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError):
+        _fail("adapter_config_invalid")
+    if type(value) is not dict:
+        _fail("adapter_config_invalid")
+    snapshot = dict(value)
+    snapshot["base_model_name_or_path"] = request.base_artifact_ref
+    snapshot.pop("revision", None)
+    return snapshot
+
+
+def _candidate_manifest_json(
+    *,
+    request: ParsedRequest,
+    config: TrainerConfig,
+    consumed: ConsumedMaterials,
+    adapter_config: dict[str, object],
+) -> str:
+    payload = {
+        "adapter_config": adapter_config,
+        "base_artifact_ref": request.base_artifact_ref,
+        "base_artifact_sha256": request.base_artifact_sha256,
+        "candidate_artifact_ref": request.candidate_artifact_ref,
+        "consumed_materials_sha256": consumed.attestation_sha256,
+        "job_fingerprint": request.job_fingerprint,
+        "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
+        "schema": "nika-peft-candidate-v1",
+        "step_number": request.step_index + 1,
+        "trainer_parameters": {
+            "learning_rate": config.learning_rate,
+            "lora_alpha": config.lora_alpha,
+            "lora_dropout": config.lora_dropout,
+            "lora_r": config.lora_r,
+            "lora_target_modules": list(config.lora_target_modules),
+            "max_records": config.max_records,
+            "max_sequence_length": config.max_sequence_length,
+            "seed": config.seed,
+        },
+    }
+    return _canonical_json_bytes(payload).decode("utf-8")
+
+
+def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
+    """Read and strictly validate the self-contained manifest bound into a PEFT candidate."""
+    try:
+        from safetensors import safe_open
+    except ImportError:
+        _fail("training_dependencies_unavailable")
+    path = Path(candidate_path)
+    if not path.is_absolute():
+        raise ValueError("candidate_path must be absolute")
+    _require_regular_unlinked(path, code="candidate_artifact_invalid")
+    try:
+        with safe_open(os.fspath(path), framework="pt", device="cpu") as handle:
+            metadata = handle.metadata()
+    except (OSError, RuntimeError, ValueError):
+        _fail("candidate_safetensors_invalid")
+    if type(metadata) is not dict or set(metadata) != {"nika_adapter_manifest"}:
+        _fail("candidate_manifest_missing")
+    raw = metadata["nika_adapter_manifest"]
+    if type(raw) is not str or not raw:
+        _fail("candidate_manifest_invalid")
+    try:
+        value = json.loads(
+            raw,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+        _bounded_json_tree(value)
+    except (json.JSONDecodeError, RecursionError, ValueError):
+        _fail("candidate_manifest_invalid")
+    if type(value) is not dict or value.get("schema") != "nika-peft-candidate-v1":
+        _fail("candidate_manifest_invalid")
+    if _canonical_json_bytes(value).decode("utf-8") != raw:
+        _fail("candidate_manifest_not_canonical")
+    return dict(value)
 
 
 def _response(
