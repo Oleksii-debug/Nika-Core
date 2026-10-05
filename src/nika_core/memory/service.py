@@ -107,9 +107,12 @@ class MemoryService:
             body.encode("utf-8")
         except UnicodeEncodeError as exc:
             raise ValueError("memory JSON contains invalid Unicode") from exc
+        committed_record: MemoryRecord | None = None
         with self._store.connection() as conn:
-            if expected is not _UNCONDITIONAL:
-                conn.execute("BEGIN IMMEDIATE")
+            # Every mutation that assigns updated_at shares one writer boundary.
+            # This prevents an unconditional writer from deriving a revision from a
+            # stale pre-CAS snapshot and reusing another committed revision token.
+            conn.execute("BEGIN IMMEDIATE")
             existing = conn.execute(
                 "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
                 "AND namespace = ? AND memory_key = ?",
@@ -182,10 +185,40 @@ class MemoryService:
                         "conditional": expected is not _UNCONDITIONAL,
                     },
                 )
-        record = self.get(scope=scope, owner_id=owner_id, namespace=namespace, key=key)
-        if record is None:
+            committed = conn.execute(
+                "SELECT * FROM memory_records WHERE scope = ? AND owner_id = ? "
+                "AND namespace = ? AND memory_key = ?",
+                (scope.value, owner_id, namespace, key),
+            ).fetchone()
+            if committed is None:
+                raise RuntimeError("memory record disappeared during write")
+            committed_record = _record_from_row(committed)
+            committed_expiry = committed_record.expires_at
+            if (
+                committed_expiry is not None
+                and _as_utc(committed_expiry) <= datetime.now(UTC)
+            ):
+                cursor = conn.execute(
+                    "DELETE FROM memory_records WHERE scope = ? AND owner_id = ? "
+                    "AND namespace = ? AND memory_key = ? AND updated_at = ? "
+                    "AND expires_at = ?",
+                    (
+                        scope.value,
+                        owner_id,
+                        namespace,
+                        key,
+                        committed["updated_at"],
+                        committed["expires_at"],
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise MemoryConflictError(
+                        "memory record revision changed during write finalization"
+                    )
+                committed_record = None
+        if committed_record is None:
             raise RuntimeError("memory record expired during write")
-        return record
+        return committed_record
 
     def get(
         self,
