@@ -395,3 +395,80 @@ def test_plan_rejects_noncanonical_service_collections(services: object) -> None
 def test_service_rejects_noncanonical_execution_before_plan_dispatch() -> None:
     with pytest.raises(DeploymentWaveError, match="execution spec"):
         replace(_execution("api"), execution=object())
+
+
+
+def test_restore_rejects_missing_plan_before_identity_traversal() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    corrupted_plan = replace(snapshot.plans[0], plan=None)
+    corrupted = replace(snapshot, plans=(corrupted_plan,))
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentWaveError, match="plan structure"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert executions.records["operation-api"].state is OperationState.PENDING
+
+
+def test_restore_rejects_malformed_service_record_before_field_traversal() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    corrupted_plan = replace(snapshot.plans[0], services=(object(),))
+    corrupted = replace(snapshot, plans=(corrupted_plan,))
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentWaveError, match="plan structure"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert executions.records["operation-api"].state is OperationState.PENDING
+
+
+@pytest.mark.parametrize("records", [[], (object(),)])
+def test_restore_rejects_malformed_execution_collection_before_traversal(
+    records: object,
+) -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    corrupted_execution = replace(snapshot.execution, records=records)
+    corrupted = replace(snapshot, execution=corrupted_execution)
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentWaveError, match="execution snapshot structure"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert executions.records["operation-api"].state is OperationState.PENDING
+
+
+def test_restore_rejects_execution_record_with_missing_spec_before_traversal() -> None:
+    plan = DeploymentWavePlan("plan", "social", (_execution("api"),))
+    source, _ = _coordinator()
+    source.submit(plan)
+    snapshot = source.snapshot()
+    execution_record = replace(snapshot.execution.records[0], spec=None)
+    corrupted_execution = replace(snapshot.execution, records=(execution_record,))
+    corrupted = replace(snapshot, execution=corrupted_execution)
+
+    target, executions = _coordinator()
+    target.submit(plan)
+    before = target.snapshot()
+
+    with pytest.raises(DeploymentWaveError, match="execution snapshot structure"):
+        target.restore(corrupted)
+    assert target.snapshot() == before
+    assert executions.records["operation-api"].state is OperationState.PENDING
