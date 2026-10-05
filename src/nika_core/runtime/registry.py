@@ -34,6 +34,10 @@ def _canonical_runtime_id(value: object) -> str:
         raise ValueError(
             f"runtime_id must contain at most {MAX_RUNTIME_ID_CHARS} characters"
         )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("runtime_id must be valid UTF-8") from exc
     if any(
         unicodedata.category(char) in {"Cc", "Cf", "Zl", "Zp"}
         for char in value
