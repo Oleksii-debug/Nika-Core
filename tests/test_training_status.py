@@ -68,7 +68,7 @@ def test_training_status_projects_only_bounded_checkpoint_truth(tmp_path: Path) 
     assert status.checkpoint_id == checkpoint.checkpoint_id
     rendered = status.render_text()
     assert f"Завдання: {task_id}" in rendered
-    assert "Стан: paused" in rendered
+    assert "Стан: призупинено (paused)" in rendered
     assert "Наступний крок: 2" in rendered
     assert "Обмеження доказовості:" in rendered
     assert "resume_state" not in rendered
