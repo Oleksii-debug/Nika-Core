@@ -940,3 +940,95 @@ def test_program_host_dispatches_through_existing_public_coding_worker_adapter(t
         "pytest",
         "tests/component-0",
     )
+
+
+@pytest.mark.parametrize("collision", ("task", "operation_type", "fingerprint"))
+def test_existing_foreign_worker_reservation_requires_reconciliation_before_recovery(
+    tmp_path, collision: str
+) -> None:
+    from nika_core.product_factory_program_host import _request_fingerprint
+
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+    reservation = {
+        "operation_key": operation_key,
+        "task_id": "foreign-task" if collision == "task" else task_id,
+        "operation_type": (
+            "different.operation"
+            if collision == "operation_type"
+            else "product_factory.coding_worker"
+        ),
+        "input_fingerprint": (
+            "f" * 64 if collision == "fingerprint" else _request_fingerprint(request)
+        ),
+    }
+    ledger = IdempotencyLedger(store)
+    operation, created = ledger.reserve_once(**reservation)
+    assert created
+    assert operation.status is IdempotencyStatus.PENDING
+
+    host = ProductFactoryProgramHost(store, worker)
+    outcomes = _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
+    assert outcomes[0].operation_status is IdempotencyStatus.PENDING
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
+    assert ledger.require(operation_key).status is IdempotencyStatus.PENDING
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+    restored = host.restore_latest(host_task_id=task_id, binding=binding)
+    recovery = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=restored,
+        )
+    )
+    assert recovery[0].disposition is ProgramWorkDisposition.NEEDS_RECONCILIATION
+    assert worker.dispatch_calls == []
+    assert worker.inspect_calls == []
+    assert worker.recover_calls == []
+
+
+def test_existing_matching_worker_reservation_preserves_safe_recovery(tmp_path) -> None:
+    from nika_core.product_factory_program_host import _request_fingerprint
+
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    operation_key = f"pf-worker:{request.work_id}"
+    ledger = IdempotencyLedger(store)
+    operation, created = ledger.reserve_once(
+        operation_key=operation_key,
+        task_id=task_id,
+        operation_type="product_factory.coding_worker",
+        input_fingerprint=_request_fingerprint(request),
+    )
+    assert created
+    assert operation.status is IdempotencyStatus.PENDING
+
+    outcomes = _run(
+        ProductFactoryProgramHost(store, worker).dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition is ProgramWorkDisposition.NEEDS_RECOVERY
+    assert outcomes[0].operation_status is IdempotencyStatus.PENDING
+    assert ledger.require(operation_key).status is IdempotencyStatus.PENDING
+    assert worker.dispatch_calls == []
+    assert _record(coordinator, request.component_id).state is WorkState.RUNNING
