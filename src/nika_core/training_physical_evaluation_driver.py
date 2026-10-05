@@ -23,12 +23,6 @@ from nika_core.experiments import (
     PromotionPolicy,
     SQLiteExperimentRepository,
 )
-from nika_core.runtime.idempotency import (
-    IdempotencyConflictError,
-    IdempotencyLedger,
-    IdempotencyRecord,
-    IdempotencyStatus,
-)
 from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue, TaskRecord
 from nika_core.learning_package import FrozenLearningPackage
@@ -46,6 +40,12 @@ from nika_core.model_engineering import (
 )
 from nika_core.model_engineering.experiment_bridge import build_experiment_definition
 from nika_core.model_gateway.contracts import ModelMessage, PrivacyClass, ProviderKind
+from nika_core.runtime.idempotency import (
+    IdempotencyConflictError,
+    IdempotencyLedger,
+    IdempotencyRecord,
+    IdempotencyStatus,
+)
 from nika_core.training_evaluation_binding import bind_training_result_for_evaluation
 from nika_core.training_evaluation_champion import bind_champion_for_attested_evaluation
 from nika_core.training_evaluation_champion_execution import run_attested_champion_benchmark
@@ -997,6 +997,8 @@ def _evaluation_effect_identity(
         f"sha256:{input_sha256}",
         f"nika-physical-old-new-{input_sha256}",
     )
+
+
 def _claim_evaluation_attempt(
     *,
     repository: SQLiteExperimentRepository,
@@ -1158,6 +1160,45 @@ def _reserve_evaluation_effect(
         ) from exc
 
 
+def _validate_recovered_experiment(
+    *,
+    repository: SQLiteExperimentRepository,
+    experiment_id: str,
+    champion: ModelCandidate,
+    challenger: ModelCandidate,
+    evaluation_set: EvaluationSet,
+    execution_config: BenchmarkExecutionConfig,
+    policy: PromotionPolicy,
+    permission_fingerprint: str,
+    report_payload: dict[str, object],
+) -> None:
+    expected_definition = build_experiment_definition(
+        experiment_id=experiment_id,
+        champion=champion,
+        challengers=(challenger,),
+        evaluation_set=evaluation_set,
+        execution_config=execution_config,
+        policy=policy,
+        permission_fingerprint=permission_fingerprint,
+    )
+    try:
+        snapshot = repository.get(experiment_id)
+    except KeyError as exc:
+        raise PhysicalEvaluationDriverError(
+            "completed evaluation ledger has no matching Experiment Engine state"
+        ) from exc
+    if snapshot.definition != expected_definition:
+        _fail("completed evaluation Experiment definition does not match current authority")
+    if snapshot.status not in {ExperimentStatus.COMPLETED, ExperimentStatus.PROMOTED}:
+        _fail("completed evaluation ledger points to a non-terminal Experiment snapshot")
+    if (
+        snapshot.status.value != report_payload["experiment_status"]
+        or snapshot.selected_candidate_id != report_payload["selected_candidate_id"]
+        or snapshot.previous_champion_id != report_payload["previous_champion_id"]
+    ):
+        _fail("completed evaluation ledger conflicts with terminal Experiment decision")
+
+
 def _mark_evaluation_uncertain(
     ledger: IdempotencyLedger,
     record: IdempotencyRecord,
@@ -1306,7 +1347,7 @@ async def _run_attested_comparison(
     )
     if not created:
         if reservation.status is IdempotencyStatus.COMPLETED:
-            return _validate_recovered_report_payload(
+            payload = _validate_recovered_report_payload(
                 reservation.result,
                 pilot=pilot,
                 requested_experiment_id=config.experiment_id,
@@ -1317,6 +1358,18 @@ async def _run_attested_comparison(
                 attestor_id=champion_attestor.attestor_id,
                 attestor_sha256=champion_attestor.attestor_sha256,
             )
+            _validate_recovered_experiment(
+                repository=SQLiteExperimentRepository(store),
+                experiment_id=experiment_id,
+                champion=champion,
+                challenger=challenger,
+                evaluation_set=evaluation_set,
+                execution_config=config.benchmark,
+                policy=config.policy,
+                permission_fingerprint=config.permission_fingerprint,
+                report_payload=payload,
+            )
+            return payload
         raise PhysicalEvaluationDriverError(
             "physical evaluation already has a durable "
             f"{reservation.status.value} side-effect reservation; automatic model-effect "
