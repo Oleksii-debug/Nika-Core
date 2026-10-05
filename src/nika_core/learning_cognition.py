@@ -66,6 +66,10 @@ def _normalized_statement(value: object) -> str:
     if len(value) > _MAX_STATEMENT_RAW_CHARS:
         raise ValueError("statement exceeds the pre-normalization bound")
     normalized = unicodedata.normalize("NFC", value)
+    try:
+        normalized.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError("statement must be valid UTF-8 text") from exc
     if not normalized.strip():
         raise ValueError("statement must not be empty")
     if len(normalized) > _MAX_STATEMENT_CHARS:
