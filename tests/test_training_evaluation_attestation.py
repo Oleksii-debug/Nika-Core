@@ -32,6 +32,7 @@ _ATTESTOR_SHA256 = _sha(b"attestor")
 _CHALLENGER_SHA256 = _sha(b"challenger")
 _DESCRIPTOR_SHA256 = _sha(b"descriptor")
 _REGISTRY_KEY = _sha(b"registry")
+_EVALUATION_SET_SHA256 = _sha(b"evaluation")
 
 
 def _binding() -> TrainingEvaluationBinding:
@@ -45,7 +46,7 @@ def _binding() -> TrainingEvaluationBinding:
         challenger_sha256=_CHALLENGER_SHA256,
         candidate_artifact_ref="models/candidate/job-1",
         frozen_package_sha256=_sha(b"package"),
-        evaluation_set_sha256=_sha(b"evaluation"),
+        evaluation_set_sha256=_EVALUATION_SET_SHA256,
         descriptor_digest=_DESCRIPTOR_SHA256,
         descriptor_registry_key=_REGISTRY_KEY,
         challenger_size_bytes=123,
@@ -57,6 +58,7 @@ def _request(
     provider_id: str = "ollama",
     model: str = "candidate-model",
     candidate_id: str = "models/candidate/job-1",
+    evaluation_set_sha256: str = _EVALUATION_SET_SHA256,
     fallbacks: tuple[str, ...] = (),
 ) -> ModelRequest:
     return ModelRequest(
@@ -67,7 +69,10 @@ def _request(
         provider_kind=ProviderKind.LOCAL,
         fallback_provider_ids=fallbacks,
         privacy=PrivacyClass.PRIVATE,
-        metadata={"model_candidate_id": candidate_id},
+        metadata={
+            "model_candidate_id": candidate_id,
+            "evaluation_set_sha256": evaluation_set_sha256,
+        },
     )
 
 
@@ -212,6 +217,21 @@ async def test_candidate_identity_mismatch_is_rejected_before_effect() -> None:
     with pytest.raises(ModelGatewayError) as exc_info:
         await gateway.complete(_request(candidate_id="different-candidate"))
 
+    assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
+    assert port.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_evaluation_set_identity_mismatch_is_rejected_before_effect() -> None:
+    port = _EffectPort()
+    gateway = _gateway(port)
+
+    with pytest.raises(ModelGatewayError) as exc_info:
+        await gateway.complete(
+            _request(evaluation_set_sha256=_sha(b"different-held-out"))
+        )
+
+    assert exc_info.value.code is ModelErrorCode.INVALID_REQUEST
     assert exc_info.value.failure_effect is ModelFailureEffect.NO_EFFECT
     assert port.calls == 0
 
