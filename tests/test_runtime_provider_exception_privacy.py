@@ -63,7 +63,7 @@ def _ready(tmp_path):
 
 @pytest.mark.parametrize("error_type", [OSError, RuntimeError, _UnprintableProviderError])
 def test_runtime_start_never_projects_provider_exception_text(tmp_path, error_type):
-    store, queue, task_id, audit, coordinator = _ready(tmp_path)
+    _store, queue, task_id, audit, coordinator = _ready(tmp_path)
     runtime = _FaultingRuntime(error_type)
 
     result = asyncio.run(coordinator.start(runtime, RuntimeRequest(task_id, "private-thread")))

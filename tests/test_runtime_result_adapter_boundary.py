@@ -27,7 +27,6 @@ from nika_core.runtime.idempotency import (
     IdempotencyStatus,
 )
 
-
 _PRIVATE_MARKER = "SYNTHETIC_UNTRUSTED_ADAPTER_SECRET"
 
 
