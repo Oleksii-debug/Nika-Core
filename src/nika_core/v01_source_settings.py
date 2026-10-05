@@ -209,7 +209,9 @@ class V01SourceSettings:
         try:
             raw = bounded_stored_utf8(body, max_bytes=_MAX_STORED_SOURCE_JSON_BYTES)
         except (TypeError, ValueError) as exc:
-            raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.") from exc
+            raise SourceSetupError(
+                "Збережену конфігурацію завдання не вдалося перевірити."
+            ) from exc
         if hashlib.sha256(raw).hexdigest() != selection_id:
             raise SourceSetupError("Збережену конфігурацію завдання не вдалося перевірити.")
         return SourceSelection.from_stored(body)
