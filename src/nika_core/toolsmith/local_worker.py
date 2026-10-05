@@ -6,6 +6,7 @@ import json
 import os
 import pathlib
 import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -63,6 +64,102 @@ _MAX_STATE_BYTES = 1024 * 1024
 
 class ContainedLocalWorkerError(RuntimeError):
     """Raised when local CodingWorker authority cannot be proven safely."""
+
+
+class _JobExecutionLock:
+    """Cross-instance/process single-flight lock for one deterministic job root."""
+
+    def __init__(self, job_root: pathlib.Path) -> None:
+        self._path = job_root / "_nika_execution.lock"
+        self._fd: int | None = None
+
+    @staticmethod
+    def _is_reparse(file_stat: os.stat_result) -> bool:
+        attributes = getattr(file_stat, "st_file_attributes", 0)
+        flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        return bool(flag and attributes & flag)
+
+    def acquire(self) -> bool:
+        if self._fd is not None:
+            raise ContainedLocalWorkerError("job execution lock is already acquired")
+        try:
+            existing = self._path.lstat()
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            raise ContainedLocalWorkerError("unable to inspect job execution lock") from exc
+        if existing is not None and (
+            not stat.S_ISREG(existing.st_mode) or self._is_reparse(existing)
+        ):
+            raise ContainedLocalWorkerError("job execution lock path is unsafe")
+
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_NOINHERIT", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self._path, flags, 0o600)
+        except OSError as exc:
+            raise ContainedLocalWorkerError("unable to open job execution lock") from exc
+        try:
+            opened = os.fstat(fd)
+            if not stat.S_ISREG(opened.st_mode) or self._is_reparse(opened):
+                raise ContainedLocalWorkerError("job execution lock descriptor is unsafe")
+            if os.name == "nt":
+                import msvcrt
+
+                if opened.st_size < 1:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.write(fd, b"\0")
+                    os.fsync(fd)
+                os.lseek(fd, 0, os.SEEK_SET)
+                try:
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                except OSError:
+                    os.close(fd)
+                    return False
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    os.close(fd)
+                    return False
+            self._fd = fd
+            return True
+        except Exception:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            raise
+
+    def release(self) -> None:
+        fd = self._fd
+        if fd is None:
+            return
+        self._fd = None
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                try:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                except OSError:
+                    pass
+        finally:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -500,8 +597,10 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
 
     def ensure_workspace_root(self, job_id: str) -> pathlib.Path:
         root = self.workspace_root_for(job_id)
-        if not root.exists():
+        try:
             root.mkdir(parents=False, exist_ok=False)
+        except FileExistsError:
+            pass
         return ensure_real_directory_root(root, label="contained worker job root")
 
     def repository_tree_digest(self, repository_id: str, base_sha: str) -> str:
@@ -744,7 +843,20 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 )
             self._active[exact.job_id] = cancellation
 
+        process_lock: _JobExecutionLock | None = None
         try:
+            try:
+                process_lock = _JobExecutionLock(self.ensure_workspace_root(exact.job_id))
+                if not process_lock.acquire():
+                    return self._failure(
+                        exact.job_id,
+                        WorkerFailureKind.INVALID_REQUEST,
+                        "local coding job is already active in another worker or process",
+                        retryable=False,
+                    )
+            except (ValueError, WorkspaceSecurityError, ContainedLocalWorkerError):
+                return self._manual_reconcile(exact.job_id)
+
             try:
                 prior = self._load_state(exact.job_id)
             except ContainedLocalWorkerError:
@@ -802,6 +914,8 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             cancellation.set()
             raise
         finally:
+            if process_lock is not None:
+                process_lock.release()
             with self._active_lock:
                 self._active.pop(exact.job_id, None)
 
