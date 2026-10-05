@@ -503,18 +503,51 @@ class StandingPermissionStore:
         instant = _utc(revoked_at or datetime.now(UTC), "revoked_at")
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            current = self._require(conn, permission_id)
-            if current.revoked_at is not None:
-                return current
-            if instant < current.granted_at:
-                raise ValueError("revocation time cannot precede grant time")
-            conn.execute(
-                "UPDATE standing_permissions SET revoked_at = ? WHERE permission_id = ?",
-                (instant.isoformat(), permission_id),
+            return self._revoke_with_connection(
+                conn,
+                permission_id=permission_id,
+                instant=instant,
             )
-            revoked = self._require(conn, permission_id)
-            self._audit(conn, "standing_permission.revoked", revoked)
-            return revoked
+
+    @contextmanager
+    def revoke_transaction(
+        self,
+        permission_id: str,
+        *,
+        revoked_at: datetime | None = None,
+    ) -> Iterator[tuple[_StandingPermissionTransaction, StoredStandingPermission]]:
+        """Revoke while a dependent binding precondition shares the same write lock."""
+
+        _permission_id(permission_id)
+        instant = _utc(revoked_at or datetime.now(UTC), "revoked_at")
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            revoked = self._revoke_with_connection(
+                conn,
+                permission_id=permission_id,
+                instant=instant,
+            )
+            yield _StandingPermissionTransaction(conn), revoked
+
+    def _revoke_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        permission_id: str,
+        instant: datetime,
+    ) -> StoredStandingPermission:
+        current = self._require(conn, permission_id)
+        if current.revoked_at is not None:
+            return current
+        if instant < current.granted_at:
+            raise ValueError("revocation time cannot precede grant time")
+        conn.execute(
+            "UPDATE standing_permissions SET revoked_at = ? WHERE permission_id = ?",
+            (instant.isoformat(), permission_id),
+        )
+        revoked = self._require(conn, permission_id)
+        self._audit(conn, "standing_permission.revoked", revoked)
+        return revoked
 
     def authorize(
         self,
