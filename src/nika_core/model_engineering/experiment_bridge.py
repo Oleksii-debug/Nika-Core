@@ -19,6 +19,8 @@ from nika_core.model_engineering.contracts import (
     EvaluationSet,
     ModelCandidate,
     validate_candidate_benchmark_report,
+    validate_evaluation_set,
+    validate_model_candidate,
 )
 
 QUALITY_METRIC = "model_quality_score"
@@ -51,18 +53,18 @@ def build_experiment_definition(
         raise TypeError("experiment_id must be canonical text")
     if not experiment_id or experiment_id != experiment_id.strip():
         raise ValueError("experiment_id must be non-empty without surrounding whitespace")
-    if type(champion) is not ModelCandidate:
-        raise TypeError("champion must be an exact ModelCandidate")
+    validate_model_candidate(champion)
     if type(challengers) is not tuple:
         raise TypeError("challengers must be a canonical tuple")
-    if any(type(candidate) is not ModelCandidate for candidate in challengers):
-        raise TypeError("challengers must use exact ModelCandidate values")
-    if type(evaluation_set) is not EvaluationSet:
-        raise TypeError("evaluation_set must be an exact EvaluationSet")
+    for candidate in challengers:
+        validate_model_candidate(candidate)
+    validate_evaluation_set(evaluation_set)
     if type(execution_config) is not BenchmarkExecutionConfig:
         raise TypeError("execution_config must be an exact BenchmarkExecutionConfig")
+    BenchmarkExecutionConfig.__post_init__(execution_config)
     if type(policy) is not PromotionPolicy:
         raise TypeError("policy must be an exact PromotionPolicy")
+    PromotionPolicy.__post_init__(policy)
     if type(permission_fingerprint) is not str:
         raise TypeError("permission_fingerprint must be canonical text")
     if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
@@ -109,8 +111,11 @@ def benchmark_observations(
         raise TypeError("report must be an exact CandidateBenchmarkReport")
     if type(definition) is not ExperimentDefinition:
         raise TypeError("definition must be an exact ExperimentDefinition")
-    if type(evaluation_set) is not EvaluationSet:
-        raise TypeError("evaluation_set must be an exact EvaluationSet")
+    validate_evaluation_set(evaluation_set)
+    validate_candidate_benchmark_report(report)
+    if type(definition.policy) is not PromotionPolicy:
+        raise TypeError("definition policy must be an exact PromotionPolicy")
+    PromotionPolicy.__post_init__(definition.policy)
     if evaluation_set.purpose is not EvaluationPurpose.HELD_OUT:
         raise ValueError("model promotion observations require held-out evidence")
     metrics = _validate_policy_metrics(definition.policy)
