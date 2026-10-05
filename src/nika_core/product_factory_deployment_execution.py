@@ -12,8 +12,13 @@ from nika_core.product_factory_deployment import (
     DeploymentIntent,
     DeploymentRecord,
     DeploymentState,
+    EnvironmentIdentity,
+    EnvironmentTier,
     ExecutionNodeRegistry,
     ExecutionRequest,
+    Platform,
+    ReleaseRef,
+    ResourceEnvelope,
     WorkLease,
 )
 
@@ -50,8 +55,8 @@ class DeploymentExecutionSpec:
     node_lease_seconds: int = 300
 
     def __post_init__(self) -> None:
-        if type(self.request) is not ExecutionRequest or type(self.intent) is not DeploymentIntent:
-            raise DeploymentExecutionError("invalid deployment request or intent")
+        _validate_execution_request(self.request)
+        _validate_deployment_intent(self.intent)
         if any(
             type(value) is not str or not value.strip()
             for value in (
@@ -304,6 +309,22 @@ class DeploymentExecutionCoordinator:
                 and type(record.deployment_state) is not DeploymentState
             ):
                 raise DeploymentExecutionError("invalid snapshot deployment state")
+            expected_deployment_state = {
+                OperationState.RECONCILE_REQUIRED: DeploymentState.UNCERTAIN,
+                OperationState.SUCCEEDED: DeploymentState.HEALTHY,
+                OperationState.REJECTED: DeploymentState.REJECTED,
+                OperationState.ROLLED_BACK: DeploymentState.ROLLED_BACK,
+            }.get(record.state)
+            if (
+                expected_deployment_state is None
+                and record.deployment_state is not None
+            ) or (
+                expected_deployment_state is not None
+                and record.deployment_state is not expected_deployment_state
+            ):
+                raise DeploymentExecutionError(
+                    "snapshot deployment state does not match operation state"
+                )
             if type(record.updated_at) is not datetime:
                 raise DeploymentExecutionError("invalid snapshot update timestamp")
             _aware(record.updated_at)
@@ -361,6 +382,79 @@ class DeploymentExecutionCoordinator:
     def _save(self, record: DeploymentExecutionRecord) -> DeploymentExecutionRecord:
         self._records[record.spec.operation_id] = record
         return record
+
+
+def _validate_execution_request(request: ExecutionRequest) -> None:
+    if type(request) is not ExecutionRequest:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    if any(
+        type(value) is not str or not value.strip()
+        for value in (request.project_id, request.work_id)
+    ):
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    if type(request.platform) is not Platform:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    for values in (request.required_features, request.required_toolchains):
+        if type(values) is not frozenset or any(
+            type(value) is not str or not value.strip() for value in values
+        ):
+            raise DeploymentExecutionError("invalid deployment request or intent")
+    if type(request.resources) is not ResourceEnvelope:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    resource_values = (
+        request.resources.cpu_cores,
+        request.resources.memory_mb,
+        request.resources.disk_mb,
+    )
+    if any(type(value) is not int or value <= 0 for value in resource_values):
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    if type(request.require_gpu) is not bool:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+
+
+def _validate_deployment_intent(intent: DeploymentIntent) -> None:
+    if type(intent) is not DeploymentIntent:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    if any(
+        type(value) is not str or not value.strip()
+        for value in (intent.intent_id, intent.project_id)
+    ):
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    if type(intent.environment) is not EnvironmentIdentity:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    environment = intent.environment
+    if any(
+        type(value) is not str or not value.strip()
+        for value in (
+            environment.environment_id,
+            environment.project_id,
+            environment.provider_ref,
+        )
+    ) or type(environment.tier) is not EnvironmentTier:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    if type(intent.release) is not ReleaseRef:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    release = intent.release
+    if any(
+        type(value) is not str or not value.strip()
+        for value in (release.project_id, release.version)
+    ):
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    if type(release.source_sha) is not str or type(release.artifact_digest) is not str:
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    try:
+        release.__post_init__()
+    except (DeploymentFabricError, AttributeError, TypeError, ValueError) as exc:
+        raise DeploymentExecutionError("invalid deployment request or intent") from exc
+    if type(intent.migration_refs) is not tuple or any(
+        type(value) is not str or not value.strip() for value in intent.migration_refs
+    ):
+        raise DeploymentExecutionError("invalid deployment request or intent")
+    if (
+        intent.project_id != environment.project_id
+        or intent.project_id != release.project_id
+    ):
+        raise DeploymentExecutionError("invalid deployment request or intent")
 
 
 def _aware(value: datetime) -> datetime:
