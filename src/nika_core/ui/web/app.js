@@ -107,6 +107,7 @@
   const taskMutationActions = new Set(["task.create", "task.pause", "task.resume", "agent.stop"]);
   const inFlightActions = new Set();
   let keymapMutationPending = false;
+  let stateReadGeneration = 0;
   let bridgeInitializationStarted = false;
   let statePollHandle = null;
   let teamStateSignature = null;
@@ -566,6 +567,7 @@
   });
 
   async function refreshState({ announceTeamTransitions = true } = {}) {
+    const readGeneration = ++stateReadGeneration;
     const autostartReadGeneration = autostartGeneration;
     if (!globalThis.pywebview?.api?.get_state) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
@@ -576,10 +578,12 @@
     try {
       response = await globalThis.pywebview.api.get_state();
     } catch {
+      if (readGeneration !== stateReadGeneration) return null;
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
       return false;
     }
+    if (readGeneration !== stateReadGeneration) return null;
     if (!response?.ok) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       reportStateUnavailable();
@@ -622,6 +626,7 @@
       return;
     }
     inFlightActions.add(lockKey);
+    if (durableMutation) stateReadGeneration += 1;
     let keepLocked = false;
     const reconcileUncertain = async (message) => {
       announce(message, true);
@@ -858,8 +863,9 @@
   function startStatePolling() {
     if (statePollHandle !== null || typeof window.setInterval !== "function") return;
     statePollHandle = window.setInterval(async () => {
-      if (document.hidden) return;
+      if (document.hidden || inFlightActions.size > 0) return;
       const ready = await refreshState();
+      if (ready === null) return;
       document.documentElement.dataset.nikaReady = ready ? "true" : "false";
     }, 1500);
   }
