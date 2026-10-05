@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
@@ -116,3 +117,88 @@ def test_json_escaped_invalid_unicode_fails_before_sqlite(
 def test_valid_json_escaped_surrogate_pair_is_accepted(keymap: Keymap) -> None:
     keymap.import_json(r'{"format_version":1,"bindings":{},"note":"\ud83d\ude00"}')
     assert keymap.resolve("test.first") == "Ctrl+1"
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "Ctrl+\x00K",
+        "Ctrl+\x85K",
+        "Ctrl+\n+K",
+        "Ctrl+\u202eK",
+        "Ctrl+\u200dK",
+        "Ctrl+\ud800K",
+    ],
+)
+def test_invalid_direct_shortcut_is_rejected_before_sqlite(
+    keymap: Keymap, binding: str
+) -> None:
+    with pytest.raises(ValueError, match="shortcut binding"):
+        keymap.set_binding("test.first", binding)
+    assert keymap.resolve("test.first") == "Ctrl+1"
+    with keymap._store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM keymap_overrides").fetchone()[0] == 0
+
+
+def test_nontext_direct_binding_is_a_controlled_error(keymap: Keymap) -> None:
+    with pytest.raises(TypeError, match="shortcut binding must be text"):
+        keymap.set_binding("test.first", 1)  # type: ignore[arg-type]
+    assert keymap.resolve("test.first") == "Ctrl+1"
+
+
+def test_valid_ukrainian_primary_key_remains_supported(keymap: Keymap) -> None:
+    keymap.set_binding("test.first", "Shift+Control+Ї")
+    assert keymap.resolve("test.first") == "Ctrl+Shift+Ї"
+
+
+def test_corrupt_persisted_binding_blocks_read_and_mutation(keymap: Keymap) -> None:
+    with keymap._store.connection() as conn:
+        conn.execute(
+            "INSERT INTO keymap_overrides(action_id, binding, updated_at) VALUES (?, ?, ?)",
+            ("test.first", "Ctrl+\x00K", "corrupt"),
+        )
+    with pytest.raises(ValueError, match="unsupported control characters"):
+        keymap.resolve("test.first")
+    with pytest.raises(ValueError, match="unsupported control characters"):
+        keymap.set_binding("test.second", "Ctrl+K")
+    with keymap._store.connection() as conn:
+        rows = conn.execute("SELECT action_id, binding FROM keymap_overrides").fetchall()
+    assert [(row["action_id"], row["binding"]) for row in rows] == [
+        ("test.first", "Ctrl+\x00K")
+    ]
+
+
+def test_corrupt_persisted_action_identity_cannot_be_coerced_away(
+    keymap: Keymap,
+) -> None:
+    with keymap._store.connection() as conn:
+        conn.execute(
+            "INSERT INTO keymap_overrides(action_id, binding, updated_at) VALUES (?, ?, ?)",
+            (sqlite3.Binary(b"test.first"), "Ctrl+K", "corrupt"),
+        )
+    with pytest.raises(TypeError, match="stored keymap action ID must be text"):
+        keymap.export_json()
+    with pytest.raises(TypeError, match="stored keymap action ID must be text"):
+        keymap.import_json('{"format_version":1,"bindings":{"test.second":"Ctrl+K"}}')
+    with keymap._store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM keymap_overrides").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("binding", ["Ctrl+" + "K" * 252, "Ctrl+" + "ї" * 126])
+def test_oversized_direct_binding_is_rejected_without_sqlite_effect(
+    keymap: Keymap, binding: str
+) -> None:
+    with pytest.raises(ValueError, match="shortcut binding exceeds the byte limit"):
+        keymap.set_binding("test.first", binding)
+    assert keymap.resolve("test.first") == "Ctrl+1"
+    with keymap._store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM keymap_overrides").fetchone()[0] == 0
+
+
+def test_oversized_imported_binding_is_rejected_without_sqlite_effect(keymap: Keymap) -> None:
+    payload = json.dumps({"format_version": 1, "bindings": {"test.first": "K" * 257}})
+    with pytest.raises(ValueError, match="shortcut binding exceeds the byte limit"):
+        keymap.import_json(payload)
+    assert keymap.resolve("test.first") == "Ctrl+1"
+    with keymap._store.connection() as conn:
+        assert conn.execute("SELECT COUNT(*) FROM keymap_overrides").fetchone()[0] == 0
