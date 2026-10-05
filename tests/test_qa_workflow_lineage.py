@@ -119,6 +119,8 @@ def test_m11_runs_all_release_boundary_regressions() -> None:
         "tests/test_m11_m12_release.py",
         "tests/test_m5_shell_required_assets.py",
         "tests/test_qa_workflow_lineage.py",
+        "tests/test_release_archive_windows_safety.py",
+        "tests/test_release_manifest_integrity.py",
         "tests/test_release_special_bundle_entries.py",
         "tests/test_windows_packaging_ancestor_links.py",
         "tests/test_windows_packaging_input_safety.py",
