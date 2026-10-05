@@ -21,7 +21,7 @@ from nika_core.model_artifacts import (
     ModelIntegrityBasis,
 )
 from nika_core.research.blobs import ContentAddressedBlobStore
-from nika_core.resources import PsutilResourceObserver, ResourceBudget, ResourceManager
+from nika_core.resources import ResourceBudget, ResourceManager
 from nika_core.training_adapters import SubprocessTrainingWorker
 from nika_core.training_materials import ResolvedTrainingPackage, resolve_training_materials
 from nika_core.training_peft_worker import (
@@ -495,6 +495,12 @@ def _resource_manager(
     owner_id: str,
     config: ResourceBudgetConfig,
 ) -> ResourceManager:
+    try:
+        from nika_core.resources import PsutilResourceObserver
+    except ImportError as exc:
+        raise PhysicalPilotDriverError(
+            "physical pilot resource observer dependency is unavailable"
+        ) from exc
     resources = ResourceManager(store, PsutilResourceObserver())
     resources.set_budget(
         ResourceBudget(
