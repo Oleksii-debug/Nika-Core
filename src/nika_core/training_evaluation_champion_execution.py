@@ -64,7 +64,7 @@ def _expected_request_id(
 
 def _receipt_payload(receipt: AttestedCaseReceipt) -> dict[str, str]:
     item = receipt.revalidated()
-    return {
+    payload = {
         "schema": "nika-attested-champion-case-v1",
         "case_id": item.case_id,
         "request_id": item.request_id,
@@ -76,6 +76,9 @@ def _receipt_payload(receipt: AttestedCaseReceipt) -> dict[str, str]:
         "attestor_id": item.attestor_id,
         "attestor_sha256": item.attestor_sha256,
     }
+    if item.provider_manifest_sha256 is not None:
+        payload["provider_manifest_sha256"] = item.provider_manifest_sha256
+    return payload
 
 
 def _payload_sha256(payload: dict[str, object]) -> str:
@@ -150,6 +153,8 @@ class AttestedChampionBenchmarkResult:
             raise ValueError("attested receipt case order does not match benchmark report")
         if len({item.request_id for item in receipts}) != len(receipts):
             raise ValueError("attested receipt request identities must be unique")
+        if len({item.provider_manifest_sha256 for item in receipts}) > 1:
+            raise ValueError("provider manifest changed across attested champion benchmark")
         for receipt in receipts:
             if receipt.request_id != _expected_request_id(
                 run_id=self.report.run.run_id,
@@ -191,6 +196,13 @@ class AttestedChampionBenchmarkResult:
                 "attested champion benchmark fields are incomplete"
             ) from exc
 
+    @property
+    def provider_manifest_sha256(self) -> str | None:
+        result = self.revalidated()
+        if not result.case_receipts:
+            return None
+        return result.case_receipts[0].provider_manifest_sha256
+
     def evidence_payload(self) -> dict[str, object]:
         result = self.revalidated()
         receipt_payloads: list[dict[str, object]] = []
@@ -198,7 +210,7 @@ class AttestedChampionBenchmarkResult:
             payload: dict[str, object] = _receipt_payload(receipt)
             payload["receipt_sha256"] = _payload_sha256(payload)
             receipt_payloads.append(payload)
-        return {
+        payload: dict[str, object] = {
             "schema": "nika-attested-champion-benchmark-v1",
             "job_id": result.binding.job_id,
             "training_binding_sha256": result.binding.training_binding_sha256,
@@ -214,6 +226,14 @@ class AttestedChampionBenchmarkResult:
             "case_count": len(result.report.case_results),
             "case_receipts": receipt_payloads,
         }
+        provider_manifest_sha256 = (
+            result.case_receipts[0].provider_manifest_sha256
+            if result.case_receipts
+            else None
+        )
+        if provider_manifest_sha256 is not None:
+            payload["provider_manifest_sha256"] = provider_manifest_sha256
+        return payload
 
     @property
     def evidence_sha256(self) -> str:
