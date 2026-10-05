@@ -4,6 +4,8 @@ import json
 
 import pytest
 
+from product_decision_authority_support import AuthorizingProductDecisionRepository
+
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_decisions import ProductDecisionRepository
 from nika_core.product_project import (
@@ -123,7 +125,7 @@ def test_formal_handoff_without_matching_integrity_seal_fails_closed(
                 (json.dumps(payload), row["event_id"]),
             )
 
-    decisions = ProductDecisionRepository(store)
+    decisions = AuthorizingProductDecisionRepository(store)
     decision = ProductDecision(
         decision_id="decision-1",
         option_id="option-1",
