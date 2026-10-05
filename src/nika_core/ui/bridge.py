@@ -42,7 +42,7 @@ class UIActionBridge:
             return UIResult(
                 request_id=self._rejected_request_id(raw),
                 status="rejected",
-                message=f"Invalid UI command: {exc.errors()[0]['msg']}",
+                message="Некоректна команда інтерфейсу.",
             ).model_dump()
 
         try:
@@ -51,7 +51,7 @@ class UIActionBridge:
             return UIResult(
                 request_id=command.request_id,
                 status="rejected",
-                message=f"Unknown action: {command.action_id}",
+                message="Невідома дія інтерфейсу.",
             ).model_dump()
 
         handler = self._handlers.get(command.action_id)
@@ -59,7 +59,7 @@ class UIActionBridge:
             return UIResult(
                 request_id=command.request_id,
                 status="rejected",
-                message=f"Action is not available in this UI context: {command.action_id}",
+                message="Ця дія недоступна в поточному контексті.",
             ).model_dump()
 
         try:
@@ -127,7 +127,7 @@ class UIActionBridge:
 
     def get_state(self) -> dict[str, Any]:
         if self._state_provider is None:
-            return {"ok": False, "message": "Desktop state provider is unavailable."}
+            return {"ok": False, "message": "Джерело стану програми недоступне."}
         try:
             state = dict(self._state_provider())
         except (KeyError, TypeError, ValueError) as exc:
