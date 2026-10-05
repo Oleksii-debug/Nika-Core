@@ -145,7 +145,9 @@ class WebCommand:
         if type(value) is not dict:
             raise ValueError("command must be an exact object")
         allowed = {"request_id", "action_id", "payload"}
-        keys = list(value)
+        if len(value) != len(allowed):
+            raise ValueError("command must contain exactly request_id, action_id and payload")
+        keys = tuple(value)
         if any(type(key) is not str for key in keys):
             raise ValueError("command keys must be exact strings")
         if set(keys) != allowed:
