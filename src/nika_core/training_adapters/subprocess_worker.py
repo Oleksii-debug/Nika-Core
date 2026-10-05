@@ -374,6 +374,7 @@ def _job_identity(
         "owner_id": spec.owner_id,
         "project_id": spec.project_id,
         "resource_scope": spec.resource_scope,
+        "scale_authorization_sha256": spec.scale_authorization_sha256,
         "task_id": spec.task_id,
         "training_material_sha256": spec.training_material_sha256,
     }
@@ -426,7 +427,7 @@ def _job_fingerprint(
         label="training_job_identity",
         effect=TrainingWorkerFailureEffect.NO_EFFECT,
     )
-    return hashlib.sha256(b"nika-training-job-v3\x00" + identity).hexdigest()
+    return hashlib.sha256(b"nika-training-job-v4\x00" + identity).hexdigest()
 
 
 def _step_id(job_fingerprint: str, trainer_sha256: str, step_index: int) -> str:
@@ -461,6 +462,7 @@ def _snapshot_spec(spec: TrainingJobSpec) -> TrainingJobSpec:
             ),
             frozen_package_sha256=spec.frozen_package_sha256,
             training_material_sha256=spec.training_material_sha256,
+            scale_authorization_sha256=spec.scale_authorization_sha256,
             candidate_artifact_ref=spec.candidate_artifact_ref,
             max_steps=spec.max_steps,
             resource_scope=spec.resource_scope,

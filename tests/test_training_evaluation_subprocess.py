@@ -75,6 +75,7 @@ def _binding(descriptor: ModelArtifactDescriptor) -> TrainingEvaluationBinding:
         challenger_sha256=descriptor.sha256,
         candidate_artifact_ref="models/candidate/job-1",
         frozen_package_sha256=_sha(b"package"),
+        scale_authorization_sha256=_sha(b"scale-authorization"),
         execution_plan_sha256=_sha(b"training-execution-plan"),
         evaluation_set_sha256=_HELD_OUT_SHA256,
         base_descriptor_digest=_sha(b"base-descriptor"),
