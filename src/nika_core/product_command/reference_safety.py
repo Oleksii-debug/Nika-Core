@@ -60,7 +60,7 @@ def _is_sensitive(reference: str) -> bool:
         if _contains_sensitive_marker(form_decoded):
             return True
 
-        if "://" in normalized:
+        if "://" in normalized or normalized.startswith("//"):
             try:
                 if urlsplit(normalized).username is not None:
                     return True
