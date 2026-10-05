@@ -168,21 +168,89 @@ def _sections(text: str) -> tuple[dict[str, str], tuple[str, ...]]:
     return parsed, tuple(duplicates)
 
 
+def _windows_verbatim_path(target: Path) -> str:
+    absolute = os.path.abspath(os.fspath(target))
+    if absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + absolute[2:]
+    return "\\\\?\\" + absolute
+
+
+def _open_notices_descriptor(target: Path) -> int:
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        generic_read = 0x80000000
+        share_read_write_delete = 0x00000001 | 0x00000002 | 0x00000004
+        open_existing = 3
+        file_attribute_normal = 0x00000080
+        file_flag_open_reparse_point = 0x00200000
+        handle = create_file(
+            _windows_verbatim_path(target),
+            generic_read,
+            share_read_write_delete,
+            None,
+            open_existing,
+            file_attribute_normal | file_flag_open_reparse_point,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            error = ctypes.get_last_error()
+            raise OSError(error, "unable to open third-party notice evidence", str(target))
+        try:
+            return msvcrt.open_osfhandle(
+                handle,
+                os.O_RDONLY | getattr(os, "O_BINARY", 0),
+            )
+        except BaseException:
+            close_handle(handle)
+            raise
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
+    return os.open(target, flags)
+
+
 def _read_notices(target: Path) -> str | None:
     """Admit only bounded, regular, stable UTF-8 license evidence."""
+    descriptor = -1
     try:
         before = target.lstat()
         if not stat.S_ISREG(before.st_mode) or before.st_size > _MAX_NOTICES_BYTES:
             return None
-        with target.open("rb") as source:
-            opened = os.fstat(source.fileno())
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
-                or (opened.st_size, opened.st_mtime_ns)
-                != (before.st_size, before.st_mtime_ns)
-            ):
-                return None
+        descriptor = _open_notices_descriptor(target)
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+            or (opened.st_size, opened.st_mtime_ns)
+            != (before.st_size, before.st_mtime_ns)
+        ):
+            return None
+        with os.fdopen(descriptor, "rb", closefd=True) as source:
+            descriptor = -1
             data = source.read(_MAX_NOTICES_BYTES + 1)
             after = os.fstat(source.fileno())
         current = target.lstat()
@@ -199,6 +267,9 @@ def _read_notices(target: Path) -> str | None:
         return data.decode("utf-8")
     except (OSError, UnicodeError):
         return None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def verify_third_party_notices(bundle_dir: Path) -> tuple[str, ...]:
