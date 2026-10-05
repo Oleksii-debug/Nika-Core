@@ -125,6 +125,8 @@ def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) ->
     if os.name == "nt" and job.active:
         job.close()
         return
+    if process.poll() is not None:
+        return
     if os.name != "nt":
         try:
             os.killpg(process.pid, signal.SIGKILL)
@@ -133,8 +135,6 @@ def terminate_process_tree(process: subprocess.Popen[bytes], job: WindowsJob) ->
             return
         except OSError:
             pass
-    if process.poll() is not None:
-        return
     try:
         process.kill()
     except OSError:
