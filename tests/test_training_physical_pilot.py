@@ -307,6 +307,26 @@ def test_report_round_trip_is_canonical_and_digest_stable(tmp_path: Path) -> Non
     )
 
 
+def test_report_from_json_rejects_legacy_v4_without_tensor_evidence(
+    tmp_path: Path,
+) -> None:
+    report = _build_report(tmp_path)
+    legacy = report.canonical_payload()
+    legacy["schema_version"] = 4
+    legacy.pop("previous_adapter_tensors_sha256")
+    legacy.pop("trained_adapter_tensors_sha256")
+
+    with pytest.raises(PhysicalTrainingPilotError, match="strict schema"):
+        PhysicalTrainingPilotReport.from_json(
+            json.dumps(
+                legacy,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            )
+        )
+
+
 def test_report_from_json_rejects_bytes_transport(tmp_path: Path) -> None:
     report = _build_report(tmp_path)
 
