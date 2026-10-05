@@ -542,6 +542,43 @@ def test_binding_schema_rejects_missing_permission_uniqueness(
         )
 
 
+def test_binding_schema_rejects_partial_permission_uniqueness(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, NOW.isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+            "permission_id TEXT NOT NULL "
+            "REFERENCES standing_permissions(permission_id), "
+            "updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "CREATE UNIQUE INDEX partial_permission_binding "
+            "ON v01_cloud_model_permission_bindings(permission_id) "
+            "WHERE task_id <> ''"
+        )
+
+    with pytest.raises(RuntimeError, match="permission_id must be unique"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
 def test_binding_schema_rejects_missing_permission_foreign_key(
     tmp_path: Path,
 ) -> None:
