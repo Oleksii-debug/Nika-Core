@@ -1524,9 +1524,9 @@ def _copy_initial_adapter_snapshot(
 
 def _candidate_foundation_model_sha256(manifest: dict[str, object]) -> str:
     schema = manifest.get("schema")
-    if schema == "nika-peft-candidate-v1":
+    if schema in {"nika-peft-candidate-v1", "nika-peft-candidate-v2"}:
         field = "base_artifact_sha256"
-    elif schema == "nika-peft-candidate-v2":
+    elif schema == "nika-peft-candidate-v3":
         field = "foundation_model_sha256"
     else:
         _fail("initial_adapter_manifest_schema_invalid")
@@ -2465,7 +2465,6 @@ def _candidate_manifest_json(
         "base_artifact_sha256": request.base_artifact_sha256,
         "candidate_artifact_ref": request.candidate_artifact_ref,
         "consumed_materials_sha256": consumed.attestation_sha256,
-        "foundation_model_sha256": config.base_gguf_sha256,
         "job_fingerprint": request.job_fingerprint,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
         "previous_adapter_tensors_sha256": previous_adapter_tensors_sha256,
@@ -2491,6 +2490,9 @@ def _candidate_manifest_json(
             "seed": config.seed,
         },
     }
+    if config.initial_adapter is not None:
+        payload["foundation_model_sha256"] = config.base_gguf_sha256
+        payload["schema"] = "nika-peft-candidate-v3"
     _validate_candidate_manifest_payload(payload)
     return _canonical_json_bytes(payload).decode("utf-8")
 
@@ -2519,6 +2521,11 @@ def _validate_candidate_manifest_payload(
     if schema == "nika-peft-candidate-v1":
         expected = legacy_expected
     elif schema == "nika-peft-candidate-v2":
+        expected = legacy_expected | {
+            "previous_adapter_tensors_sha256",
+            "trained_adapter_tensors_sha256",
+        }
+    elif schema == "nika-peft-candidate-v3":
         expected = legacy_expected | {
             "foundation_model_sha256",
             "previous_adapter_tensors_sha256",
@@ -2561,10 +2568,10 @@ def _validate_candidate_manifest_payload(
         "trainer_sha256",
         "training_runtime_manifest_sha256",
     ]
-    if schema == "nika-peft-candidate-v2":
-        digest_fields.extend(
-            ("foundation_model_sha256", "trained_adapter_tensors_sha256")
-        )
+    if schema in {"nika-peft-candidate-v2", "nika-peft-candidate-v3"}:
+        digest_fields.append("trained_adapter_tensors_sha256")
+    if schema == "nika-peft-candidate-v3":
+        digest_fields.append("foundation_model_sha256")
     for field in digest_fields:
         if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
             _fail("candidate_manifest_invalid")
@@ -2584,7 +2591,7 @@ def _validate_candidate_manifest_payload(
     step_number = value["step_number"]
     if type(step_number) is not int or not 1 <= step_number <= 100_000:
         _fail("candidate_manifest_invalid")
-    if schema == "nika-peft-candidate-v2":
+    if schema in {"nika-peft-candidate-v2", "nika-peft-candidate-v3"}:
         previous_adapter_tensors_sha256 = value[
             "previous_adapter_tensors_sha256"
         ]
@@ -2593,11 +2600,9 @@ def _validate_candidate_manifest_payload(
             or _HEX_RE.fullmatch(previous_adapter_tensors_sha256) is None
         ):
             _fail("candidate_manifest_invalid")
-        warm_started = not hmac.compare_digest(
-            value["base_artifact_sha256"],
-            value["foundation_model_sha256"],
+        previous_required = (
+            step_number > 1 or schema == "nika-peft-candidate-v3"
         )
-        previous_required = step_number > 1 or warm_started
         if (
             (previous_required and previous_adapter_tensors_sha256 is None)
             or (not previous_required and previous_adapter_tensors_sha256 is not None)
