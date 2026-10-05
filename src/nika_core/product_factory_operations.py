@@ -18,6 +18,8 @@ from .product_factory_operations_contracts import (
     RollbackObservation,
     ServiceHealth,
     ServiceObservation,
+    ServiceReplica,
+    canonical_text,
 )
 
 
@@ -86,10 +88,10 @@ class ProductOperationsCoordinator:
     _maintenance_lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if not self.project_id.strip():
-            raise ProductOperationsError("project_id must not be empty")
+        canonical_text(self.project_id, "project_id")
 
     def register(self, service: DeployableService) -> ServiceRecord:
+        service = _private_service(service)
         if service.project_id != self.project_id:
             raise ProductOperationsError("service belongs to another project")
         existing = self._services.get(service.service_id)
@@ -111,7 +113,7 @@ class ProductOperationsCoordinator:
             node_loss=self._loss(service),
         )
         self._services[service.service_id] = record
-        return record
+        return _private_service_record(record)
 
     def ready_services(self) -> tuple[DeployableService, ...]:
         candidates = [
@@ -123,7 +125,7 @@ class ProductOperationsCoordinator:
             return ()
         wave = min(record.service.wave for record in candidates)
         return tuple(
-            record.service
+            _private_service(record.service)
             for record in sorted(candidates, key=lambda item: item.service.service_id)
             if record.service.wave == wave
             and all(
@@ -133,6 +135,7 @@ class ProductOperationsCoordinator:
         )
 
     def record_observation(self, observation: ServiceObservation) -> ServiceRecord:
+        observation = _private_observation(observation)
         record = self._require(observation.service_id)
         if observation.release_sha != record.service.release_sha:
             raise ProductOperationsError("service observation release SHA mismatch")
@@ -148,7 +151,7 @@ class ProductOperationsCoordinator:
                     raise ProductOperationsError(
                         "service observation timestamp conflicts with prior evidence"
                     )
-                return record
+                return _private_service_record(record)
         if record.rollback is not None:
             raise ProductOperationsError(
                 "service observation cannot advance after terminal rollback evidence"
@@ -163,11 +166,12 @@ class ProductOperationsCoordinator:
             self._loss(record.service),
         )
         self._services[record.service.service_id] = updated
-        return updated
+        return _private_service_record(updated)
 
     def record_node_availability(self, node_id: str, *, available: bool) -> None:
-        if not node_id.strip():
-            raise ProductOperationsError("node_id must not be empty")
+        canonical_text(node_id, "node_id")
+        if type(available) is not bool:
+            raise ProductOperationsError("node availability flag must be boolean")
         if available:
             self._down_nodes.discard(node_id)
         else:
@@ -189,8 +193,7 @@ class ProductOperationsCoordinator:
             )
 
     def revoke_credential(self, credential_ref: str) -> tuple[str, ...]:
-        if not credential_ref.strip():
-            raise ProductOperationsError("credential_ref must not be empty")
+        canonical_text(credential_ref, "credential_ref")
         self._revoked.add(credential_ref)
         affected: list[str] = []
         for service_id, record in tuple(self._services.items()):
@@ -210,6 +213,7 @@ class ProductOperationsCoordinator:
         return tuple(sorted(affected))
 
     def restore_credential(self, credential_ref: str) -> tuple[str, ...]:
+        canonical_text(credential_ref, "credential_ref")
         self._revoked.discard(credential_ref)
         affected: list[str] = []
         for service_id, record in tuple(self._services.items()):
