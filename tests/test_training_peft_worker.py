@@ -516,16 +516,33 @@ class _FakeTokenizerFactory:
 
 
 class _FakeModel:
+    def __init__(
+        self,
+        adapter_bytes: bytes = b"initial-adapter-weights",
+        *,
+        base_model_name_or_path: str = "C:/private/model",
+    ) -> None:
+        self.adapter_bytes = adapter_bytes
+        self.base_model_name_or_path = base_model_name_or_path
+
     def save_pretrained(self, path: str, *, safe_serialization: bool) -> None:
         assert safe_serialization is True
         target = Path(path)
         target.mkdir(parents=True, exist_ok=True)
-        (target / "adapter_model.safetensors").write_bytes(b"real-adapter-weights")
+        (target / "adapter_model.safetensors").write_bytes(self.adapter_bytes)
         (target / "adapter_config.json").write_text(
-            (
-                '{"base_model_name_or_path":"C:/private/model","bias":"none",'
-                '"lora_alpha":8,"lora_dropout":0.0,"r":4,'
-                '"target_modules":["q_proj","v_proj"],"task_type":"CAUSAL_LM"}'
+            json.dumps(
+                {
+                    "base_model_name_or_path": self.base_model_name_or_path,
+                    "bias": "none",
+                    "lora_alpha": 8,
+                    "lora_dropout": 0.0,
+                    "r": 4,
+                    "target_modules": ["q_proj", "v_proj"],
+                    "task_type": "CAUSAL_LM",
+                },
+                separators=(",", ":"),
+                sort_keys=True,
             ),
             encoding="utf-8",
         )
@@ -593,8 +610,9 @@ class _FakePeftModel:
         assert model is not None
         assert is_trainable is True
         assert local_files_only is True
-        assert (Path(path) / "adapter_model.safetensors").is_file()
-        return _FakeModel()
+        adapter = Path(path) / "adapter_model.safetensors"
+        assert adapter.is_file()
+        return _FakeModel(adapter.read_bytes())
 
 
 class _FakeLoraConfig:
@@ -647,6 +665,9 @@ class _FakeTrainer:
             assert Path(str(resume_from_checkpoint)).name == "checkpoint-1"
         checkpoint = Path(self.args.output_dir) / f"checkpoint-{self.args.max_steps}"
         checkpoint.mkdir(parents=True, exist_ok=True)
+        self.model.adapter_bytes = (
+            f"trained-adapter-weights-step-{self.args.max_steps}".encode("ascii")
+        )
 
 
 def _fake_stack() -> tuple[object, ...]:
@@ -675,6 +696,36 @@ def _fake_stack() -> tuple[object, ...]:
         _FakeTrainingArguments,
         lambda seed: None,
     )
+
+
+class _NoMutationFakeTrainer(_FakeTrainer):
+    def train(self, *, resume_from_checkpoint: str | bool) -> None:
+        if self.args.max_steps == 1:
+            assert resume_from_checkpoint is False
+        else:
+            assert Path(str(resume_from_checkpoint)).name == "checkpoint-1"
+        checkpoint = Path(self.args.output_dir) / f"checkpoint-{self.args.max_steps}"
+        checkpoint.mkdir(parents=True, exist_ok=True)
+
+
+class _ConfigOnlyMutationFakeTrainer(_NoMutationFakeTrainer):
+    def train(self, *, resume_from_checkpoint: str | bool) -> None:
+        super().train(resume_from_checkpoint=resume_from_checkpoint)
+        self.model.base_model_name_or_path = "C:/changed-config-without-weight-effect"
+
+
+def _trainer_variant_stack(trainer_type: type[_FakeTrainer]) -> tuple[object, ...]:
+    stack = list(_fake_stack())
+    stack[10] = trainer_type
+    return tuple(stack)
+
+
+def _no_mutation_fake_stack() -> tuple[object, ...]:
+    return _trainer_variant_stack(_NoMutationFakeTrainer)
+
+
+def _config_only_mutation_fake_stack() -> tuple[object, ...]:
+    return _trainer_variant_stack(_ConfigOnlyMutationFakeTrainer)
 
 
 def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
@@ -714,6 +765,115 @@ def test_fake_stack_proves_step_resume_and_final_safetensors_publication(
     assert b"models/base" in candidate_bytes
     assert b"C:/private/model" not in candidate_bytes
     assert second_state["checkpoint_step"] == 2
+
+
+def test_training_step_rejects_unchanged_adapter_weights(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _no_mutation_fake_stack)
+
+    with pytest.raises(peft.PeftTrainerError, match="training_step_no_weight_mutation"):
+        peft._train_one_step(request, config, consumed)
+
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    assert not (checkpoint / peft._CHECKPOINT_MARKER).exists()
+    assert not peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    ).exists()
+
+
+def test_adapter_config_change_does_not_count_as_weight_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _config_only_mutation_fake_stack,
+    )
+
+    with pytest.raises(peft.PeftTrainerError, match="training_step_no_weight_mutation"):
+        peft._train_one_step(request, config, consumed)
+
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    assert (checkpoint / "adapter" / "adapter_config.json").is_file()
+    assert not (checkpoint / peft._CHECKPOINT_MARKER).exists()
+
+
+class _EmptyAdapterSnapshotModel:
+    def save_pretrained(self, path: str, *, safe_serialization: bool) -> None:
+        assert safe_serialization is True
+        target = Path(path)
+        target.mkdir(parents=True, exist_ok=True)
+        (target / peft._CANDIDATE_FILE).write_bytes(b"")
+
+
+def test_adapter_weight_snapshot_fails_closed_and_cleans_temporary_directory(
+    tmp_path: Path,
+) -> None:
+    job_root = tmp_path / "job"
+    job_root.mkdir()
+
+    with pytest.raises(peft.PeftTrainerError, match="adapter_weight_snapshot_failed"):
+        peft._snapshot_adapter_weights_sha256(_EmptyAdapterSnapshotModel(), job_root)
+
+    assert list(job_root.iterdir()) == []
+
+
+def test_resumed_training_rejects_unchanged_weights_and_preserves_prior_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+
+    job_root = config.output_root / peft._candidate_key(request.candidate_artifact_ref)
+    first_marker = job_root / "trainer" / "checkpoint-1" / peft._CHECKPOINT_MARKER
+    first_marker_bytes = first_marker.read_bytes()
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = "3" * 64
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _no_mutation_fake_stack)
+
+    with pytest.raises(peft.PeftTrainerError, match="training_step_no_weight_mutation"):
+        peft._train_one_step(second, config, second_consumed)
+
+    assert first_marker.read_bytes() == first_marker_bytes
+    assert not (
+        job_root / "trainer" / "checkpoint-2" / peft._CHECKPOINT_MARKER
+    ).exists()
+    assert not peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    ).exists()
 
 
 def test_final_candidate_is_never_overwritten(

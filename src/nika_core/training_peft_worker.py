@@ -620,6 +620,21 @@ def _training_runtime_versions_from_trainer_artifact(
     )
 
 
+def build_training_runtime_metadata(versions: dict[str, str]) -> dict[str, str]:
+    """Build exact Artifact Registry metadata for one declared PEFT runtime.
+
+    The caller supplies the authority. This helper validates the complete canonical
+    distribution set and deliberately does not inspect the parent interpreter.
+    """
+    if type(versions) is not dict:
+        raise TypeError("training runtime versions must be an exact dict")
+    canonical = _normalize_training_runtime_versions(versions)
+    return {
+        _TRAINING_RUNTIME_METADATA_KEYS[distribution]: canonical[distribution]
+        for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
+    }
+
+
 def _installed_training_runtime_versions() -> dict[str, str]:
     versions: dict[str, str] = {}
     for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS:
@@ -1647,6 +1662,31 @@ def _import_training_stack() -> tuple[Any, ...]:
     )
 
 
+def _snapshot_adapter_weights_sha256(model: object, job_root: Path) -> str:
+    """Hash the exact serialized PEFT adapter weights without retaining a snapshot."""
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=".adapter-weight-snapshot-",
+            dir=os.fspath(job_root),
+        ) as raw_directory:
+            adapter_dir = Path(raw_directory) / "adapter"
+            model.save_pretrained(
+                os.fspath(adapter_dir),
+                safe_serialization=True,
+            )
+            digest, size = _hash_regular_snapshot(
+                adapter_dir / _CANDIDATE_FILE,
+                code="adapter_weight_snapshot_failed",
+            )
+    except PeftTrainerError:
+        raise
+    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+        _fail("adapter_weight_snapshot_failed")
+    if size <= 0:
+        _fail("adapter_weight_snapshot_failed")
+    return digest
+
+
 def _train_one_step(
     request: ParsedRequest,
     config: TrainerConfig,
@@ -1722,6 +1762,11 @@ def _train_one_step(
                 local_files_only=True,
             )
 
+        before_step_adapter_sha256 = _snapshot_adapter_weights_sha256(
+            model,
+            job_root,
+        )
+
         training_dataset = _TokenizedDataset(
             consumed.training,
             tokenizer,
@@ -1794,6 +1839,12 @@ def _train_one_step(
 
     adapter_file = adapter_dir / _CANDIDATE_FILE
     _require_regular_unlinked(adapter_file, code="adapter_candidate_missing")
+    after_step_adapter_sha256, _ = _hash_regular_snapshot(
+        adapter_file,
+        code="adapter_candidate_invalid",
+    )
+    if after_step_adapter_sha256 == before_step_adapter_sha256:
+        _fail("training_step_no_weight_mutation")
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
         checkpoint,
