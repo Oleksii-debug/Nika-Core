@@ -124,6 +124,7 @@ def test_build_report_binds_restart_and_canonical_candidate_receipt(
     )
 
     assert report.platform == "windows"
+    assert report.schema_version == 2
     assert report.completed_steps == 2
     assert report.candidate_sha256 == _sha256(payload)
     assert report.candidate_byte_count == len(payload)
@@ -178,7 +179,7 @@ def test_build_report_rejects_runtime_candidate_digest_mismatch(tmp_path: Path) 
                 checkpoint_id="checkpoint-paused",
             ),
             restart_probe=_restart_probe(),
-        completed=_completed_for(b"different-candidate"),
+            completed=_completed_for(b"different-candidate"),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,
@@ -198,7 +199,7 @@ def test_build_report_rejects_descriptor_digest_mismatch(tmp_path: Path) -> None
                 checkpoint_id="checkpoint-paused",
             ),
             restart_probe=_restart_probe(),
-        completed=_completed_for(b"actual-candidate"),
+            completed=_completed_for(b"actual-candidate"),
             candidate_path=candidate,
             candidate_descriptor=descriptor,
             candidate_root=tmp_path,
@@ -244,7 +245,7 @@ def test_build_report_rejects_restart_identity_drift(tmp_path: Path) -> None:
                 checkpoint_id="checkpoint-paused",
             ),
             restart_probe=_restart_probe(),
-        completed=_run_evidence(
+            completed=_run_evidence(
                 state=TrainingRunState.COMPLETED,
                 next_step=2,
                 checkpoint_id="checkpoint-completed",
@@ -272,7 +273,7 @@ def test_build_report_rejects_boolean_step_carrier(tmp_path: Path) -> None:
         build_physical_training_pilot_report(
             paused=paused,
             restart_probe=_restart_probe(),
-        completed=_completed_for(payload),
+            completed=_completed_for(payload),
             candidate_path=candidate,
             candidate_descriptor=_descriptor(candidate),
             candidate_root=tmp_path,
@@ -292,7 +293,7 @@ def test_build_report_rejects_distinct_checkpoint_bypass(tmp_path: Path) -> None
                 checkpoint_id="same-checkpoint",
             ),
             restart_probe=_restart_probe(),
-        completed=_run_evidence(
+            completed=_run_evidence(
                 state=TrainingRunState.COMPLETED,
                 next_step=2,
                 checkpoint_id="same-checkpoint",
