@@ -229,6 +229,48 @@ def test_oversized_handoff_fails_before_json_decode(tmp_path, monkeypatch):
         ).fetchone()[0] == 0
 
 
+@pytest.mark.parametrize("column", ("package_id", "payload_json"))
+def test_invalid_utf8_text_storage_fails_closed(tmp_path, column):
+    store, projects, decisions = _setup(tmp_path)
+    update_sql = {
+        "package_id": (
+            "UPDATE product_research_handoffs SET package_id=CAST(X'80' AS TEXT) "
+            "WHERE project_id='p1' AND package_id='research-1'"
+        ),
+        "payload_json": (
+            "UPDATE product_research_handoffs SET payload_json=CAST(X'80' AS TEXT) "
+            "WHERE project_id='p1' AND package_id='research-1'"
+        ),
+    }[column]
+    with store.connection() as conn:
+        conn.execute(update_sql)
+        row = conn.execute(
+            f"SELECT typeof({column}) AS storage_type,"
+            f"length(CAST({column} AS BLOB)) AS byte_length "
+            "FROM product_research_handoffs WHERE project_id='p1'"
+        ).fetchone()
+        assert row is not None
+        assert row["storage_type"] == "text"
+        assert row["byte_length"] == 1
+
+    with pytest.raises(ProductProjectError, match="malformed"):
+        _approve(decisions)
+
+    assert projects.get("p1").row_version == 0
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM product_decisions WHERE project_id=?",
+            ("p1",),
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM product_project_mutation_idempotency"
+        ).fetchone()[0] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE event_type='product_project.decision_recorded'"
+        ).fetchone()[0] == 0
+
+
 def test_valid_handoff_still_authorizes_and_replays_exact_decision(tmp_path):
     store, projects, decisions = _setup(tmp_path)
     approved = _approve(decisions)
