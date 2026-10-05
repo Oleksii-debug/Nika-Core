@@ -2251,11 +2251,15 @@ def test_fenced_host_active_ownership_collision_does_not_cancel_sibling(
         "blank_phase",
         "padded_phase",
         "control_phase",
+        "surrogate_phase",
         "oversize_phase",
+        "utf8_oversize_phase",
         "nontext_token",
         "padded_token",
         "control_token",
+        "surrogate_token",
         "oversize_token",
+        "utf8_oversize_token",
         "missing_phase",
         "missing_token",
     ),
@@ -2289,15 +2293,23 @@ def test_fenced_recovery_rejects_malformed_state_and_releases_claim_for_retry(
             phase = " interrupted"
         elif malformed == "control_phase":
             phase = "interrupted\nresume"
+        elif malformed == "surrogate_phase":
+            phase = "\ud800"
         elif malformed == "oversize_phase":
             phase = "p" * 4097
+        elif malformed == "utf8_oversize_phase":
+            phase = "€" * 1366
         token = b"invalid" if malformed == "nontext_token" else "resume"
         if malformed == "padded_token":
             token = " resume"
         elif malformed == "control_token":
             token = "resume\tunsafe"
+        elif malformed == "surrogate_token":
+            token = "\ud800"
         elif malformed == "oversize_token":
             token = "t" * 4097
+        elif malformed == "utf8_oversize_token":
+            token = "т" * 2049
         if malformed != "missing_phase":
             object.__setattr__(untrusted, "phase", phase)
         if malformed != "missing_token":
@@ -2337,6 +2349,47 @@ def test_fenced_recovery_rejects_malformed_state_and_releases_claim_for_retry(
     assert recovered[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
     assert len(worker.recover_calls) == 1
     assert worker.recover_calls[0][0].work_id == request.work_id
+    assert IdempotencyLedger(store).require(
+        f"pf-worker:{request.work_id}"
+    ).status is IdempotencyStatus.COMPLETED
+
+
+
+def test_fenced_recovery_accepts_exact_4096_byte_text_boundary(tmp_path: Path) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    worker = FakeProgramWorker()
+    request = coordinator.ready_requests()[0]
+    worker.fail_dispatch.add(request.component_id)
+    host = ProductFactoryProgramHost(store, worker)
+
+    _run(
+        host.dispatch_ready(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            max_count=1,
+        )
+    )
+
+    phase = "p" * 4096
+    token = "т" * 2048
+    assert len(phase.encode("utf-8")) == 4096
+    assert len(token.encode("utf-8")) == 4096
+    worker.recovery_states[request.work_id] = RecoveryState(phase, token)
+
+    recovered = _run(
+        host.recover_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+        )
+    )
+
+    assert recovered[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    assert len(worker.recover_calls) == 1
+    recovered_request, recovered_state = worker.recover_calls[0]
+    assert recovered_request.work_id == request.work_id
+    assert recovered_state == RecoveryState(phase, token)
     assert IdempotencyLedger(store).require(
         f"pf-worker:{request.work_id}"
     ).status is IdempotencyStatus.COMPLETED
