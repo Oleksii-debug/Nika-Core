@@ -58,6 +58,15 @@ def test_corrupt_stored_source_json_is_never_accepted(
         SourceSelection.from_stored(body)
 
 
+def test_json_escaped_surrogate_in_source_path_is_rejected(tmp_path: Path) -> None:
+    _, _, selection = _configured(tmp_path)
+    body = json.dumps(
+        {**selection.model_dump(), "source_a": chr(0xD800)}, ensure_ascii=True
+    )
+    with pytest.raises(SourceSetupError, match="пошкоджені"):
+        SourceSelection.from_stored(body)
+
+
 def test_legacy_formatted_ukrainian_paths_keep_original_meaning(tmp_path: Path) -> None:
     _, _, selection = _configured(tmp_path)
     body = json.dumps(selection.model_dump(), indent=2, ensure_ascii=False)

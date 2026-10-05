@@ -189,7 +189,10 @@ class ModelSelection(BaseModel):
             raise ValueError("configured API route requires provider, model, and endpoint")
         if self.provider_id in {"ollama", "foundry-local"}:
             raise ValueError("configured API route must not impersonate a local provider")
-        if self.credential_ref is None or _ENV_CREDENTIAL_REF.fullmatch(self.credential_ref) is None:
+        if (
+            self.credential_ref is None
+            or _ENV_CREDENTIAL_REF.fullmatch(self.credential_ref) is None
+        ):
             raise ValueError("configured API route requires an env credential reference")
         ApiModelRouteConfig(
             provider_id=self.provider_id,
@@ -387,7 +390,10 @@ class V01ModelSettings:
         except ModelSetupError as exc:
             message = str(exc)
         except (ValidationError, TypeError, ValueError):
-            message = "Перевірте режим, постачальника, модель, адресу, тайм-аут і параметри доступу."
+            message = (
+                "Перевірте режим, постачальника, модель, адресу, "
+                "тайм-аут і параметри доступу."
+            )
         except sqlite3.Error:
             message = "Не вдалося зберегти налаштування моделі."
         return UIResult(

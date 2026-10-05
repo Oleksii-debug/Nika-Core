@@ -65,6 +65,10 @@ class SourceSelection(BaseModel):
     def path_text(cls, value: str) -> str:
         if not value.strip() or any(ord(char) < 32 for char in value):
             raise ValueError("invalid source path")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError("source path contains invalid Unicode") from exc
         return value
 
     def resolve(self) -> SourceSelection:
