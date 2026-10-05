@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import json
 
 import pytest
@@ -125,3 +127,19 @@ def test_machine_evidence_carries_pass_threshold() -> None:
     payload = json.loads(benchmark_report_json(_report()))
 
     assert payload["cases"][0]["pass_score"] == 1.0
+
+
+def test_case_evidence_rejects_total_smaller_than_known_components() -> None:
+    case = _report().case_results[0]
+
+    with pytest.raises(ValueError, match="total_tokens"):
+        replace(case, total_tokens=1)
+
+
+def test_public_serializer_revalidates_token_total_evidence() -> None:
+    report = _report()
+    case = report.case_results[0]
+    object.__setattr__(case, "total_tokens", 1)
+
+    with pytest.raises(ValueError, match="total_tokens"):
+        benchmark_report_json(report)
