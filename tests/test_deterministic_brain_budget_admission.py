@@ -298,6 +298,7 @@ def test_recovered_completion_leaves_only_the_remaining_step_budget() -> None:
     assert result.final_state.facts == frozenset({"prepared", "done"})
     assert planner.calls == 1
 
+
 @pytest.mark.parametrize(
     "action_id",
     [
