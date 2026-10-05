@@ -152,7 +152,7 @@ def test_cloud_task_without_private_data_permission_fails_before_prompt(
         assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 0
 
 
-def test_binding_failure_revokes_newly_minted_permission(
+def test_binding_failure_rolls_back_new_permission_without_compensating_revoke(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -166,28 +166,36 @@ def test_binding_failure_revokes_newly_minted_permission(
         clock=lambda: NOW,
     )
 
-    def reject_binding(**_kwargs: object) -> None:
+    def reject_binding(*_args: object, **_kwargs: object) -> None:
         raise RuntimeError("simulated durable binding failure")
 
-    monkeypatch.setattr(service, "_bind_permission", reject_binding)
+    def reject_revoke(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("atomic admission must not use compensating revoke")
+
+    monkeypatch.setattr(service, "_bind_permission_with_connection", reject_binding)
+    monkeypatch.setattr(service._permissions, "revoke", reject_revoke)
 
     with pytest.raises(CloudModelPermissionDenied, match="зберегти дозвіл"):
         service.admit_created_task(record)
 
     with store.connection() as conn:
-        permissions = conn.execute(
-            "SELECT permission_id, revoked_at FROM standing_permissions"
-        ).fetchall()
+        permission_count = conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0]
         binding_count = conn.execute(
             "SELECT COUNT(*) FROM v01_cloud_model_permission_bindings"
         ).fetchone()[0]
+        grant_audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE event_type = 'standing_permission.granted'"
+        ).fetchone()[0]
 
-    assert len(permissions) == 1
-    assert permissions[0]["revoked_at"] is not None
+    assert permission_count == 0
     assert binding_count == 0
+    assert grant_audit_count == 0
 
 
-def test_task_change_during_confirmation_revokes_new_grant_and_does_not_bind(
+def test_task_change_during_confirmation_rolls_back_grant_and_binding(
     tmp_path: Path,
 ) -> None:
     store = _store(tmp_path)
@@ -211,16 +219,20 @@ def test_task_change_during_confirmation_revokes_new_grant_and_does_not_bind(
 
     assert queue.get(record.task_id).state is TaskState.READY
     with store.connection() as conn:
-        permissions = conn.execute(
-            "SELECT permission_id, revoked_at FROM standing_permissions"
-        ).fetchall()
+        permission_count = conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0]
         binding_count = conn.execute(
             "SELECT COUNT(*) FROM v01_cloud_model_permission_bindings"
         ).fetchone()[0]
+        grant_audit_count = conn.execute(
+            "SELECT COUNT(*) FROM audit_events "
+            "WHERE event_type = 'standing_permission.granted'"
+        ).fetchone()[0]
 
-    assert len(permissions) == 1
-    assert permissions[0]["revoked_at"] is not None
+    assert permission_count == 0
     assert binding_count == 0
+    assert grant_audit_count == 0
 
 
 def test_cloud_denial_creates_no_spendable_authority(tmp_path: Path) -> None:
