@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -482,3 +483,194 @@ def test_denied_resume_reconsent_leaves_task_paused_and_old_expired_binding(
     assert queue.get(record.task_id).state is TaskState.PAUSED
     with store.connection() as conn:
         assert conn.execute("SELECT COUNT(*) FROM standing_permissions").fetchone()[0] == 1
+
+
+def test_binding_schema_rejects_text_version_before_numeric_coercion(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            ("1", NOW.isoformat()),
+        )
+
+    with pytest.raises(RuntimeError, match="schema shape"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_rejects_missing_permission_uniqueness(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, NOW.isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+            "permission_id TEXT NOT NULL "
+            "REFERENCES standing_permissions(permission_id), "
+            "updated_at TEXT NOT NULL)"
+        )
+
+    with pytest.raises(RuntimeError, match="permission_id must be unique"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+def test_binding_schema_rejects_missing_permission_foreign_key(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    with store.connection() as conn:
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_schema ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO v01_cloud_model_permission_schema(version, applied_at) "
+            "VALUES (?, ?)",
+            (1, NOW.isoformat()),
+        )
+        conn.execute(
+            "CREATE TABLE v01_cloud_model_permission_bindings ("
+            "task_id TEXT PRIMARY KEY REFERENCES tasks(task_id) ON DELETE CASCADE, "
+            "permission_id TEXT NOT NULL UNIQUE, "
+            "updated_at TEXT NOT NULL)"
+        )
+
+    with pytest.raises(RuntimeError, match="foreign keys"):
+        V01CloudModelPermissionService(
+            store=store,
+            settings=settings,
+            confirm=lambda _request: True,
+            clock=lambda: NOW,
+        )
+
+
+@pytest.mark.parametrize(
+    "corrupt_updated_at",
+    (
+        "2026-10-05T04:30:00",
+        "2026-10-05T06:30:00+02:00",
+    ),
+)
+def test_corrupt_binding_timestamp_fails_before_resume_prompt(
+    tmp_path: Path,
+    corrupt_updated_at: str,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    first = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+    first.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    queue.transition(record.task_id, TaskState.PAUSED)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_cloud_model_permission_bindings SET updated_at = ? "
+            "WHERE task_id = ?",
+            (corrupt_updated_at, record.task_id),
+        )
+
+    prompts: list[CloudModelGrantRequest] = []
+    restarted = V01CloudModelPermissionService(
+        store=SQLiteStore(store.path),
+        settings=V01ModelSettings(SQLiteStore(store.path)),
+        confirm=lambda request: prompts.append(request) or True,
+        clock=lambda: NOW,
+    )
+
+    with pytest.raises(CloudModelPermissionDenied, match="пошкоджено"):
+        restarted.admit_resumed_task(queue.get(record.task_id))
+
+    assert prompts == []
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0] == 1
+
+
+def test_corrupt_binding_timestamp_storage_type_blocks_execution(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: NOW,
+    )
+    service.admit_created_task(record)
+
+    queue = TaskQueue(store)
+    queue.transition(record.task_id, TaskState.READY)
+    queue.transition(record.task_id, TaskState.RUNNING)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE v01_cloud_model_permission_bindings SET updated_at = ? "
+            "WHERE task_id = ?",
+            (sqlite3.Binary(NOW.isoformat().encode("utf-8")), record.task_id),
+        )
+
+    assert service.execution_authority_for_task(record.task_id) is None
+
+
+class _DateTimeSubclass(datetime):
+    pass
+
+
+def test_cloud_permission_clock_rejects_datetime_subclass(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    settings = _settings(store)
+    record = _task(store, settings)
+    forged = _DateTimeSubclass(2026, 10, 5, 4, 30, tzinfo=UTC)
+    service = V01CloudModelPermissionService(
+        store=store,
+        settings=settings,
+        confirm=lambda _request: True,
+        clock=lambda: forged,
+    )
+
+    with pytest.raises(RuntimeError, match="exact timezone-aware datetime"):
+        service.admit_created_task(record)
+
+    with store.connection() as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM standing_permissions"
+        ).fetchone()[0] == 0
