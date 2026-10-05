@@ -274,6 +274,10 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
         job["candidate_artifact_ref"],
         field="candidate_artifact_ref",
     )
+    if _looks_like_private_local_path(base_artifact_ref) or _looks_like_private_local_path(
+        candidate_ref
+    ):
+        _fail("artifact_ref_private_path")
     max_steps = job["max_steps"]
     if type(max_steps) is not int or not 1 <= max_steps <= 100_000:
         _fail("max_steps_invalid")
@@ -1540,6 +1544,8 @@ def _validate_candidate_manifest_payload(
         or candidate_ref != candidate_ref.strip()
         or len(base_ref_bytes) > 4096
         or len(candidate_ref_bytes) > 4096
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in base_ref)
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in candidate_ref)
         or _looks_like_private_local_path(base_ref)
         or _looks_like_private_local_path(candidate_ref)
     ):
@@ -1617,6 +1623,7 @@ def _validate_candidate_manifest_payload(
         or adapter.get("task_type") != "CAUSAL_LM"
         or type(adapter_targets) is not list
         or any(type(item) is not str for item in adapter_targets)
+        or len(set(adapter_targets)) != len(adapter_targets)
         or set(adapter_targets) != set(targets)
     ):
         _fail("candidate_manifest_invalid")
