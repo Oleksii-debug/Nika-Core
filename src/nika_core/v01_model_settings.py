@@ -667,8 +667,13 @@ class V01ModelSettings:
                         "Налаштування моделі змінилися під час просування."
                     )
                 conn.execute(
-                    "INSERT INTO v01_model_promotions VALUES "
-                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
+                    "INSERT INTO v01_model_promotions ("
+                    "decision_sha256, binding_sha256, base_artifact_sha256, "
+                    "base_descriptor_digest, challenger_artifact_sha256, "
+                    "challenger_descriptor_digest, activation_request_sha256, "
+                    "activation_attestation_sha256, previous_selection_id, "
+                    "activated_selection_id, activated_revision, rollback_revision"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
                     (
                         decision_digest,
                         binding_digest,
