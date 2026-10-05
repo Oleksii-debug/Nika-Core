@@ -175,8 +175,9 @@ by the trusted caller and are never inferred from benchmark output.
 ## Evidence and accessibility
 
 Machine evidence uses versioned JSON schemas and SHA-256. It contains candidate/evaluation
-identity, numeric metrics, resource observations, typed error codes and response hashes. It does
-not contain:
+identity, numeric metrics, per-case evaluation weight/pass threshold, resource observations,
+typed error codes and response hashes. Case evidence rejects threshold/pass disagreement and
+token totals smaller than known input/output components. It does not contain:
 - prompt text;
 - expected answer text;
 - generated response text;
@@ -212,7 +213,9 @@ Fail closed on:
 - malformed, unsafe or duplicate benchmark run identity;
 - run/configuration fingerprint substitution;
 - report aggregate substitution inconsistent with exact case evidence;
-- case-weight substitution at an exact EvaluationSet promotion boundary;
+- case threshold/pass substitution inconsistent with exact case evidence;
+- token totals smaller than known input/output token components;
+- case-weight or case-threshold substitution at an exact EvaluationSet promotion boundary;
 - invalid Nika-process RSS used by benchmark resource evidence.
 
 Provider errors remain benchmark evidence as typed failures. Unexpected programming errors are not
