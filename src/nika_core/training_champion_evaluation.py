@@ -101,7 +101,7 @@ class ChampionEvaluationBinding:
             raise TypeError("binding must be an exact ChampionEvaluationBinding")
         try:
             return ChampionEvaluationBinding(
-                training_binding=self.training_binding.revalidated(),
+                training_binding_sha256=self.training_binding_sha256,
                 job_id=self.job_id,
                 candidate_id=self.candidate_id,
                 provider_id=self.provider_id,
@@ -326,7 +326,7 @@ class AttestedChampionBenchmarkResult:
         try:
             self._validate()
             return _build_result(
-                training_binding_sha256=self.training_binding_sha256,
+                training_binding=self.training_binding.revalidated(),
                 champion_binding=self.champion_binding.revalidated(),
                 effect_binding_sha256=self.effect_binding_sha256,
                 benchmark=self.benchmark.revalidated(),
