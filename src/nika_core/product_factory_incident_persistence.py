@@ -477,7 +477,7 @@ def _check_json_depth(payload: str) -> None:
         if quoted:
             if escaped:
                 escaped = False
-            elif char == "\\\\":
+            elif char == "\\":
                 escaped = True
             elif char == '"':
                 quoted = False
