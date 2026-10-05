@@ -50,6 +50,7 @@ _LOG = logging.getLogger(__name__)
 _CONFIG_SCHEMA_VERSION = 1
 _CONFIG_MAX_BYTES = 64 * 1024
 _FROZEN_PACKAGE_MAX_BYTES = 1024 * 1024
+_TRAINER_MAX_RECORDS = 1_000_000
 _MAX_TEXT_BYTES = 4096
 _MAX_REPORT_BYTES = 64 * 1024
 _TARGET_MODULE_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
@@ -458,6 +459,25 @@ def _is_reparse(value: os.stat_result) -> bool:
     return bool(attributes & flag)
 
 
+def _require_windows_pe_executable(path: Path) -> None:
+    try:
+        with path.open("rb") as handle:
+            dos_header = handle.read(64)
+            if len(dos_header) != 64 or dos_header[:2] != b"MZ":
+                _fail("trainer_executable is not a valid Windows PE executable")
+            pe_offset = int.from_bytes(dos_header[60:64], "little")
+            if not 64 <= pe_offset <= 16 * 1024 * 1024:
+                _fail("trainer_executable has an invalid Windows PE header offset")
+            handle.seek(pe_offset)
+            signature = handle.read(4)
+    except OSError as exc:
+        raise PhysicalPilotDriverError(
+            "trainer_executable Windows PE header could not be read"
+        ) from exc
+    if signature != b"PE\0\0":
+        _fail("trainer_executable is not a valid Windows PE executable")
+
+
 def _require_existing_file(path: Path, *, name: str) -> Path:
     try:
         resolved = path.resolve(strict=True)
@@ -542,6 +562,8 @@ def _material_totals(materials: ResolvedTrainingPackage) -> tuple[int, int, int,
             validation_bytes += item.byte_count
     if training_records < 1 or validation_records < 1 or total_records < 2:
         _fail("physical pilot requires non-empty training and validation material")
+    if total_records > _TRAINER_MAX_RECORDS:
+        _fail("physical pilot material exceeds the canonical PEFT record limit")
     return (
         training_records,
         training_bytes,
@@ -718,6 +740,7 @@ def run_physical_pilot_from_config(
     )
     if trainer_executable.suffix.casefold() != ".exe":
         _fail("trainer_executable must be a Windows executable")
+    _require_windows_pe_executable(trainer_executable)
     base_gguf_path = _require_existing_file(config.base_gguf_path, name="base_gguf_path")
     if base_gguf_path.suffix.casefold() != ".gguf":
         _fail("base_gguf_path must use the .gguf suffix")
