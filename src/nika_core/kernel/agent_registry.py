@@ -27,6 +27,16 @@ def _stored_text(value: object, field_name: str, *, allow_blank: bool) -> str:
         raise ValueError(f"invalid persisted agent {field_name}") from exc
 
 
+def _reject_corrupt_identity_alias(conn: object, agent_id: str) -> None:
+    row = conn.execute(
+        "SELECT 1 FROM agents WHERE typeof(agent_id) != 'text' "
+        "AND CAST(agent_id AS TEXT) = ? LIMIT 1",
+        (agent_id,),
+    ).fetchone()
+    if row is not None:
+        raise ValueError("invalid persisted agent agent_id")
+
+
 @dataclass(frozen=True, slots=True)
 class AgentDefinition:
     agent_id: str
@@ -58,7 +68,14 @@ class AgentRegistry:
         if self._store is None:
             return len(self._agents)
         with self._store.connection() as conn:
-            row = conn.execute("SELECT COUNT(DISTINCT agent_id) AS count FROM agents").fetchone()
+            corrupt = conn.execute(
+                "SELECT 1 FROM agents WHERE typeof(agent_id) != 'text' LIMIT 1"
+            ).fetchone()
+            if corrupt is not None:
+                raise ValueError("invalid persisted agent agent_id")
+            row = conn.execute(
+                "SELECT COUNT(DISTINCT agent_id) AS count FROM agents"
+            ).fetchone()
         return int(row["count"])
 
     def register(self, definition: AgentDefinition) -> None:
@@ -75,6 +92,7 @@ class AgentRegistry:
             # A deferred transaction would still allow multiple writers to observe the same
             # previous version before one of them commits.
             conn.execute("BEGIN IMMEDIATE")
+            _reject_corrupt_identity_alias(conn, canonical.agent_id)
             row = conn.execute(
                 "SELECT agent_id, name, version, goal FROM agents WHERE agent_id = ? "
                 "ORDER BY version DESC LIMIT 1",
@@ -131,6 +149,7 @@ class AgentRegistry:
         if self._store is None:
             return self._agents.get(agent_id)
         with self._store.connection() as conn:
+            _reject_corrupt_identity_alias(conn, agent_id)
             row = conn.execute(
                 "SELECT agent_id, name, version, goal FROM agents "
                 "WHERE agent_id = ? ORDER BY version DESC LIMIT 1",
