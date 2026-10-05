@@ -185,7 +185,7 @@ class ProductFactoryProgramHost:
         before_start = coordinator.snapshot()
         try:
             for request in ready:
-                lease = self._acquire_for_dispatch(request)
+                lease = self._acquire_if_available(request)
                 if lease is None:
                     deferred.append(
                         _outcome(
@@ -300,7 +300,9 @@ class ProductFactoryProgramHost:
                 IdempotencyStatus.UNCERTAIN,
             }:
                 continue
-            lease = self._acquire(record.request)
+            lease = self._acquire_if_available(record.request)
+            if lease is None:
+                continue
             try:
                 result = _result_summary(record)
                 with self.store.connection() as connection:
@@ -539,7 +541,18 @@ class ProductFactoryProgramHost:
     ) -> ProgramWorkOutcome:
         request = record.request
         operation_key = _operation_key(request)
-        lease = self._acquire(request)
+        lease = self._acquire_if_available(request)
+        if lease is None:
+            return _outcome(
+                request,
+                coordinator,
+                ProgramWorkDisposition.NEEDS_RECONCILIATION,
+                self._durable_operation_status(operation_key),
+                (
+                    "active Product Factory ownership forbids duplicate recovery; "
+                    "independent running work may continue"
+                ),
+            )
         try:
             operation = self._ledger.get(operation_key)
 
@@ -1152,7 +1165,7 @@ class ProductFactoryProgramHost:
             marker_detail = f"; uncertainty marker failed: {type(exc).__name__}"
         return self._durable_operation_status(operation_key), marker_detail
 
-    def _acquire_for_dispatch(
+    def _acquire_if_available(
         self,
         request: ComponentWorkRequest,
     ) -> WorkOwnershipLease | None:
