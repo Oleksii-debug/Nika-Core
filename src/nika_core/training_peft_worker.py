@@ -70,6 +70,7 @@ class ParsedRequest:
     step_index: int
     job_fingerprint: str
     trainer_artifact_id: str
+    trainer_sha256: str
     candidate_artifact_ref: str
     base_artifact_ref: str
     base_artifact_sha256: str
@@ -84,6 +85,8 @@ class TrainerConfig:
     base_gguf: Path
     model_dir: Path
     model_dir_manifest_sha256: str
+    trainer_implementation_sha256: str
+    training_runtime_versions: tuple[tuple[str, str], ...]
     output_root: Path
     max_records: int
     max_sequence_length: int
@@ -261,7 +264,10 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
         value["trainer_artifact_id"],
         field="trainer_artifact_id",
     )
-    _require_sha256(value["trainer_sha256"], field="trainer_sha256")
+    trainer_sha256 = _require_sha256(
+        value["trainer_sha256"],
+        field="trainer_sha256",
+    )
 
     step_index = value["step_index"]
     if type(step_index) is not int or step_index < 0:
@@ -360,6 +366,7 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
         step_index=step_index,
         job_fingerprint=job_fingerprint,
         trainer_artifact_id=trainer_artifact_id,
+        trainer_sha256=trainer_sha256,
         candidate_artifact_ref=candidate_ref,
         base_artifact_ref=base_artifact_ref,
         base_artifact_sha256=base_sha256,
@@ -583,7 +590,7 @@ def _training_runtime_manifest_sha256(versions: dict[str, str]) -> str:
 
 def _training_runtime_versions_from_trainer_artifact(
     trainer_artifact: object,
-) -> tuple[str, dict[str, str]]:
+) -> tuple[str, str, dict[str, str]]:
     try:
         from nika_core.artifacts import ArtifactLocationKind, ArtifactRecord
     except ImportError as exc:
@@ -606,7 +613,11 @@ def _training_runtime_versions_from_trainer_artifact(
         distribution: metadata[_TRAINING_RUNTIME_METADATA_KEYS[distribution]]
         for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
     }
-    return trainer_artifact.artifact_id, _normalize_training_runtime_versions(versions)
+    return (
+        trainer_artifact.artifact_id,
+        trainer_artifact.sha256,
+        _normalize_training_runtime_versions(versions),
+    )
 
 
 def _installed_training_runtime_versions() -> dict[str, str]:
@@ -621,7 +632,7 @@ def _installed_training_runtime_versions() -> dict[str, str]:
     return _normalize_training_runtime_versions(versions)
 
 
-def _verify_training_runtime_versions() -> None:
+def _verify_training_runtime_versions() -> tuple[tuple[str, str], ...]:
     try:
         expected = _normalize_training_runtime_versions(
             {
@@ -643,6 +654,10 @@ def _verify_training_runtime_versions() -> None:
         _fail("nika_trainer_runtime_versions_unavailable")
     if observed != expected:
         _fail("nika_trainer_runtime_version_mismatch")
+    return tuple(
+        (distribution, observed[distribution])
+        for distribution, _ in _TRAINING_RUNTIME_DISTRIBUTIONS
+    )
 
 
 def _verify_trainer_deployment_identity(request: ParsedRequest) -> None:
@@ -650,8 +665,14 @@ def _verify_trainer_deployment_identity(request: ParsedRequest) -> None:
         os.environ.get("NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"),
         field="nika_trainer_deployment_artifact_id",
     )
+    expected_sha256 = _require_sha256(
+        os.environ.get("NIKA_TRAINER_DEPLOYMENT_SHA256"),
+        field="nika_trainer_deployment_sha256",
+    )
     if request.trainer_artifact_id != expected_artifact_id:
         _fail("nika_trainer_deployment_artifact_mismatch")
+    if request.trainer_sha256 != expected_sha256:
+        _fail("nika_trainer_deployment_sha256_mismatch")
 
 
 def build_trainer_environment(
@@ -721,9 +742,11 @@ def build_trainer_environment(
     ):
         raise ValueError("lora_target_modules is invalid")
     try:
-        trainer_artifact_id, deployment_runtime_versions = (
-            _training_runtime_versions_from_trainer_artifact(trainer_artifact)
-        )
+        (
+            trainer_artifact_id,
+            trainer_deployment_sha256,
+            deployment_runtime_versions,
+        ) = _training_runtime_versions_from_trainer_artifact(trainer_artifact)
     except (TypeError, UnicodeEncodeError, ValueError) as exc:
         raise ValueError("trainer deployment runtime metadata is invalid") from exc
     output.mkdir(parents=True, exist_ok=True)
@@ -751,6 +774,7 @@ def build_trainer_environment(
         "NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256": model_manifest,
         "NIKA_TRAINER_OUTPUT_ROOT": os.fspath(output),
         "NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID": trainer_artifact_id,
+        "NIKA_TRAINER_DEPLOYMENT_SHA256": trainer_deployment_sha256,
         "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256": _training_runtime_manifest_sha256(
             deployment_runtime_versions
         ),
@@ -1161,7 +1185,7 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
 
 
 def _read_config() -> TrainerConfig:
-    _verify_training_runtime_versions()
+    training_runtime_versions = _verify_training_runtime_versions()
     expected_implementation_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_IMPLEMENTATION_SHA256"),
         field="nika_trainer_implementation_sha256",
@@ -1215,6 +1239,8 @@ def _read_config() -> TrainerConfig:
         base_gguf=base_gguf,
         model_dir=model_dir,
         model_dir_manifest_sha256=model_dir_manifest_sha256,
+        trainer_implementation_sha256=expected_implementation_sha256,
+        training_runtime_versions=training_runtime_versions,
         output_root=output_root,
         max_records=_env_int(
             "NIKA_TRAINER_MAX_RECORDS",
@@ -1969,6 +1995,13 @@ def _candidate_manifest_json(
         "consumed_materials_sha256": consumed.attestation_sha256,
         "job_fingerprint": request.job_fingerprint,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
+        "trainer_artifact_id": request.trainer_artifact_id,
+        "trainer_implementation_sha256": config.trainer_implementation_sha256,
+        "trainer_sha256": request.trainer_sha256,
+        "training_runtime_manifest_sha256": _training_runtime_manifest_sha256(
+            dict(config.training_runtime_versions)
+        ),
+        "training_runtime_versions": dict(config.training_runtime_versions),
         "schema": "nika-peft-candidate-v1",
         "step_number": request.step_index + 1,
         "trainer_parameters": {
@@ -1983,8 +2016,8 @@ def _candidate_manifest_json(
             "seed": config.seed,
         },
     }
+    _validate_candidate_manifest_payload(payload)
     return _canonical_json_bytes(payload).decode("utf-8")
-
 
 
 def _validate_candidate_manifest_payload(
@@ -1998,6 +2031,11 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
+        "trainer_artifact_id",
+        "trainer_implementation_sha256",
+        "trainer_sha256",
+        "training_runtime_manifest_sha256",
+        "training_runtime_versions",
         "schema",
         "step_number",
         "trainer_parameters",
@@ -2032,9 +2070,25 @@ def _validate_candidate_manifest_payload(
         "consumed_materials_sha256",
         "job_fingerprint",
         "model_dir_manifest_sha256",
+        "trainer_artifact_id",
+        "trainer_implementation_sha256",
+        "trainer_sha256",
+        "training_runtime_manifest_sha256",
     ):
         if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
             _fail("candidate_manifest_invalid")
+
+    try:
+        runtime_versions = _normalize_training_runtime_versions(
+            value["training_runtime_versions"]
+        )
+    except (UnicodeEncodeError, ValueError):
+        _fail("candidate_manifest_invalid")
+    if not hmac.compare_digest(
+        value["training_runtime_manifest_sha256"],
+        _training_runtime_manifest_sha256(runtime_versions),
+    ):
+        _fail("candidate_manifest_invalid")
 
     step_number = value["step_number"]
     if type(step_number) is not int or not 1 <= step_number <= 100_000:
@@ -2167,9 +2221,9 @@ def _response(
 
 def main() -> int:
     try:
-        config = _read_config()
         request = _parse_request(_read_request())
         _verify_trainer_deployment_identity(request)
+        config = _read_config()
         consumed = _consume_materials(request, max_records=config.max_records)
         resume_state, candidate_sha256 = _train_one_step(request, config, consumed)
         result = _response(request, consumed, resume_state, candidate_sha256)

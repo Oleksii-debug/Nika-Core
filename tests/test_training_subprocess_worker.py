@@ -1504,6 +1504,7 @@ response = {
         "transformers": os.getenv("NIKA_TRAINER_TRANSFORMERS_VERSION"),
         "manifest": os.getenv("NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"),
         "deployment": os.getenv("NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"),
+        "deployment_sha256": os.getenv("NIKA_TRAINER_DEPLOYMENT_SHA256"),
         "allowed": os.getenv("NIKA_ALLOWED"),
     },
     "step_id": request["step_id"],
@@ -1512,7 +1513,7 @@ sys.stdout.write(json.dumps(response))
 """.strip(),
     )
     metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
-    worker, _, artifact_id = _worker(
+    worker, registry, artifact_id = _worker(
         tmp_path,
         trainer,
         trainer_metadata=metadata,
@@ -1537,6 +1538,7 @@ sys.stdout.write(json.dumps(response))
         "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"
     ]
     assert trainer_state["deployment"] == artifact_id
+    assert trainer_state["deployment_sha256"] == registry.get(artifact_id).sha256
     assert trainer_state["allowed"] == "yes"
 
 
@@ -1549,6 +1551,23 @@ def test_runtime_deployment_artifact_id_must_match_registry_authority(
     environment["NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"] = "0" * 64
 
     with pytest.raises(ValueError, match="deployment artifact identity does not match"):
+        _worker(
+            tmp_path,
+            trainer,
+            trainer_metadata=metadata,
+            environment=environment,
+        )
+
+
+def test_runtime_deployment_sha256_must_match_registry_authority(
+    tmp_path: Path,
+) -> None:
+    trainer = _script(tmp_path, "raise SystemExit(0)")
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    environment = _runtime_environment()
+    environment["NIKA_TRAINER_DEPLOYMENT_SHA256"] = "0" * 64
+
+    with pytest.raises(ValueError, match="deployment digest does not match"):
         _worker(
             tmp_path,
             trainer,
@@ -1626,6 +1645,49 @@ Path({str(marker)!r}).write_text("started", encoding="utf-8")
     drifted_record = original.model_copy(
         update={"metadata": training_runtime_registry_metadata(drifted_versions)}
     )
+
+    def changed_get(requested_artifact_id: str) -> object:
+        if requested_artifact_id == artifact_id:
+            return drifted_record
+        return real_get(requested_artifact_id)
+
+    monkeypatch.setattr(registry, "get", changed_get)
+    materials = _resolved_materials(tmp_path)
+
+    with pytest.raises(TrainingSubprocessError) as exc_info:
+        worker.step(
+            spec=_spec(materials),
+            step_index=0,
+            resume_state={},
+            training_materials=materials,
+        )
+
+    assert exc_info.value.code == "training_execution_plan_changed"
+    assert exc_info.value.effect is TrainingWorkerFailureEffect.NO_EFFECT
+    assert not marker.exists()
+
+
+def test_runtime_registry_trainer_digest_drift_fails_before_process_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker = tmp_path / "started"
+    trainer = _script(
+        tmp_path,
+        f"""
+from pathlib import Path
+Path({str(marker)!r}).write_text("started", encoding="utf-8")
+""".strip(),
+    )
+    metadata = training_runtime_registry_metadata(_RUNTIME_VERSIONS)
+    worker, registry, artifact_id = _worker(
+        tmp_path,
+        trainer,
+        trainer_metadata=metadata,
+    )
+    real_get = registry.get
+    original = real_get(artifact_id)
+    drifted_record = original.model_copy(update={"sha256": "0" * 64})
 
     def changed_get(requested_artifact_id: str) -> object:
         if requested_artifact_id == artifact_id:

@@ -92,6 +92,7 @@ _SECRET_ENVIRONMENT_TOKENS = frozenset(
 _TRAINING_RUNTIME_MANIFEST_DOMAIN = b"nika-peft-runtime-manifest-v1\x00"
 _TRAINING_RUNTIME_MANIFEST_ENVIRONMENT_KEY = "NIKA_TRAINER_RUNTIME_MANIFEST_SHA256"
 _TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY = "NIKA_TRAINER_DEPLOYMENT_ARTIFACT_ID"
+_TRAINER_DEPLOYMENT_SHA256_ENVIRONMENT_KEY = "NIKA_TRAINER_DEPLOYMENT_SHA256"
 _TRAINING_RUNTIME_METADATA_PREFIX = "nika.training.runtime."
 _TRAINING_RUNTIME_BINDINGS = (
     ("torch", "NIKA_TRAINER_TORCH_VERSION"),
@@ -512,6 +513,9 @@ def _bind_registry_training_runtime_environment(
     caller_deployment_artifact_id = caller_environment.get(
         _TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY
     )
+    caller_deployment_sha256 = caller_environment.get(
+        _TRAINER_DEPLOYMENT_SHA256_ENVIRONMENT_KEY
+    )
     if caller_deployment_artifact_id is not None:
         caller_deployment_artifact_id = _validate_sha256(
             caller_deployment_artifact_id,
@@ -523,6 +527,18 @@ def _bind_registry_training_runtime_environment(
         ):
             raise ValueError(
                 "trainer deployment artifact identity does not match Registry authority"
+            )
+    if caller_deployment_sha256 is not None:
+        caller_deployment_sha256 = _validate_sha256(
+            caller_deployment_sha256,
+            name="trainer_deployment_sha256",
+        )
+        if not hmac.compare_digest(
+            caller_deployment_sha256,
+            trainer_record.sha256,
+        ):
+            raise ValueError(
+                "trainer deployment digest does not match Registry authority"
             )
     if caller_runtime and not registry_runtime:
         raise ValueError(
@@ -539,9 +555,15 @@ def _bind_registry_training_runtime_environment(
         caller_environment[_TRAINER_DEPLOYMENT_ARTIFACT_ID_ENVIRONMENT_KEY] = (
             trainer_record.artifact_id
         )
-    elif caller_deployment_artifact_id is not None:
+        caller_environment[_TRAINER_DEPLOYMENT_SHA256_ENVIRONMENT_KEY] = (
+            trainer_record.sha256
+        )
+    elif (
+        caller_deployment_artifact_id is not None
+        or caller_deployment_sha256 is not None
+    ):
         raise ValueError(
-            "trainer deployment artifact identity requires Registry runtime authority"
+            "trainer deployment identity requires Registry runtime authority"
         )
     return _validate_environment(caller_environment)
 
