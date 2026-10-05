@@ -97,3 +97,83 @@ def test_compilation_detaches_nested_caller_grants_before_draft_persistence() ->
     assert compiled.definition.tool_grants[0].max_risk == RiskTier.R0_READ_ONLY
     assert compiled.required_human_approvals == ()
     assert compiled.highest_risk is RiskTier.R0_READ_ONLY
+
+@pytest.mark.parametrize(
+    ("field", "untrusted"),
+    (
+        ("format_version", True),
+        ("format_version", 1.0),
+        ("format_version", "1"),
+        ("version", True),
+        ("version", False),
+        ("version", 1.0),
+        ("version", "1"),
+        ("max_steps", True),
+        ("max_steps", False),
+        ("max_steps", 2.0),
+        ("max_steps", "2"),
+    ),
+)
+def test_agent_document_rejects_ambiguous_version_or_budget(
+    field: str, untrusted: object,
+) -> None:
+    source = _definition("web.read", RiskTier.R0_READ_ONLY)
+    fields = source.model_dump()
+    fields[field] = untrusted
+    with pytest.raises(ValidationError):
+        AgentDefinition.model_validate(fields)
+
+
+@pytest.mark.parametrize(
+    ("field", "encoded"),
+    (
+        ("format_version", "true"),
+        ("format_version", "1.0"),
+        ("version", "true"),
+        ("version", "1.0"),
+        ("version", '"1"'),
+        ("max_steps", "false"),
+        ("max_steps", "2.0"),
+        ("max_steps", '"2"'),
+    ),
+)
+def test_imported_agent_document_rejects_ambiguous_version_or_budget(
+    field: str, encoded: str,
+) -> None:
+    import json
+
+    source = _definition("web.read", RiskTier.R0_READ_ONLY)
+    fields = source.model_dump()
+    fields[field] = None
+    raw = json.dumps(fields, ensure_ascii=False)
+    raw = raw.replace('"' + field + '": null', '"' + field + '": ' + encoded)
+    with pytest.raises(ValidationError):
+        AgentDefinition.import_json(raw)
+
+
+@pytest.mark.parametrize(
+    ("version", "max_steps"),
+    ((1, 1), (2, 100_000), (1, 100)),
+)
+def test_agent_document_preserves_exact_integer_versions_and_budget(
+    version: int, max_steps: int,
+) -> None:
+    source = _definition("web.read", RiskTier.R0_READ_ONLY)
+    payload = source.model_dump()
+    payload.update(format_version=1, version=version, max_steps=max_steps)
+    agent = AgentDefinition.model_validate(payload)
+    restored = AgentDefinition.import_json(agent.export_json())
+    assert restored.format_version == 1
+    assert type(restored.version) is int and restored.version == version
+    assert type(restored.max_steps) is int and restored.max_steps == max_steps
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("format_version", 2), ("version", 0), ("max_steps", 0), ("max_steps", 100_001)),
+)
+def test_agent_document_retains_version_and_budget_bounds(field: str, value: int) -> None:
+    payload = _definition("web.read", RiskTier.R0_READ_ONLY).model_dump()
+    payload[field] = value
+    with pytest.raises(ValidationError):
+        AgentDefinition.model_validate(payload)
