@@ -3097,3 +3097,59 @@ def test_recovery_rejects_foreign_operation_without_attributing_status(
     assert worker.recover_calls == []
     assert IdempotencyLedger(store).require(operation_key).status is IdempotencyStatus.PENDING
 
+def test_reconcile_rejects_in_memory_result_without_durable_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store, _, binding, task_id, coordinator, _ = _setup(tmp_path)
+    host = ProductFactoryProgramHost(
+        store,
+        FakeProgramWorker(),
+        owner_id="program-host:checkpoint-authority",
+    )
+    request = coordinator.start("component-0")
+    lease = host._acquire(request)
+    try:
+        host._checkpoint_running(
+            host_task_id=task_id,
+            binding=binding,
+            coordinator=coordinator,
+            requests=(request,),
+            leases=(lease,),
+        )
+        operation, created = host._reserve_effect(
+            host_task_id=task_id,
+            request=request,
+            lease=lease,
+        )
+        assert created is True
+        assert operation.status is IdempotencyStatus.PENDING
+    finally:
+        host._release_best_effort(lease)
+
+    coordinator.record_result(_envelope(request, 901))
+
+    with pytest.raises(
+        ProductFactoryProgramError,
+        match="latest durable Product Factory checkpoint",
+    ):
+        host.reconcile_durable_results(
+            host_task_id=task_id,
+            coordinator=coordinator,
+        )
+
+    operation = IdempotencyLedger(store).require(f"pf-worker:{request.work_id}")
+    assert operation.status is IdempotencyStatus.PENDING
+    assert operation.result is None
+    checkpoint = ProductFactoryCheckpointHost(store).latest(
+        host_task_id=task_id,
+        project_id=request.project_id,
+    )
+    assert checkpoint is not None
+    durable = next(
+        item
+        for item in checkpoint.checkpoint.coordinator.records
+        if item.request.component_id == request.component_id
+    )
+    assert durable.state is WorkState.RUNNING
+    assert durable.result is None
+
