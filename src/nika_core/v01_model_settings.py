@@ -24,11 +24,7 @@ from nika_core.intelligence.modes import (
     IntelligenceModeRouter,
 )
 from nika_core.kernel.audit import AuditLog
-from nika_core.kernel.task_queue import (
-    TaskPayloadCorruptionError,
-    TaskQueue,
-    decode_task_payload,
-)
+from nika_core.kernel.task_queue import decode_task_payload
 from nika_core.model_gateway.api_route import (
     ApiModelRouteConfig,
     CredentialRefOpenAICompatibleProvider,
@@ -1140,10 +1136,7 @@ class V01ModelSettings:
             ).fetchone()
             if task_row is None:
                 raise ModelSetupError("Завдання для вибраної моделі не знайдено.")
-            try:
-                payload = decode_task_payload(task_row["payload_json"])
-            except TaskPayloadCorruptionError as exc:
-                raise ModelSetupError("Збережені дані завдання пошкоджені.") from exc
+            payload = decode_task_payload(task_row["payload_json"])
             selection_id = payload.get(_TASK_SELECTION_FIELD)
             accepted = self._selection_by_id(conn, selection_id)
             accepted_pin = self._task_artifact_pin(
