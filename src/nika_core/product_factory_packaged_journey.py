@@ -19,6 +19,7 @@ from nika_core.product_project import ProductProjectSpec
 from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
+ActivityReportHandler = Callable[[], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
@@ -34,6 +35,17 @@ _CURRENT_PROJECT_COMMANDS = frozenset(
         "show current productproject",
         "поточний productproject",
         "покажи поточний productproject",
+    }
+)
+_DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
+    {
+        "daily activity report",
+        "show daily activity report",
+        "nika daily activity report",
+        "щоденний звіт активності",
+        "покажи щоденний звіт активності",
+        "звіт діяльності за сьогодні",
+        "покажи звіт діяльності за сьогодні",
     }
 )
 
@@ -88,6 +100,14 @@ def packaged_current_product_command(command: str) -> bool:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :")
     return normalized in _CURRENT_PROJECT_COMMANDS
+
+
+def packaged_daily_activity_report_command(command: str) -> bool:
+    """Recognize explicit read-only daily report commands without broad keyword capture."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    return normalized in _DAILY_ACTIVITY_REPORT_COMMANDS
 
 
 def _valid_selection_id(value: object) -> bool:
@@ -165,10 +185,12 @@ class PackagedProductCommandRouter:
         *,
         products: ProductProjectCommandService,
         ordinary_handler: OrdinaryCommandHandler,
+        activity_report_handler: ActivityReportHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
+        self._activity_report_handler = activity_report_handler
         self._selection_store = selection_store
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
@@ -251,6 +273,13 @@ class PackagedProductCommandRouter:
             raise PackagedProductJourneyError(
                 "Команда містить некоректний текст Unicode."
             ) from None
+
+        if packaged_daily_activity_report_command(command):
+            if self._activity_report_handler is None:
+                raise PackagedProductJourneyError(
+                    "Щоденний звіт активності недоступний у цьому запуску."
+                )
+            return self._activity_report_handler()
 
         if packaged_current_product_command(command):
             return self._describe_current_project()
