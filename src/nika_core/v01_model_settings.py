@@ -79,6 +79,10 @@ _MIGRATIONS = {
             "CREATE TABLE v01_model_promotions ("
             "decision_sha256 TEXT PRIMARY KEY, "
             "binding_sha256 TEXT NOT NULL, "
+            "base_artifact_sha256 TEXT NOT NULL, "
+            "base_descriptor_digest TEXT NOT NULL, "
+            "challenger_artifact_sha256 TEXT NOT NULL, "
+            "challenger_descriptor_digest TEXT NOT NULL, "
             "previous_selection_id TEXT NOT NULL, "
             "activated_selection_id TEXT NOT NULL, "
             "activated_revision INTEGER NOT NULL CHECK(activated_revision > 0), "
@@ -99,6 +103,10 @@ class ModelPromotionReceipt:
 
     decision_sha256: str
     binding_sha256: str
+    base_artifact_sha256: str
+    base_descriptor_digest: str
+    challenger_artifact_sha256: str
+    challenger_descriptor_digest: str
     previous_selection_id: str
     activated_selection_id: str
     activated_revision: int
@@ -108,6 +116,10 @@ class ModelPromotionReceipt:
         for value, name in (
             (self.decision_sha256, "decision_sha256"),
             (self.binding_sha256, "binding_sha256"),
+            (self.base_artifact_sha256, "base_artifact_sha256"),
+            (self.base_descriptor_digest, "base_descriptor_digest"),
+            (self.challenger_artifact_sha256, "challenger_artifact_sha256"),
+            (self.challenger_descriptor_digest, "challenger_descriptor_digest"),
             (self.previous_selection_id, "previous_selection_id"),
             (self.activated_selection_id, "activated_selection_id"),
         ):
@@ -380,6 +392,10 @@ class V01ModelSettings:
             return ModelPromotionReceipt(
                 decision_sha256=row["decision_sha256"],
                 binding_sha256=row["binding_sha256"],
+                base_artifact_sha256=row["base_artifact_sha256"],
+                base_descriptor_digest=row["base_descriptor_digest"],
+                challenger_artifact_sha256=row["challenger_artifact_sha256"],
+                challenger_descriptor_digest=row["challenger_descriptor_digest"],
                 previous_selection_id=row["previous_selection_id"],
                 activated_selection_id=row["activated_selection_id"],
                 activated_revision=row["activated_revision"],
@@ -406,6 +422,10 @@ class V01ModelSettings:
         challenger_model_id: str,
         decision_sha256: str,
         binding_sha256: str,
+        base_artifact_sha256: str,
+        base_descriptor_digest: str,
+        challenger_artifact_sha256: str,
+        challenger_descriptor_digest: str,
     ) -> ModelPromotionReceipt:
         """Atomically activate an attested local challenger for future tasks only.
 
@@ -420,6 +440,22 @@ class V01ModelSettings:
         binding_digest = self._require_promotion_digest(
             binding_sha256,
             field="SHA-256 зв'язування",
+        )
+        base_artifact_digest = self._require_promotion_digest(
+            base_artifact_sha256,
+            field="SHA-256 базового артефакту",
+        )
+        base_descriptor = self._require_promotion_digest(
+            base_descriptor_digest,
+            field="SHA-256 базового дескриптора",
+        )
+        challenger_artifact_digest = self._require_promotion_digest(
+            challenger_artifact_sha256,
+            field="SHA-256 артефакту-кандидата",
+        )
+        challenger_descriptor = self._require_promotion_digest(
+            challenger_descriptor_digest,
+            field="SHA-256 дескриптора-кандидата",
         )
         if (
             type(expected_revision) is not int
@@ -448,7 +484,15 @@ class V01ModelSettings:
                         raise ModelSetupError(
                             "Це просування вже було відкотило і не може бути повторно застосоване."
                         )
-                    if receipt.binding_sha256 != binding_digest:
+                    if (
+                        receipt.binding_sha256 != binding_digest
+                        or receipt.base_artifact_sha256 != base_artifact_digest
+                        or receipt.base_descriptor_digest != base_descriptor
+                        or receipt.challenger_artifact_sha256
+                        != challenger_artifact_digest
+                        or receipt.challenger_descriptor_digest
+                        != challenger_descriptor
+                    ):
                         raise ModelSetupError(
                             "Це рішення вже прив'язане до іншого навчального доказу."
                         )
@@ -547,10 +591,15 @@ class V01ModelSettings:
                         "Налаштування моделі змінилися під час просування."
                     )
                 conn.execute(
-                    "INSERT INTO v01_model_promotions VALUES (?, ?, ?, ?, ?, NULL)",
+                    "INSERT INTO v01_model_promotions VALUES "
+                    "(?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
                     (
                         decision_digest,
                         binding_digest,
+                        base_artifact_digest,
+                        base_descriptor,
+                        challenger_artifact_digest,
+                        challenger_descriptor,
                         previous_id,
                         activated_id,
                         next_revision,
@@ -572,12 +621,20 @@ class V01ModelSettings:
                         ),
                         "decision_sha256": decision_digest,
                         "binding_sha256": binding_digest,
+                        "base_artifact_sha256": base_artifact_digest,
+                        "base_descriptor_digest": base_descriptor,
+                        "challenger_artifact_sha256": challenger_artifact_digest,
+                        "challenger_descriptor_digest": challenger_descriptor,
                         "rollback_selection_id": previous_id,
                     },
                 )
                 return ModelPromotionReceipt(
                     decision_sha256=decision_digest,
                     binding_sha256=binding_digest,
+                    base_artifact_sha256=base_artifact_digest,
+                    base_descriptor_digest=base_descriptor,
+                    challenger_artifact_sha256=challenger_artifact_digest,
+                    challenger_descriptor_digest=challenger_descriptor,
                     previous_selection_id=previous_id,
                     activated_selection_id=activated_id,
                     activated_revision=next_revision,
@@ -688,6 +745,10 @@ class V01ModelSettings:
                 return ModelPromotionReceipt(
                     decision_sha256=receipt.decision_sha256,
                     binding_sha256=receipt.binding_sha256,
+                    base_artifact_sha256=receipt.base_artifact_sha256,
+                    base_descriptor_digest=receipt.base_descriptor_digest,
+                    challenger_artifact_sha256=receipt.challenger_artifact_sha256,
+                    challenger_descriptor_digest=receipt.challenger_descriptor_digest,
                     previous_selection_id=receipt.previous_selection_id,
                     activated_selection_id=receipt.activated_selection_id,
                     activated_revision=receipt.activated_revision,
