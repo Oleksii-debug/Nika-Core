@@ -533,6 +533,7 @@ def test_report_rejects_ambiguous_or_empty_windows(start, end, message, tmp_path
     with pytest.raises(ValueError, match=message):
         service.build_window(start=start, end=end)
 
+
 @pytest.mark.parametrize("section", ["task", "audit", "experiment"])
 def test_report_rejects_oversized_group_label_before_projection(
     tmp_path, section: str
