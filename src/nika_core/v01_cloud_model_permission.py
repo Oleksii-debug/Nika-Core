@@ -201,6 +201,7 @@ class V01CloudModelPermissionService:
         instant = self._utc_now() if now is None else now
         previous_id = self._bound_permission_id(record.task_id, strict=True)
         permission_id = self._new_permission_id(record.task_id)
+        granted = False
         try:
             self._permissions.grant(
                 permission_id=permission_id,
@@ -216,6 +217,7 @@ class V01CloudModelPermissionService:
                     expires_at=instant + _GRANT_TTL,
                 ),
             )
+            granted = True
             self._bind_permission(
                 task_id=record.task_id,
                 permission_id=permission_id,
@@ -223,6 +225,11 @@ class V01CloudModelPermissionService:
                 expected_previous_id=previous_id,
             )
         except Exception:  # noqa: BLE001 - durable permission boundary fails closed
+            if granted:
+                try:
+                    self._permissions.revoke(permission_id, revoked_at=instant)
+                except Exception:  # noqa: BLE001 - preserve the original admission failure
+                    pass
             raise CloudModelPermissionDenied(
                 "Не вдалося безпечно зберегти дозвіл для зовнішньої моделі; "
                 "завдання не запущено."
