@@ -87,7 +87,9 @@ class ContentAddressedBlobStore:
                 if destination.stat().st_size != total:
                     raise BlobStoreError("existing content-addressed blob has unexpected size")
                 if _sha256_file(destination) != raw_sha256:
-                    raise BlobStoreError("existing content-addressed blob failed digest verification")
+                    raise BlobStoreError(
+                        "existing content-addressed blob failed digest verification"
+                    )
                 temp_path.unlink(missing_ok=True)
             else:
                 os.replace(temp_path, destination)
@@ -144,7 +146,10 @@ class ContentAddressedBlobStore:
             raise BlobStoreError("artifact byte size is invalid")
 
         relative = Path(workspace_key) / artifact.raw_sha256[:2] / artifact.raw_sha256
-        if type(artifact.storage_relpath) is not str or artifact.storage_relpath != relative.as_posix():
+        if (
+            type(artifact.storage_relpath) is not str
+            or artifact.storage_relpath != relative.as_posix()
+        ):
             raise BlobStoreError("artifact storage path does not match workspace and digest")
         expected_id = hashlib.sha256(
             f"{artifact.workspace_id}\0{artifact.raw_sha256}".encode("utf-8")
@@ -153,7 +158,8 @@ class ContentAddressedBlobStore:
             raise BlobStoreError("artifact ID does not match workspace and digest")
 
         candidate = self.root / relative
-        if any(path.is_symlink() for path in (candidate.parent.parent, candidate.parent, candidate)):
+        path_parts = (candidate.parent.parent, candidate.parent, candidate)
+        if any(path.is_symlink() for path in path_parts):
             raise BlobStoreError("artifact path must not contain symbolic links")
         if not candidate.resolve().is_relative_to(self.root):
             raise BlobStoreError("artifact storage path escapes blob root")
