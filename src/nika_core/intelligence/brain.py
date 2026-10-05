@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from dataclasses import dataclass
 
 from nika_core.intelligence.contracts import (
@@ -52,6 +53,21 @@ class _StateObservationFailure:
     message: str
 
 
+def _positive_finite_seconds(value: object, *, name: str) -> float:
+    """Normalize time budgets before scheduling any work."""
+    if type(value) not in (int, float):
+        raise ValueError(f"{name} must be a positive finite number")
+    try:
+        seconds = float(value)
+    except OverflowError as exc:
+        raise ValueError(f"{name} must be a positive finite number") from exc
+    if not math.isfinite(seconds):
+        raise ValueError(f"{name} must be a positive finite number")
+    if seconds <= 0:
+        raise ValueError(f"{name} must be greater than zero")
+    return seconds
+
+
 class DeterministicBrain:
     """Plan, validate, re-plan and execute explicit workflows without a language model."""
 
@@ -84,14 +100,16 @@ class DeterministicBrain:
     ) -> DeterministicBrainResult:
         if not run_id.strip():
             raise ValueError("run_id must not be empty")
-        if max_steps <= 0:
-            raise ValueError("max_steps must be greater than zero")
-        if max_replans < 0:
-            raise ValueError("max_replans must be non-negative")
-        if planning_timeout_seconds <= 0:
-            raise ValueError("planning_timeout_seconds must be greater than zero")
-        if observation_timeout_seconds <= 0:
-            raise ValueError("observation_timeout_seconds must be greater than zero")
+        if type(max_steps) is not int or max_steps <= 0:
+            raise ValueError("max_steps must be a positive integer")
+        if type(max_replans) is not int or max_replans < 0:
+            raise ValueError("max_replans must be a non-negative integer")
+        planning_timeout_seconds = _positive_finite_seconds(
+            planning_timeout_seconds, name="planning_timeout_seconds"
+        )
+        observation_timeout_seconds = _positive_finite_seconds(
+            observation_timeout_seconds, name="observation_timeout_seconds"
+        )
         if self._effect_journal is not None and (task_id is None or not task_id.strip()):
             raise ValueError("task_id is required when effect_journal is configured")
 

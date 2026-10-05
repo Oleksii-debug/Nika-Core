@@ -1,0 +1,100 @@
+"""Reject malformed deterministic budgets before planning, journaling or tool effects."""
+
+from __future__ import annotations
+
+import asyncio
+from decimal import Decimal
+
+import pytest
+
+from nika_core.intelligence.brain import DeterministicBrain
+from nika_core.intelligence.contracts import DeterministicGoal, DeterministicPlan, WorldState
+from nika_core.tools import ToolExecutor
+
+
+class CountingPlanner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def plan(self, *, state, goal, actions) -> DeterministicPlan:
+        self.calls += 1
+        return DeterministicPlan(steps=())
+
+
+class GuardedJournal:
+    def __init__(self) -> None:
+        self.inspected = False
+
+    def unresolved_operation_keys(self, *, task_id: str) -> tuple[str, ...]:
+        self.inspected = True
+        return ()
+
+
+def _run(brain: DeterministicBrain, **overrides: object):
+    arguments = dict(
+        run_id="finite-budget-proof",
+        state=WorldState(),
+        goal=DeterministicGoal(),
+        actions=(),
+    )
+    arguments.update(overrides)
+    return asyncio.run(brain.run(**arguments))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, True, False, 0, -1, 1.0, 1.5, "2", float("nan"), float("inf"), []],
+)
+def test_invalid_step_budgets_never_call_planner(value: object) -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    with pytest.raises(ValueError, match="max_steps"):
+        _run(brain, max_steps=value)
+    assert planner.calls == 0
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, True, False, -1, 0.5, 1.0, "1", float("nan"), float("inf"), []],
+)
+def test_invalid_replan_budgets_never_call_planner(value: object) -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    with pytest.raises(ValueError, match="max_replans"):
+        _run(brain, max_replans=value)
+    assert planner.calls == 0
+
+
+@pytest.mark.parametrize("field", ["planning_timeout_seconds", "observation_timeout_seconds"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        None, True, False, "2", 0, -1, float("nan"), float("inf"),
+        -float("inf"), 10**500, Decimal("1"), object(),
+    ],
+)
+def test_invalid_time_budgets_fail_before_planning_and_journal(
+    field: str, value: object
+) -> None:
+    planner = CountingPlanner()
+    journal = GuardedJournal()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor(), effect_journal=journal)
+    with pytest.raises(ValueError, match=field):
+        _run(brain, task_id="task-1", **{field: value})
+    assert planner.calls == 0
+    assert journal.inspected is False
+
+
+@pytest.mark.parametrize("seconds", [1, 1.0, 0.5])
+def test_finite_integral_and_float_timeouts_preserve_success(seconds: float) -> None:
+    planner = CountingPlanner()
+    brain = DeterministicBrain(planner=planner, tools=ToolExecutor())
+    result = _run(
+        brain,
+        max_steps=1,
+        max_replans=0,
+        planning_timeout_seconds=seconds,
+        observation_timeout_seconds=seconds,
+    )
+    assert result.ok
+    assert planner.calls == 1
