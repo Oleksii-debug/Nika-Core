@@ -13,6 +13,16 @@ from nika_core.training_runtime.runtime import (
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _REASON_RE = re.compile(r"^[a-z0-9][a-z0-9_.:-]{0,191}$")
+_STATE_LABELS = {
+    TrainingRunState.DISPATCHING: "підготовка до запуску",
+    TrainingRunState.RUNNING: "виконується",
+    TrainingRunState.PAUSED: "призупинено",
+    TrainingRunState.COMPLETED: "завершено",
+    TrainingRunState.CANCELLED: "скасовано",
+    TrainingRunState.FAILED: "помилка",
+    TrainingRunState.RECONCILE_REQUIRED: "потрібна звірка",
+    TrainingRunState.EXHAUSTED: "ліміт кроків вичерпано",
+}
 
 
 class TrainingStatusError(ValueError):
@@ -31,19 +41,20 @@ class TrainingStatusProjection:
 
     def render_text(self) -> str:
         reason = self.reason if self.reason is not None else "немає"
+        state_label = _STATE_LABELS[self.state]
         return "\n".join(
             (
                 "Стан навчання Nika.",
                 f"Завдання: {self.task_id}",
-                f"Стан: {self.state.value}",
+                f"Стан: {state_label} ({self.state.value})",
                 f"Наступний крок: {self.next_step}",
                 f"Причина: {reason}",
-                f"Checkpoint: {self.checkpoint_id}",
+                f"ID контрольної точки: {self.checkpoint_id}",
                 (
-                    "Обмеження доказовості: показано лише останній цілісний durable "
-                    "training checkpoint цього task_id. Він не доводить реальний запуск "
-                    "тренера, наявність ваг, успішне оцінювання, promotion, activation "
-                    "або production readiness."
+                    "Обмеження доказовості: показано лише останню цілісну стійку "
+                    "контрольну точку навчання цього task_id. Вона не доводить реальний "
+                    "запуск тренера, наявність ваг, успішне оцінювання, просування "
+                    "моделі, активацію або готовність до випуску."
                 ),
             )
         )
