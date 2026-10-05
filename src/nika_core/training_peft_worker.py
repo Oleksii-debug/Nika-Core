@@ -1930,6 +1930,7 @@ def _candidate_manifest_json(
             "lora_target_modules": list(config.lora_target_modules),
             "max_records": config.max_records,
             "max_sequence_length": config.max_sequence_length,
+            "torch_num_threads": config.torch_num_threads,
             "seed": config.seed,
         },
     }
@@ -2022,6 +2023,7 @@ def _validate_candidate_manifest_payload(
         "lora_target_modules",
         "max_records",
         "max_sequence_length",
+        "torch_num_threads",
         "seed",
     }
     if type(parameters) is not dict or set(parameters) != parameter_keys:
@@ -2032,6 +2034,7 @@ def _validate_candidate_manifest_payload(
     lora_r = parameters["lora_r"]
     max_records = parameters["max_records"]
     max_sequence_length = parameters["max_sequence_length"]
+    torch_num_threads = parameters["torch_num_threads"]
     seed = parameters["seed"]
     targets = parameters["lora_target_modules"]
     if (
@@ -2049,6 +2052,8 @@ def _validate_candidate_manifest_payload(
         or not 2 <= max_records <= _MAX_RECORDS_LIMIT
         or type(max_sequence_length) is not int
         or not 32 <= max_sequence_length <= _MAX_SEQUENCE_LENGTH_LIMIT
+        or type(torch_num_threads) is not int
+        or not 1 <= torch_num_threads <= 256
         or type(seed) is not int
         or not 0 <= seed <= (1 << 31) - 1
         or type(targets) is not list
