@@ -165,6 +165,31 @@ def test_verifier_rejects_noncanonical_manifest_paths(tmp_path: Path, path: str)
         ),
     ],
 )
+@pytest.mark.parametrize(
+    "version",
+    [
+        "v" * 129,
+        "1.0.0\\x1f",
+    ],
+)
+def test_manifest_rejects_product_version_outside_canonical_boundary(
+    tmp_path: Path,
+    version: str,
+) -> None:
+    bundle, valid = _bundle(tmp_path)
+    manifest = ReleaseManifest(
+        product="NikaCore",
+        version=version,
+        source_sha=SOURCE_SHA,
+        files=(valid,),
+    )
+    assert verify_release_manifest(bundle, manifest) == (
+        "manifest:product-version",
+    )
+    with pytest.raises(ValueError, match="product-version"):
+        write_release_manifest(bundle, manifest)
+
+
 def test_verifier_rejects_invalid_file_evidence(
     tmp_path: Path,
     entry: ReleaseFile,
