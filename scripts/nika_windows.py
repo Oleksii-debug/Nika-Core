@@ -42,6 +42,7 @@ from nika_core.product_project import ProductProjectRepository
 from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
+from nika_core.ui.packaged_speech import PackagedSpeechFeature, build_packaged_speech
 from nika_core.training_runtime import TrainingStatusService
 from nika_core.ui.shell import launch_windows_shell, preflight_windows_shell
 from nika_core.v01_cloud_model_permission import (
@@ -231,6 +232,7 @@ def build_windows_bridge(
     activity_report_day: Callable[[], date] | None = None,
     start_startup_recovery: bool = True,
     defer_startup_recovery: Callable[[Callable[[], None]], None] | None = None,
+    register_cleanup: Callable[[Callable[[], None]], None] | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     store = SQLiteStore(config.database_path)
     store.initialize()
@@ -279,6 +281,9 @@ def build_windows_bridge(
             else None
         ),
     )
+    speech: PackagedSpeechFeature = build_packaged_speech()
+    if register_cleanup is not None:
+        register_cleanup(speech.close)
     products = ProductProjectCommandService(ProductProjectRepository(store))
     agent_definitions = AgentDefinitionRepository(store)
 
@@ -337,6 +342,7 @@ def build_windows_bridge(
     def source_state() -> Mapping[str, Any]:
         state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
         state["v01_model_settings"] = model_settings.snapshot()
+        state["speech"] = speech.snapshot()
         return agent_builder_state.decorate(state)
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
@@ -370,6 +376,8 @@ def build_windows_bridge(
             "task.pause": backend.pause_task,
             "task.resume": resume_ordinary_task,
             "agent.stop": backend.stop_agent,
+            "speech.start": speech.speak,
+            "speech.cancel": speech.cancel,
             "team.sources.configure": source_settings.configure,
             "settings.autostart.configure": backend.autostart_settings.configure,
             "settings.autostart.refresh": backend.autostart_settings.refresh,
@@ -390,7 +398,10 @@ def build_windows_bridge(
         try:
             backend.start_startup_recovery()
         except Exception as exc:
-            backend.close()
+            try:
+                speech.close()
+            finally:
+                backend.close()
             raise _StartupRecoveryInventoryError(
                 "packaged startup recovery inventory failed"
             ) from exc
@@ -581,10 +592,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 1
     deferred_recovery: list[Callable[[], None]] = []
+    cleanup_callbacks: list[Callable[[], None]] = []
     try:
         bridge, _products = build_windows_bridge(
             config,
             defer_startup_recovery=deferred_recovery.append,
+            register_cleanup=cleanup_callbacks.append,
         )
         if len(deferred_recovery) != 1:
             raise RuntimeError("packaged startup recovery runner was not scheduled exactly once")
@@ -625,6 +638,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             "перевстановіть застосунок."
         )
         return 1
+    finally:
+        for cleanup in reversed(cleanup_callbacks):
+            try:
+                cleanup()
+            except Exception as exc:  # noqa: BLE001 - shutdown is best-effort and private
+                logging.getLogger(__name__).error(
+                    "Packaged resource cleanup failed: exception_type=%s",
+                    type(exc).__name__,
+                )
     return 0
 
 

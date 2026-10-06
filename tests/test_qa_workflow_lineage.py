@@ -128,6 +128,23 @@ def test_m11_requalifies_database_configuration_before_windows_package() -> None
     for test in paths[1:]:
         assert f"          {test}" in regressions, test
 
+
+def test_m11_requalifies_local_speech_before_windows_package() -> None:
+    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    assert workflow.count('      - "src/nika_core/speech/**"') == 2
+    tests = (
+        "tests/test_packaged_speech_output.py",
+        "tests/test_speech_output_windows.py",
+        "tests/test_speech_streaming.py",
+    )
+    for path in tests:
+        assert workflow.count(f'      - "{path}"') == 2, path
+
+    regressions = workflow.split("- name: Run M11 M12 source regressions", 1)[1]
+    regressions = regressions.split("- name: Build standalone", 1)[0]
+    for path in tests:
+        assert f"          {path}" in regressions, path
+
 def test_m11_requalifies_legacy_adoption_before_windows_package() -> None:
     workflow = WORKFLOWS[1].read_text(encoding="utf-8")
     for path in (
