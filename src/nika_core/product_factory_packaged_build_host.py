@@ -8,7 +8,6 @@ from pathlib import Path
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_build_execution import (
     BuildExecutionCoordinator,
-    ExecutionNodeAvailabilityPort,
     TrustedExecutionAuthorityPort,
 )
 from nika_core.product_factory_build_execution_host import (
@@ -43,7 +42,7 @@ class PackagedLocalBuildHostError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class PackagedLocalBuildNodeAvailability(ExecutionNodeAvailabilityPort):
+class PackagedLocalBuildNodeAvailability:
     """Read-only readiness for the exact configured contained-local PF5 node."""
 
     node_id: str
@@ -74,7 +73,10 @@ class PackagedLocalBuildNodeAvailability(ExecutionNodeAvailabilityPort):
             )
         except (OSError, TypeError, ValueError, WorkspaceSecurityError):
             return False
-        return _is_real_regular_file(self.startup.git_executable)
+        return _is_real_regular_file(self.startup.git_executable) and os.access(
+        self.startup.git_executable,
+        os.X_OK,
+    )
 
 
 def build_packaged_local_durable_build_host(
