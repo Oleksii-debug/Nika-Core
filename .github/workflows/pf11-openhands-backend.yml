@@ -4,11 +4,18 @@ on:
   pull_request:
     paths:
       - "src/nika_core/toolsmith/openhands_remote_worker.py"
-      - "src/nika_core/product_factory_openhands_recovery.py"
       - "src/nika_core/toolsmith/openhands_sdk_runtime.py"
+      - "src/nika_core/product_factory_coding_worker_adapter.py"
+      - "src/nika_core/product_factory_coding_program.py"
+      - "src/nika_core/product_factory_program_host.py"
+      - "src/nika_core/product_factory_openhands_recovery.py"
+      - "src/nika_core/product_factory_openhands_program.py"
       - "tests/test_toolsmith_openhands_remote_worker.py"
-      - "tests/test_product_factory_openhands_recovery.py"
       - "tests/test_product_factory_coding_worker_adapter.py"
+      - "tests/test_product_factory_coding_program.py"
+      - "tests/test_product_factory_program_host.py"
+      - "tests/test_product_factory_openhands_recovery.py"
+      - "tests/test_product_factory_openhands_program.py"
       - "pyproject.toml"
       - ".github/workflows/pf11-openhands-backend.yml"
   workflow_dispatch:
@@ -67,16 +74,26 @@ jobs:
           python -m ruff check
           src/nika_core/toolsmith/openhands_remote_worker.py
           src/nika_core/toolsmith/openhands_sdk_runtime.py
+          src/nika_core/product_factory_coding_worker_adapter.py
+          src/nika_core/product_factory_coding_program.py
+          src/nika_core/product_factory_program_host.py
           src/nika_core/product_factory_openhands_recovery.py
+          src/nika_core/product_factory_openhands_program.py
           tests/test_toolsmith_openhands_remote_worker.py
           tests/test_product_factory_coding_worker_adapter.py
+          tests/test_product_factory_coding_program.py
+          tests/test_product_factory_program_host.py
           tests/test_product_factory_openhands_recovery.py
+          tests/test_product_factory_openhands_program.py
       - name: Run CodingWorker and Product Factory adapter regressions
         run: >-
           python -m pytest
           tests/test_toolsmith_openhands_remote_worker.py
           tests/test_product_factory_coding_worker_adapter.py
+          tests/test_product_factory_coding_program.py
+          tests/test_product_factory_program_host.py
           tests/test_product_factory_openhands_recovery.py
+          tests/test_product_factory_openhands_program.py
           -q
 
   isolated-agent-server:
