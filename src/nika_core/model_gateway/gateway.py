@@ -203,6 +203,11 @@ class ModelGateway:
                     cancellation_baseline,
                 ):
                     cancelled = True
+                elif loop.time() >= deadline:
+                    terminal_error = self._late_provider_timeout(
+                        request,
+                        capabilities.provider_id,
+                    )
                 else:
                     error = ModelGatewayError(
                         ModelErrorCode.PROVIDER_ERROR,
@@ -220,6 +225,11 @@ class ModelGateway:
                     cancellation_baseline,
                 ):
                     cancelled = True
+                elif loop.time() >= deadline:
+                    terminal_error = self._late_provider_timeout(
+                        request,
+                        capabilities.provider_id,
+                    )
                 else:
                     error = self._normalize_provider_error(
                         raw_error, capabilities.provider_id
@@ -245,6 +255,11 @@ class ModelGateway:
                     cancellation_baseline,
                 ):
                     cancelled = True
+                elif loop.time() >= deadline:
+                    terminal_error = self._late_provider_timeout(
+                        request,
+                        capabilities.provider_id,
+                    )
                 else:
                     error = ModelGatewayError(
                         ModelErrorCode.PROVIDER_ERROR,
@@ -262,15 +277,10 @@ class ModelGateway:
                 ):
                     cancelled = True
                 elif provider_finished_at is None or provider_finished_at >= deadline:
-                    error = ModelGatewayError(
-                        ModelErrorCode.TIMEOUT,
-                        "model request exceeded its deadline",
-                        provider_id=capabilities.provider_id,
-                        retryable=False,
-                        failure_effect=ModelFailureEffect.UNKNOWN,
+                    terminal_error = self._late_provider_timeout(
+                        request,
+                        capabilities.provider_id,
                     )
-                    self._audit_failure(request, capabilities.provider_id, error)
-                    terminal_error = error
 
             # Raise after the provider exception handler so provider-controlled
             # diagnostics are not retained as public cause/context chains.
@@ -337,6 +347,21 @@ class ModelGateway:
             trusted_provider_kind=trusted_provider_kind,
         )
         return canonical_response, response_error, False
+
+    def _late_provider_timeout(
+        self,
+        request: ModelRequest,
+        provider_id: str,
+    ) -> ModelGatewayError:
+        error = ModelGatewayError(
+            ModelErrorCode.TIMEOUT,
+            "model request exceeded its deadline",
+            provider_id=provider_id,
+            retryable=False,
+            failure_effect=ModelFailureEffect.UNKNOWN,
+        )
+        self._audit_failure(request, provider_id, error)
+        return error
 
     def _admit_caller_cancellation(
         self,
