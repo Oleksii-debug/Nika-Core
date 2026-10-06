@@ -333,10 +333,18 @@ class PackagedBuildAuthorityStore:
         if (
             component_id != template.component_id
             or spec.request.project_id != template.project_id
+            or spec.request.platform is not template.platform
+            or spec.request.required_features != template.required_features
+            or spec.request.required_toolchains != template.required_toolchains
+            or spec.request.resources != template.resources
+            or spec.request.require_gpu is not template.require_gpu
             or spec.scope.repository_id != template.repository_id
             or spec.scope.requested_node_ids != (template.node_id,)
             or spec.scope.workspace_relpath != template.workspace_relpath
+            or spec.scope.network_scopes != ()
+            or spec.scope.credential_refs != ()
             or spec.scope.command_id != template.command_id
+            or spec.lease_seconds != template.lease_seconds
         ):
             raise PackagedBuildAuthorityError(
                 "PF5 spec does not match the packaged build authority snapshot"
