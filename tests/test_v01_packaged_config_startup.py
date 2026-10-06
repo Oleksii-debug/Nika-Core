@@ -77,6 +77,7 @@ def test_storage_startup_failure_is_accessible_private_and_does_not_launch_shell
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: Exception,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
@@ -123,6 +124,7 @@ def test_actual_corrupt_database_is_not_overwritten_during_failed_startup(
     assert "PRIVATE_" not in messages[0]
     assert database.read_bytes() == original_bytes
 
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -158,6 +160,8 @@ def test_shell_launch_failure_is_accessible_private_and_returns_error(
     assert len(messages) == 1
     assert "Не вдалося відкрити інтерфейс Nika" in messages[0]
     assert "PRIVATE_" not in messages[0]
+    assert "PRIVATE_" not in caplog.text
+    assert f"exception_type={type(failure).__name__}" in caplog.text
 
 
 def test_shell_launch_boundary_does_not_swallow_process_exit(
