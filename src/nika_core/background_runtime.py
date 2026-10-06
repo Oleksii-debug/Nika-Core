@@ -921,13 +921,14 @@ class BackgroundDispatchGuard:
         with self._queue.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
             row = conn.execute(
-                "SELECT payload_json FROM audit_events "
+                "SELECT event_id, event_type, entity_type, entity_id, "
+                "payload_json, created_at FROM audit_events "
                 "WHERE entity_type = ? AND entity_id = ? AND event_type = ? "
                 "ORDER BY event_id DESC LIMIT 1",
                 (_SOURCE_ENTITY_TYPE, self._source_id, _OBSERVED_EVENT),
             ).fetchone()
             if row is not None:
-                payload = json.loads(row["payload_json"])
+                payload = self._audit._event_from_row(row).payload
                 previous_sequence = payload.get("sequence")
                 previous_observed_at = payload.get("observed_at")
                 if type(previous_sequence) is not int:
