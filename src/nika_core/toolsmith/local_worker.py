@@ -71,6 +71,19 @@ class ContainedLocalWorkerError(RuntimeError):
     """Raised when local CodingWorker authority cannot be proven safely."""
 
 
+class _RepositoryAuthorityChangedDuringPrivateEffect(Exception):
+    """Internal carrier preserving authority/cleanup failures past generic rollback."""
+
+    def __init__(
+        self,
+        authority_error: Exception,
+        cleanup_error: Exception | None = None,
+    ) -> None:
+        super().__init__("repository authority changed during private candidate work")
+        self.authority_error = authority_error
+        self.cleanup_error = cleanup_error
+
+
 class _JobExecutionLock:
     """Cross-instance/process single-flight lock for one deterministic job root."""
 
@@ -1175,6 +1188,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 ),
             )
             artifacts = self._candidate_artifacts(result_sha, after.digest)
+            self._revalidate_repository_authority_after_private_effect(job, git_plan)
 
             if cancellation.is_set():
                 result = CodingResult(
@@ -1201,6 +1215,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 raise WorkspaceSecurityError(
                     "candidate worktree changed while acceptance evidence was collected"
                 )
+            self._revalidate_repository_authority_after_private_effect(job, git_plan)
             result = CodingResult(
                 job_id=job.job_id,
                 changed_files=changed,
@@ -1215,6 +1230,13 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             )
             self._save_terminal(job, evidence, result)
             return result
+        except _RepositoryAuthorityChangedDuringPrivateEffect as exc:
+            if exc.cleanup_error is not None:
+                raise ContainedLocalWorkerError(
+                    "repository authority changed during private candidate work "
+                    "and cleanup could not be proven"
+                ) from exc.cleanup_error
+            raise exc.authority_error
         except WorkspaceSecurityError as exc:
             return self._rollback_private_failure(
                 job,
@@ -1617,6 +1639,23 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
                 "application/vnd.nika.tree+sha256",
             ),
         )
+
+    def _revalidate_repository_authority_after_private_effect(
+        self,
+        job: CodingJob,
+        git_plan,
+    ) -> None:
+        try:
+            self._require_repository_authority(job.repository.repository_id)
+        except Exception as exc:
+            try:
+                cleanup_private_git_workspace(git_plan)
+            except Exception as cleanup_exc:
+                raise _RepositoryAuthorityChangedDuringPrivateEffect(
+                    exc,
+                    cleanup_exc,
+                ) from cleanup_exc
+            raise _RepositoryAuthorityChangedDuringPrivateEffect(exc) from exc
 
     def _rollback_private_failure(
         self,
