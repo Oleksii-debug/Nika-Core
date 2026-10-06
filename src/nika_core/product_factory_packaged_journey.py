@@ -217,6 +217,8 @@ def packaged_task_direct_target(command: str) -> tuple[str, str | None] | None:
             continue
         prefix = max(prefixes, key=len)
         task_id = normalized[len(prefix) :].strip(" :#")
+        if len(task_id.split()) != 1:
+            return None
         try:
             parsed = UUID(task_id)
         except (ValueError, AttributeError) as exc:
