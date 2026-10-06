@@ -27,7 +27,6 @@ from nika_core.learning_skill import LearningSkillApplyReceipt
 from nika_core.learning_update import LearningUpdateIntent, LearningUpdateTarget
 from nika_core.learning_world_model import LearningWorldModelApplyReceipt
 from nika_core.runtime.idempotency import (
-    IdempotencyConflictError,
     IdempotencyLedger,
     IdempotencyRecord,
     IdempotencyStatus,
@@ -255,7 +254,7 @@ def _replayed_receipt(
 
 
 class LearningSemanticUpdateExecutor:
-    """Crash-safe replay fence over the canonical Loop-B semantic router."""
+    """Atomic replay fence over the canonical Loop-B semantic router."""
 
     def __init__(
         self,
@@ -267,8 +266,11 @@ class LearningSemanticUpdateExecutor:
             raise TypeError("router must be the canonical LearningSemanticUpdateRouter")
         if type(idempotency) is not IdempotencyLedger:
             raise TypeError("idempotency must be the canonical IdempotencyLedger")
+        if router.sqlite_store is not idempotency.sqlite_store:
+            raise ValueError("semantic router and idempotency must share one SQLiteStore")
         self._router = router
         self._idempotency = idempotency
+        self._store = router.sqlite_store
 
     def apply(
         self,
@@ -298,23 +300,29 @@ class LearningSemanticUpdateExecutor:
             raise ValueError("semantic update address does not match the bound target")
 
         operation_key = _operation_key(canonical)
-        record, created_reservation = self._idempotency.reserve_once(
-            operation_key=operation_key,
-            task_id=task_id,
-            operation_type=_OPERATION_TYPE,
-            input_fingerprint=canonical.intent_sha256,
-        )
-        if not created_reservation:
-            if record.status is IdempotencyStatus.COMPLETED:
-                return _replayed_receipt(record=record, intent=canonical)
-            if record.status in {IdempotencyStatus.PENDING, IdempotencyStatus.UNCERTAIN}:
-                raise LearningSemanticReconciliationRequired(
-                    "semantic update has an unresolved prior execution"
-                )
-            raise RuntimeError("semantic update has unsupported idempotency state")
+        with self._store.connection() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            record, created_reservation = self._idempotency.reserve_with_connection(
+                conn,
+                operation_key=operation_key,
+                task_id=task_id,
+                operation_type=_OPERATION_TYPE,
+                input_fingerprint=canonical.intent_sha256,
+            )
+            if not created_reservation:
+                if record.status is IdempotencyStatus.COMPLETED:
+                    return _replayed_receipt(record=record, intent=canonical)
+                if record.status in {
+                    IdempotencyStatus.PENDING,
+                    IdempotencyStatus.UNCERTAIN,
+                }:
+                    raise LearningSemanticReconciliationRequired(
+                        "semantic update has an unresolved prior execution"
+                    )
+                raise RuntimeError("semantic update has unsupported idempotency state")
 
-        try:
-            target_receipt = self._router.apply(
+            target_receipt = self._router.apply_with_connection(
+                conn,
                 intent=canonical,
                 candidate=candidate,
                 verification=verification,
@@ -327,12 +335,8 @@ class LearningSemanticUpdateExecutor:
                 receipt=target_receipt,
                 intent=canonical,
             )
-        except Exception:
-            self._mark_owned_pending_uncertain(record)
-            raise
-
-        try:
-            self._idempotency.complete_pending_if_matches(
+            self._idempotency.complete_pending_if_matches_with_connection(
+                conn,
                 operation_key=record.operation_key,
                 task_id=record.task_id,
                 operation_type=record.operation_type,
@@ -340,26 +344,4 @@ class LearningSemanticUpdateExecutor:
                 created_at=record.created_at,
                 result=_result_payload(receipt),
             )
-        except Exception:
-            self._mark_owned_pending_uncertain(record, tolerate_conflict=True)
-            raise
-        return receipt
-
-    def _mark_owned_pending_uncertain(
-        self,
-        record: IdempotencyRecord,
-        *,
-        tolerate_conflict: bool = False,
-    ) -> None:
-        try:
-            self._idempotency.mark_pending_uncertain_if_matches(
-                operation_key=record.operation_key,
-                task_id=record.task_id,
-                operation_type=record.operation_type,
-                input_fingerprint=record.input_fingerprint,
-                created_at=record.created_at,
-            )
-        except IdempotencyConflictError:
-            if tolerate_conflict:
-                return
-            raise
+            return receipt

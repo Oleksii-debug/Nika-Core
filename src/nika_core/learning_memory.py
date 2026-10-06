@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import sqlite3
 import unicodedata
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -131,8 +132,74 @@ class LearningMemoryApplier:
             raise TypeError("memory must be the canonical MemoryService")
         self._memory = memory
 
+    @property
+    def sqlite_store(self):
+        """Return the exact SQLite authority backing this target owner."""
+        return self._memory.sqlite_store
+
     def apply(
         self,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        scope: MemoryScope,
+        owner_id: str,
+        namespace: str,
+        key: str,
+    ) -> LearningMemoryApplyReceipt:
+        return self._apply(
+            None,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            scope=scope,
+            owner_id=owner_id,
+            namespace=namespace,
+            key=key,
+        )
+
+    def apply_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        scope: MemoryScope,
+        owner_id: str,
+        namespace: str,
+        key: str,
+    ) -> LearningMemoryApplyReceipt:
+        """Apply one semantic memory CAS inside a caller-owned transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        return self._apply(
+            conn,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            scope=scope,
+            owner_id=owner_id,
+            namespace=namespace,
+            key=key,
+        )
+
+    def _apply(
+        self,
+        conn: sqlite3.Connection | None,
         *,
         intent: LearningUpdateIntent,
         candidate: CognitionCandidate,
@@ -186,12 +253,21 @@ class LearningMemoryApplier:
         if expected_revision is None:
             expected_updated_at = None
         else:
-            existing = self._memory.get(
-                scope=canonical_scope,
-                owner_id=canonical_owner,
-                namespace=canonical_namespace,
-                key=canonical_key,
-            )
+            if conn is None:
+                existing = self._memory.get(
+                    scope=canonical_scope,
+                    owner_id=canonical_owner,
+                    namespace=canonical_namespace,
+                    key=canonical_key,
+                )
+            else:
+                existing = self._memory.get_with_connection(
+                    conn,
+                    scope=canonical_scope,
+                    owner_id=canonical_owner,
+                    namespace=canonical_namespace,
+                    key=canonical_key,
+                )
             if existing is None:
                 raise MemoryConflictError("learning memory target no longer exists")
             actual_revision = memory_revision_sha256(existing)
@@ -199,15 +275,27 @@ class LearningMemoryApplier:
                 raise MemoryConflictError("learning memory revision changed")
             expected_updated_at = existing.updated_at
 
-        committed = self._memory.compare_and_put(
-            scope=canonical_scope,
-            owner_id=canonical_owner,
-            namespace=canonical_namespace,
-            key=canonical_key,
-            value=value,
-            expected_updated_at=expected_updated_at,
-            user_approved=False,
-        )
+        if conn is None:
+            committed = self._memory.compare_and_put(
+                scope=canonical_scope,
+                owner_id=canonical_owner,
+                namespace=canonical_namespace,
+                key=canonical_key,
+                value=value,
+                expected_updated_at=expected_updated_at,
+                user_approved=False,
+            )
+        else:
+            committed = self._memory.compare_and_put_with_connection(
+                conn,
+                scope=canonical_scope,
+                owner_id=canonical_owner,
+                namespace=canonical_namespace,
+                key=canonical_key,
+                value=value,
+                expected_updated_at=expected_updated_at,
+                user_approved=False,
+            )
         return LearningMemoryApplyReceipt(
             intent_sha256=canonical.intent_sha256,
             target_ref_sha256=target_ref,

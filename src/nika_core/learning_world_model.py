@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import sqlite3
 from dataclasses import dataclass
 
 from nika_core.learning_cognition import (
@@ -28,15 +29,73 @@ class LearningWorldModelApplyReceipt:
 
 
 class LearningWorldModelApplier:
-    """Apply VERIFIED Loop-B WORLD_MODEL intents through the canonical world-state owner."""
+    """Apply VERIFIED Loop-B WORLD_MODEL intents through the canonical target owner."""
 
     def __init__(self, world_model: WorldModelService) -> None:
         if type(world_model) is not WorldModelService:
             raise TypeError("world_model must be the canonical WorldModelService")
         self._world_model = world_model
 
+    @property
+    def sqlite_store(self):
+        """Return the exact SQLite authority backing this target owner."""
+        return self._world_model.sqlite_store
+
     def apply(
         self,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        workspace_id: str,
+        topic: str,
+    ) -> LearningWorldModelApplyReceipt:
+        return self._apply(
+            None,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            workspace_id=workspace_id,
+            topic=topic,
+        )
+
+    def apply_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        workspace_id: str,
+        topic: str,
+    ) -> LearningWorldModelApplyReceipt:
+        """Apply one world-model CAS inside a caller-owned SQLite transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        return self._apply(
+            conn,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            workspace_id=workspace_id,
+            topic=topic,
+        )
+
+    def _apply(
+        self,
+        conn: sqlite3.Connection | None,
         *,
         intent: LearningUpdateIntent,
         candidate: CognitionCandidate,
@@ -56,9 +115,7 @@ class LearningWorldModelApplier:
             payload=payload,
         )
         if canonical.target is not LearningUpdateTarget.WORLD_MODEL:
-            raise ValueError(
-                "learning world-model adapter accepts only WORLD_MODEL update intents"
-            )
+            raise ValueError("learning world-model adapter accepts only WORLD_MODEL update intents")
         if canonical.update_schema != WORLD_MODEL_UPDATE_SCHEMA:
             raise ValueError("unsupported learning world-model update schema")
         if type(workspace_id) is not str or workspace_id != canonical.workspace_id:
@@ -73,12 +130,19 @@ class LearningWorldModelApplier:
 
         value = decode_learning_json_payload(payload)
         created = canonical.expected_revision_sha256 is None
-        snapshot = self._world_model.compare_and_put(
+        if conn is None:
+            snapshot = self._world_model.compare_and_put(
             workspace_id=workspace_id,
-            topic=topic,
-            value=value,
-            expected_revision_sha256=canonical.expected_revision_sha256,
-        )
+            topic=topic,                value=value,
+                expected_revision_sha256=canonical.expected_revision_sha256,
+            )
+        else:
+            snapshot = self._world_model.compare_and_put_with_connection(
+                conn,
+            workspace_id=workspace_id,
+            topic=topic,                value=value,
+                expected_revision_sha256=canonical.expected_revision_sha256,
+            )
         return LearningWorldModelApplyReceipt(
             intent_sha256=canonical.intent_sha256,
             target_ref_sha256=snapshot.target_ref_sha256,
