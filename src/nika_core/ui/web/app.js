@@ -101,6 +101,9 @@
   let autostartPending = false;
   let autostartGeneration = 0;
   const tasksList = document.getElementById("tasks-list");
+  const tasksPageStatus = document.getElementById("tasks-page-status");
+  const tasksPagePrevious = document.getElementById("tasks-page-previous");
+  const tasksPageNext = document.getElementById("tasks-page-next");
   const agentsList = document.getElementById("agents-list");
   const workspacesList = document.getElementById("workspaces-list");
   const tasksEmpty = document.getElementById("tasks-empty");
@@ -368,6 +371,41 @@
     }
   }
 
+  function renderTaskPage(snapshot) {
+    const failClosed = () => {
+      if (tasksPageStatus) tasksPageStatus.textContent = "Сторінки завдань недоступні або несумісні.";
+      if (tasksPagePrevious) tasksPagePrevious.disabled = true;
+      if (tasksPageNext) tasksPageNext.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || snapshot.schema !== "nika.task-page:v1"
+      || !Number.isSafeInteger(snapshot.page_size)
+      || snapshot.page_size !== 50
+      || !Number.isSafeInteger(snapshot.offset)
+      || snapshot.offset < 0
+      || snapshot.offset % snapshot.page_size !== 0
+      || !Number.isSafeInteger(snapshot.page_number)
+      || snapshot.page_number !== Math.floor(snapshot.offset / snapshot.page_size) + 1
+      || typeof snapshot.has_previous !== "boolean"
+      || typeof snapshot.has_next !== "boolean"
+      || typeof snapshot.unfinished_only !== "boolean"
+      || snapshot.has_previous !== (snapshot.offset > 0)
+      || (snapshot.offset > 0 && !snapshot.unfinished_only)
+    ) {
+      return failClosed();
+    }
+    if (tasksPageStatus) {
+      tasksPageStatus.textContent = snapshot.unfinished_only
+        ? `Сторінка ${snapshot.page_number} незавершених завдань. Використовуйте кнопки сторінок, щоб отримати task_id інших незавершених завдань.`
+        : "Показано всі незавершені та останні завершені завдання, що вміщаються в поточний список.";
+    }
+    if (tasksPagePrevious) tasksPagePrevious.disabled = !snapshot.has_previous;
+    if (tasksPageNext) tasksPageNext.disabled = !snapshot.has_next;
+    return true;
+  }
+
   function presentState(labels, value) {
     if (typeof value !== "string") return unavailableStateLabel;
     return Object.prototype.hasOwnProperty.call(labels, value)
@@ -400,6 +438,7 @@
   function reportStateUnavailable() {
     renderStartupRecovery(null);
     renderModelSettings(null);
+    renderTaskPage(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
     renderTeamTaskUnavailable();
     if (stateUnavailableReported) return;
@@ -1625,6 +1664,7 @@
     renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderSpeech(state.speech ?? null);
     renderVoice(state.voice ?? null);
+    const taskPageReady = renderTaskPage(state.task_page ?? null);
     renderItems(
       tasksList,
       tasksEmpty,
@@ -1641,6 +1681,11 @@
     if (!recoveryRender.ok) {
       lastStateReady = false;
       announce(recoveryRender.message, true);
+      return false;
+    }
+    if (!taskPageReady) {
+      lastStateReady = false;
+      announce("Сторінки завдань недоступні або несумісні.", true);
       return false;
     }
     if (!teamRender.ok) {

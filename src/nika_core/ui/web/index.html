@@ -195,7 +195,12 @@
     <section aria-labelledby="tasks-heading">
       <h2 id="tasks-heading" tabindex="-1">Завдання</h2>
       <p id="tasks-empty">Завдань ще немає.</p>
+      <p id="tasks-page-status">Показано актуальний список завдань.</p>
       <ol id="tasks-list" aria-label="Список завдань"></ol>
+      <div class="actions" aria-label="Сторінки списку завдань">
+        <button id="tasks-page-previous" type="button" data-action-id="task.page.previous" disabled>Попередня сторінка</button>
+        <button id="tasks-page-next" type="button" data-action-id="task.page.next" disabled>Наступна сторінка</button>
+      </div>
     </section>
 
     <section aria-labelledby="team-task-heading">

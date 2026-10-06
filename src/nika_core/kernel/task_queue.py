@@ -142,10 +142,13 @@ class TaskQueue:
         states: tuple[TaskState, ...],
         *,
         limit: int = 50,
+        offset: int = 0,
     ) -> tuple[TaskRecord, ...]:
-        """Return recent matching states after filtering the entire durable task table."""
+        """Return a bounded recent-state window after filtering the durable task table."""
         if limit < 1 or limit > 500:
             raise ValueError("limit must be between 1 and 500")
+        if type(offset) is not int or offset < 0:
+            raise ValueError("offset must be a non-negative integer")
         if any(type(state) is not TaskState for state in states):
             raise TypeError("states must contain only TaskState values")
         unique_states = tuple(dict.fromkeys(states))
@@ -164,15 +167,25 @@ class TaskQueue:
             "typeof(state) != 'text' "
             f"OR state NOT IN ({canonical_placeholders}) "
             "THEN 0 ELSE 1 END, "
-            "updated_at DESC, created_at DESC LIMIT ?"
+            "updated_at DESC, created_at DESC LIMIT ? OFFSET ?"
         )
         parameters = (
             *tuple(state.value for state in unique_states),
             *canonical_states,
             *canonical_states,
             limit,
+            offset,
         )
         with self.store.connection() as conn:
+            if offset:
+                corrupted = conn.execute(
+                    "SELECT task_id, workspace_id, agent_id, state, payload_json "
+                    "FROM tasks WHERE typeof(state) != 'text' "
+                    f"OR state NOT IN ({canonical_placeholders}) LIMIT 1",
+                    canonical_states,
+                ).fetchone()
+                if corrupted is not None:
+                    self._record_from_row(corrupted)
             rows = conn.execute(statement, parameters).fetchall()
         return tuple(self._record_from_row(row) for row in rows)
 

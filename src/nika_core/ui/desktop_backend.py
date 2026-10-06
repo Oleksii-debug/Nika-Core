@@ -40,6 +40,7 @@ _NONTERMINAL_STATES = tuple(state for state in TaskState if state not in _TERMIN
 _LOCAL_CANCEL_STATES = frozenset(
     {TaskState.CREATED, TaskState.READY, TaskState.PAUSED, TaskState.BLOCKED}
 )
+_TASK_PAGE_SIZE = 50
 
 
 class _DesktopRuntimeLoop:
@@ -122,6 +123,8 @@ class DesktopBackend:
         self._active_futures: dict[str, Future[Any]] = {}
         self._cancel_futures: dict[str, Future[bool]] = {}
         self._packaged_futures: set[Future[Any]] = set()
+        self._task_page_lock = threading.Lock()
+        self._task_page_offset = 0
         self._startup_recovery_lock = threading.Lock()
         self._startup_recovery_started = False
         self._startup_recovery_future: Future[Any] | None = None
@@ -160,6 +163,7 @@ class DesktopBackend:
             self._cancel_rejected_admission(record.task_id)
             raise
         self._queue.transition(record.task_id, TaskState.READY)
+        self._reset_task_page()
         self._schedule_start(record.task_id, command)
         return UIResult(
             request_id="desktop-handler",
@@ -412,10 +416,12 @@ class DesktopBackend:
             return dict(self._startup_recovery_state)
 
     def snapshot(self) -> dict[str, Any]:
+        task_records, task_page = self._snapshot_task_records()
         return {
             "autostart": self.autostart_settings.snapshot(),
             "startup_recovery": self.startup_recovery_snapshot(),
-            "tasks": [self._task_view(record) for record in self._snapshot_task_records()],
+            "tasks": [self._task_view(record) for record in task_records],
+            "task_page": task_page,
             "agents": [
                 {
                     "agent_id": item.agent_id,
@@ -787,17 +793,107 @@ class DesktopBackend:
         records = list(self._queue.list_by_states((state,), limit=2))
         return self._require_unambiguous(records, action=action)
 
-    def _snapshot_task_records(self) -> tuple[TaskRecord, ...]:
-        unfinished = self._queue.list_by_states(_NONTERMINAL_STATES, limit=50)
-        if len(unfinished) >= 50:
-            return unfinished
-        terminal = tuple(
-            record
-            for record in self._queue.list_recent(limit=50)
-            if record.state in _TERMINAL_STATES
+    def next_task_page(self, payload: Mapping[str, Any]) -> UIResult:
+        self._require_empty_task_page_payload(payload)
+        with self._task_page_lock:
+            next_offset = self._task_page_offset + _TASK_PAGE_SIZE
+            next_page = self._queue.list_by_states(
+                _NONTERMINAL_STATES,
+                limit=1,
+                offset=next_offset,
+            )
+            if not next_page:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Це остання сторінка незавершених завдань.",
+                    focus_id="tasks-heading",
+                )
+            self._task_page_offset = next_offset
+            page_number = next_offset // _TASK_PAGE_SIZE + 1
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=f"Відкрито сторінку {page_number} незавершених завдань.",
+            focus_id="tasks-heading",
         )
-        remaining = 50 - len(unfinished)
-        return (*unfinished, *terminal[:remaining])
+
+    def previous_task_page(self, payload: Mapping[str, Any]) -> UIResult:
+        self._require_empty_task_page_payload(payload)
+        with self._task_page_lock:
+            if self._task_page_offset == 0:
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message="Це перша сторінка завдань.",
+                    focus_id="tasks-heading",
+                )
+            self._task_page_offset = max(0, self._task_page_offset - _TASK_PAGE_SIZE)
+            page_number = self._task_page_offset // _TASK_PAGE_SIZE + 1
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=f"Відкрито сторінку {page_number} завдань.",
+            focus_id="tasks-heading",
+        )
+
+    def _reset_task_page(self) -> None:
+        with self._task_page_lock:
+            self._task_page_offset = 0
+
+    def _snapshot_task_records(
+        self,
+    ) -> tuple[tuple[TaskRecord, ...], dict[str, object]]:
+        with self._task_page_lock:
+            offset = self._task_page_offset
+
+        window = self._queue.list_by_states(
+            _NONTERMINAL_STATES,
+            limit=_TASK_PAGE_SIZE + 1,
+            offset=offset,
+        )
+        if offset and not window:
+            with self._task_page_lock:
+                if self._task_page_offset == offset:
+                    self._task_page_offset = 0
+                offset = self._task_page_offset
+            window = self._queue.list_by_states(
+                _NONTERMINAL_STATES,
+                limit=_TASK_PAGE_SIZE + 1,
+                offset=offset,
+            )
+
+        unfinished = tuple(window[:_TASK_PAGE_SIZE])
+        has_next = len(window) > _TASK_PAGE_SIZE
+        has_previous = offset > 0
+        unfinished_only = has_previous or has_next
+        records: tuple[TaskRecord, ...] = unfinished
+        if not unfinished_only:
+            terminal = tuple(
+                record
+                for record in self._queue.list_recent(limit=_TASK_PAGE_SIZE)
+                if record.state in _TERMINAL_STATES
+            )
+            remaining = _TASK_PAGE_SIZE - len(unfinished)
+            records = (*unfinished, *terminal[:remaining])
+
+        page = {
+            "schema": "nika.task-page:v1",
+            "page_size": _TASK_PAGE_SIZE,
+            "offset": offset,
+            "page_number": offset // _TASK_PAGE_SIZE + 1,
+            "has_previous": has_previous,
+            "has_next": has_next,
+            "unfinished_only": unfinished_only,
+        }
+        return records, page
+
+    @staticmethod
+    def _require_empty_task_page_payload(payload: Mapping[str, Any]) -> None:
+        if type(payload) is not dict:
+            raise TypeError("task page action payload must be an exact dict")
+        if payload:
+            raise ValueError("task page action does not accept payload authority")
 
     @staticmethod
     def _require_unambiguous(
