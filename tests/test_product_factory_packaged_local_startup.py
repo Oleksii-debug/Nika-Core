@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import shutil
@@ -7,6 +8,7 @@ import subprocess
 
 import pytest
 
+import nika_core.product_factory_packaged_local_startup as startup_module
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_packaged_local_startup import (
@@ -90,6 +92,52 @@ def _configure_ollama(settings: V01ModelSettings) -> None:
         }
     )
     assert result.status == "completed"
+
+
+def _seed_current_ollama_promotion(
+    store: SQLiteStore,
+    settings: V01ModelSettings,
+) -> dict[str, str]:
+    selection, pin = settings.current_binding()
+    assert pin is None
+    selection_id = hashlib.sha256(
+        selection.canonical_json().encode("utf-8")
+    ).hexdigest()
+    digests = {
+        "decision": hashlib.sha256(b"decision").hexdigest(),
+        "binding": hashlib.sha256(b"binding").hexdigest(),
+        "base_artifact": hashlib.sha256(b"base-artifact").hexdigest(),
+        "base_descriptor": hashlib.sha256(b"base-descriptor").hexdigest(),
+        "challenger_artifact": hashlib.sha256(b"challenger-artifact").hexdigest(),
+        "challenger_descriptor": hashlib.sha256(b"challenger-descriptor").hexdigest(),
+        "previous_selection": hashlib.sha256(b"previous-selection").hexdigest(),
+    }
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT revision FROM v01_model_settings WHERE singleton = 1"
+        ).fetchone()
+        assert row is not None
+        conn.execute(
+            "INSERT INTO v01_model_promotions("
+            "decision_sha256, binding_sha256, base_artifact_sha256, "
+            "base_descriptor_digest, challenger_artifact_sha256, "
+            "challenger_descriptor_digest, previous_selection_id, "
+            "activated_selection_id, activated_revision, rollback_revision, "
+            "activation_request_sha256, activation_attestation_sha256"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)",
+            (
+                digests["decision"],
+                digests["binding"],
+                digests["base_artifact"],
+                digests["base_descriptor"],
+                digests["challenger_artifact"],
+                digests["challenger_descriptor"],
+                digests["previous_selection"],
+                selection_id,
+                row["revision"],
+            ),
+        )
+    return digests
 
 
 def test_startup_decoder_binds_only_explicit_local_host_authority(
@@ -355,4 +403,107 @@ def test_windows_bridge_rejects_two_product_factory_host_authorities(
             config,
             start_startup_recovery=False,
             product_factory_execution_host=object(),  # type: ignore[arg-type]
+        )
+
+
+def test_program_composition_preserves_promoted_ollama_manifest_pin(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    startup = decode_packaged_local_product_factory_startup(
+        _startup_json(
+            tmp_path,
+            repository,
+            executable=str(pathlib.Path(executable).resolve()),
+        )
+    )
+    assert startup is not None
+    store = SQLiteStore(tmp_path / "promoted.db")
+    store.initialize()
+    settings = V01ModelSettings(store)
+    _configure_ollama(settings)
+    digests = _seed_current_ollama_promotion(store, settings)
+    manifest_sha = hashlib.sha256(b"provider-manifest").hexdigest()
+    observed: dict[str, object] = {}
+
+    def resolve_manifest(_self: object, **kwargs: object) -> object:
+        observed["resolve"] = kwargs
+
+        class Prepared:
+            provider_manifest_sha256 = manifest_sha
+
+        return Prepared()
+
+    original_provider = startup_module.OllamaProvider
+
+    class CapturingOllamaProvider(original_provider):
+        def __init__(self, **kwargs: object) -> None:
+            observed["expected_manifest_sha256"] = kwargs.get(
+                "expected_manifest_sha256"
+            )
+            super().__init__(**kwargs)
+
+    monkeypatch.setattr(
+        startup_module.OllamaPromotionManifestStore,
+        "resolve",
+        resolve_manifest,
+    )
+    monkeypatch.setattr(
+        startup_module,
+        "OllamaProvider",
+        CapturingOllamaProvider,
+    )
+
+    program = build_packaged_local_product_factory_program(
+        store,
+        settings=settings,
+        startup=startup,
+    )
+
+    assert program.worker.planner is not None
+    assert observed["expected_manifest_sha256"] == manifest_sha
+    resolved = observed["resolve"]
+    assert isinstance(resolved, dict)
+    assert resolved["decision_sha256"] == digests["decision"]
+    assert resolved["binding_sha256"] == digests["binding"]
+    assert resolved["role"] == "challenger"
+    assert resolved["artifact_sha256"] == digests["challenger_artifact"]
+    assert resolved["descriptor_digest"] == digests["challenger_descriptor"]
+    assert resolved["route_model_id"] == "qwen3:8b"
+    assert resolved["base_url"] == "http://localhost:11434"
+
+
+def test_program_composition_fails_closed_when_promoted_manifest_is_missing(
+    tmp_path: pathlib.Path,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    startup = decode_packaged_local_product_factory_startup(
+        _startup_json(
+            tmp_path,
+            repository,
+            executable=str(pathlib.Path(executable).resolve()),
+        )
+    )
+    assert startup is not None
+    store = SQLiteStore(tmp_path / "missing-manifest.db")
+    store.initialize()
+    settings = V01ModelSettings(store)
+    _configure_ollama(settings)
+    _seed_current_ollama_promotion(store, settings)
+
+    with pytest.raises(
+        PackagedLocalProductFactoryStartupError,
+        match="provider manifest",
+    ):
+        build_packaged_local_product_factory_program(
+            store,
+            settings=settings,
+            startup=startup,
         )

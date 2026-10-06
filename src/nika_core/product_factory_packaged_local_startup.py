@@ -20,7 +20,11 @@ from nika_core.product_factory_local_model_program import (
     build_modelgateway_contained_local_coding_program,
 )
 from nika_core.toolsmith.contracts import ResourceBudget
-from nika_core.v01_model_settings import V01ModelSettings
+from nika_core.training_ollama_manifest import (
+    OllamaPromotionManifestStore,
+    OllamaPromotionManifestStoreError,
+)
+from nika_core.v01_model_settings import ModelSetupError, V01ModelSettings
 
 _SCHEMA = "nika.product-factory.local-startup.v1"
 _MAX_CONFIG_BYTES = 64 * 1024
@@ -232,32 +236,46 @@ def build_packaged_local_product_factory_program(
     if type(startup) is not PackagedLocalProductFactoryStartup:
         raise TypeError("startup carrier is invalid")
 
-    snapshot = settings.snapshot()
-    if snapshot.get("status") != "ready":
+    try:
+        selection, artifact_pin = settings.current_binding()
+    except ModelSetupError as exc:
         raise PackagedLocalProductFactoryStartupError(
             "select a local Ollama model before enabling contained-local Product Factory"
-        )
+        ) from exc
     if (
-        snapshot.get("route_kind") != "ollama"
-        or snapshot.get("provider_id") != "ollama"
-        or snapshot.get("provider_kind") != ProviderKind.LOCAL.value
+        selection.route_kind != "ollama"
+        or selection.provider_id != "ollama"
+        or selection.provider_kind is not ProviderKind.LOCAL
     ):
         raise PackagedLocalProductFactoryStartupError(
             "contained-local Product Factory startup requires the persisted Ollama LOCAL route"
         )
 
-    model = _required_route_text(snapshot.get("model"), "model")
-    base_url = _required_route_text(snapshot.get("base_url"), "base_url")
-    timeout = snapshot.get("timeout_seconds")
-    if type(timeout) not in (int, float) or isinstance(timeout, bool):
-        raise PackagedLocalProductFactoryStartupError(
-            "persisted local model timeout is invalid"
-        )
-    timeout_seconds = float(timeout)
-    if not 0.0 < timeout_seconds <= 600.0:
-        raise PackagedLocalProductFactoryStartupError(
-            "persisted local model timeout is invalid"
-        )
+    model = _required_route_text(selection.model, "model")
+    base_url = _required_route_text(selection.base_url, "base_url")
+    timeout_seconds = selection.timeout_seconds
+
+    expected_manifest_sha256: str | None = None
+    if artifact_pin is not None:
+        try:
+            prepared = OllamaPromotionManifestStore(store).resolve(
+                decision_sha256=artifact_pin.decision_sha256,
+                binding_sha256=artifact_pin.binding_sha256,
+                role=artifact_pin.role,
+                artifact_sha256=artifact_pin.artifact_sha256,
+                descriptor_digest=artifact_pin.descriptor_digest,
+                route_model_id=model,
+                base_url=base_url,
+            )
+            expected_manifest_sha256 = prepared.provider_manifest_sha256
+        except (
+            TypeError,
+            ValueError,
+            OllamaPromotionManifestStoreError,
+        ) as exc:
+            raise PackagedLocalProductFactoryStartupError(
+                "persisted promoted Ollama artifact provider manifest could not be verified"
+            ) from exc
 
     gateway = ModelGateway(audit_log=AuditLog(store))
     gateway.register(
@@ -265,6 +283,7 @@ def build_packaged_local_product_factory_program(
             default_model=model,
             base_url=base_url,
             think=False,
+            expected_manifest_sha256=expected_manifest_sha256,
         ),
         default=True,
     )
