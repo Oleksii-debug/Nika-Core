@@ -31,6 +31,15 @@ from nika_core.toolsmith.workspace_security import (
 )
 
 
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
+
+
 class ProcessExecutionError(RuntimeError):
     """Raised when a typed process cannot be executed within the declared policy."""
 
@@ -70,6 +79,215 @@ def _is_windows_reparse_point(file_stat: os.stat_result) -> bool:
     attributes = getattr(file_stat, "st_file_attributes", 0)
     reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
     return bool(reparse_flag and attributes & reparse_flag)
+
+
+def _open_windows_executable_launch_lock(path: pathlib.Path) -> int:
+    """Hold one final executable path against write/delete replacement."""
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            str(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "CreateFileW failed")
+        return int(handle)
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        raise ProcessExecutionError(
+            "unable to lock pinned runtime executable for launch"
+        ) from exc
+
+
+def _open_windows_directory_launch_lock(path: pathlib.Path) -> int:
+    """Hold one process-context directory against rename/delete replacement."""
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            str(path),
+            0,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            error_code = ctypes.get_last_error()
+            raise OSError(error_code, "CreateFileW failed")
+        return int(handle)
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        raise ProcessExecutionError(
+            "unable to lock process directory authority for launch"
+        ) from exc
+
+
+def _close_windows_executable_launch_lock(handle: int) -> None:
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+        close_handle.restype = ctypes.c_int
+        close_handle(ctypes.c_void_p(handle))
+    except (AttributeError, ImportError, OSError, TypeError, ValueError):
+        return
+
+
+class _PinnedExecutableLaunchGuard:
+    """Revalidate the final path at the process-launch boundary.
+
+    Windows additionally holds the pathname object with FILE_SHARE_READ only, denying
+    concurrent write/delete replacement until CreateProcess has opened the image.
+    """
+
+    def __init__(self, executable: pathlib.Path, arguments: tuple[str, ...]) -> None:
+        self._executable = executable
+        self._arguments = arguments
+        self._handle: int | None = None
+
+    def __enter__(self) -> pathlib.Path:
+        if os.name == "nt":
+            self._handle = _open_windows_executable_launch_lock(self._executable)
+        try:
+            resolved = _resolve_pinned_executable(
+                self._executable,
+                self._arguments,
+            )
+            if _resolution_chain_key(resolved) != _resolution_chain_key(self._executable):
+                raise ProcessExecutionError(
+                    "pinned runtime executable changed before process launch"
+                )
+            return resolved
+        except Exception:
+            self._close()
+            raise
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        self._handle = None
+        _close_windows_executable_launch_lock(handle)
+
+
+class _PinnedDirectoryLaunchGuard:
+    """Revalidate and, on Windows, hold workspace/cwd directory authority."""
+
+    def __init__(
+        self,
+        workspace_root: pathlib.Path,
+        cwd: pathlib.Path,
+    ) -> None:
+        self._workspace_root = workspace_root
+        self._cwd = cwd
+        try:
+            relative = cwd.relative_to(workspace_root)
+        except ValueError as exc:
+            raise ProcessExecutionError(
+                "process cwd escapes declared workspace root"
+            ) from exc
+        paths = [workspace_root]
+        current = workspace_root
+        for component in relative.parts:
+            current = current / component
+            paths.append(current)
+        self._paths = tuple(paths)
+        self._handles: list[int] = []
+
+    def __enter__(self) -> pathlib.Path:
+        if os.name == "nt":
+            try:
+                for path in self._paths:
+                    self._handles.append(
+                        _open_windows_directory_launch_lock(path)
+                    )
+            except Exception:
+                self._close()
+                raise
+        try:
+            workspace_root = ensure_real_directory_root(
+                self._workspace_root,
+                label="process workspace root",
+            )
+            cwd = ensure_real_directory_root(
+                self._cwd,
+                label="process cwd",
+            )
+            if (
+                _resolution_chain_key(workspace_root)
+                != _resolution_chain_key(self._workspace_root)
+                or _resolution_chain_key(cwd) != _resolution_chain_key(self._cwd)
+            ):
+                raise ProcessExecutionError(
+                    "process directory authority changed before launch"
+                )
+            try:
+                cwd.relative_to(workspace_root)
+            except ValueError as exc:
+                raise ProcessExecutionError(
+                    "process cwd escaped the workspace before launch"
+                ) from exc
+            return cwd
+        except Exception:
+            self._close()
+            raise
+
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_value: object,
+        traceback: object,
+    ) -> None:
+        self._close()
+
+    def _close(self) -> None:
+        while self._handles:
+            _close_windows_executable_launch_lock(self._handles.pop())
 
 
 def _resolve_pinned_executable(
@@ -183,6 +401,19 @@ def _cancelled_before_launch(typed_argv: tuple[str, ...]) -> ProcessExecutionRes
     )
 
 
+def _timed_out_before_launch(typed_argv: tuple[str, ...]) -> ProcessExecutionResult:
+    return ProcessExecutionResult(
+        argv=typed_argv,
+        returncode=1,
+        stdout="",
+        stderr="",
+        timed_out=True,
+        cancelled=False,
+        output_limit_exceeded=False,
+        isolation_class=_process_isolation_class(),
+    )
+
+
 def run_typed_process(
     argv: collections.abc.Sequence[str],
     *,
@@ -229,17 +460,27 @@ def run_typed_process(
 
     creationflags, start_new_session = process_group_popen_options()
 
-    process = subprocess.Popen(
-        typed_argv,
-        cwd=cwd,
-        env=process_environment,
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        creationflags=creationflags,
-        start_new_session=start_new_session,
-    )
+    with _PinnedExecutableLaunchGuard(
+        pathlib.Path(typed_argv[0]),
+        typed_argv[1:],
+    ) as launch_executable:
+        with _PinnedDirectoryLaunchGuard(workspace_root, cwd) as launch_cwd:
+            if cancellation_event is not None and cancellation_event.is_set():
+                return _cancelled_before_launch(typed_argv)
+            if time.monotonic() >= deadline:
+                return _timed_out_before_launch(typed_argv)
+            launch_argv = (str(launch_executable), *typed_argv[1:])
+            process = subprocess.Popen(
+                launch_argv,
+                cwd=launch_cwd,
+                env=process_environment,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                creationflags=creationflags,
+                start_new_session=start_new_session,
+            )
 
     with _WindowsJob() as job:
         if os.name == "nt":
@@ -343,20 +584,47 @@ def _git(
     environment: collections.abc.Mapping[str, str],
     timeout_seconds: int = 60,
 ) -> subprocess.CompletedProcess[str]:
+    command = tuple(argv)
+    if not command:
+        raise WorkspaceSecurityError("git command is empty")
     try:
-        result = subprocess.run(
-            tuple(argv),
-            cwd=cwd,
-            env=dict(environment),
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
-        )
+        executable = pathlib.Path(command[0])
+        if executable.is_absolute():
+            with _PinnedExecutableLaunchGuard(
+                executable,
+                command[1:],
+            ) as launch_executable:
+                result = subprocess.run(
+                    (str(launch_executable), *command[1:]),
+                    cwd=cwd,
+                    env=dict(environment),
+                    shell=False,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=timeout_seconds,
+                    check=False,
+                )
+        else:
+            result = subprocess.run(
+                command,
+                cwd=cwd,
+                env=dict(environment),
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+            )
+    except ProcessExecutionError:
+        raise WorkspaceSecurityError(
+            "git command executable authority changed before launch"
+        ) from None
     except subprocess.TimeoutExpired:
         raise WorkspaceSecurityError("git command timed out") from None
     except (OSError, subprocess.SubprocessError):
@@ -482,16 +750,32 @@ def prepare_private_git_workspace(
     if base_result.stdout.strip().lower() != plan.base_sha.lower():
         raise WorkspaceSecurityError("pinned base SHA is not the exact private Git commit")
 
-    collision = subprocess.run(
-        (*git_prefix, "show-ref", "--verify", "--quiet", f"refs/heads/{plan.branch_name}"),
-        cwd=job_root,
-        env=dict(plan.environment),
-        shell=False,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
+    collision_argv = (
+        *git_prefix,
+        "show-ref",
+        "--verify",
+        "--quiet",
+        f"refs/heads/{plan.branch_name}",
     )
+    try:
+        with _PinnedExecutableLaunchGuard(
+            pathlib.Path(collision_argv[0]),
+            collision_argv[1:],
+        ) as launch_executable:
+            collision = subprocess.run(
+                (str(launch_executable), *collision_argv[1:]),
+                cwd=job_root,
+                env=dict(plan.environment),
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+    except ProcessExecutionError:
+        raise WorkspaceSecurityError(
+            "unable to prove job branch collision executable authority"
+        ) from None
     if collision.returncode == 0:
         raise WorkspaceSecurityError("job branch already exists in private metadata")
     if collision.returncode not in {1}:
