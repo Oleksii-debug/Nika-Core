@@ -43,7 +43,7 @@ from nika_core.learning_world_model import (
     WORLD_MODEL_UPDATE_SCHEMA,
     LearningWorldModelApplier,
 )
-from nika_core.memory.contracts import MemoryScope
+from nika_core.memory.contracts import MemoryConflictError, MemoryScope
 from nika_core.memory.service import MemoryService
 from nika_core.runtime.idempotency import (
     IdempotencyConflictError,
@@ -486,7 +486,7 @@ def test_router_failure_marks_owned_reservation_uncertain(tmp_path: Path) -> Non
         expected_revision_sha256="d" * 64,
     )
 
-    with pytest.raises(ValueError, match="expected revision"):
+    with pytest.raises(MemoryConflictError, match="revision changed"):
         _apply(
             executor,
             task_id="task-stale",
