@@ -30,7 +30,11 @@ from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
 )
 from nika_core.product_project import ProductProject, ProductProjectRepository
-from nika_core.v01_model_settings import ModelSelection, V01ModelSettings
+from nika_core.v01_model_settings import (
+    MAX_MODEL_SETTINGS_REVISION,
+    ModelSelection,
+    V01ModelSettings,
+)
 
 _MODEL_AUTHORITY_KEY = "packaged_local_model_authority"
 _MODEL_AUTHORITY_SCHEMA = "nika.product-factory.packaged-model-authority.v1"
@@ -738,7 +742,11 @@ def _decode_model_authority(value: object) -> _PackagedLocalOllamaAuthority:
         )
 
     revision = value["revision"]
-    if type(revision) is not int or revision < 1:
+    if (
+        type(revision) is not int
+        or revision < 1
+        or revision > MAX_MODEL_SETTINGS_REVISION
+    ):
         raise PackagedBoundLocalProductFactoryHostError(
             "durable Product Factory model revision is invalid"
         )
@@ -757,6 +765,10 @@ def _decode_model_authority(value: object) -> _PackagedLocalOllamaAuthority:
         "expected_manifest_sha256",
         allow_none=True,
     )
+    if (artifact_pin_sha256 is None) != (expected_manifest_sha256 is None):
+        raise PackagedBoundLocalProductFactoryHostError(
+            "durable Product Factory artifact pin and manifest authority disagree"
+        )
     private_data_allowed = value["private_data_allowed"]
     if type(private_data_allowed) is not bool:
         raise PackagedBoundLocalProductFactoryHostError(
