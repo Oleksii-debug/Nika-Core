@@ -1217,6 +1217,75 @@ def test_resumed_training_loads_from_verified_checkpoint_snapshot(
     assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
 
 
+def test_initial_adapter_config_publish_recovers_partial_prelink_temp(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "adapter_config.json"
+    temporary = tmp_path / ".adapter_config.json.tmp"
+    payload = b'{"base_model_name_or_path":"models/base"}'
+    temporary.write_bytes(b"partial-after-crash")
+
+    peft._publish_initial_adapter_config(target, payload)
+
+    assert target.read_bytes() == payload
+    assert target.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_initial_adapter_config_publish_recovers_postlink_temp(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "adapter_config.json"
+    temporary = tmp_path / ".adapter_config.json.tmp"
+    payload = b'{"base_model_name_or_path":"models/base"}'
+    temporary.write_bytes(payload)
+    target.hardlink_to(temporary)
+    assert target.stat().st_nlink == 2
+
+    peft._publish_initial_adapter_config(target, payload)
+
+    assert target.read_bytes() == payload
+    assert target.stat().st_nlink == 1
+    assert not temporary.exists()
+
+
+def test_initial_adapter_config_publish_rejects_unknown_extra_hardlink(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "adapter_config.json"
+    outside = tmp_path / "unexpected-hardlink"
+    payload = b'{"base_model_name_or_path":"models/base"}'
+    outside.write_bytes(payload)
+    target.hardlink_to(outside)
+    assert target.stat().st_nlink == 2
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="initial_adapter_config_invalid",
+    ):
+        peft._publish_initial_adapter_config(target, payload)
+
+    assert target.read_bytes() == payload
+    assert outside.read_bytes() == payload
+    assert target.stat().st_nlink == 2
+
+
+def test_initial_adapter_config_publish_rejects_mismatched_existing_target(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "adapter_config.json"
+    target.write_bytes(b"wrong-derived-config")
+    payload = b'{"base_model_name_or_path":"models/base"}'
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="initial_adapter_config_mismatch",
+    ):
+        peft._publish_initial_adapter_config(target, payload)
+
+    assert target.read_bytes() == b"wrong-derived-config"
+
+
 def test_checkpoint_snapshot_revalidates_nested_source_changes(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1296,7 +1365,9 @@ def test_new_job_can_warm_start_from_promoted_candidate(
         "consumed_materials_sha256": "7" * 64,
         "job_fingerprint": "8" * 64,
         "model_dir_manifest_sha256": config.model_dir_manifest_sha256,
+        "previous_adapter_tensors_sha256": "6" * 64,
         "schema": "nika-peft-candidate-v2",
+        "trained_adapter_tensors_sha256": "9" * 64,
         "step_number": 2,
         "trainer_artifact_id": "a" * 64,
         "trainer_implementation_sha256": "b" * 64,
