@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from threading import Event, Thread
 
 import pytest
 
@@ -125,6 +126,48 @@ def test_invalid_json_reload_clears_previously_loaded_authority(tmp_path: Path) 
         source.resolve(_PROJECT_ID)
 
 
+def test_newer_load_wins_when_an_older_file_read_finishes_late(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _write_plan(tmp_path / "first.json")
+    newer_project = "product-" + "d" * 64
+    second = _write_plan(tmp_path / "second.json", project_id=newer_project)
+    source = PackagedProductFactoryExecutionPlanFileSource()
+    first_started = Event()
+    release_first = Event()
+    original = plan_file_module._read_stable_plan_bytes
+
+    def delayed_read(path: Path) -> bytes:
+        if path == first.resolve():
+            first_started.set()
+            if not release_first.wait(timeout=5):
+                raise RuntimeError("timed out waiting to finish stale plan read")
+        return original(path)
+
+    monkeypatch.setattr(plan_file_module, "_read_stable_plan_bytes", delayed_read)
+    results: dict[str, object] = {}
+
+    def load_first() -> None:
+        results["first"] = source.load({"path": str(first.resolve())})
+
+    worker = Thread(target=load_first, daemon=True)
+    worker.start()
+    assert first_started.wait(timeout=5)
+
+    newer_result = source.load({"path": str(second.resolve())})
+    release_first.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert newer_result.status == "completed"
+    stale_result = results["first"]
+    assert getattr(stale_result, "status") == "rejected"
+    assert source.resolve(newer_project).project_id == newer_project
+    with pytest.raises(PackagedExecutionPlanFileError, match="another ProductProject"):
+        source.resolve(_PROJECT_ID)
+
+
 def test_file_source_rejects_plan_for_other_project_at_resolution(tmp_path: Path) -> None:
     other = "product-" + "b" * 64
     path = _write_plan(tmp_path / "other.json", project_id=other)
@@ -142,6 +185,21 @@ def test_file_source_rejects_relative_path_before_read(tmp_path: Path) -> None:
 
     assert result.status == "rejected"
     assert result.focus_id == "product-factory-execution-plan-path"
+    assert source.snapshot()["status"] == "missing"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow contract")
+def test_file_source_fails_closed_without_posix_nofollow(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_plan(tmp_path / "plan.json")
+    monkeypatch.delattr(plan_file_module.os, "O_NOFOLLOW", raising=False)
+    source = PackagedProductFactoryExecutionPlanFileSource()
+
+    result = source.load({"path": str(path.resolve())})
+
+    assert result.status == "failed"
     assert source.snapshot()["status"] == "missing"
 
 

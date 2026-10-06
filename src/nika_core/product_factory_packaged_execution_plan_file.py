@@ -47,11 +47,14 @@ class PackagedProductFactoryExecutionPlanFileSource:
     def __init__(self) -> None:
         self._lock = Lock()
         self._plan: PackagedProductFactoryExecutionPlan | None = None
+        self._load_generation = 0
 
     def load(self, payload: Mapping[str, Any]) -> UIResult:
         """Replace the in-memory plan with one explicitly selected safe file."""
 
         with self._lock:
+            self._load_generation += 1
+            load_generation = self._load_generation
             self._plan = None
 
         try:
@@ -82,6 +85,11 @@ class PackagedProductFactoryExecutionPlanFileSource:
             )
 
         with self._lock:
+            if load_generation != self._load_generation:
+                return _result(
+                    "rejected",
+                    "Завантаження плану Product Factory замінено новішим запитом.",
+                )
             self._plan = plan
         return _result(
             "completed",
@@ -249,9 +257,14 @@ def _open_read_authority(path: Path) -> int:
     if os.name == "nt":
         return _open_windows_read_authority(path)
 
+    nofollow = getattr(os, "O_NOFOLLOW", None)
+    if nofollow is None:
+        raise PackagedExecutionPlanFileError(
+            "platform does not provide no-follow execution-plan file opens"
+        )
     flags = os.O_RDONLY
     flags |= int(getattr(os, "O_BINARY", 0))
-    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(nofollow)
     flags |= int(getattr(os, "O_NONBLOCK", 0))
     try:
         return os.open(path, flags)
