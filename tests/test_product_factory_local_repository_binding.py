@@ -490,6 +490,80 @@ def test_require_rejects_relative_persisted_root_path(
         bindings.require(project.project_id, repository.repository_id)
 
 
+def test_expected_project_versions_reject_stale_plan_before_filesystem_work(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    plan = _plan(project, repository)
+    ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed after plan admission",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale local repository binding plan",
+        idempotency_key="update:product-1:stale-binding-plan",
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    def filesystem_must_not_run(_root: pathlib.Path):
+        raise AssertionError("filesystem validation ran for a stale execution plan")
+
+    monkeypatch.setattr(
+        binding_module,
+        "_filesystem_identity",
+        filesystem_must_not_run,
+    )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="execution plan is stale",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=tmp_path / "must-not-be-read",
+            expected_binding_version=None,
+            expected_project_spec_version=plan.expected_spec_version,
+            expected_project_row_version=plan.expected_row_version,
+        )
+
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) is None
+
+
+def test_current_binding_version_survives_invalid_filesystem_identity(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+
+    root.rename(tmp_path / "repository moved")
+
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == bound.binding_version
+    with pytest.raises(ProductFactoryLocalRepositoryBindingError):
+        bindings.require(project.project_id, repository.repository_id)
+
+
 def test_binding_rejects_inline_repository_credentials(
     tmp_path: pathlib.Path,
 ) -> None:
