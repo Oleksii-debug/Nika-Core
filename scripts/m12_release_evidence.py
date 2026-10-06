@@ -61,7 +61,7 @@ def _finite_runtime_json_float(raw: str) -> float:
 
 
 def _bounded_runtime_json_int(raw: str) -> int:
-    digits = raw[1:] if raw.startswith("-") else raw
+    digits = raw.removeprefix("-")
     if len(digits) > _MAX_RUNTIME_EVIDENCE_JSON_INTEGER_DECIMAL_CHARS:
         raise ValueError("runtime evidence integer exceeds the digit limit")
     value = int(raw)
