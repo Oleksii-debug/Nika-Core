@@ -10,6 +10,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_build_execution import (
     ApprovedBuildCommand,
+    BuildExecutionError,
     BuildExecutionScopeRequest,
     BuildExecutionSpec,
     BuildExecutionState,
@@ -270,22 +271,47 @@ def test_restart_restores_existing_pf5_state_before_returning_usable_host(tmp_pa
     assert restored.sequence >= 2
 
 
-def test_restart_rejects_current_node_identity_drift_for_prepared_lease(tmp_path) -> None:
-    host, store, task_id, startup, _authority_value, policies = _host(tmp_path)
+def test_restart_does_not_substitute_a_different_local_node_for_prepared_lease(
+    tmp_path,
+) -> None:
+    host, store, task_id, startup, authority, policies = _host(tmp_path)
     host.submit(_spec())
     host.prepare(WORK_ID)
-    drifted_node = _node(node_id="packaged-local-2")
     restarted_store = SQLiteStore(store.path)
     restarted_store.initialize()
 
-    with pytest.raises(BuildExecutionDurabilityError):
+    restarted = build_packaged_local_durable_build_host(
+        restarted_store,
+        host_task_id=task_id,
+        project_id=PROJECT_ID,
+        node=_node(node_id="packaged-local-2"),
+        startup=startup,
+        trusted_authority=authority,
+        output_policies=policies,
+    )
+
+    record = restarted.snapshot().coordinator.records[0]
+    assert record.state is BuildExecutionState.WAITING_FOR_NODE
+    assert record.node_id is None
+    assert record.lease_id is None
+    assert record.dispatch is None
+
+
+def test_restart_rejects_trusted_execution_authority_drift(tmp_path) -> None:
+    host, store, task_id, startup, _authority_value, policies = _host(tmp_path)
+    host.submit(_spec())
+    host.prepare(WORK_ID)
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+
+    with pytest.raises(BuildExecutionError, match="trusted host authority"):
         build_packaged_local_durable_build_host(
             restarted_store,
             host_task_id=task_id,
             project_id=PROJECT_ID,
-            node=drifted_node,
+            node=_node(),
             startup=startup,
-            trusted_authority=_authority(node_id="packaged-local-2"),
+            trusted_authority=_authority(evidence_ref="authority://pf5/drifted"),
             output_policies=policies,
         )
 
