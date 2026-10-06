@@ -14,7 +14,7 @@ import nika_core.product_factory_openhands_program as openhands_program
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_coding_worker_adapter import CodingWorkerComponentAdapter
-from nika_core.product_factory_coordinator import ComponentWorkRequest
+from nika_core.product_factory_coordinator import ComponentWorkRequest, ReviewDecision, WorkState
 from nika_core.product_factory_multi_repository import (
     MultiRepositoryExecutionError,
     MultiRepositoryProductFactoryHost,
@@ -25,15 +25,26 @@ from nika_core.product_factory_openhands_program import (
     build_openhands_product_factory_program,
 )
 from nika_core.product_factory_orchestration import (
+    ComponentBrief,
+    DynamicTeamComposer,
     ProductComponent,
     ProductRepositoryGraph,
+    ProjectScale,
     RepositoryRef,
+    TeamCompositionRequest,
 )
 from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
     PackagedProductFactoryPreparationService,
 )
-from nika_core.product_factory_program_host import ProgramWorkDisposition
+from nika_core.product_factory_program_host import (
+    ProductFactoryProgramHost,
+    ProgramWorkDisposition,
+)
+from nika_core.product_factory_review_authority import (
+    reviewer_principal_bindings_ref,
+    team_plan_fingerprint_ref,
+)
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from nika_core.toolsmith.contracts import (
     AcceptanceCommand,
@@ -227,6 +238,40 @@ def test_multi_repository_host_rejects_reusing_program_host_from_other_store(
     assert program.host.store is store
 
 
+def test_multi_repository_host_rejects_product_factory_program_host_subclass(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _base_sha = _repository(tmp_path)
+    store, program = _program(tmp_path, repository)
+
+    class SubvertedProgramHost(ProductFactoryProgramHost):
+        pass
+
+    subverted = SubvertedProgramHost(store, program.host.worker)
+
+    with pytest.raises(MultiRepositoryExecutionError, match="invalid carrier"):
+        MultiRepositoryProductFactoryHost(
+            store=store,
+            worker=program.host.worker,
+            program_host=subverted,
+        )
+
+
+def test_multi_repository_host_rejects_post_composition_store_drift(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository, _base_sha = _repository(tmp_path)
+    _store, program = _program(tmp_path, repository)
+    foreign_store = SQLiteStore(tmp_path / "foreign-drift.db")
+    foreign_store.initialize()
+
+    program.multi_repository_host.store = foreign_store
+    program.host.store = foreign_store
+
+    with pytest.raises(MultiRepositoryExecutionError, match="store changed"):
+        program.multi_repository_host._assert_program_composition()
+
+
 def test_openhands_multi_repository_host_drives_packaged_prepare_and_dispatch(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -311,6 +356,244 @@ def test_openhands_multi_repository_host_drives_packaged_prepare_and_dispatch(
     assert program.ports.candidate_worktree(work_id).joinpath(
         "src", "core.py"
     ).read_text(encoding="utf-8") == "VALUE = 2\n"
+
+
+def test_openhands_packaged_multi_repository_accepts_trusted_independent_review(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository_root, base_sha = _repository(tmp_path)
+    jobs = tmp_path / "OpenHands reviewed jobs"
+    jobs.mkdir()
+    store = SQLiteStore(tmp_path / "reviewed.db")
+    store.initialize()
+    locator = "Oleksii-debug/Nika-Core"
+    team_plan = DynamicTeamComposer().compose(
+        TeamCompositionRequest(
+            project_id="product-openhands-reviewed",
+            components=(ComponentBrief("core", "backend"),),
+            acceptance_criteria=("Independent review is required",),
+            permission_ceiling=PERMISSIONS,
+            scale=ProjectScale.SMALL,
+        )
+    )
+    reviewer_role = next(role for role in team_plan.roles if role.independent_review)
+    reviewer_principals = ((reviewer_role.role_id, "reviewer-actor"),)
+
+    class AllowReviewAuthority:
+        def verify(self, subject, evidence_refs: tuple[str, ...]) -> bool:
+            return bool(subject.project_id and evidence_refs)
+
+    review_authority = AllowReviewAuthority()
+    program = build_openhands_product_factory_program(
+        store,
+        workspace_parent=jobs,
+        repositories={"repo-1": repository_root},
+        sandbox_provider=_SandboxProvider(),
+        client_factory=lambda _endpoint: None,
+        agent_profile_id_factory=lambda _job, _endpoint: (
+            "11111111-1111-4111-8111-111111111111"
+        ),
+        acceptance_runtime=_AcceptanceRuntime(),
+        policy=_policy(),
+        review_evidence_authority=review_authority,
+        team_plan=team_plan,
+        reviewer_principals=reviewer_principals,
+    )
+    provider = _WorkingSandboxProvider()
+    runtime = _MutatingRemoteRuntime()
+    acceptance = _PassingAcceptanceRuntime()
+    program.worker._sandbox_provider = provider
+    program.worker._runtime = runtime
+    program.worker._acceptance_runtime = acceptance
+
+    projects = ProductProjectRepository(store)
+    project = projects.create(
+        project_id=team_plan.project_id,
+        name="Reviewed OpenHands Product Factory",
+        spec=ProductProjectSpec(
+            goal="Build one independently reviewed component",
+            desired_outcome="The private candidate is durably accepted",
+            repository_refs=(locator,),
+            team_refs=(
+                team_plan.plan_id,
+                team_plan_fingerprint_ref(team_plan),
+                reviewer_principal_bindings_ref(team_plan, reviewer_principals),
+            ),
+        ),
+        idempotency_key="create:product-openhands-reviewed",
+    )
+    python = str(pathlib.Path(sys.executable).resolve(strict=True))
+    graph = ProductRepositoryGraph(
+        project_id=project.project_id,
+        repositories=(RepositoryRef("repo-1", "github", locator, "main"),),
+        components=(
+            ProductComponent(
+                component_id="core",
+                repository_id="repo-1",
+                paths=("src",),
+                test_commands=((python, "-c", "print('ok')"),),
+            ),
+        ),
+    )
+    service = PackagedProductFactoryPreparationService(
+        repository=projects,
+        tasks=TaskQueue(store),
+        host=program.multi_repository_host,
+        workspace_id="packaged.product-factory",
+    )
+    prepared = service.prepare(
+        PackagedProductFactoryExecutionPlan(
+            project_id=project.project_id,
+            expected_spec_version=project.spec_version,
+            expected_row_version=project.row_version,
+            graph=graph,
+            graph_version=1,
+            base_shas={"repo-1": base_sha},
+            component_goals={"core": "update core without publishing"},
+            permission_ceiling=PERMISSIONS,
+        )
+    )
+    outcomes = _run(
+        program.multi_repository_host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+    assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+
+    record = program.multi_repository_host.review_and_checkpoint(
+        host_task_id=prepared.host_task_id,
+        state=prepared.state,
+        component_id="core",
+        decision=ReviewDecision(
+            reviewer_id="reviewer-actor",
+            accepted=True,
+            reason="independent evidence accepted",
+            evidence_refs=("review:evidence",),
+        ),
+    )
+    restored = service.restore(project.project_id)
+
+    assert record.state is WorkState.ACCEPTED
+    assert restored.state.coordinator.snapshot().records[0].state is WorkState.ACCEPTED
+    assert (repository_root / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\n"
+    assert len(runtime.calls) == 1
+    assert len(acceptance.calls) == 1
+
+    program.multi_repository_host.reviewer_principals = ()
+    with pytest.raises(MultiRepositoryExecutionError, match="reviewer principals changed"):
+        program.multi_repository_host._assert_program_composition()
+    program.multi_repository_host.reviewer_principals = reviewer_principals
+    program.multi_repository_host.team_plan = None
+    with pytest.raises(MultiRepositoryExecutionError, match="TeamPlan changed"):
+        program.multi_repository_host._assert_program_composition()
+
+
+def test_openhands_packaged_multi_repository_restores_review_candidate_after_restart(
+    tmp_path: pathlib.Path,
+) -> None:
+    repository_root, base_sha = _repository(tmp_path)
+    store, program = _program(tmp_path, repository_root)
+    provider = _WorkingSandboxProvider()
+    runtime = _MutatingRemoteRuntime()
+    acceptance = _PassingAcceptanceRuntime()
+    program.worker._sandbox_provider = provider
+    program.worker._runtime = runtime
+    program.worker._acceptance_runtime = acceptance
+
+    projects = ProductProjectRepository(store)
+    locator = "Oleksii-debug/Nika-Core"
+    project = projects.create(
+        project_id="product-openhands-restart",
+        name="OpenHands packaged restart",
+        spec=ProductProjectSpec(
+            goal="Build and recover one isolated component",
+            desired_outcome="A private reviewed candidate survives restart",
+            repository_refs=(locator,),
+        ),
+        idempotency_key="create:product-openhands-restart",
+    )
+    python = str(pathlib.Path(sys.executable).resolve(strict=True))
+    graph = ProductRepositoryGraph(
+        project_id=project.project_id,
+        repositories=(
+            RepositoryRef(
+                repository_id="repo-1",
+                provider="github",
+                locator=locator,
+                default_branch="main",
+            ),
+        ),
+        components=(
+            ProductComponent(
+                component_id="core",
+                repository_id="repo-1",
+                paths=("src",),
+                test_commands=((python, "-c", "print('ok')"),),
+            ),
+        ),
+    )
+    plan = PackagedProductFactoryExecutionPlan(
+        project_id=project.project_id,
+        expected_spec_version=project.spec_version,
+        expected_row_version=project.row_version,
+        graph=graph,
+        graph_version=1,
+        base_shas={"repo-1": base_sha},
+        component_goals={"core": "update core without publishing"},
+        permission_ceiling=PERMISSIONS,
+    )
+    service = PackagedProductFactoryPreparationService(
+        repository=projects,
+        tasks=TaskQueue(store),
+        host=program.multi_repository_host,
+        workspace_id="packaged.product-factory",
+    )
+    prepared = service.prepare(plan)
+    outcomes = _run(
+        program.multi_repository_host.dispatch_ready(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            max_parallel=1,
+            max_count=1,
+        )
+    )
+    assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
+    snapshot = prepared.state.coordinator.snapshot()
+    work_id = snapshot.records[0].request.work_id
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted = build_openhands_product_factory_program(
+        restarted_store,
+        workspace_parent=program.ports.workspace_parent,
+        repositories={"repo-1": repository_root},
+        sandbox_provider=_SandboxProvider(),
+        client_factory=lambda _endpoint: None,
+        agent_profile_id_factory=lambda _job, _endpoint: (
+            "11111111-1111-4111-8111-111111111111"
+        ),
+        acceptance_runtime=_AcceptanceRuntime(),
+        policy=_policy(),
+    )
+    restored = PackagedProductFactoryPreparationService(
+        repository=ProductProjectRepository(restarted_store),
+        tasks=TaskQueue(restarted_store),
+        host=restarted.multi_repository_host,
+        workspace_id="packaged.product-factory",
+    ).restore(project.project_id)
+
+    assert restored.host_task_id == prepared.host_task_id
+    assert restored.state.coordinator.snapshot() == snapshot
+    assert restored.state.coordinator.snapshot().records[0].state is WorkState.REVIEW_REQUIRED
+    assert restarted.multi_repository_host._program is restarted.host
+    assert restarted.ports.candidate_worktree(work_id).joinpath(
+        "src", "core.py"
+    ).read_text(encoding="utf-8") == "VALUE = 2\n"
+    assert len(runtime.calls) == 1
+    assert len(acceptance.calls) == 1
 
 
 def test_context_prepares_exact_private_base_without_git_remote_or_visible_metadata(

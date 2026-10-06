@@ -170,6 +170,18 @@ class MultiRepositoryProductFactoryHost:
     reviewer_principals: ReviewerPrincipalBindings = field(default=(), repr=False)
     program_host: ProductFactoryProgramHost | None = field(default=None, repr=False)
     _program: ProductFactoryProgramHost = field(init=False, repr=False)
+    _composition_program_host: ProductFactoryProgramHost = field(init=False, repr=False)
+    _composition_store: SQLiteStore = field(init=False, repr=False)
+    _composition_worker: ProductFactoryProgramWorkerPort = field(init=False, repr=False)
+    _composition_team_plan: TeamPlan | None = field(init=False, repr=False)
+    _composition_reviewer_principals: ReviewerPrincipalBindings = field(
+        init=False,
+        repr=False,
+    )
+    _composition_review_evidence_authority: ProductFactoryReviewAuthorityPort | None = field(
+        init=False,
+        repr=False,
+    )
     _coordinator_checkpoints: ProductFactoryCheckpointHost = field(
         init=False,
         repr=False,
@@ -184,7 +196,7 @@ class MultiRepositoryProductFactoryHost:
             )
         else:
             program = self.program_host
-            if not isinstance(program, ProductFactoryProgramHost):
+            if type(program) is not ProductFactoryProgramHost:
                 raise MultiRepositoryExecutionError(
                     "reused Product Factory program host has an invalid carrier"
                 )
@@ -200,8 +212,70 @@ class MultiRepositoryProductFactoryHost:
                 raise MultiRepositoryExecutionError(
                     "reused Product Factory program host review authority changed"
                 )
+        self._composition_program_host = program
+        self._composition_store = self.store
+        self._composition_worker = self.worker
+        self._composition_team_plan = self.team_plan
+        self._composition_reviewer_principals = self.reviewer_principals
+        self._composition_review_evidence_authority = self.review_evidence_authority
         self._program = program
         self._coordinator_checkpoints = ProductFactoryCheckpointHost(self.store)
+
+    def _assert_program_composition(self) -> None:
+        if self._program is not self._composition_program_host:
+            raise MultiRepositoryExecutionError(
+                "Product Factory program host changed after composition"
+            )
+        if (
+            self.program_host is not None
+            and self.program_host is not self._composition_program_host
+        ):
+            raise MultiRepositoryExecutionError(
+                "reused Product Factory program host changed after composition"
+            )
+        if (
+            self.store is not self._composition_store
+            or self._program.store is not self._composition_store
+        ):
+            raise MultiRepositoryExecutionError(
+                "Product Factory program store changed after composition"
+            )
+        if (
+            self.worker is not self._composition_worker
+            or self._program.worker is not self._composition_worker
+        ):
+            raise MultiRepositoryExecutionError(
+                "Product Factory program worker changed after composition"
+            )
+        if self.team_plan is not self._composition_team_plan:
+            raise MultiRepositoryExecutionError(
+                "Product Factory TeamPlan changed after composition"
+            )
+        if self.reviewer_principals is not self._composition_reviewer_principals:
+            raise MultiRepositoryExecutionError(
+                "Product Factory reviewer principals changed after composition"
+            )
+        if (
+            self.review_evidence_authority
+            is not self._composition_review_evidence_authority
+            or self._program.review_evidence_authority
+            is not self._composition_review_evidence_authority
+        ):
+            raise MultiRepositoryExecutionError(
+                "Product Factory review authority changed after composition"
+            )
+        if self._coordinator_checkpoints._store is not self._composition_store:
+            raise MultiRepositoryExecutionError(
+                "Product Factory checkpoint store changed after composition"
+            )
+        if self._program._ledger._store is not self._composition_store:
+            raise MultiRepositoryExecutionError(
+                "Product Factory idempotency store changed after composition"
+            )
+        if self._program._ownership._store is not self._composition_store:
+            raise MultiRepositoryExecutionError(
+                "Product Factory ownership store changed after composition"
+            )
 
     def initialize(
         self,
@@ -216,6 +290,7 @@ class MultiRepositoryProductFactoryHost:
     ) -> MultiRepositoryExecutionState:
         """Bind one immutable graph authority and create the first durable work checkpoint."""
 
+        self._assert_program_composition()
         binding = self._binding(project, graph)
         authority = self._bind_graph(
             host_task_id=host_task_id,
@@ -250,6 +325,7 @@ class MultiRepositoryProductFactoryHost:
     ) -> MultiRepositoryExecutionState:
         """Reconstruct exact graph + coordinator state without caller-supplied graph bytes."""
 
+        self._assert_program_composition()
         authority = self._load_graph(host_task_id=host_task_id, project=project)
         binding = self._binding(project, authority.graph)
         coordinator = self._program.restore_latest(
@@ -1109,6 +1185,7 @@ class MultiRepositoryProductFactoryHost:
         host_task_id: str,
         state: MultiRepositoryExecutionState,
     ) -> None:
+        self._assert_program_composition()
         project = state.binding.project
         project_id, spec_version, row_version = _project_version_snapshot(project)
         if (
