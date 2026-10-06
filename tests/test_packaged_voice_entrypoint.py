@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from concurrent.futures import Future
 from pathlib import Path
 from typing import Any
 
@@ -113,6 +114,44 @@ def test_packaged_voice_is_bounded_unavailable_off_windows(
     assert feature.cancel({}).status == "completed"
     with pytest.raises(ValueError, match="does not accept payload authority"):
         feature.start({"unexpected": True})
+
+
+def test_packaged_voice_refuses_indirected_preexisting_model_before_native_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outside = tmp_path / "outside"
+    model_root = outside / "whisper"
+    model_root.mkdir(parents=True)
+    for name in ("encoder.onnx", "decoder.onnx", "tokens.txt"):
+        (model_root / name).write_bytes(b"model")
+
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    try:
+        (data_root / "voice").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this host")
+
+    monkeypatch.setattr(packaged_voice.sys, "platform", "win32")
+
+    class _ForbiddenMicrophone:
+        def __init__(self) -> None:
+            raise AssertionError("unsafe model install must fail before microphone construction")
+
+    monkeypatch.setattr(
+        packaged_voice,
+        "WindowsWasapiMicrophoneCaptureAdapter",
+        _ForbiddenMicrophone,
+    )
+
+    feature = packaged_voice.build_packaged_voice(
+        data_root.resolve(),
+        submit=lambda coroutine: Future(),
+    )
+
+    assert feature.available is False
+    assert "не встановлена безпечно" in feature.snapshot()["message"]
 
 
 def test_packaged_voice_build_is_lazy_and_preserves_current_vad_gate(

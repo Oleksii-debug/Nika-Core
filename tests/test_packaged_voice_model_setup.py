@@ -246,6 +246,49 @@ def test_voice_model_setup_rejects_symlinked_source_root(
     assert not (data_root / "voice" / "whisper").exists()
 
 
+def test_voice_model_setup_rejects_indirected_canonical_install(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    target = outside / "whisper"
+    target.mkdir(parents=True)
+    for name in ("encoder.onnx", "decoder.onnx", "tokens.txt"):
+        (target / name).write_bytes(b"installed")
+
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    try:
+        (data_root / "voice").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this host")
+
+    setup = PackagedVoiceModelSetup(data_root)
+    snapshot = setup.snapshot()
+
+    assert snapshot["status"] == "partial"
+    assert snapshot["installed"] is False
+    assert snapshot["can_import"] is False
+
+
+def test_voice_model_setup_rejects_oversized_preexisting_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "nika-data"
+    target = data_root / "voice" / "whisper"
+    target.mkdir(parents=True)
+    (target / "encoder.onnx").write_bytes(b"12345")
+    (target / "decoder.onnx").write_bytes(b"ok")
+    (target / "tokens.txt").write_bytes(b"ok")
+    monkeypatch.setattr(model_setup, "_ONNX_FILE_LIMIT", 4)
+
+    snapshot = PackagedVoiceModelSetup(data_root).snapshot()
+
+    assert snapshot["status"] == "partial"
+    assert snapshot["installed"] is False
+    assert snapshot["can_import"] is False
+
+
 def test_voice_model_setup_requires_all_fixed_files(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
