@@ -341,13 +341,29 @@ def ensure_path_policy(
 def sterile_git_environment(
     source: collections.abc.Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    source_env = dict(os.environ if source is None else source)
-    environment = {
-        key: value
-        for key, value in source_env.items()
-        if key.upper() in _ALLOWED_ENVIRONMENT_VARIABLES
-        and key.upper() not in _GIT_CREDENTIAL_VARIABLES
-    }
+    try:
+        source_env = dict(os.environ if source is None else source)
+    except (TypeError, ValueError) as exc:
+        raise WorkspaceSecurityError("source environment must be a string mapping") from exc
+
+    environment: dict[str, str] = {}
+    for key, value in source_env.items():
+        if type(key) is not str:
+            raise WorkspaceSecurityError("environment keys must be exact text")
+        identity = key.upper()
+        if (
+            identity not in _ALLOWED_ENVIRONMENT_VARIABLES
+            or identity in _GIT_CREDENTIAL_VARIABLES
+        ):
+            continue
+        if type(value) is not str or "\x00" in value:
+            raise WorkspaceSecurityError(
+                "allowed environment values must be exact NUL-free text"
+            )
+        if identity in environment and environment[identity] != value:
+            raise WorkspaceSecurityError("conflicting environment variable aliases")
+        environment[identity] = value
+
     null_device = "NUL" if os.name == "nt" else "/dev/null"
     environment.update(
         {
