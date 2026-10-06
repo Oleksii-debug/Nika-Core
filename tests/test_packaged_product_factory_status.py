@@ -332,6 +332,18 @@ def test_packaged_state_exposes_bounded_component_status_without_evidence(
     ]
     assert product_state["status_items_truncated"] is False
     assert "evidence" not in product_state["status_items"][0]
+    assert product_state["operator"] == {
+        "project": project.project_id,
+        "work": "core=ready",
+        "owner": "unassigned",
+        "state": "active",
+        "blocker": "none",
+        "candidate": "unknown",
+        "test": "unknown",
+        "qa": "unknown",
+        "integration": "not_started",
+        "next": "continue_work:core",
+    }
 
 
 def _status_router(
@@ -360,6 +372,9 @@ def test_factory_status_command_is_exact_and_does_not_capture_broad_text() -> No
     assert packaged_current_product_factory_status_command(
         "Покажи поточний статус Product Factory."
     )
+    assert packaged_current_product_factory_status_command(
+        "Покажи поточний стан Product Factory."
+    )
     assert not packaged_current_product_factory_status_command(
         "please show current Product Factory status when convenient"
     )
@@ -380,7 +395,7 @@ def test_factory_status_command_reports_prepared_authority_and_survives_restart(
     before = router.create({"command": "Покажи поточний статус Product Factory"})
 
     assert before.status == "completed"
-    assert before.focus_id == "product-project-heading"
+    assert before.focus_id == "product-project-operator-heading"
     assert f"Статус Product Factory для {project.project_id}" in before.message
     assert "компонентів 1" in before.message
     assert "блокерів 0" in before.message
@@ -462,7 +477,7 @@ def test_factory_status_command_reports_unprepared_current_version(tmp_path: Pat
     result = router.create({"command": "Поточний статус Product Factory"})
 
     assert result.status == "completed"
-    assert result.focus_id == "product-project-heading"
+    assert result.focus_id == "product-project-operator-heading"
     assert "ще не має підготовленого execution authority" in result.message
 
 
