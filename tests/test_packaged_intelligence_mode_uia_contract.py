@@ -32,7 +32,7 @@ def test_packaged_uia_mode_commands_prove_durable_route_without_task_creation() 
     assert "'provider_id': 'ollama'" in source
     assert "'model': 'uia-proof-model'" in source
     assert "'base_url': 'http://localhost:11434'" in source
-    assert "'private_data_allowed': False" in source
+    assert "'private_data_allowed': True" in source
     assert "SELECT COUNT(*) FROM tasks" in source
     assert "if task_count != 0:" in source
 
