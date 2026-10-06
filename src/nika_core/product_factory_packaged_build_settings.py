@@ -649,7 +649,12 @@ def _text(mapping: Mapping[str, object], key: str) -> str:
         type(value) is not str
         or not value
         or value != value.strip()
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or character in "\u0085\u2028\u2029"
+            for character in value
+        )
     ):
         raise PackagedBuildRuntimeSettingsError(
             f"PF5 поле {key} має бути канонічним непорожнім текстом."
