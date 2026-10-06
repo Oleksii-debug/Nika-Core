@@ -44,6 +44,10 @@ $requiredNames = @(
     'Nika Core',
     'Що має зробити Nika?',
     'Створити завдання',
+    'Голосовий ввід',
+    'Почати один голосовий ввід',
+    'Скасувати голосовий ввід',
+    'Перенести розпізнаний текст у поле команди',
     'Голос Nika',
     'Текст для озвучення',
     'Озвучити текст',
@@ -686,6 +690,17 @@ try {
         $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
         $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
         $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+        $voiceStartControl = Wait-DescendantName 'Почати один голосовий ввід' ([System.Windows.Automation.ControlType]::Button)
+        $voiceCancelControl = Wait-DescendantName 'Скасувати голосовий ввід' ([System.Windows.Automation.ControlType]::Button)
+        $voiceStageControl = Wait-DescendantName 'Перенести розпізнаний текст у поле команди' ([System.Windows.Automation.ControlType]::Button)
+        Wait-BoundTextEvidence 'Локальна голосова модель не встановлена. Додайте encoder.onnx, decoder.onnx і tokens.txt до папки NikaCore\voice\whisper.'
+        foreach ($voiceControl in @($voiceStartControl, $voiceCancelControl, $voiceStageControl)) {
+            $voiceTarget = Resolve-BoundControlIdentity $voiceControl
+            if ($voiceTarget.Current.IsEnabled) {
+                throw "Packaged voice control '$($voiceControl.ExpectedName)' must stay disabled when no local voice model is installed."
+            }
+        }
+        Write-Host 'Packaged voice controls are UIA-discoverable and fail closed without a local model. Microphone access was not invoked.'
         $speechTextControl = Wait-DescendantName 'Текст для озвучення' ([System.Windows.Automation.ControlType]::Edit)
         $speechStartControl = Wait-DescendantName 'Озвучити текст' ([System.Windows.Automation.ControlType]::Button)
         $speechCancelControl = Wait-DescendantName 'Скасувати озвучення' ([System.Windows.Automation.ControlType]::Button)
