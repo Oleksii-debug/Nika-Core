@@ -196,6 +196,12 @@ def test_revocation_is_digest_guarded_durable_and_fail_closed(
     )
     assert repeated == revoked
 
+    with pytest.raises(
+        PackagedStagingAuthorityError,
+        match="cannot be reauthorized",
+    ):
+        _authorize(authorities)
+
     reopened = SQLiteStore(sqlite.path)
     reopened.initialize()
     restarted = PackagedStagingAuthorityStore(

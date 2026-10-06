@@ -122,6 +122,10 @@ class PackagedStagingAuthorityStore:
                 ).fetchone()
                 if row is not None:
                     existing = self._snapshot_row(row)
+                    if existing.revoked:
+                        raise PackagedStagingAuthorityError(
+                            "revoked PF5 work cannot be reauthorized"
+                        )
                     if (
                         existing.authority != authority
                         or existing.authority_digest != payload_digest
