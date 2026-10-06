@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.product_factory_packaged_execution_plan_file as plan_file
 from nika_core.product_factory_packaged_execution_plan_file import (
     PackagedExecutionPlanFileError,
     PackagedExecutionPlanFileResolver,
@@ -122,7 +123,7 @@ def test_reader_requires_absolute_json_regular_single_link(tmp_path: Path) -> No
         os.link(path, alias)
     except OSError:
         pytest.skip("hard links are unavailable on this filesystem")
-    with pytest.raises(PackagedExecutionPlanFileError, match="regular unlinked authority"):
+    with pytest.raises(PackagedExecutionPlanFileError, match="single-link regular authority"):
         read_packaged_execution_plan_file(path)
 
 
@@ -136,6 +137,43 @@ def test_reader_rejects_symlink_or_reparse_alias(tmp_path: Path) -> None:
 
     with pytest.raises(PackagedExecutionPlanFileError):
         read_packaged_execution_plan_file(alias.absolute())
+
+
+def test_reader_detects_path_replacement_while_descriptor_is_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = _write_plan(tmp_path)
+    original = path.read_bytes()
+    replacement = tmp_path / "replacement.json"
+    replacement.write_bytes(b"x" * len(original))
+    real_read = plan_file.os.read
+    attempted = False
+    replacement_denied = False
+
+    def mutating_read(descriptor: int, count: int) -> bytes:
+        nonlocal attempted, replacement_denied
+        chunk = real_read(descriptor, count)
+        if chunk and not attempted:
+            attempted = True
+            try:
+                os.replace(replacement, path)
+            except OSError:
+                replacement_denied = True
+        return chunk
+
+    monkeypatch.setattr(plan_file.os, "read", mutating_read)
+
+    if os.name == "nt":
+        assert read_packaged_execution_plan_file(path) == original
+        assert attempted is True
+        assert replacement_denied is True
+        assert path.read_bytes() == original
+    else:
+        with pytest.raises(PackagedExecutionPlanFileError, match="changed"):
+            read_packaged_execution_plan_file(path)
+        assert attempted is True
+        assert replacement_denied is False
 
 
 def test_reader_rejects_oversize_before_decoder(tmp_path: Path) -> None:

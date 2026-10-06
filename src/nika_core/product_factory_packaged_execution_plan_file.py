@@ -113,6 +113,17 @@ def read_packaged_execution_plan_file(path: Path) -> bytes:
         _require_regular_single_link(after, stage="after read")
         if total != opened.st_size or _stable_identity(after) != identity:
             _fail_changed()
+
+        try:
+            current = os.lstat(candidate)
+        except OSError as exc:
+            raise PackagedExecutionPlanFileError(
+                "execution-plan file changed during read"
+            ) from exc
+        _require_regular_single_link(current, stage="after read")
+        if _stable_identity(current) != identity:
+            _fail_changed()
+        return b"".join(chunks)
     except PackagedExecutionPlanFileError:
         raise
     except OSError as exc:
@@ -125,17 +136,6 @@ def read_packaged_execution_plan_file(path: Path) -> bytes:
                 os.close(descriptor)
             except OSError:
                 pass
-
-    try:
-        current = os.lstat(candidate)
-    except OSError as exc:
-        raise PackagedExecutionPlanFileError(
-            "execution-plan file changed during read"
-        ) from exc
-    _require_regular_single_link(current, stage="after read")
-    if _stable_identity(current) != identity:
-        _fail_changed()
-    return b"".join(chunks)
 
 
 def _selected_plan_path(selection: object) -> Path:
@@ -221,7 +221,7 @@ def _require_regular_single_link(value: os.stat_result, *, stage: str) -> None:
         or value.st_nlink != 1
     ):
         raise PackagedExecutionPlanFileError(
-            f"execution-plan file is not one regular unlinked authority ({stage})"
+            f"execution-plan file is not one single-link regular authority ({stage})"
         )
 
 
