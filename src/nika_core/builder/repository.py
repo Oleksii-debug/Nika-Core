@@ -236,6 +236,24 @@ class AgentDefinitionRepository:
             ).fetchone()
         return self._decode(row) if row is not None else None
 
+    def list_latest(self, *, limit: int = 50) -> tuple[StoredAgentDefinition, ...]:
+        """Return one integrity-validated latest version per agent for bounded presentation."""
+
+        if type(limit) is not int or not 1 <= limit <= 100:
+            raise ValueError("agent definition list limit must be an exact integer from 1 to 100")
+        with self._store.connection() as conn:
+            rows = conn.execute(
+                "SELECT defs.version, defs.definition_json, defs.status, "
+                "defs.required_approvals_json, defs.highest_risk, defs.created_at, "
+                "defs.activated_at FROM agent_definitions AS defs "
+                "JOIN (SELECT agent_id, MAX(version) AS version FROM agent_definitions "
+                "GROUP BY agent_id) AS latest "
+                "ON latest.agent_id = defs.agent_id AND latest.version = defs.version "
+                "ORDER BY defs.created_at DESC, defs.agent_id LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return tuple(self._decode(row) for row in rows)
+
     @staticmethod
     def _decode(row) -> StoredAgentDefinition:
         row_version = _exact_positive_int(
