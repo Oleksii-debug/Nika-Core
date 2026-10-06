@@ -43,6 +43,7 @@ from nika_core.ui.bridge import UIActionBridge
 from nika_core.ui.bridge_models import UIResult
 from nika_core.ui.desktop_backend import DesktopBackend
 from nika_core.ui.packaged_speech import PackagedSpeechFeature, build_packaged_speech
+from nika_core.ui.packaged_voice import PackagedVoiceFeature, build_packaged_voice
 from nika_core.training_runtime import TrainingStatusService
 from nika_core.ui.shell import launch_windows_shell, preflight_windows_shell
 from nika_core.v01_cloud_model_permission import (
@@ -281,6 +282,12 @@ def build_windows_bridge(
             else None
         ),
     )
+    voice: PackagedVoiceFeature = build_packaged_voice(
+        config.database_path.parent,
+        submit=backend.submit_packaged_coroutine,
+    )
+    if register_cleanup is not None and voice.available:
+        register_cleanup(voice.close)
     speech: PackagedSpeechFeature = build_packaged_speech()
     if register_cleanup is not None:
         register_cleanup(speech.close)
@@ -343,6 +350,7 @@ def build_windows_bridge(
         state = {**packaged_state(), "v01_sources": source_settings.snapshot()}
         state["v01_model_settings"] = model_settings.snapshot()
         state["speech"] = speech.snapshot()
+        state["voice"] = voice.snapshot()
         return agent_builder_state.decorate(state)
 
     def refresh_model_settings(payload: Mapping[str, Any]) -> UIResult:
@@ -376,6 +384,8 @@ def build_windows_bridge(
             "task.pause": backend.pause_task,
             "task.resume": resume_ordinary_task,
             "agent.stop": backend.stop_agent,
+            "voice.start": voice.start,
+            "voice.cancel": voice.cancel,
             "speech.start": speech.speak,
             "speech.cancel": speech.cancel,
             "team.sources.configure": source_settings.configure,
@@ -399,9 +409,12 @@ def build_windows_bridge(
             backend.start_startup_recovery()
         except Exception as exc:
             try:
-                speech.close()
+                voice.close()
             finally:
-                backend.close()
+                try:
+                    speech.close()
+                finally:
+                    backend.close()
             raise _StartupRecoveryInventoryError(
                 "packaged startup recovery inventory failed"
             ) from exc
@@ -541,15 +554,69 @@ def _run_pf11_proof(
     return 0
 
 
+
+def _run_voice_runtime_proof(output_path: Path | None) -> int:
+    """Prove frozen local-voice imports without opening a microphone or model."""
+
+    if sys.platform != "win32":
+        raise RuntimeError("packaged voice runtime proof requires Windows")
+    if output_path is None:
+        raise ValueError("--voice-runtime-proof-output is required")
+    try:
+        import _sounddevice_data
+        import numpy
+        import sherpa_onnx
+        import sounddevice
+        from sherpa_onnx.lib import _sherpa_onnx
+    except Exception as exc:  # noqa: BLE001 - frozen native dependency boundary
+        raise RuntimeError(
+            f"packaged voice dependency import failed: {type(exc).__name__}"
+        ) from None
+
+    sounddevice_roots = tuple(Path(item) for item in _sounddevice_data.__path__)
+    portaudio_dlls = tuple(
+        candidate
+        for root in sounddevice_roots
+        for candidate in (root / "portaudio-binaries").glob("libportaudio*.dll")
+        if candidate.is_file()
+    )
+    if not portaudio_dlls:
+        raise RuntimeError("packaged sounddevice data does not contain PortAudio DLLs")
+
+    payload = {
+        "schema": "nika.packaged-voice-runtime-proof:v1",
+        "numpy_imported": numpy is not None,
+        "sherpa_onnx_imported": sherpa_onnx is not None,
+        "sherpa_native_imported": _sherpa_onnx is not None,
+        "sounddevice_imported": sounddevice is not None,
+        "sounddevice_data_proven": True,
+        "microphone_opened": False,
+        "model_loaded": False,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pf11-proof", action="store_true")
     parser.add_argument("--pf11-proof-output", type=Path)
+    parser.add_argument("--voice-runtime-proof", action="store_true")
+    parser.add_argument("--voice-runtime-proof-output", type=Path)
     parser.add_argument(
         "--pf11-proof-command",
         default=("Створи застосунок для керування витратами малого бізнесу"),
     )
     args = parser.parse_args(argv)
+    if args.voice_runtime_proof:
+        return _run_voice_runtime_proof(args.voice_runtime_proof_output)
     from nika_core.reliability.legacy_database import LegacyDatabaseConflict
     from nika_core.ui.startup_error import show_recovery_error
 
