@@ -75,7 +75,9 @@ def _readmit_sterile_git_plan(plan: object) -> SterileGitPlan:
         type(value) is not path_type
         for value in (repository_root, private_git_dir, worktree_root)
     ):
-        raise WorkspaceSecurityError("private Git plan paths must use canonical Path carriers")
+        raise WorkspaceSecurityError(
+            "private Git plan paths must use canonical Path carriers"
+        )
 
     branch_name = validate_git_branch_name(plan.branch_name)
     base_sha = validate_git_commit_sha(plan.base_sha)
@@ -116,7 +118,9 @@ class PreparedGitWorkspace:
             label="pinned base SHA",
         )
         if head_sha.lower() != base_sha.lower():
-            raise WorkspaceSecurityError("private workspace HEAD must equal the pinned base SHA")
+            raise WorkspaceSecurityError(
+                "private workspace HEAD must equal the pinned base SHA"
+            )
         if type(self.remotes) is not tuple or self.remotes:
             raise WorkspaceSecurityError("worker-private Git metadata must not retain remotes")
 

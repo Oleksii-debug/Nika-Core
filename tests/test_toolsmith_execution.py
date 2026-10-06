@@ -827,7 +827,7 @@ def test_prepared_git_workspace_readmits_plan_base_sha_and_remotes(
     )
     object.__setattr__(plan, "base_sha", "--help")
 
-    with pytest.raises(WorkspaceSecurityError, match="pinned base SHA"):
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
         execution_module.PreparedGitWorkspace(
             plan=plan,
             head_sha="a" * 40,
