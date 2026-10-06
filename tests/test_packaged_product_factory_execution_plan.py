@@ -277,6 +277,9 @@ def test_decode_rejects_excessively_nested_locator_encoding() -> None:
         "Oleksii-debug/Nika-Core\nforged-log-line",
         "Oleksii-debug/Nika-Core\rforged-log-line",
         "Oleksii-debug/Nika-Core\x7fforged-log-line",
+        "Oleksii-debug/Nika-Core\u0085forged-log-line",
+        "Oleksii-debug/Nika-Core\u2028forged-log-line",
+        "Oleksii-debug/Nika-Core\u2029forged-log-line",
     ],
 )
 def test_decode_rejects_control_characters_in_repository_locator(
@@ -319,6 +322,7 @@ def test_decode_preserves_benign_scheme_less_repository_locator(
     assert plan.graph.repositories[0].locator == locator
 
 
+@pytest.mark.parametrize("line_boundary", ["\n", "\u0085", "\u2028", "\u2029"])
 @pytest.mark.parametrize(
     ("carrier", "field"),
     [
@@ -330,25 +334,26 @@ def test_decode_preserves_benign_scheme_less_repository_locator(
         ("component", "repository_id"),
     ],
 )
-def test_decode_rejects_control_characters_in_identity_fields(
+def test_decode_rejects_line_boundaries_in_identity_fields(
     carrier: str,
     field: str,
+    line_boundary: str,
 ) -> None:
     claim = _claim()
     if carrier == "top":
-        claim[field] = "identity\nforged"
+        claim[field] = f"identity{line_boundary}forged"
     elif carrier == "repository":
         repositories = claim["repositories"]
         assert isinstance(repositories, list)
         repository = repositories[0]
         assert isinstance(repository, dict)
-        repository[field] = "identity\nforged"
+        repository[field] = f"identity{line_boundary}forged"
     else:
         components = claim["components"]
         assert isinstance(components, list)
         component = components[0]
         assert isinstance(component, dict)
-        component[field] = "identity\nforged"
+        component[field] = f"identity{line_boundary}forged"
 
     with pytest.raises(
         PackagedExecutionPlanAdmissionError,
@@ -357,13 +362,16 @@ def test_decode_rejects_control_characters_in_identity_fields(
         decode_packaged_product_factory_execution_plan(_encode(claim))
 
 
-def test_decode_rejects_control_characters_in_credential_reference() -> None:
+@pytest.mark.parametrize("line_boundary", ["\n", "\u0085", "\u2028", "\u2029"])
+def test_decode_rejects_line_boundaries_in_credential_reference(
+    line_boundary: str,
+) -> None:
     claim = _claim()
     repositories = claim["repositories"]
     assert isinstance(repositories, list)
     repository = repositories[0]
     assert isinstance(repository, dict)
-    repository["credential_ref"] = "credref:line\nbreak"
+    repository["credential_ref"] = f"credref:line{line_boundary}break"
 
     with pytest.raises(
         PackagedExecutionPlanAdmissionError,
