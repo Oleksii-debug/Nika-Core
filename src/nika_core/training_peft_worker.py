@@ -1874,6 +1874,65 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     return candidate
 
 
+def _completed_step_checkpoint(
+    job_root: Path,
+    request: ParsedRequest,
+    *,
+    consumed_sha256: str,
+) -> tuple[Path, str, str] | None:
+    checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
+    try:
+        root = os.lstat(checkpoint)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _fail("step_checkpoint_invalid")
+    if (
+        stat.S_ISLNK(root.st_mode)
+        or _is_reparse(root)
+        or not stat.S_ISDIR(root.st_mode)
+    ):
+        _fail("step_checkpoint_invalid")
+
+    marker_path = checkpoint / _CHECKPOINT_MARKER
+    try:
+        _require_regular_unlinked(marker_path, code="step_checkpoint_incomplete")
+    except PeftTrainerError:
+        _fail("step_checkpoint_incomplete")
+    marker_sha256 = _sha256_file(marker_path)
+    try:
+        marker = json.loads(
+            marker_path.read_text(encoding="utf-8"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        _fail("step_checkpoint_marker_invalid")
+    expected_keys = {
+        "checkpoint_payload_sha256",
+        "consumed_materials_sha256",
+        "job_fingerprint",
+        "schema_version",
+        "step_number",
+    }
+    if (
+        type(marker) is not dict
+        or set(marker) != expected_keys
+        or marker.get("schema_version") != _SCHEMA_VERSION
+        or marker.get("job_fingerprint") != request.job_fingerprint
+        or marker.get("step_number") != request.step_index + 1
+        or marker.get("consumed_materials_sha256") != consumed_sha256
+    ):
+        _fail("step_checkpoint_marker_identity_mismatch")
+    payload_sha256 = _require_sha256(
+        marker.get("checkpoint_payload_sha256"),
+        field="step_checkpoint_payload_sha256",
+    )
+    if _checkpoint_payload_manifest_sha256(checkpoint) != payload_sha256:
+        _fail("step_checkpoint_payload_mismatch")
+    return checkpoint, marker_sha256, payload_sha256
+
+
 def _copy_checkpoint_snapshot_file(
     source: Path,
     destination: Path,
@@ -2251,6 +2310,50 @@ def _snapshot_adapter_weights_sha256(
     return digest, tensor_sha256
 
 
+def _existing_candidate_sha256(
+    candidate: Path,
+    *,
+    expected_manifest: dict[str, object],
+) -> str | None:
+    try:
+        before = os.lstat(candidate)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _fail("candidate_replay_invalid")
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or _is_reparse(before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+    ):
+        _fail("candidate_replay_invalid")
+    try:
+        observed_manifest = candidate_adapter_manifest(candidate)
+    except (PeftTrainerError, OSError, RuntimeError, TypeError, ValueError):
+        _fail("candidate_replay_invalid")
+    if observed_manifest != expected_manifest:
+        _fail("candidate_replay_identity_mismatch")
+    middle = _require_regular_unlinked(candidate, code="candidate_replay_changed")
+    if (
+        (middle.st_dev, middle.st_ino) != (before.st_dev, before.st_ino)
+        or middle.st_nlink != 1
+    ):
+        _fail("candidate_replay_changed")
+    digest, size = _hash_regular_snapshot(
+        candidate,
+        code="candidate_replay_changed",
+    )
+    after = _require_regular_unlinked(candidate, code="candidate_replay_changed")
+    if (
+        size <= 0
+        or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+        or after.st_nlink != 1
+    ):
+        _fail("candidate_replay_changed")
+    return digest
+
+
 def _train_one_step(
     request: ParsedRequest,
     config: TrainerConfig,
@@ -2365,68 +2468,79 @@ def _train_one_step(
             torch=torch,
         )
 
-        training_dataset = _TokenizedDataset(
+        completed_step = _completed_step_checkpoint(
+            job_root,
+            request,
+            consumed_sha256=consumed.attestation_sha256,
+        )
+        replay_marker_sha256: str | None = None
+        replay_payload_sha256: str | None = None
+        if completed_step is not None:
+            checkpoint, replay_marker_sha256, replay_payload_sha256 = completed_step
+            adapter_dir = checkpoint / "adapter"
+        else:
+            training_dataset = _TokenizedDataset(
             consumed.training,
             tokenizer,
             config.max_sequence_length,
         )
-        validation_dataset = _TokenizedDataset(
-            consumed.validation,
-            tokenizer,
-            config.max_sequence_length,
-        )
-        collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-        trainer_root = _ensure_child_directory(
-            job_root,
-            "trainer",
-            code="trainer_output_directory_invalid",
-        )
-        _ensure_child_directory(
-            trainer_root,
-            f"checkpoint-{request.step_index + 1}",
-            code="trainer_checkpoint_directory_invalid",
-        )
-        arguments = TrainingArguments(
-            output_dir=os.fspath(trainer_root),
-            per_device_train_batch_size=1,
-            per_device_eval_batch_size=1,
-            learning_rate=config.learning_rate,
-            max_steps=request.step_index + 1,
-            save_strategy="steps",
-            save_steps=1,
-            save_total_limit=None,
-            eval_strategy="no",
-            logging_strategy="no",
-            report_to=[],
-            seed=config.seed,
-            data_seed=config.seed,
-            use_cpu=True,
-            full_determinism=True,
-            dataloader_num_workers=0,
-            dataloader_pin_memory=False,
-            optim="adamw_torch",
-            remove_unused_columns=False,
-        )
-        trainer = Trainer(
-            model=model,
-            args=arguments,
-            train_dataset=training_dataset,
-            eval_dataset=validation_dataset,
-            data_collator=collator,
-            processing_class=tokenizer,
-        )
-        trainer.train(
-            resume_from_checkpoint=(
-                False if resume_checkpoint is None else os.fspath(resume_checkpoint)
+            validation_dataset = _TokenizedDataset(
+                consumed.validation,
+                tokenizer,
+                config.max_sequence_length,
             )
-        )
-        checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
-        adapter_dir = checkpoint / "adapter"
-        adapter_dir.mkdir(parents=True, exist_ok=True)
-        trainer.model.save_pretrained(
-            os.fspath(adapter_dir),
-            safe_serialization=True,
-        )
+            collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+            trainer_root = _ensure_child_directory(
+                job_root,
+                "trainer",
+                code="trainer_output_directory_invalid",
+            )
+            _ensure_child_directory(
+                trainer_root,
+                f"checkpoint-{request.step_index + 1}",
+                code="trainer_checkpoint_directory_invalid",
+            )
+            arguments = TrainingArguments(
+                output_dir=os.fspath(trainer_root),
+                per_device_train_batch_size=1,
+                per_device_eval_batch_size=1,
+                learning_rate=config.learning_rate,
+                max_steps=request.step_index + 1,
+                save_strategy="steps",
+                save_steps=1,
+                save_total_limit=None,
+                eval_strategy="no",
+                logging_strategy="no",
+                report_to=[],
+                seed=config.seed,
+                data_seed=config.seed,
+                use_cpu=True,
+                full_determinism=True,
+                dataloader_num_workers=0,
+                dataloader_pin_memory=False,
+                optim="adamw_torch",
+                remove_unused_columns=False,
+            )
+            trainer = Trainer(
+                model=model,
+                args=arguments,
+                train_dataset=training_dataset,
+                eval_dataset=validation_dataset,
+                data_collator=collator,
+                processing_class=tokenizer,
+            )
+            trainer.train(
+                resume_from_checkpoint=(
+                    False if resume_checkpoint is None else os.fspath(resume_checkpoint)
+                )
+            )
+            checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
+            adapter_dir = checkpoint / "adapter"
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            trainer.model.save_pretrained(
+                os.fspath(adapter_dir),
+                safe_serialization=True,
+            )
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
@@ -2470,12 +2584,20 @@ def _train_one_step(
         else None
     )
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
-    marker_sha256 = _write_checkpoint_marker(
-        checkpoint,
-        request=request,
-        consumed_sha256=consumed.attestation_sha256,
-        checkpoint_payload_sha256=checkpoint_payload_sha256,
-    )
+    if replay_payload_sha256 is None:
+        marker_sha256 = _write_checkpoint_marker(
+            checkpoint,
+            request=request,
+            consumed_sha256=consumed.attestation_sha256,
+            checkpoint_payload_sha256=checkpoint_payload_sha256,
+        )
+    else:
+        if (
+            replay_marker_sha256 is None
+            or checkpoint_payload_sha256 != replay_payload_sha256
+        ):
+            _fail("step_checkpoint_replay_mismatch")
+        marker_sha256 = replay_marker_sha256
     resume_state: dict[str, object] = {
         "checkpoint_marker_sha256": marker_sha256,
         "checkpoint_payload_sha256": checkpoint_payload_sha256,
@@ -2508,6 +2630,25 @@ def _train_one_step(
         previous_adapter_tensors_sha256=previous_adapter_tensors_sha256,
         trained_adapter_tensors_sha256=trained_adapter_tensors_sha256,
     )
+    try:
+        expected_manifest = json.loads(
+            manifest_json,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (json.JSONDecodeError, ValueError):
+        _fail("candidate_manifest_invalid")
+    if type(expected_manifest) is not dict:
+        _fail("candidate_manifest_invalid")
+    existing_candidate_sha256 = _existing_candidate_sha256(
+        candidate,
+        expected_manifest=expected_manifest,
+    )
+    if existing_candidate_sha256 is not None:
+        if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+            _fail("checkpoint_payload_changed_after_candidate_replay")
+        return resume_state, existing_candidate_sha256
+
     temporary_sha256: str | None = None
     temporary_identity: tuple[int, int] | None = None
     published = False
