@@ -26,6 +26,10 @@ PackagedCoroutineSubmitter = Callable[
     [Coroutine[Any, Any, Any]],
     Future[Any],
 ]
+ProductFactoryExecutionContextFactory = Callable[
+    [PackagedProductFactoryExecutionPlan],
+    tuple[PackagedProductFactoryPreparationService, MultiRepositoryProductFactoryHost],
+]
 
 
 class PackagedProductFactoryExecutionError(RuntimeError):
@@ -49,19 +53,28 @@ class PackagedProductFactoryExecutionController:
     def __init__(
         self,
         *,
-        preparation: PackagedProductFactoryPreparationService,
-        host: MultiRepositoryProductFactoryHost,
+        preparation: PackagedProductFactoryPreparationService | None = None,
+        host: MultiRepositoryProductFactoryHost | None = None,
+        execution_context_factory: ProductFactoryExecutionContextFactory | None = None,
         resolve_plan: ProductFactoryExecutionPlanResolver,
         submit: PackagedCoroutineSubmitter,
         max_parallel: int = 4,
         max_count: int = 32,
     ) -> None:
-        if not callable(getattr(preparation, "prepare", None)):
-            raise TypeError("Product Factory preparation authority is invalid")
-        if not callable(getattr(host, "recover_running", None)) or not callable(
-            getattr(host, "dispatch_ready", None)
-        ):
-            raise TypeError("Product Factory execution host is invalid")
+        has_static_context = preparation is not None or host is not None
+        if execution_context_factory is None:
+            if preparation is None or host is None:
+                raise TypeError(
+                    "Product Factory execution requires preparation and host authorities"
+                )
+            _require_execution_context(preparation, host)
+        else:
+            if has_static_context:
+                raise ValueError(
+                    "static Product Factory execution authority conflicts with context factory"
+                )
+            if not callable(execution_context_factory):
+                raise TypeError("Product Factory execution-context factory must be callable")
         if not callable(resolve_plan):
             raise TypeError("Product Factory execution-plan resolver must be callable")
         if not callable(submit):
@@ -73,6 +86,7 @@ class PackagedProductFactoryExecutionController:
 
         self._preparation = preparation
         self._host = host
+        self._execution_context_factory = execution_context_factory
         self._resolve_plan = resolve_plan
         self._submit = submit
         self._max_parallel = max_parallel
@@ -117,7 +131,16 @@ class PackagedProductFactoryExecutionController:
                 )
 
             try:
-                prepared = self._preparation.prepare(plan)
+                preparation, host = self._execution_context(plan)
+            except Exception as exc:  # noqa: BLE001 - redact trusted-composition failure
+                _log_failure("execution-context resolution", exc)
+                return _result(
+                    "failed",
+                    "Не вдалося безпечно підготувати середовище виконання Product Factory.",
+                )
+
+            try:
+                prepared = preparation.prepare(plan)
             except Exception as exc:  # noqa: BLE001 - packaged boundary must redact details
                 _log_failure("durable preparation", exc)
                 return _result(
@@ -130,7 +153,7 @@ class PackagedProductFactoryExecutionController:
                     "Product Factory не підтвердив канонічний підготовлений стан.",
                 )
 
-            coroutine = self._run_once(prepared)
+            coroutine = self._run_once(prepared, host)
             try:
                 future = self._submit(coroutine)
             except Exception as exc:  # noqa: BLE001 - packaged boundary must redact details
@@ -163,13 +186,32 @@ class PackagedProductFactoryExecutionController:
             with self._lock:
                 self._starting.discard(project_id)
 
-    async def _run_once(self, prepared: PreparedProductFactory) -> None:
-        await self._host.recover_running(
+    def _execution_context(
+        self,
+        plan: PackagedProductFactoryExecutionPlan,
+    ) -> tuple[PackagedProductFactoryPreparationService, MultiRepositoryProductFactoryHost]:
+        if self._execution_context_factory is None:
+            assert self._preparation is not None
+            assert self._host is not None
+            return self._preparation, self._host
+        context = self._execution_context_factory(plan)
+        if type(context) is not tuple or len(context) != 2:
+            raise TypeError("Product Factory execution-context factory returned invalid context")
+        preparation, host = context
+        _require_execution_context(preparation, host)
+        return preparation, host
+
+    async def _run_once(
+        self,
+        prepared: PreparedProductFactory,
+        host: MultiRepositoryProductFactoryHost,
+    ) -> None:
+        await host.recover_running(
             host_task_id=prepared.host_task_id,
             state=prepared.state,
             max_parallel=self._max_parallel,
         )
-        await self._host.dispatch_ready(
+        await host.dispatch_ready(
             host_task_id=prepared.host_task_id,
             state=prepared.state,
             max_parallel=self._max_parallel,
@@ -185,6 +227,18 @@ class PackagedProductFactoryExecutionController:
             with self._lock:
                 if self._active.get(project_id) is future:
                     self._active.pop(project_id, None)
+
+
+def _require_execution_context(
+    preparation: object,
+    host: object,
+) -> None:
+    if not callable(getattr(preparation, "prepare", None)):
+        raise TypeError("Product Factory preparation authority is invalid")
+    if not callable(getattr(host, "recover_running", None)) or not callable(
+        getattr(host, "dispatch_ready", None)
+    ):
+        raise TypeError("Product Factory execution host is invalid")
 
 
 def _canonical_project_id(value: object) -> str:
