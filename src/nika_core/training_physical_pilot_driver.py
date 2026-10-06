@@ -33,6 +33,9 @@ from nika_core.training_peft_worker import (
     candidate_artifact_path,
     model_directory_manifest_sha256,
 )
+from nika_core.training_physical_evaluation_driver import (
+    load_trusted_scale_progression_proof,
+)
 from nika_core.training_physical_pilot import (
     PhysicalTrainingPilotError,
     PhysicalTrainingPilotReport,
@@ -1300,6 +1303,36 @@ def _read_config(path: Path) -> PhysicalPilotConfig:
     return PhysicalPilotConfig.from_json(raw)
 
 
+def _trusted_progression_for_cli(
+    config: PhysicalPilotConfig,
+    *,
+    source_root: Path | None,
+) -> TrainingScaleProgressionProof | None:
+    if type(config) is not PhysicalPilotConfig:
+        raise TypeError("config must be exact PhysicalPilotConfig")
+    if config.scale_tier_id is None:
+        if source_root is not None:
+            _fail("pilot-tier execution must not receive a trusted progression root")
+        return None
+    if config.progression_proof_payload is None:
+        _fail("higher-tier config is missing its progression claim")
+    if source_root is None:
+        _fail("higher-tier CLI execution requires --trusted-progression-root")
+    root = source_root
+    if not root.is_absolute():
+        try:
+            root = root.resolve(strict=True)
+        except OSError as exc:
+            raise PhysicalPilotDriverError(
+                "trusted progression root is unavailable"
+            ) from exc
+    return load_trusted_scale_progression_proof(
+        root,
+        workspace_id=config.workspace_id,
+        expected_claim=config.progression_proof_payload,
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the canonical Windows physical PEFT pause/reopen/resume pilot."
@@ -1308,6 +1341,15 @@ def build_parser() -> argparse.ArgumentParser:
         "config",
         type=Path,
         help="Path to the local UTF-8 physical-pilot JSON manifest.",
+    )
+    parser.add_argument(
+        "--trusted-progression-root",
+        type=Path,
+        default=None,
+        help=(
+            "Previous physical-training output root containing the completed "
+            "promoted evaluation authority required by schema-v3 higher-tier runs."
+        ),
     )
     return parser
 
@@ -1320,7 +1362,14 @@ def main(argv: list[str] | None = None) -> int:
         if not config_path.is_absolute():
             config_path = config_path.resolve(strict=True)
         config = _read_config(config_path)
-        report = run_physical_pilot_from_config(config)
+        trusted_progression = _trusted_progression_for_cli(
+            config,
+            source_root=args.trusted_progression_root,
+        )
+        report = run_physical_pilot_from_config(
+            config,
+            trusted_progression_proof=trusted_progression,
+        )
     except (
         KeyError,
         OSError,
