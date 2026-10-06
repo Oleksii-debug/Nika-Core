@@ -363,6 +363,74 @@ def test_restart_post_effect_does_not_require_old_node_lease_to_be_recreated(
     assert restarted_port.inspect_calls == 1
 
 
+def test_restart_post_effect_rejects_conflicting_current_work_lease(
+    tmp_path,
+) -> None:
+    port = Port(programming_error=True, inspect_result=_result())
+    host, checkpoint, _, _, _, task_id, store = _setup(tmp_path, port=port)
+    spec = _spec("work-1", Platform.LINUX, "linux-1")
+    _dispatch(host, spec)
+    with pytest.raises(RuntimeError, match="adapter crash"):
+        host.execute("work-1", now=NOW)
+    durable_lease_id = checkpoint.latest().snapshot.leases[0].lease_id
+
+    registry = ExecutionNodeRegistry()
+    registry.register(_node("linux-2", Platform.LINUX))
+    dummy = registry.acquire(
+        ExecutionRequest(
+            "project-1",
+            "dummy-work",
+            Platform.LINUX,
+            frozenset({"build"}),
+            frozenset({"python"}),
+            ResourceEnvelope(2, 2048, 4096),
+        ),
+        now=NOW,
+        lease_seconds=120,
+    )
+    registry.release(dummy.lease_id)
+    conflicting = registry.acquire(
+        ExecutionRequest(
+            "project-1",
+            "work-1",
+            Platform.LINUX,
+            frozenset({"build"}),
+            frozenset({"python"}),
+            ResourceEnvelope(2, 2048, 4096),
+        ),
+        now=NOW,
+        lease_seconds=120,
+    )
+    assert conflicting.lease_id != durable_lease_id
+
+    restarted = DurableBuildExecutionHost(
+        BuildExecutionCoordinator(
+            registry,
+            Available(set()),
+            Authority(_authority("work-1", "linux-1")),
+        ),
+        Port(inspect_result=_result()),
+        FileEvidence(),
+        OutputPolicies(
+            BuildOutputPolicy(
+                "project-1",
+                "repo-main",
+                "work-1",
+                AllowedPathPolicy(("products/build",)),
+                4,
+                RepositoryPathIdentity.CASE_SENSITIVE,
+            )
+        ),
+        SQLiteBuildExecutionCheckpointStore(store, task_id, "project-1"),
+    )
+
+    with pytest.raises(
+        BuildExecutionDurabilityError,
+        match="already has a different work lease",
+    ):
+        restarted.restore_latest(now=NOW)
+
+
 def test_restart_rechecks_current_authority_and_fails_closed_on_drift(tmp_path) -> None:
     host, _, _, _, _, task_id, store = _setup(tmp_path)
     spec = _spec("work-1", Platform.LINUX, "linux-1")
