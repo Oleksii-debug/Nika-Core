@@ -50,6 +50,7 @@ class PackagedVoiceModelSetup:
         self._active = False
         self._cancelling = False
         self._cancel_event: Event | None = None
+        self._active_future: Future[Any] | None = None
         self._last_status: str | None = None
         self._last_message: str | None = None
         self._restart_required = False
@@ -201,7 +202,7 @@ class PackagedVoiceModelSetup:
             cancel_event=cancel_event,
         )
         try:
-            self._submit(coroutine)
+            future = self._submit(coroutine)
         except Exception:  # noqa: BLE001 - bounded packaged submit failure
             coroutine.close()
             with self._lock:
@@ -209,11 +210,39 @@ class PackagedVoiceModelSetup:
                     self._active = False
                     self._cancel_event = None
                     self._last_status = "failed"
-                    self._last_message = "Не вдалося запустити фоновий імпорт голосової моделі."
+                    self._last_message = (
+                        "Не вдалося запустити фоновий імпорт голосової моделі."
+                    )
             return self._result(
                 "failed",
                 "Не вдалося запустити фоновий імпорт голосової моделі.",
             )
+        if type(future) is not Future:
+            coroutine.close()
+            with self._lock:
+                if generation == self._generation:
+                    self._active = False
+                    self._cancel_event = None
+                    self._last_status = "failed"
+                    self._last_message = (
+                        "Не вдалося запустити фоновий імпорт голосової моделі."
+                    )
+            return self._result(
+                "failed",
+                "Не вдалося запустити фоновий імпорт голосової моделі.",
+            )
+
+        with self._lock:
+            if generation != self._generation or not self._active:
+                future.cancel()
+                return self._result(
+                    "failed",
+                    "Стан імпорту голосової моделі змінився до запуску.",
+                )
+            self._active_future = future
+        future.add_done_callback(
+            lambda done, identity=generation: self._submitted_done(identity, done)
+        )
 
         return UIResult(
             request_id="desktop-handler",
@@ -221,6 +250,44 @@ class PackagedVoiceModelSetup:
             message="Імпорт локальної голосової моделі розпочато.",
             focus_id="voice-model-cancel",
         )
+
+    def _submitted_done(self, generation: int, future: Future[Any]) -> None:
+        with self._lock:
+            if self._active_future is not future:
+                return
+            self._active_future = None
+            if generation != self._generation or not self._active:
+                return
+            cancel_event = self._cancel_event
+
+        if future.cancelled():
+            if cancel_event is not None:
+                cancel_event.set()
+            status = "cancelled"
+            message = "Імпорт голосової моделі скасовано."
+        else:
+            try:
+                failure = future.exception()
+            except Exception:  # noqa: BLE001 - untrusted Future completion boundary
+                failure = RuntimeError("voice model import Future inspection failed")
+            if failure is None:
+                status = "failed"
+                message = "Фоновий імпорт завершився без коректного стану."
+            else:
+                if cancel_event is not None:
+                    cancel_event.set()
+                status = "failed"
+                message = "Не вдалося безпечно завершити фоновий імпорт моделі."
+
+        with self._lock:
+            if generation != self._generation or not self._active:
+                return
+            self._active = False
+            self._cancelling = False
+            self._cancel_event = None
+            self._restart_required = False
+            self._last_status = status
+            self._last_message = message
 
     def cancel(self, payload: dict[str, Any]) -> UIResult:
         if type(payload) is not dict:
