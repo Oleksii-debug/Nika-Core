@@ -60,6 +60,8 @@ class _FilesystemIdentity:
     git_metadata_device: str
     git_metadata_inode: str
     gitfile_sha256: str | None
+    git_target_device: str | None
+    git_target_inode: str | None
 
 
 class ProductFactoryLocalRepositoryBindings:
@@ -202,8 +204,8 @@ class ProductFactoryLocalRepositoryBindings:
                     "INSERT INTO product_factory_local_repository_bindings("
                     "project_id,repository_id,provider,locator,root_path,root_device,"
                     "root_inode,git_metadata_kind,git_metadata_device,git_metadata_inode,"
-                    "gitfile_sha256,binding_version,updated_at"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "gitfile_sha256,git_target_device,git_target_inode,binding_version,updated_at"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         project_id,
                         repository.repository_id,
@@ -216,6 +218,8 @@ class ProductFactoryLocalRepositoryBindings:
                         identity.git_metadata_device,
                         identity.git_metadata_inode,
                         identity.gitfile_sha256,
+                        identity.git_target_device,
+                        identity.git_target_inode,
                         version,
                         now,
                     ),
@@ -246,7 +250,8 @@ class ProductFactoryLocalRepositoryBindings:
                     "UPDATE product_factory_local_repository_bindings SET "
                     "provider=?,locator=?,root_path=?,root_device=?,root_inode=?,"
                     "git_metadata_kind=?,git_metadata_device=?,git_metadata_inode=?,"
-                    "gitfile_sha256=?,binding_version=?,updated_at=? "
+                    "gitfile_sha256=?,git_target_device=?,git_target_inode=?,"
+                    "binding_version=?,updated_at=? "
                     "WHERE project_id=? AND repository_id=? AND binding_version=?",
                     (
                         repository.provider,
@@ -258,6 +263,8 @@ class ProductFactoryLocalRepositoryBindings:
                         identity.git_metadata_device,
                         identity.git_metadata_inode,
                         identity.gitfile_sha256,
+                        identity.git_target_device,
+                        identity.git_target_inode,
                         version,
                         now,
                         project_id,
@@ -585,6 +592,51 @@ def _snapshot_repository(repository: RepositoryRef) -> RepositoryRef:
     )
 
 
+def _gitfile_target_identity(
+    metadata: pathlib.Path,
+    raw: bytes,
+) -> tuple[str, str]:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise ProductFactoryLocalRepositoryBindingError(
+            "Product Factory .git metadata file must be UTF-8 text"
+        ) from exc
+    if text.endswith("\r\n"):
+        line = text[:-2]
+    elif text.endswith("\n"):
+        line = text[:-1]
+    else:
+        line = text
+    if (
+        not line.startswith("gitdir: ")
+        or len(line) == len("gitdir: ")
+        or "\n" in line
+        or "\r" in line
+        or "\x00" in line
+    ):
+        raise ProductFactoryLocalRepositoryBindingError(
+            "Product Factory .git metadata file has an invalid gitdir record"
+        )
+    target_text = line[len("gitdir: "):]
+    if any(ord(character) < 32 or ord(character) == 127 for character in target_text):
+        raise ProductFactoryLocalRepositoryBindingError(
+            "Product Factory .git metadata target contains control characters"
+        )
+    target = pathlib.Path(target_text)
+    if not target.is_absolute():
+        target = metadata.parent / target
+    try:
+        resolved_target = ensure_real_directory_root(
+            target,
+            label="Product Factory gitdir target",
+        )
+    except WorkspaceSecurityError as exc:
+        raise ProductFactoryLocalRepositoryBindingError(str(exc)) from exc
+    target_stat = resolved_target.stat()
+    return str(target_stat.st_dev), str(target_stat.st_ino)
+
+
 def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
     if not isinstance(root, pathlib.Path):
         raise TypeError("root must be pathlib.Path")
@@ -607,6 +659,8 @@ def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
     if stat.S_ISDIR(metadata_stat.st_mode):
         kind = "directory"
         gitfile_sha256 = None
+        git_target_device = None
+        git_target_inode = None
     elif stat.S_ISREG(metadata_stat.st_mode):
         kind = "file"
         try:
@@ -620,6 +674,7 @@ def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
                 "Product Factory .git metadata file is invalid"
             )
         gitfile_sha256 = hashlib.sha256(raw).hexdigest()
+        git_target_device, git_target_inode = _gitfile_target_identity(metadata, raw)
     else:
         raise ProductFactoryLocalRepositoryBindingError(
             "Product Factory .git metadata has an unsupported file type"
@@ -632,6 +687,8 @@ def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
         git_metadata_device=str(metadata_stat.st_dev),
         git_metadata_inode=str(metadata_stat.st_ino),
         gitfile_sha256=gitfile_sha256,
+        git_target_device=git_target_device,
+        git_target_inode=git_target_inode,
     )
 
 
@@ -657,6 +714,8 @@ def _same_physical_repository(
         and first.git_metadata_device == second.git_metadata_device
         and first.git_metadata_inode == second.git_metadata_inode
         and first.gitfile_sha256 == second.gitfile_sha256
+        and first.git_target_device == second.git_target_device
+        and first.git_target_inode == second.git_target_inode
     )
 
 
@@ -693,6 +752,24 @@ def _binding_from_row(row: object) -> tuple[
             raise ProductFactoryLocalRepositoryBindingError(
                 "persisted Git metadata kind/digest mismatch"
             )
+        raw_git_target_device = row["git_target_device"]
+        raw_git_target_inode = row["git_target_inode"]
+        if kind == "file":
+            git_target_device = _stored_decimal(
+                raw_git_target_device,
+                "git_target_device",
+            )
+            git_target_inode = _stored_decimal(
+                raw_git_target_inode,
+                "git_target_inode",
+            )
+        else:
+            if raw_git_target_device is not None or raw_git_target_inode is not None:
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "persisted directory Git metadata has unexpected target identity"
+                )
+            git_target_device = None
+            git_target_inode = None
         version = _stored_positive_int(row["binding_version"], "binding_version")
         updated_at = _stored_text(row["updated_at"], "updated_at")
     except (KeyError, TypeError) as exc:
@@ -713,6 +790,8 @@ def _binding_from_row(row: object) -> tuple[
         git_metadata_device=git_device,
         git_metadata_inode=git_inode,
         gitfile_sha256=gitfile_sha256,
+        git_target_device=git_target_device,
+        git_target_inode=git_target_inode,
     )
     return (
         ProductFactoryLocalRepositoryBinding(

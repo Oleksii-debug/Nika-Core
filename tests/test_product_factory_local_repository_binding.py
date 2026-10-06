@@ -122,8 +122,14 @@ def test_schema_migration_adds_local_repository_binding_table(
                 "PRAGMA table_info(product_factory_local_repository_binding_generations)"
             )
         ]
+        binding_columns = [
+            row["name"]
+            for row in conn.execute(
+                "PRAGMA table_info(product_factory_local_repository_bindings)"
+            )
+        ]
 
-    assert version == 7
+    assert version == 8
     assert table is not None
     assert "PRIMARY KEY(project_id, repository_id)" in table[0]
     assert generation_table is not None
@@ -133,6 +139,8 @@ def test_schema_migration_adds_local_repository_binding_table(
         "repository_id",
         "last_binding_version",
     ]
+    assert "git_target_device" in binding_columns
+    assert "git_target_inode" in binding_columns
 
 
 def test_binding_survives_restart_and_resolves_exact_plan(
@@ -430,6 +438,120 @@ def test_bind_rejects_product_project_changed_before_write(
     assert isinstance(errors[0], ProductFactoryLocalRepositoryBindingError)
     assert "ProductProject changed while binding" in str(errors[0])
     with pytest.raises(KeyError):
+        bindings.require(project.project_id, repository.repository_id)
+
+
+def test_gitfile_binding_tracks_target_directory_identity(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = tmp_path / "linked worktree"
+    root.mkdir()
+    target = tmp_path / "git metadata target"
+    target.mkdir()
+    (root / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    assert bindings.require(project.project_id, repository.repository_id) == bound
+
+    moved = tmp_path / "original git metadata target"
+    target.rename(moved)
+    target.mkdir()
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="filesystem identity changed",
+    ):
+        bindings.require(project.project_id, repository.repository_id)
+
+
+def test_gitfile_binding_accepts_relative_gitdir_and_rejects_malformed_record(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = tmp_path / "relative worktree"
+    root.mkdir()
+    target = tmp_path / "relative metadata"
+    target.mkdir()
+    (root / ".git").write_text(
+        "gitdir: ../relative metadata\n",
+        encoding="utf-8",
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    assert bindings.require(project.project_id, repository.repository_id) == bound
+
+    bindings.unbind(
+        project_id=project.project_id,
+        repository_id=repository.repository_id,
+        expected_binding_version=bound.binding_version,
+        expected_repository=repository,
+    )
+    (root / ".git").write_text("not-a-gitdir\n", encoding="utf-8")
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="invalid gitdir record",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=root,
+            expected_binding_version=None,
+        )
+
+
+def test_legacy_gitfile_binding_without_target_identity_fails_closed(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = tmp_path / "legacy worktree"
+    root.mkdir()
+    target = tmp_path / "legacy metadata"
+    target.mkdir()
+    (root / ".git").write_text(f"gitdir: {target}\n", encoding="utf-8")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_factory_local_repository_bindings "
+            "SET git_target_device=NULL, git_target_inode=NULL "
+            "WHERE project_id=? AND repository_id=?",
+            (project.project_id, repository.repository_id),
+        )
+
+    assert bindings.current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == bound.binding_version
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="invalid persisted git_target_device",
+    ):
         bindings.require(project.project_id, repository.repository_id)
 
 
