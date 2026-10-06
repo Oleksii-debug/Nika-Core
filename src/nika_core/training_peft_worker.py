@@ -55,6 +55,11 @@ _TRAINING_RUNTIME_METADATA_KEYS = {
 _MAX_MODEL_DIR_FILES = 10_000
 _MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
 _MODEL_SNAPSHOT_DIR = "model-snapshot"
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
 class PeftTrainerError(RuntimeError):
@@ -123,6 +128,58 @@ class ConsumedMaterials:
 
 def _fail(code: str) -> NoReturn:
     raise PeftTrainerError(code)
+
+
+def _open_readonly_snapshot(path: Path) -> int:
+    """Open one file for authority reads while denying Windows write/delete sharing."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows authority snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
 
 
 def _sha256_file(path: Path) -> str:
@@ -457,9 +514,8 @@ def _hash_model_directory_file(
     if expected is not None and _stable_stat_identity(before) != _stable_stat_identity(expected):
         raise ValueError("model_dir entry changed before hashing")
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = _open_readonly_snapshot(path)
     except OSError as exc:
         raise ValueError("model_dir entry changed before hashing") from exc
 
@@ -900,9 +956,8 @@ def _copy_model_snapshot_file(
     before = _require_regular_unlinked(source, code="model_dir_source_changed")
     if before.st_size != expected_size:
         _fail("model_dir_source_changed")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(source, flags)
+        fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("model_dir_source_changed")
     total = 0
@@ -1051,9 +1106,8 @@ def _require_directory_unlinked(path: Path, *, code: str) -> os.stat_result:
 
 def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     before = _require_regular_unlinked(path, code=code)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = _open_readonly_snapshot(path)
     except OSError:
         _fail(code)
     digest = hashlib.sha256()
@@ -1107,9 +1161,8 @@ def _read_regular_snapshot(
     if type(max_bytes) is not int or max_bytes <= 0:
         raise ValueError("max_bytes must be a positive exact integer")
     before = _require_regular_unlinked(path, code=code)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = _open_readonly_snapshot(path)
     except OSError:
         _fail(code)
     chunks: list[bytes] = []
@@ -1249,9 +1302,8 @@ def _consume_material(
     before = _require_regular_unlinked(material.path, code="material_not_regular")
     if before.st_size != material.byte_count:
         _fail("material_size_mismatch")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(material.path, flags)
+        fd = _open_readonly_snapshot(material.path)
     except OSError:
         _fail("material_open_failed")
     digest = hashlib.sha256()
@@ -1555,9 +1607,8 @@ def _copy_initial_adapter_snapshot(
         source,
         code="initial_adapter_source_changed",
     )
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        source_fd = os.open(source, flags)
+        source_fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("initial_adapter_source_changed")
     temporary: Path | None = None
@@ -2293,9 +2344,8 @@ def _copy_checkpoint_snapshot_file(
     before = _require_regular_unlinked(source, code="resume_checkpoint_changed")
     if before.st_size != expected_size:
         _fail("resume_checkpoint_changed")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(source, flags)
+        fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("resume_checkpoint_changed")
     total = 0
