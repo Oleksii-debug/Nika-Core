@@ -15,6 +15,7 @@ from nika_core.toolsmith import (
     CodingResult,
     DeterministicCodingWorker,
     GapKind,
+    InvalidTransitionError,
     ReuseCandidate,
     ToolsmithRepository,
 )
@@ -111,14 +112,19 @@ def _verified(
     return gap, version
 
 
-def _manifest(digest: str) -> CapabilityManifestV1:
+def _manifest(
+    digest: str,
+    *,
+    entrypoint: str = "toolsmith.generated.safe_config_repair:run",
+    source: str = "local://toolsmith/acceptance",
+) -> CapabilityManifestV1:
     return CapabilityManifestV1(
         capability_id=CAPABILITY_ID,
         version="1.0.0",
         digest=digest,
-        entrypoint="toolsmith.generated.safe_config_repair:run",
+        entrypoint=entrypoint,
         permissions=PERMISSIONS,
-        source="local://toolsmith/acceptance",
+        source=source,
     )
 
 
@@ -153,6 +159,286 @@ def test_registration_cannot_substitute_artifact_after_independent_verification(
         "version": "1.0.0",
         "digest": VERIFIED_DIGEST,
     }
+
+
+def test_registry_same_digest_cannot_rebind_manifest_identity(tmp_path: Path) -> None:
+    task_id, store, repository, service = _service(tmp_path)
+    gap, version = _verified(task_id=task_id, repository=repository, service=service)
+    service.register(
+        gap=gap,
+        expected_version=version,
+        manifest=_manifest(VERIFIED_DIGEST),
+    )
+
+    with store.connection() as conn:
+        original_registry = conn.execute(
+            "SELECT digest, manifest_json, active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ?",
+            (CAPABILITY_ID, "1.0.0"),
+        ).fetchone()
+    assert original_registry is not None
+
+    second_task = TaskQueue(store).create(
+        workspace_id="toolsmith.verification.second",
+        agent_id="eng02-test",
+        payload={"capability_id": CAPABILITY_ID},
+    )
+    second_gap, second_version = _verified(
+        task_id=second_task.task_id,
+        repository=repository,
+        service=service,
+    )
+    with pytest.raises(RuntimeError, match="different manifest identity"):
+        service.register(
+            gap=second_gap,
+            expected_version=second_version,
+            manifest=_manifest(
+                VERIFIED_DIGEST,
+                entrypoint="toolsmith.generated.substituted:run",
+            ),
+        )
+
+    escalation = repository.get_escalation(
+        task_id=second_task.task_id,
+        capability_id=CAPABILITY_ID,
+    )
+    assert escalation is not None
+    assert escalation["state"] == CandidateState.REGISTERING.value
+    assert escalation["pinned_version"] is None
+
+    with store.connection() as conn:
+        registry = conn.execute(
+            "SELECT digest, manifest_json, active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ?",
+            (CAPABILITY_ID, "1.0.0"),
+        ).fetchone()
+        resume = conn.execute(
+            "SELECT 1 FROM capability_resume_bindings WHERE task_id = ? AND capability_id = ?",
+            (second_task.task_id, CAPABILITY_ID),
+        ).fetchone()
+    assert registry is not None
+    assert tuple(registry) == tuple(original_registry)
+    assert resume is None
+
+
+def test_exact_registry_identity_reactivates_after_rollback(tmp_path: Path) -> None:
+    task_id, store, repository, service = _service(tmp_path)
+    gap, version = _verified(task_id=task_id, repository=repository, service=service)
+    registered_version = service.register(
+        gap=gap,
+        expected_version=version,
+        manifest=_manifest(VERIFIED_DIGEST),
+    )
+    rolled_back_version = repository.transition(
+        task_id=task_id,
+        capability_id=CAPABILITY_ID,
+        expected_version=registered_version,
+        target=CandidateState.ROLLED_BACK,
+    )
+    assert rolled_back_version == registered_version + 1
+    repository.rollback_registration(task_id=task_id, capability_id=CAPABILITY_ID)
+
+    with store.connection() as conn:
+        inactive = conn.execute(
+            "SELECT active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ?",
+            (CAPABILITY_ID, "1.0.0"),
+        ).fetchone()
+    assert inactive is not None
+    assert int(inactive["active"]) == 0
+
+    second_task = TaskQueue(store).create(
+        workspace_id="toolsmith.verification.reactivation",
+        agent_id="eng02-test",
+        payload={"capability_id": CAPABILITY_ID},
+    )
+    second_gap, second_version = _verified(
+        task_id=second_task.task_id,
+        repository=repository,
+        service=service,
+    )
+    service.register(
+        gap=second_gap,
+        expected_version=second_version,
+        manifest=_manifest(VERIFIED_DIGEST),
+    )
+
+    with store.connection() as conn:
+        active = conn.execute(
+            "SELECT active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ?",
+            (CAPABILITY_ID, "1.0.0"),
+        ).fetchone()
+    assert active is not None
+    assert int(active["active"]) == 1
+
+
+def test_rollback_preserves_registry_used_by_another_registered_task(
+    tmp_path: Path,
+) -> None:
+    first_task_id, store, repository, service = _service(tmp_path)
+    first_gap, first_version = _verified(
+        task_id=first_task_id,
+        repository=repository,
+        service=service,
+    )
+    first_registered_version = service.register(
+        gap=first_gap,
+        expected_version=first_version,
+        manifest=_manifest(VERIFIED_DIGEST),
+    )
+
+    second_task = TaskQueue(store).create(
+        workspace_id="toolsmith.verification.shared",
+        agent_id="eng02-test",
+        payload={"capability_id": CAPABILITY_ID},
+    )
+    second_gap, second_version = _verified(
+        task_id=second_task.task_id,
+        repository=repository,
+        service=service,
+    )
+    second_registered_version = service.register(
+        gap=second_gap,
+        expected_version=second_version,
+        manifest=_manifest(VERIFIED_DIGEST),
+    )
+
+    repository.transition(
+        task_id=first_task_id,
+        capability_id=CAPABILITY_ID,
+        expected_version=first_registered_version,
+        target=CandidateState.ROLLED_BACK,
+    )
+    repository.rollback_registration(
+        task_id=first_task_id,
+        capability_id=CAPABILITY_ID,
+    )
+
+    with store.connection() as conn:
+        registry = conn.execute(
+            "SELECT active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ? AND digest = ?",
+            (CAPABILITY_ID, "1.0.0", VERIFIED_DIGEST),
+        ).fetchone()
+        first_resume = conn.execute(
+            "SELECT 1 FROM capability_resume_bindings "
+            "WHERE task_id = ? AND capability_id = ?",
+            (first_task_id, CAPABILITY_ID),
+        ).fetchone()
+        second_resume = conn.execute(
+            "SELECT status FROM capability_resume_bindings "
+            "WHERE task_id = ? AND capability_id = ?",
+            (second_task.task_id, CAPABILITY_ID),
+        ).fetchone()
+    assert registry is not None
+    assert int(registry["active"]) == 1
+    assert first_resume is None
+    assert second_resume is not None
+    assert second_resume["status"] == "ready"
+
+    repository.transition(
+        task_id=second_task.task_id,
+        capability_id=CAPABILITY_ID,
+        expected_version=second_registered_version,
+        target=CandidateState.ROLLED_BACK,
+    )
+    repository.rollback_registration(
+        task_id=second_task.task_id,
+        capability_id=CAPABILITY_ID,
+    )
+    with store.connection() as conn:
+        inactive = conn.execute(
+            "SELECT active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ? AND digest = ?",
+            (CAPABILITY_ID, "1.0.0", VERIFIED_DIGEST),
+        ).fetchone()
+    assert inactive is not None
+    assert int(inactive["active"]) == 0
+
+
+def test_registration_cleanup_requires_durable_rolled_back_state(tmp_path: Path) -> None:
+    task_id, store, repository, service = _service(tmp_path)
+    gap, version = _verified(task_id=task_id, repository=repository, service=service)
+    service.register(
+        gap=gap,
+        expected_version=version,
+        manifest=_manifest(VERIFIED_DIGEST),
+    )
+
+    with pytest.raises(
+        InvalidTransitionError,
+        match="cleanup requires durable ROLLED_BACK state",
+    ):
+        repository.rollback_registration(task_id=task_id, capability_id=CAPABILITY_ID)
+
+    with store.connection() as conn:
+        registry = conn.execute(
+            "SELECT active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ?",
+            (CAPABILITY_ID, "1.0.0"),
+        ).fetchone()
+        resume = conn.execute(
+            "SELECT status FROM capability_resume_bindings "
+            "WHERE task_id = ? AND capability_id = ?",
+            (task_id, CAPABILITY_ID),
+        ).fetchone()
+    assert registry is not None
+    assert int(registry["active"]) == 1
+    assert resume is not None
+    assert resume["status"] == "ready"
+
+
+def test_restart_does_not_publish_resume_for_inactive_registry_identity(
+    tmp_path: Path,
+) -> None:
+    task_id, store, repository, service = _service(tmp_path)
+    gap, version = _verified(task_id=task_id, repository=repository, service=service)
+    service.register(
+        gap=gap,
+        expected_version=version,
+        manifest=_manifest(VERIFIED_DIGEST),
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE capability_registry SET active = 0 "
+            "WHERE capability_id = ? AND version = ? AND digest = ?",
+            (CAPABILITY_ID, "1.0.0", VERIFIED_DIGEST),
+        )
+        conn.execute(
+            "DELETE FROM capability_resume_bindings "
+            "WHERE task_id = ? AND capability_id = ?",
+            (task_id, CAPABILITY_ID),
+        )
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted_repository = ToolsmithRepository(restarted_store)
+    restarted_service = CapabilityEscalationService(
+        repository=restarted_repository,
+        checkpoints=CheckpointService(restarted_store),
+        worker=DeterministicCodingWorker(lambda job: CodingResult(job_id=job.job_id)),
+    )
+
+    assert restarted_service.reconcile_resume(
+        task_id=task_id,
+        capability_id=CAPABILITY_ID,
+    ) is None
+    with restarted_store.connection() as conn:
+        resume = conn.execute(
+            "SELECT 1 FROM capability_resume_bindings "
+            "WHERE task_id = ? AND capability_id = ?",
+            (task_id, CAPABILITY_ID),
+        ).fetchone()
+        registry = conn.execute(
+            "SELECT active FROM capability_registry "
+            "WHERE capability_id = ? AND version = ? AND digest = ?",
+            (CAPABILITY_ID, "1.0.0", VERIFIED_DIGEST),
+        ).fetchone()
+    assert resume is None
+    assert registry is not None
+    assert int(registry["active"]) == 0
 
 
 def test_verified_digest_survives_restart_before_registration(tmp_path: Path) -> None:

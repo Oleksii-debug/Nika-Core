@@ -313,24 +313,52 @@ class ToolsmithRepository:
                 raise StaleTransitionError(
                     "verified candidate identity changed before exact registry publication"
                 )
+            manifest_json = _json(
+                {**asdict(manifest), "permissions": sorted(manifest.permissions)}
+            )
+            registered_at = _now()
             conflicting = conn.execute(
-                "SELECT digest FROM capability_registry WHERE capability_id = ? AND version = ?",
+                "SELECT digest, manifest_json, active FROM capability_registry "
+                "WHERE capability_id = ? AND version = ?",
                 (manifest.capability_id, manifest.version),
             ).fetchone()
-            if conflicting is not None and str(conflicting["digest"]) != manifest.digest:
-                raise RuntimeError("capability version collision with a different digest")
-            conn.execute(
-                "INSERT OR IGNORE INTO capability_registry("
-                "capability_id, version, digest, manifest_json, registered_at, active) "
-                "VALUES (?, ?, ?, ?, ?, 1)",
-                (
-                    manifest.capability_id,
-                    manifest.version,
-                    manifest.digest,
-                    _json({**asdict(manifest), "permissions": sorted(manifest.permissions)}),
-                    _now(),
-                ),
-            )
+            if conflicting is not None:
+                if str(conflicting["digest"]) != manifest.digest:
+                    raise RuntimeError("capability version collision with a different digest")
+                if str(conflicting["manifest_json"]) != manifest_json:
+                    raise RuntimeError(
+                        "capability version collision with a different manifest identity"
+                    )
+                if int(conflicting["active"]) != 1:
+                    cursor = conn.execute(
+                        "UPDATE capability_registry SET active = 1, registered_at = ? "
+                        "WHERE capability_id = ? AND version = ? AND digest = ? "
+                        "AND manifest_json = ? AND active = 0",
+                        (
+                            registered_at,
+                            manifest.capability_id,
+                            manifest.version,
+                            manifest.digest,
+                            manifest_json,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise StaleTransitionError(
+                            "capability registry identity changed during reactivation"
+                        )
+            else:
+                conn.execute(
+                    "INSERT INTO capability_registry("
+                    "capability_id, version, digest, manifest_json, registered_at, active) "
+                    "VALUES (?, ?, ?, ?, ?, 1)",
+                    (
+                        manifest.capability_id,
+                        manifest.version,
+                        manifest.digest,
+                        manifest_json,
+                        registered_at,
+                    ),
+                )
             conn.execute(
                 "UPDATE capability_escalations SET pinned_version = ?, pinned_digest = ?, "
                 "updated_at = ? WHERE task_id = ? AND requested_capability = ?",
@@ -372,6 +400,15 @@ class ToolsmithRepository:
             digest = authoritative["pinned_digest"]
             if not version or not digest:
                 raise RuntimeError("registered escalation is missing exact pinned capability identity")
+            registry = conn.execute(
+                "SELECT active FROM capability_registry "
+                "WHERE capability_id = ? AND version = ? AND digest = ?",
+                (capability_id, version, digest),
+            ).fetchone()
+            if registry is None or int(registry["active"]) != 1:
+                raise StaleTransitionError(
+                    "registered escalation has no active registry identity"
+                )
             conn.execute(
                 "INSERT INTO capability_resume_bindings("
                 "task_id, capability_id, version, digest, status, updated_at) "
@@ -396,18 +433,52 @@ class ToolsmithRepository:
         }
 
     def rollback_registration(self, *, task_id: str, capability_id: str) -> None:
-        row = self.get_escalation(task_id=task_id, capability_id=capability_id)
-        if row is None:
-            raise KeyError((task_id, capability_id))
-        version = row["pinned_version"]
-        digest = row["pinned_digest"]
         with self._store.connection() as conn:
-            if version and digest:
-                conn.execute(
-                    "UPDATE capability_registry SET active = 0 "
-                    "WHERE capability_id = ? AND version = ? AND digest = ?",
-                    (capability_id, version, digest),
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT state, pinned_version, pinned_digest FROM capability_escalations "
+                "WHERE task_id = ? AND requested_capability = ?",
+                (task_id, capability_id),
+            ).fetchone()
+            if row is None:
+                raise KeyError((task_id, capability_id))
+            if CandidateState(str(row["state"])) is not CandidateState.ROLLED_BACK:
+                raise InvalidTransitionError(
+                    "registration cleanup requires durable ROLLED_BACK state"
                 )
+            version = row["pinned_version"]
+            digest = row["pinned_digest"]
+            registry_deactivated = False
+            if version and digest:
+                surviving = conn.execute(
+                    "SELECT 1 FROM capability_escalations "
+                    "WHERE requested_capability = ? AND pinned_version = ? "
+                    "AND pinned_digest = ? AND state = ? AND task_id <> ? LIMIT 1",
+                    (
+                        capability_id,
+                        version,
+                        digest,
+                        CandidateState.REGISTERED.value,
+                        task_id,
+                    ),
+                ).fetchone()
+                if surviving is None:
+                    conn.execute(
+                        "UPDATE capability_registry SET active = 0 "
+                        "WHERE capability_id = ? AND version = ? AND digest = ?",
+                        (capability_id, version, digest),
+                    )
+                    registry_deactivated = True
+                else:
+                    registry = conn.execute(
+                        "SELECT active FROM capability_registry "
+                        "WHERE capability_id = ? AND version = ? AND digest = ?",
+                        (capability_id, version, digest),
+                    ).fetchone()
+                    if registry is None or int(registry["active"]) != 1:
+                        raise RuntimeError(
+                            "registered capability consumer references an inactive registry identity"
+                        )
             conn.execute(
                 "DELETE FROM capability_resume_bindings WHERE task_id = ? AND capability_id = ?",
                 (task_id, capability_id),
@@ -417,7 +488,12 @@ class ToolsmithRepository:
                 event_type="capability.registration.rolled_back",
                 entity_type="task",
                 entity_id=task_id,
-                payload={"capability_id": capability_id, "version": version, "digest": digest},
+                payload={
+                    "capability_id": capability_id,
+                    "version": version,
+                    "digest": digest,
+                    "registry_deactivated": registry_deactivated,
+                },
             )
 
     def list_incomplete(self) -> tuple[dict[str, object], ...]:

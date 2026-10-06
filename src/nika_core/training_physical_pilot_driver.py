@@ -1104,7 +1104,22 @@ def _preflight_output_root(path: Path) -> tuple[Path, os.stat_result]:
     return path, parent_stat
 
 
-def _stable_regular_file_size(path: Path, *, name: str) -> int:
+def _storage_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_size,
+        value.st_mtime_ns,
+    )
+
+
+def _stable_regular_file_size(
+    path: Path,
+    *,
+    name: str,
+    expected_identity: tuple[int, int, int, int, int] | None = None,
+) -> int:
     """Read one file identity/size without consuming or publishing its bytes."""
 
     descriptor: int | None = None
@@ -1132,14 +1147,13 @@ def _stable_regular_file_size(path: Path, *, name: str) -> int:
                 os.close(descriptor)
             except OSError:
                 pass
-    identities = (
-        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
-        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
-        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
-        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    identities = tuple(
+        _storage_identity(value)
+        for value in (before, opened, after, current)
     )
     if (
         len(set(identities)) != 1
+        or (expected_identity is not None and identities[0] != expected_identity)
         or before.st_size < 0
         or before.st_size > _MAX_STATIC_STAGING_BYTES
         or stat.S_ISLNK(current.st_mode)
@@ -1170,18 +1184,29 @@ def _stable_model_directory_size(
             model_dir.rglob("*"),
             key=lambda item: item.relative_to(model_dir).as_posix(),
         )
+        relative_paths = [
+            path.relative_to(model_dir).as_posix()
+            for path in paths
+        ]
+        expected_identities: dict[str, tuple[int, int, int, int, int]] = {}
         total = 0
-        for path in paths:
+        for path, relative in zip(paths, relative_paths, strict=True):
             value = os.lstat(path)
             if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
                 _fail("model_dir changed during storage preflight")
+            expected_identities[relative] = _storage_identity(value)
             if stat.S_ISDIR(value.st_mode):
                 continue
             if not stat.S_ISREG(value.st_mode):
                 _fail("model_dir changed during storage preflight")
-            total += value.st_size
-            if total < 0 or total > _MAX_STATIC_STAGING_BYTES:
+            size_bytes = _stable_regular_file_size(
+                path,
+                name="model_dir entry",
+                expected_identity=expected_identities[relative],
+            )
+            if total > _MAX_STATIC_STAGING_BYTES - size_bytes:
                 _fail("model_dir staging size exceeds supported bounds")
+            total += size_bytes
     except PhysicalPilotDriverError:
         raise
     except OSError as exc:
@@ -1190,7 +1215,31 @@ def _stable_model_directory_size(
         ) from exc
     try:
         after_manifest = model_directory_manifest_sha256(model_dir)
-    except ValueError as exc:
+        paths_after = sorted(
+            model_dir.rglob("*"),
+            key=lambda item: item.relative_to(model_dir).as_posix(),
+        )
+        relative_paths_after = [
+            path.relative_to(model_dir).as_posix()
+            for path in paths_after
+        ]
+        if relative_paths_after != relative_paths:
+            _fail("model_dir changed during storage preflight")
+        for path, relative in zip(
+            paths_after,
+            relative_paths_after,
+            strict=True,
+        ):
+            value = os.lstat(path)
+            if (
+                stat.S_ISLNK(value.st_mode)
+                or _is_reparse(value)
+                or _storage_identity(value) != expected_identities[relative]
+            ):
+                _fail("model_dir changed during storage preflight")
+    except PhysicalPilotDriverError:
+        raise
+    except (OSError, ValueError) as exc:
         raise PhysicalPilotDriverError(
             "model_dir changed during storage preflight"
         ) from exc
@@ -1230,24 +1279,31 @@ def _preflight_static_storage(
             _fail("mandatory PEFT staging size exceeds supported bounds")
         required_bytes += adapter_bytes
 
+    parent_lock = _open_windows_output_parent_stability_lock(
+        output_root.parent,
+        expected_parent,
+    )
     try:
-        parent_before = os.lstat(output_root.parent)
-        if (
-            stat.S_ISLNK(parent_before.st_mode)
-            or _is_reparse(parent_before)
-            or not stat.S_ISDIR(parent_before.st_mode)
-            or (parent_before.st_dev, parent_before.st_ino)
-            != (expected_parent.st_dev, expected_parent.st_ino)
-        ):
-            _fail("output_root parent changed before storage preflight")
-        usage = shutil.disk_usage(output_root.parent)
-        parent_after = os.lstat(output_root.parent)
-    except PhysicalPilotDriverError:
-        raise
-    except (OSError, ValueError) as exc:
-        raise PhysicalPilotDriverError(
-            "output volume free space could not be inspected"
-        ) from exc
+        try:
+            parent_before = os.lstat(output_root.parent)
+            if (
+                stat.S_ISLNK(parent_before.st_mode)
+                or _is_reparse(parent_before)
+                or not stat.S_ISDIR(parent_before.st_mode)
+                or (parent_before.st_dev, parent_before.st_ino)
+                != (expected_parent.st_dev, expected_parent.st_ino)
+            ):
+                _fail("output_root parent changed before storage preflight")
+            usage = shutil.disk_usage(output_root.parent)
+            parent_after = os.lstat(output_root.parent)
+        except PhysicalPilotDriverError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise PhysicalPilotDriverError(
+                "output volume free space could not be inspected"
+            ) from exc
+    finally:
+        _close_windows_output_parent_stability_lock(parent_lock)
     if (
         stat.S_ISLNK(parent_after.st_mode)
         or _is_reparse(parent_after)
