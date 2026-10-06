@@ -8,9 +8,10 @@ import math
 import os
 import re
 import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import NoReturn
+from typing import Iterator, NoReturn
 
 from nika_core.artifacts import ArtifactRecord, ArtifactRegistry
 from nika_core.data.sqlite import SQLiteStore
@@ -260,6 +261,78 @@ def _open_windows_output_parent_stability_lock(
         raise PhysicalPilotDriverError(
             "output_root parent directory could not be locked for creation"
         ) from exc
+
+
+def _require_output_root_identity(
+    path: Path,
+    expected_snapshot: os.stat_result,
+) -> None:
+    try:
+        current = os.lstat(path)
+    except OSError as exc:
+        raise PhysicalPilotDriverError("output_root is unavailable") from exc
+    if (
+        stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISDIR(current.st_mode)
+        or (current.st_dev, current.st_ino)
+        != (expected_snapshot.st_dev, expected_snapshot.st_ino)
+    ):
+        _fail("output_root changed during durable execution")
+
+
+def _open_windows_output_root_stability_lock(
+    path: Path,
+    expected_snapshot: os.stat_result,
+) -> int | None:
+    """Deny output-root rename/delete for the complete durable training interval."""
+
+    if os.name != "nt":
+        return None
+    handle_value: int | None = None
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            0,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS
+            | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        handle_value = int(handle)
+        _require_output_root_identity(path, expected_snapshot)
+        return handle_value
+    except PhysicalPilotDriverError:
+        _close_windows_output_parent_stability_lock(handle_value)
+        raise
+    except (AttributeError, ImportError, OSError, TypeError, ValueError) as exc:
+        _close_windows_output_parent_stability_lock(handle_value)
+        raise PhysicalPilotDriverError(
+            "output_root could not be locked for durable execution"
+        ) from exc
+
+
+def _close_windows_output_root_stability_lock(handle: int | None) -> None:
+    _close_windows_output_parent_stability_lock(handle)
 
 
 def _read_bounded_file(path: Path, *, max_bytes: int, name: str) -> bytes:
@@ -1039,11 +1112,12 @@ def _create_output_root(
     path: Path,
     *,
     expected_parent: os.stat_result,
-) -> Path:
+) -> tuple[Path, os.stat_result, int | None]:
     parent_lock = _open_windows_output_parent_stability_lock(
         path.parent,
         expected_parent,
     )
+    root_lock: int | None = None
     try:
         parent_before = os.lstat(path.parent)
         if (
@@ -1082,13 +1156,35 @@ def _create_output_root(
             or not stat.S_ISDIR(value.st_mode)
         ):
             _fail("output_root must be a non-linked directory")
-        return path
+        root_lock = _open_windows_output_root_stability_lock(path, value)
+        _require_output_root_identity(path, value)
+        return path, value, root_lock
     except PhysicalPilotDriverError:
+        _close_windows_output_root_stability_lock(root_lock)
         raise
     except OSError as exc:
+        _close_windows_output_root_stability_lock(root_lock)
         raise PhysicalPilotDriverError("output_root could not be created") from exc
     finally:
         _close_windows_output_parent_stability_lock(parent_lock)
+
+
+@contextmanager
+def _stable_created_output_root(
+    path: Path,
+    *,
+    expected_parent: os.stat_result,
+) -> Iterator[Path]:
+    output_root, snapshot, root_lock = _create_output_root(
+        path,
+        expected_parent=expected_parent,
+    )
+    try:
+        _require_output_root_identity(output_root, snapshot)
+        yield output_root
+        _require_output_root_identity(output_root, snapshot)
+    finally:
+        _close_windows_output_root_stability_lock(root_lock)
 
 
 def _material_totals(materials: ResolvedTrainingPackage) -> tuple[int, int, int, int, int]:
@@ -1479,113 +1575,27 @@ def run_physical_pilot_from_config(
         material_base_sha256=materials.evidence.base_artifact_sha256,
     )
 
-    output_root = _create_output_root(
+    with _stable_created_output_root(
         output_root,
         expected_parent=output_parent_snapshot,
-    )
-    database_path = output_root / "physical-pilot.sqlite3"
-    report_path = output_root / "physical-pilot-report.json"
-    store = SQLiteStore(database_path)
-    store.initialize()
-    registry = ArtifactRegistry.from_store(
-        store,
-        local_file_roots=(trainer_executable.parent,),
-    )
-    trainer_record = registry.register_file(
-        workspace_id=config.workspace_id,
-        idempotency_key="physical-peft-trainer",
-        path=trainer_executable,
-        kind="training_executable",
-        metadata=runtime_metadata,
-    )
-    initial_worker, trainer_record = _build_worker(
-        store=store,
-        trainer_executable=trainer_executable,
-        trainer_artifact_id=trainer_record.artifact_id,
-        local_root=trainer_executable.parent,
-        base_gguf_path=base_gguf_path,
-        model_dir=model_dir,
-        initial_adapter_path=initial_adapter_path,
-        output_root=output_root,
-        parameters=config.trainer_parameters,
-        max_records=total_records,
-    )
-
-    base_artifact = ArtifactIdentity(
-        config.base_artifact_ref,
-        materials.evidence.base_artifact_sha256,
-    )
-    try:
-        scale_authorization = authorize_training_scale(
-            plan=scale_plan,
-            tier_id=scale_tier.tier_id,
-            job_id=config.job_id,
-            base_artifact=base_artifact,
-            candidate_artifact_ref=config.candidate_artifact_ref,
-            material_evidence=materials.evidence,
-            execution_plan_sha256=initial_worker.execution_plan_sha256,
-            max_steps=training_max_steps,
-            progression_proof=progression_proof,
+    ) as output_root:
+        database_path = output_root / "physical-pilot.sqlite3"
+        report_path = output_root / "physical-pilot-report.json"
+        store = SQLiteStore(database_path)
+        store.initialize()
+        registry = ArtifactRegistry.from_store(
+            store,
+            local_file_roots=(trainer_executable.parent,),
         )
-    except TrainingScaleError as exc:
-        raise PhysicalPilotDriverError(
-            "training data or progression proof exceeds the configured scale tier"
-        ) from exc
-    task = TaskQueue(store).create(
-        workspace_id=config.workspace_id,
-        agent_id="physical-peft-pilot",
-        payload=_physical_training_task_payload(
-            job_id=config.job_id,
-            plan=scale_plan,
-            tier_index=tier_index,
-            progression_proof=progression_proof,
-        ),
-    )
-    spec = TrainingJobSpec(
-        job_id=config.job_id,
-        task_id=task.task_id,
-        project_id=config.project_id,
-        owner_id=config.owner_id,
-        base_artifact=base_artifact,
-        frozen_package_sha256=materials.evidence.package_manifest_sha256,
-        training_material_sha256=materials.training_material_sha256,
-        scale_authorization_sha256=scale_authorization.authorization_sha256,
-        candidate_artifact_ref=config.candidate_artifact_ref,
-        max_steps=training_max_steps,
-    )
-    resources = _resource_manager(
-        store=store,
-        owner_id=config.owner_id,
-        config=config.resource_budget,
-    )
-    runtime = TrainingRuntime(
-        resources=resources,
-        checkpoints=CheckpointService(store),
-        training_materials=materials,
-    )
-
-    def restart_runtime() -> TrainingRuntime:
-        restart_store = SQLiteStore(database_path)
-        restart_store.initialize()
-        restart_materials = resolve_training_materials(
-            package,
+        trainer_record = registry.register_file(
             workspace_id=config.workspace_id,
-            blob_store=ContentAddressedBlobStore(blob_store_root),
+            idempotency_key="physical-peft-trainer",
+            path=trainer_executable,
+            kind="training_executable",
+            metadata=runtime_metadata,
         )
-        return TrainingRuntime(
-            resources=_resource_manager(
-                store=restart_store,
-                owner_id=config.owner_id,
-                config=config.resource_budget,
-            ),
-            checkpoints=CheckpointService(restart_store),
-            training_materials=restart_materials,
-        )
-
-    def restart_worker() -> SubprocessTrainingWorker:
-        restart_store = SQLiteStore(database_path)
-        restart_worker_value, _ = _build_worker(
-            store=restart_store,
+        initial_worker, trainer_record = _build_worker(
+            store=store,
             trainer_executable=trainer_executable,
             trainer_artifact_id=trainer_record.artifact_id,
             local_root=trainer_executable.parent,
@@ -1596,34 +1606,120 @@ def run_physical_pilot_from_config(
             parameters=config.trainer_parameters,
             max_records=total_records,
         )
-        return restart_worker_value
 
-    candidate_path = candidate_artifact_path(
-        output_root,
-        config.candidate_artifact_ref,
-    )
-    report = run_physical_training_pilot(
-        runtime=runtime,
-        restart_runtime=restart_runtime,
-        spec=spec,
-        worker=initial_worker,
-        restart_worker=restart_worker,
-        scale_authorization=scale_authorization,
-        candidate_path=candidate_path,
-        candidate_descriptor_factory=lambda completed: _candidate_descriptor(
-            config=config,
+        base_artifact = ArtifactIdentity(
+            config.base_artifact_ref,
+            materials.evidence.base_artifact_sha256,
+        )
+        try:
+            scale_authorization = authorize_training_scale(
+                plan=scale_plan,
+                tier_id=scale_tier.tier_id,
+                job_id=config.job_id,
+                base_artifact=base_artifact,
+                candidate_artifact_ref=config.candidate_artifact_ref,
+                material_evidence=materials.evidence,
+                execution_plan_sha256=initial_worker.execution_plan_sha256,
+                max_steps=training_max_steps,
+                progression_proof=progression_proof,
+            )
+        except TrainingScaleError as exc:
+            raise PhysicalPilotDriverError(
+                "training data or progression proof exceeds the configured scale tier"
+            ) from exc
+        task = TaskQueue(store).create(
+            workspace_id=config.workspace_id,
+            agent_id="physical-peft-pilot",
+            payload=_physical_training_task_payload(
+                job_id=config.job_id,
+                plan=scale_plan,
+                tier_index=tier_index,
+                progression_proof=progression_proof,
+            ),
+        )
+        spec = TrainingJobSpec(
+            job_id=config.job_id,
+            task_id=task.task_id,
+            project_id=config.project_id,
+            owner_id=config.owner_id,
+            base_artifact=base_artifact,
+            frozen_package_sha256=materials.evidence.package_manifest_sha256,
+            training_material_sha256=materials.training_material_sha256,
+            scale_authorization_sha256=scale_authorization.authorization_sha256,
+            candidate_artifact_ref=config.candidate_artifact_ref,
+            max_steps=training_max_steps,
+        )
+        resources = _resource_manager(
+            store=store,
+            owner_id=config.owner_id,
+            config=config.resource_budget,
+        )
+        runtime = TrainingRuntime(
+            resources=resources,
+            checkpoints=CheckpointService(store),
+            training_materials=materials,
+        )
+
+        def restart_runtime() -> TrainingRuntime:
+            restart_store = SQLiteStore(database_path)
+            restart_store.initialize()
+            restart_materials = resolve_training_materials(
+                package,
+                workspace_id=config.workspace_id,
+                blob_store=ContentAddressedBlobStore(blob_store_root),
+            )
+            return TrainingRuntime(
+                resources=_resource_manager(
+                    store=restart_store,
+                    owner_id=config.owner_id,
+                    config=config.resource_budget,
+                ),
+                checkpoints=CheckpointService(restart_store),
+                training_materials=restart_materials,
+            )
+
+        def restart_worker() -> SubprocessTrainingWorker:
+            restart_store = SQLiteStore(database_path)
+            restart_worker_value, _ = _build_worker(
+                store=restart_store,
+                trainer_executable=trainer_executable,
+                trainer_artifact_id=trainer_record.artifact_id,
+                local_root=trainer_executable.parent,
+                base_gguf_path=base_gguf_path,
+                model_dir=model_dir,
+                initial_adapter_path=initial_adapter_path,
+                output_root=output_root,
+                parameters=config.trainer_parameters,
+                max_records=total_records,
+            )
+            return restart_worker_value
+
+        candidate_path = candidate_artifact_path(
+            output_root,
+            config.candidate_artifact_ref,
+        )
+        report = run_physical_training_pilot(
+            runtime=runtime,
+            restart_runtime=restart_runtime,
+            spec=spec,
+            worker=initial_worker,
+            restart_worker=restart_worker,
+            scale_authorization=scale_authorization,
             candidate_path=candidate_path,
-            completed=completed,
-        ),
-        candidate_root=output_root,
-    )
-    write_physical_training_pilot_report(report, report_path)
-    _LOG.info(
-        "physical PEFT pilot completed: job_id=%s candidate_sha256=%s",
-        report.job_id,
-        report.candidate_sha256,
-    )
-    return report
+            candidate_descriptor_factory=lambda completed: _candidate_descriptor(
+                config=config,
+                candidate_path=candidate_path,
+                completed=completed,
+            ),
+            candidate_root=output_root,
+        )
+        write_physical_training_pilot_report(report, report_path)
+        _LOG.info(
+            "physical PEFT pilot completed: job_id=%s candidate_sha256=%s",
+            report.job_id,
+            report.candidate_sha256,
+        )
+        return report
 
 
 def _read_config(path: Path) -> PhysicalPilotConfig:
