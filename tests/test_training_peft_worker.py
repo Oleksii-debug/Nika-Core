@@ -1091,6 +1091,49 @@ def test_warm_start_rejects_wrong_foundation_chain(
         )
 
 
+def test_first_training_step_requires_canonical_tensor_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StableTensorReader(_FakeSafeTensorReader):
+        def get_tensor(self, name: str) -> _FakeTensor:
+            assert name == "lora.weight"
+            return _FakeTensor(b"stable-canonical-tensor-state")
+
+    def _stable_tensor_safe_open(
+        path: str,
+        *,
+        framework: str,
+        device: str,
+    ) -> _StableTensorReader:
+        assert framework == "pt"
+        assert device == "cpu"
+        return _StableTensorReader(path)
+
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    stack = list(_fake_stack())
+    stack[5] = _stable_tensor_safe_open
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    with pytest.raises(peft.PeftTrainerError, match="training_step_no_tensor_mutation"):
+        peft._train_one_step(request, config, consumed)
+
+    checkpoint = (
+        config.output_root
+        / peft._candidate_key(request.candidate_artifact_ref)
+        / "trainer"
+        / "checkpoint-1"
+    )
+    assert (checkpoint / "adapter" / peft._CANDIDATE_FILE).is_file()
+    assert not (checkpoint / peft._CHECKPOINT_MARKER).exists()
+    assert not peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    ).exists()
+
+
 def test_training_step_rejects_unchanged_adapter_weights(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
