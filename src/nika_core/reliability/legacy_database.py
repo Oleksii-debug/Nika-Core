@@ -26,6 +26,7 @@ from nika_core.kernel.audit import AuditLog
 from nika_core.model_artifact_schema import MODEL_ARTIFACT_SCHEMA_VERSION
 from nika_core.product_project_schema import PRODUCT_PROJECT_SCHEMA_VERSION
 from nika_core.reliability.backup import BackupRecoveryError, SQLiteRecoveryManager
+from nika_core.reliability.recovery_lease import RecoveryFileLease, RecoveryLeaseError
 from nika_core.research.knowledge_schema import KNOWLEDGE_SCHEMA_VERSION
 
 _RECEIPT_TABLE = "legacy_database_adoption_v1"
@@ -183,34 +184,14 @@ def _source_unchanged(path: Path, digest: str) -> bool:
 
 @contextmanager
 def _startup_lock(target: Path) -> Iterator[None]:
-    target.parent.mkdir(parents=True, exist_ok=True)
+    # Reuse the canonical no-follow, regular-file and inode-identity lease.
+    # A plain is_symlink()/open() pair allows a lock-file substitution.
     lock = target.with_name(f".{target.name}.startup.lock")
-    if lock.is_symlink():
-        raise LegacyDatabaseConflict(_MESSAGE)
-    with lock.open("a+b") as handle:
-        if handle.tell() == 0:
-            handle.write(b"0")
-            handle.flush()
-        handle.seek(0)
-        try:
-            if os.name == "nt":
-                import msvcrt
-
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            else:
-                import fcntl
-
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            raise LegacyDatabaseConflict(_MESSAGE) from None
-        try:
+    try:
+        with RecoveryFileLease(lock):
             yield
-        finally:
-            handle.seek(0)
-            if os.name == "nt":
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-            else:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    except RecoveryLeaseError:
+        raise LegacyDatabaseConflict(_MESSAGE) from None
 
 
 def _publish_pending(path: Path, record: dict[str, object]) -> None:

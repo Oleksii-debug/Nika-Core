@@ -216,6 +216,90 @@ def test_startup_lock_has_one_owner_and_is_released_on_process_scope_exit(tmp_pa
     adoption.prepare_default_database(target, [])
 
 
+def test_startup_lock_rejects_indirect_and_nonregular_paths(tmp_path):
+    target = tmp_path / "nika.db"
+    lock = target.with_name(f".{target.name}.startup.lock")
+    sentinel = tmp_path / "unrelated-private-file"
+    sentinel.write_bytes(b"")
+
+    try:
+        lock.symlink_to(sentinel)
+    except (NotImplementedError, OSError):
+        pytest.skip("filesystem does not support symlinks")
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert sentinel.read_bytes() == b""
+    assert not target.exists()
+
+    lock.unlink()
+    lock.mkdir()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert not target.exists()
+
+
+def test_startup_lock_rejects_path_swapped_for_symlink_during_open(
+    tmp_path, monkeypatch
+):
+    import nika_core.reliability.recovery_lease as lease_module
+
+    target = tmp_path / "nika.db"
+    lock = target.with_name(f".{target.name}.startup.lock")
+    sentinel = tmp_path / "must-not-be-modified"
+    sentinel.write_bytes(b"")
+    real_open = lease_module.os.open
+    swapped = False
+
+    def swap_before_open(path, flags, mode=0o777):
+        nonlocal swapped
+        if Path(path) == lock and not swapped:
+            swapped = True
+            try:
+                lock.symlink_to(sentinel)
+            except (NotImplementedError, OSError):
+                pytest.skip("filesystem does not support symlinks")
+        return real_open(path, flags, mode)
+
+    monkeypatch.setattr(lease_module.os, "open", swap_before_open)
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert swapped
+    assert lock.is_symlink()
+    assert sentinel.read_bytes() == b""
+    assert not target.exists()
+
+
+def test_startup_lock_rejects_inode_swap_after_open(tmp_path, monkeypatch):
+    import nika_core.reliability.recovery_lease as lease_module
+
+    target = tmp_path / "nika.db"
+    lock = target.with_name(f".{target.name}.startup.lock")
+    lock.write_bytes(b"original")
+    replacement = tmp_path / "replacement-lock"
+    replacement.write_bytes(b"replacement")
+    real_open = lease_module.os.open
+    swapped = False
+
+    def swap_after_open(path, flags, mode=0o777):
+        nonlocal swapped
+        fd = real_open(path, flags, mode)
+        if Path(path) == lock and not swapped:
+            swapped = True
+            try:
+                replacement.replace(lock)
+            except OSError:
+                lease_module.os.close(fd)
+                pytest.skip("filesystem cannot replace a lock held open")
+        return fd
+
+    monkeypatch.setattr(lease_module.os, "open", swap_after_open)
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [])
+    assert swapped
+    assert lock.read_bytes() == b"replacement"
+    assert not target.exists()
+
+
 @pytest.mark.parametrize("hold_open", [False, True])
 def test_late_wal_writer_is_detected_inside_restore_lock(tmp_path, monkeypatch, hold_open):
     source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
