@@ -1,17 +1,23 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.checkpoint import CheckpointService
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
 from nika_core.product_factory_coding_worker_adapter import CodingWorkerComponentAdapter
 from nika_core.product_factory_coordinator import WorkerResultEnvelope
-from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
+from nika_core.product_factory_multi_repository import (
+    MultiRepositoryExecutionError,
+    MultiRepositoryProductFactoryHost,
+    RepairLineageError,
+)
 from nika_core.product_factory_orchestration import (
     ProductComponent,
     ProductRepositoryGraph,
@@ -30,18 +36,27 @@ from nika_core.product_factory_toolsmith_integration import (
     ProductFactoryToolsmithBridge,
     ProductFactoryToolsmithError,
 )
+from nika_core.product_factory_toolsmith_state import (
+    ProductFactoryToolsmithBindingError,
+    ProductFactoryToolsmithBindingRepository,
+)
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from nika_core.toolsmith.contracts import (
     CandidateState,
+    CapabilityManifestV1,
     CodingResult,
     RecoveryState,
+    ReuseCandidate,
     WorkerFailure,
     WorkerFailureKind,
 )
+from nika_core.toolsmith.repository import ToolsmithRepository
+from nika_core.toolsmith.service import CapabilityEscalationService
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 DIFF_DIGEST = "d" * 64
+CAPABILITY_DIGEST = "f" * 64
 PERMISSIONS = frozenset({"read_source", "write_source", "run_tests"})
 
 
@@ -54,6 +69,46 @@ class NeverDispatchWorker:
 
     async def recover(self, request, state):
         raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
+
+
+class FailingProgramWorker:
+    async def dispatch(self, request):
+        return WorkerResultEnvelope(
+            work_id=request.work_id,
+            component_id=request.component_id,
+            repository_id=request.repository_id,
+            base_sha=request.base_sha,
+            result_sha=SHA_B,
+            diff_digest=DIFF_DIGEST,
+            coding_result=CodingResult(
+                job_id=request.work_id,
+                failure=WorkerFailure(
+                    WorkerFailureKind.PROCESS_FAILED,
+                    "canonical bounded worker lacks exact TOML editing capability",
+                    retryable=True,
+                ),
+            ),
+        )
+
+    async def inspect(self, _work_id: str) -> RecoveryState | None:
+        return None
+
+    async def recover(self, request, state):
+        raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
+
+
+class UnusedToolsmithWorker:
+    async def execute(self, _job):
+        raise AssertionError("Toolsmith worker execution is not expected")
+
+    async def cancel(self, _job_id):
+        raise AssertionError("Toolsmith worker cancellation is not expected")
+
+    async def inspect(self, _job_id):
+        return None
+
+    async def recover(self, _job, _state):
+        raise AssertionError("Toolsmith worker recovery is not expected")
 
 
 class RecordingEscalation:
@@ -114,7 +169,12 @@ class RecordingBridge:
         return self.resume_result
 
 
-def _fixture(tmp_path: Path, *, failed: bool = True):
+def _fixture(
+    tmp_path: Path,
+    *,
+    failed: bool = True,
+    canonical_failure: bool = False,
+):
     store = SQLiteStore(tmp_path / "packaged factory toolsmith.db")
     store.initialize()
     repository = ProductProjectRepository(store)
@@ -147,7 +207,10 @@ def _fixture(tmp_path: Path, *, failed: bool = True):
             ),
         ),
     )
-    host = MultiRepositoryProductFactoryHost(store, NeverDispatchWorker())
+    host = MultiRepositoryProductFactoryHost(
+        store,
+        FailingProgramWorker() if canonical_failure else NeverDispatchWorker(),
+    )
     preparation = PackagedProductFactoryPreparationService(
         repository=repository,
         tasks=TaskQueue(store),
@@ -167,7 +230,19 @@ def _fixture(tmp_path: Path, *, failed: bool = True):
     prepared = preparation.prepare(execution_plan)
     record = prepared.state.coordinator.snapshot().records[0]
     request = record.request
-    if failed:
+    if failed and canonical_failure:
+        outcomes = asyncio.run(
+            host.dispatch_ready(
+                host_task_id=prepared.host_task_id,
+                state=prepared.state,
+                max_parallel=1,
+                max_count=1,
+            )
+        )
+        assert len(outcomes) == 1
+        assert outcomes[0].state.value == "repair_required"
+        request = prepared.state.coordinator.snapshot().records[0].request
+    elif failed:
         request = prepared.state.coordinator.start("core")
         prepared.state.coordinator.record_result(
             WorkerResultEnvelope(
@@ -204,6 +279,89 @@ def _fixture(tmp_path: Path, *, failed: bool = True):
         attempted_methods=("canonical-registry-search",),
     )
     return store, repository, preparation, prepared, request, gap_plan
+
+
+def _real_toolsmith(store: SQLiteStore):
+    worker = UnusedToolsmithWorker()
+    service = CapabilityEscalationService(
+        repository=ToolsmithRepository(store),
+        checkpoints=CheckpointService(store),
+        worker=worker,
+    )
+    adapter = CodingWorkerComponentAdapter(
+        worker=worker,
+        contexts=cast(Any, object()),
+        evidence=cast(Any, object()),
+    )
+    bridge = ProductFactoryToolsmithBridge(
+        service,
+        adapter,
+        store=store,
+    )
+    return service, bridge
+
+
+def _register_reuse(service: CapabilityEscalationService, checkpoint) -> None:
+    candidate = ReuseCandidate(
+        capability_id=checkpoint.capability_id,
+        version="1.4.0",
+        source="canonical-local-registry",
+        digest=CAPABILITY_DIGEST,
+        permissions=PERMISSIONS,
+    )
+    version, selected = service.choose_reuse(
+        gap=checkpoint.gap,
+        candidates=(candidate,),
+        expected_version=checkpoint.row_version,
+    )
+    assert selected == candidate
+    version = service.start_verification(
+        gap=checkpoint.gap,
+        expected_version=version,
+    )
+    version = service.accept_verification(
+        gap=checkpoint.gap,
+        expected_version=version,
+        candidate_digest=CAPABILITY_DIGEST,
+        verifier_evidence={"tests": "independent-green"},
+    )
+    service.register(
+        gap=checkpoint.gap,
+        expected_version=version,
+        manifest=CapabilityManifestV1(
+            capability_id=checkpoint.capability_id,
+            version="1.4.0",
+            digest=CAPABILITY_DIGEST,
+            entrypoint="nika_ext.toml:tool",
+            permissions=PERMISSIONS,
+            source="canonical-local-registry",
+        ),
+    )
+
+
+def _restart_packaged_service(
+    store: SQLiteStore,
+):
+    restarted = SQLiteStore(store.path)
+    restarted.initialize()
+    host = MultiRepositoryProductFactoryHost(restarted, NeverDispatchWorker())
+    preparation = PackagedProductFactoryPreparationService(
+        repository=ProductProjectRepository(restarted),
+        tasks=TaskQueue(restarted),
+        host=host,
+        workspace_id="packaged.product-factory",
+    )
+    toolsmith, bridge = _real_toolsmith(restarted)
+    return (
+        restarted,
+        host,
+        preparation,
+        toolsmith,
+        PackagedProductFactoryToolsmithService(
+            preparation=preparation,
+            bridge=bridge,
+        ),
+    )
 
 
 def _service(preparation, bridge: RecordingBridge):
@@ -456,3 +614,236 @@ def test_bridge_exact_guards_preserve_current_none_resume_behavior(
 
     assert result is None
     assert escalation.resumed == [(prepared.host_task_id, "toml-editor")]
+
+
+def test_real_registered_capability_resumes_factory_with_durable_repair_lineage(
+    tmp_path: Path,
+) -> None:
+    store, _repository, preparation, prepared, request, plan = _fixture(
+        tmp_path,
+        canonical_failure=True,
+    )
+    toolsmith, bridge = _real_toolsmith(store)
+    packaged = PackagedProductFactoryToolsmithService(
+        preparation=preparation,
+        bridge=bridge,
+    )
+    checkpoint = packaged.begin_gap(plan)
+    _register_reuse(toolsmith, checkpoint)
+
+    restarted, _host, _preparation, _toolsmith, packaged = (
+        _restart_packaged_service(store)
+    )
+    resumed = packaged.resume_registered_gap(plan)
+
+    assert resumed is not None
+    assert resumed.previous_work_id == request.work_id
+    assert resumed.next_request.attempt == 2
+    assert resumed.next_request.base_sha == SHA_B
+    assert resumed.next_request.permission_ceiling == PERMISSIONS
+    assert resumed.capability_version == "1.4.0"
+    assert resumed.capability_digest == CAPABILITY_DIGEST
+
+    _final_store, final_host, final_preparation, _toolsmith, _packaged = (
+        _restart_packaged_service(restarted)
+    )
+    final = final_preparation.restore(plan.project_id)
+    record = final.state.coordinator.snapshot().records[0]
+    lineage = final_host.repair_lineage(
+        host_task_id=final.host_task_id,
+        state=final.state,
+    )
+    assert record.state.value == "ready"
+    assert record.request == resumed.next_request
+    assert len(lineage) == 1
+    assert lineage[0].from_work_id == request.work_id
+    assert lineage[0].to_work_id == resumed.next_request.work_id
+    assert lineage[0].from_result_sha == SHA_B
+    assert lineage[0].to_base_sha == SHA_B
+
+
+def test_toolsmith_resume_recovers_after_failure_before_factory_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _repository, preparation, prepared, request, plan = _fixture(
+        tmp_path,
+        canonical_failure=True,
+    )
+    toolsmith, bridge = _real_toolsmith(store)
+    packaged = PackagedProductFactoryToolsmithService(
+        preparation=preparation,
+        bridge=bridge,
+    )
+    checkpoint = packaged.begin_gap(plan)
+    _register_reuse(toolsmith, checkpoint)
+
+    def fail_commit(*_args, **_kwargs):
+        raise OSError("simulated Factory checkpoint outage")
+
+    monkeypatch.setattr(preparation, "commit_repair", fail_commit)
+    with pytest.raises(
+        PackagedProductFactoryToolsmithError,
+        match="resume was rejected",
+    ):
+        packaged.resume_registered_gap(plan)
+
+    monkeypatch.undo()
+    restarted, _host, _preparation, _toolsmith, packaged = (
+        _restart_packaged_service(store)
+    )
+    resumed = packaged.resume_registered_gap(plan)
+    assert resumed is not None
+    assert resumed.previous_work_id == request.work_id
+    assert resumed.next_request.attempt == 2
+    assert resumed.next_request.base_sha == SHA_B
+
+    _final_store, final_host, final_preparation, _toolsmith, _packaged = (
+        _restart_packaged_service(restarted)
+    )
+    final = final_preparation.restore(plan.project_id)
+    lineage = final_host.repair_lineage(
+        host_task_id=final.host_task_id,
+        state=final.state,
+    )
+    assert len(lineage) == 1
+    assert lineage[0].to_work_id == resumed.next_request.work_id
+
+
+def test_repair_preview_is_side_effect_free_before_toolsmith_binding_commit(
+    tmp_path: Path,
+) -> None:
+    _store, _repository, preparation, prepared, request, _plan = _fixture(tmp_path)
+    before = prepared.state.coordinator.snapshot()
+
+    preview = preparation.preview_repair(
+        prepared,
+        component_id="core",
+        reason="registered capability toml-editor is ready",
+    )
+
+    assert preview.attempt == 2
+    assert preview.base_sha == SHA_B
+    assert prepared.state.coordinator.snapshot() == before
+    assert prepared.state.coordinator.snapshot().records[0].request == request
+
+
+def test_commit_repair_rejects_changed_preview_identity_without_state_advance(
+    tmp_path: Path,
+) -> None:
+    _store, _repository, preparation, prepared, request, _plan = _fixture(tmp_path)
+    before = prepared.state.coordinator.snapshot()
+
+    with pytest.raises(
+        RepairLineageError,
+        match="current repair preview differs from the expected next work identity",
+    ):
+        preparation.commit_repair(
+            prepared,
+            component_id="core",
+            reason="registered capability toml-editor is ready",
+            expected_next_work_id="stale-next-work-id",
+        )
+
+    assert prepared.state.coordinator.snapshot() == before
+    assert prepared.state.coordinator.snapshot().records[0].request == request
+
+
+def test_project_revision_between_repair_preview_and_commit_fails_closed(
+    tmp_path: Path,
+) -> None:
+    _store, repository, preparation, prepared, request, _plan = _fixture(
+        tmp_path,
+        canonical_failure=True,
+    )
+    preview = preparation.preview_repair(
+        prepared,
+        component_id="core",
+        reason="registered capability toml-editor is ready",
+    )
+    before = prepared.state.coordinator.snapshot()
+    current = repository.get(request.project_id)
+    repository.update_spec(
+        current.project_id,
+        replace(
+            current.spec,
+            desired_outcome="Newer owner-approved ProductProject revision",
+        ),
+        expected_row_version=current.row_version,
+        change_reason="regression: revise after repair preview",
+    )
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        preparation.commit_repair(
+            prepared,
+            component_id="core",
+            reason="registered capability toml-editor is ready",
+            expected_next_work_id=preview.work_id,
+        )
+
+    assert prepared.state.coordinator.snapshot() == before
+    assert prepared.state.coordinator.snapshot().records[0].request == request
+
+
+def test_toolsmith_resume_recovers_after_factory_checkpoint_before_binding_finalize(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, _repository, preparation, prepared, request, plan = _fixture(
+        tmp_path,
+        canonical_failure=True,
+    )
+    toolsmith, bridge = _real_toolsmith(store)
+    packaged = PackagedProductFactoryToolsmithService(
+        preparation=preparation,
+        bridge=bridge,
+    )
+    checkpoint = packaged.begin_gap(plan)
+    _register_reuse(toolsmith, checkpoint)
+
+    def fail_consumed(_self, _binding):
+        raise ProductFactoryToolsmithBindingError(
+            "simulated binding finalization outage"
+        )
+
+    monkeypatch.setattr(
+        ProductFactoryToolsmithBindingRepository,
+        "mark_consumed",
+        fail_consumed,
+    )
+    with pytest.raises(
+        PackagedProductFactoryToolsmithError,
+        match="resume was rejected",
+    ):
+        packaged.resume_registered_gap(plan)
+
+    # Factory lineage/checkpoint is already authoritative even though the Toolsmith
+    # two-phase binding deliberately remains RESUME_PREPARED.
+    assert prepared.state.coordinator.snapshot().records[0].state.value == "ready"
+
+    monkeypatch.undo()
+    restarted, final_host, final_preparation, _toolsmith, packaged = (
+        _restart_packaged_service(store)
+    )
+    resumed = packaged.resume_registered_gap(plan)
+    assert resumed is not None
+    assert resumed.previous_work_id == request.work_id
+    assert resumed.next_request.attempt == 2
+    assert resumed.next_request.base_sha == SHA_B
+
+    final = final_preparation.restore(plan.project_id)
+    lineage = final_host.repair_lineage(
+        host_task_id=final.host_task_id,
+        state=final.state,
+    )
+    assert len(lineage) == 1
+    assert lineage[0].to_work_id == resumed.next_request.work_id
+
+    binding = ProductFactoryToolsmithBindingRepository(restarted).require(
+        host_task_id=final.host_task_id,
+        work_id=request.work_id,
+    )
+    assert binding.state.value == "consumed"
