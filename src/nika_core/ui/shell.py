@@ -75,9 +75,8 @@ def launch_windows_shell(
             window.show()
         except BaseException as exc:  # noqa: BLE001 - relay control-flow to main thread
             callback_failure.append(exc)
-            # The bootstrap host is deliberately hidden until recovery and reload
-            # succeed, so "shown" cannot be a destruction precondition here.
-            window.destroy()
+            if window.events.shown.is_set():
+                window.destroy()
 
     if on_gui_started is None:
         webview.start(gui="edgechromium")
