@@ -341,6 +341,20 @@ def test_tree_evidence_refuses_symlinks(tmp_path: Path) -> None:
         collect_tree_evidence(root)
 
 
+def test_production_integrity_snapshot_rejects_behavioral_identity_carriers() -> None:
+    class BaseSha(str):
+        pass
+
+    class TreeDigest(str):
+        pass
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        ProductionIntegritySnapshot(BaseSha("c" * 40), "d" * 64)
+
+    with pytest.raises(WorkspaceSecurityError, match="tree_digest"):
+        ProductionIntegritySnapshot("c" * 40, TreeDigest("d" * 64))
+
+
 def test_production_integrity_must_match_exactly() -> None:
     before = ProductionIntegritySnapshot("c" * 40, "d" * 64)
     assert_production_integrity(before, before)
