@@ -1300,6 +1300,23 @@ def _read_config(path: Path) -> PhysicalPilotConfig:
     return PhysicalPilotConfig.from_json(raw)
 
 
+def _load_trusted_progression_proof_from_output_root(
+    output_root: Path,
+    *,
+    workspace_id: str,
+    expected_claim: dict[str, object],
+) -> TrainingScaleProgressionProof:
+    from nika_core.training_physical_evaluation_driver import (
+        load_trusted_scale_progression_proof,
+    )
+
+    return load_trusted_scale_progression_proof(
+        output_root,
+        workspace_id=workspace_id,
+        expected_claim=expected_claim,
+    )
+
+
 def _trusted_progression_proof_for_cli(
     config: PhysicalPilotConfig,
     evidence_root: Path | None,
@@ -1319,11 +1336,7 @@ def _trusted_progression_proof_for_cli(
     root = evidence_root
     if not root.is_absolute():
         root = root.resolve(strict=True)
-    from nika_core.training_physical_evaluation_driver import (
-        load_trusted_scale_progression_proof,
-    )
-
-    return load_trusted_scale_progression_proof(
+    return _load_trusted_progression_proof_from_output_root(
         root,
         workspace_id=config.workspace_id,
         expected_claim=claim,
