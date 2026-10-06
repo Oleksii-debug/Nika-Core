@@ -150,7 +150,6 @@ _REPORT_KEYS_V1 = frozenset(
         "selected_candidate_id",
         "previous_champion_id",
         "training_binding_sha256",
-        "champion_binding_sha256",
         "champion_benchmark_sha256",
         "challenger_benchmark_sha256",
         "attestor_id",
