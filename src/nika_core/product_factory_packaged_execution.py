@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from concurrent.futures import Future
 from threading import Lock
 from typing import Any
@@ -26,6 +26,7 @@ PackagedCoroutineSubmitter = Callable[
     [Coroutine[Any, Any, Any]],
     Future[Any],
 ]
+PackagedPostDispatchHook = Callable[[PreparedProductFactory], Awaitable[None]]
 
 
 class PackagedProductFactoryExecutionError(RuntimeError):
@@ -53,6 +54,7 @@ class PackagedProductFactoryExecutionController:
         host: MultiRepositoryProductFactoryHost,
         resolve_plan: ProductFactoryExecutionPlanResolver,
         submit: PackagedCoroutineSubmitter,
+        post_dispatch: PackagedPostDispatchHook | None = None,
         max_parallel: int = 4,
         max_count: int = 32,
     ) -> None:
@@ -66,6 +68,8 @@ class PackagedProductFactoryExecutionController:
             raise TypeError("Product Factory execution-plan resolver must be callable")
         if not callable(submit):
             raise TypeError("packaged coroutine submitter must be callable")
+        if post_dispatch is not None and not callable(post_dispatch):
+            raise TypeError("packaged post-dispatch hook must be callable")
         if type(max_parallel) is not int or not 1 <= max_parallel <= 32:
             raise ValueError("Product Factory max_parallel must be 1..32")
         if type(max_count) is not int or not 1 <= max_count <= 256:
@@ -75,6 +79,7 @@ class PackagedProductFactoryExecutionController:
         self._host = host
         self._resolve_plan = resolve_plan
         self._submit = submit
+        self._post_dispatch = post_dispatch
         self._max_parallel = max_parallel
         self._max_count = max_count
         self._lock = Lock()
@@ -175,6 +180,8 @@ class PackagedProductFactoryExecutionController:
             max_parallel=self._max_parallel,
             max_count=self._max_count,
         )
+        if self._post_dispatch is not None:
+            await self._post_dispatch(prepared)
 
     def _done(self, project_id: str, future: Future[Any]) -> None:
         try:
