@@ -323,6 +323,25 @@ def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
     return payload
 
 
+def _load_frozen_package_snapshot(
+    path: Path,
+    *,
+    expected_manifest_sha256: str,
+) -> FrozenLearningPackage:
+    raw = _stable_file_bytes(
+        path,
+        max_bytes=_MAX_JSON_BYTES,
+        name=f"frozen learning package {path.name}",
+    )
+    try:
+        return FrozenLearningPackage.from_json(
+            raw,
+            expected_manifest_sha256=expected_manifest_sha256,
+        )
+    except (RuntimeError, TypeError, UnicodeError, ValueError) as exc:
+        raise ProofError(f"frozen learning package is invalid: {path.name}") from exc
+
+
 def _candidate_file_authority(
     path: Path,
     *,
@@ -600,8 +619,8 @@ def prepare_tier0(root: Path) -> None:
     config = _read_object(config_path)
     if config.get("schema_version") != 1 or "scale_plan" in config:
         _fail("tier-0 proof config must start from canonical schema-v1 preparation")
-    package = FrozenLearningPackage.from_json(
-        package_path.read_bytes(),
+    package = _load_frozen_package_snapshot(
+        package_path,
         expected_manifest_sha256=str(config.get("frozen_package_sha256", "")),
     )
     config["schema_version"] = 2
@@ -727,8 +746,8 @@ def prepare_tier1(root: Path) -> None:
     ):
         _fail("promoted adapter bytes do not match tier-0 report")
 
-    source_package = FrozenLearningPackage.from_json(
-        (root / "frozen-package.json").read_bytes(),
+    source_package = _load_frozen_package_snapshot(
+        root / "frozen-package.json",
         expected_manifest_sha256=str(
             tier0_config.get("frozen_package_sha256", "")
         ),
@@ -796,8 +815,8 @@ def verify(root: Path) -> None:
     if type(workspace_id) is not str or not workspace_id:
         _fail("tier-0 workspace identity is invalid")
     tier0_package_path = root / "frozen-package.json"
-    tier0_package = FrozenLearningPackage.from_json(
-        tier0_package_path.read_bytes(),
+    tier0_package = _load_frozen_package_snapshot(
+        tier0_package_path,
         expected_manifest_sha256=str(
             tier0_config.get("frozen_package_sha256", "")
         ),
@@ -897,9 +916,8 @@ def verify(root: Path) -> None:
     ).resolve(strict=True)
     if tier1_package_path != expected_tier1_package_path:
         _fail("tier-1 config points at an unexpected frozen package")
-    tier1_package_bytes = tier1_package_path.read_bytes()
-    tier1_package = FrozenLearningPackage.from_json(
-        tier1_package_bytes,
+    tier1_package = _load_frozen_package_snapshot(
+        tier1_package_path,
         expected_manifest_sha256=tier1.frozen_package_sha256,
     )
     if (
