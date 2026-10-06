@@ -36,6 +36,7 @@ _DEFAULT_WORKSPACE_ID = "default"
 _TERMINAL_STATES = frozenset(
     {TaskState.COMPLETED, TaskState.FAILED, TaskState.CANCELLED, TaskState.ARCHIVED}
 )
+_NONTERMINAL_STATES = tuple(state for state in TaskState if state not in _TERMINAL_STATES)
 _LOCAL_CANCEL_STATES = frozenset(
     {TaskState.CREATED, TaskState.READY, TaskState.PAUSED, TaskState.BLOCKED}
 )
@@ -413,7 +414,7 @@ class DesktopBackend:
         return {
             "autostart": self.autostart_settings.snapshot(),
             "startup_recovery": self.startup_recovery_snapshot(),
-            "tasks": [self._task_view(record) for record in self._queue.list_recent(limit=50)],
+            "tasks": [self._task_view(record) for record in self._snapshot_task_records()],
             "agents": [
                 {
                     "agent_id": item.agent_id,
@@ -760,18 +761,24 @@ class DesktopBackend:
             raise ValueError(f"Завдання не знайдено: {task_id}.") from exc
 
     def _only_controllable(self, *, action: str) -> TaskRecord | None:
-        records = [
-            record
-            for record in self._queue.list_recent(limit=50)
-            if record.state not in _TERMINAL_STATES
-        ]
+        records = list(self._queue.list_by_states(_NONTERMINAL_STATES, limit=2))
         return self._require_unambiguous(records, action=action)
 
     def _only_with_state(self, state: TaskState, *, action: str) -> TaskRecord | None:
-        records = [
-            record for record in self._queue.list_recent(limit=50) if record.state == state
-        ]
+        records = list(self._queue.list_by_states((state,), limit=2))
         return self._require_unambiguous(records, action=action)
+
+    def _snapshot_task_records(self) -> tuple[TaskRecord, ...]:
+        unfinished = self._queue.list_by_states(_NONTERMINAL_STATES, limit=50)
+        if len(unfinished) >= 50:
+            return unfinished
+        terminal = tuple(
+            record
+            for record in self._queue.list_recent(limit=50)
+            if record.state in _TERMINAL_STATES
+        )
+        remaining = 50 - len(unfinished)
+        return (*unfinished, *terminal[:remaining])
 
     @staticmethod
     def _require_unambiguous(

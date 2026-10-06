@@ -137,6 +137,31 @@ class TaskQueue:
             ).fetchall()
         return tuple(self._record_from_row(row) for row in rows)
 
+    def list_by_states(
+        self,
+        states: tuple[TaskState, ...],
+        *,
+        limit: int = 50,
+    ) -> tuple[TaskRecord, ...]:
+        """Return recent matching states after filtering the entire durable task table."""
+        if limit < 1 or limit > 500:
+            raise ValueError("limit must be between 1 and 500")
+        if any(type(state) is not TaskState for state in states):
+            raise TypeError("states must contain only TaskState values")
+        unique_states = tuple(dict.fromkeys(states))
+        if not unique_states:
+            return ()
+        placeholders = ", ".join("?" for _ in unique_states)
+        statement = (
+            "SELECT task_id, workspace_id, agent_id, state, payload_json "
+            f"FROM tasks WHERE state IN ({placeholders}) "
+            "ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+        )
+        parameters = (*tuple(state.value for state in unique_states), limit)
+        with self.store.connection() as conn:
+            rows = conn.execute(statement, parameters).fetchall()
+        return tuple(self._record_from_row(row) for row in rows)
+
     def transition(self, task_id: str, target: TaskState) -> TaskState:
         with self.store.connection() as conn:
             return self.transition_with_connection(conn, task_id, target)
