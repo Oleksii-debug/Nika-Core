@@ -50,6 +50,7 @@ from nika_core.product_factory_deployment_checkpoint import (
     DurableDeploymentFabric,
     ProductFactoryDeploymentCheckpointHost,
 )
+from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
 from nika_core.product_factory_local_repository_binding import (
     ProductFactoryLocalRepositoryBindings,
 )
@@ -62,7 +63,6 @@ from nika_core.product_factory_orchestration import (
 from nika_core.product_factory_packaged_build_host import (
     build_packaged_local_durable_build_host,
 )
-from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
 from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartup,
 )
