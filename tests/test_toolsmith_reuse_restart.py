@@ -25,6 +25,7 @@ from nika_core.toolsmith import (
     ResourceBudget,
     ReuseCandidate,
     ReuseSearchPipeline,
+    ReuseSearchResult,
     StaticReuseMetadataSource,
     TestEvidence,
     ToolsmithRepository,
@@ -137,7 +138,9 @@ def test_reuse_search_filters_permission_widening_before_selection() -> None:
         permissions=frozenset({"fs.read", "network.any"}),
     )
     pipeline = ReuseSearchPipeline((StaticReuseMetadataSource("tool_registry", (widened,)),))
-    assert pipeline.search(_gap()).candidates == ()
+    result = pipeline.search(_gap())
+    assert result.candidates == ()
+    assert result.permission_rejected_count == 1
 
 
 def test_building_restart_uses_worker_recovery_without_second_build_transition(tmp_path: Path) -> None:
@@ -210,3 +213,153 @@ def test_building_restart_without_recovery_checkpoint_blocks_instead_of_replayin
     checkpoint = CheckpointService(store).latest(gap.task_id)
     assert checkpoint is not None
     assert checkpoint.stage == "capability_escalation_blocked"
+
+
+def _service_for_reuse(tmp_path: Path) -> tuple[SQLiteStore, ToolsmithRepository, CapabilityEscalationService]:
+    store = _store(tmp_path)
+    repository = ToolsmithRepository(store)
+    service = CapabilityEscalationService(
+        repository=repository,
+        checkpoints=CheckpointService(store),
+        worker=DeterministicCodingWorker(_result),
+    )
+    return store, repository, service
+
+
+def test_service_build_requires_canonical_search_provenance(tmp_path: Path) -> None:
+    _, repository, service = _service_for_reuse(tmp_path)
+    gap = CapabilityGap(
+        task_id="task-1",
+        requested_capability="tool.example",
+        kind=GapKind.MISSING_CAPABILITY,
+        reason="missing",
+        attempted_methods=(),
+        permission_ceiling=frozenset({"fs.read"}),
+    )
+    version, state = service.begin(gap)
+    assert state is CandidateState.PROPOSED
+
+    version, selected = service.choose_reuse(
+        gap=gap,
+        expected_version=version,
+        search_result=ReuseSearchResult(
+            candidates=(),
+            attempted_sources=("tool_registry",),
+        ),
+    )
+    assert selected is None
+    row = repository.get_escalation(task_id=gap.task_id, capability_id=gap.requested_capability)
+    assert row is not None
+    assert row["state"] == CandidateState.BUILD_REQUIRED.value
+    assert int(row["row_version"]) == version
+
+
+def test_service_blocks_permission_filtered_canonical_match(tmp_path: Path) -> None:
+    store, repository, service = _service_for_reuse(tmp_path)
+    gap = _gap()
+    version, state = service.begin(gap)
+    assert state is CandidateState.PROPOSED
+    widened = ReuseCandidate(
+        capability_id=gap.requested_capability,
+        version="9.9.9",
+        source="tool_registry",
+        digest="sha256:widened",
+        permissions=frozenset({"fs.read", "network.any"}),
+    )
+    result = ReuseSearchPipeline(
+        (StaticReuseMetadataSource("tool_registry", (widened,)),)
+    ).search(gap)
+
+    version, selected = service.choose_reuse(
+        gap=gap,
+        expected_version=version,
+        search_result=result,
+    )
+    assert selected is None
+    row = repository.get_escalation(task_id=gap.task_id, capability_id=gap.requested_capability)
+    assert row is not None
+    assert row["state"] == CandidateState.BLOCKED.value
+    assert int(row["row_version"]) == version
+    checkpoint = CheckpointService(store).latest(gap.task_id)
+    assert checkpoint is not None
+    assert checkpoint.stage == "capability_escalation_blocked"
+    with store.connection() as conn:
+        stored = conn.execute(
+            "SELECT COUNT(*) AS count FROM capability_search_candidates WHERE task_id = ?",
+            (gap.task_id,),
+        ).fetchone()
+    assert stored is not None
+    assert int(stored["count"]) == 0
+
+
+def test_service_selects_only_canonical_compatible_candidate(tmp_path: Path) -> None:
+    _, repository, service = _service_for_reuse(tmp_path)
+    gap = _gap()
+    version, state = service.begin(gap)
+    assert state is CandidateState.PROPOSED
+    candidate = ReuseCandidate(
+        capability_id=gap.requested_capability,
+        version="1.0.0",
+        source="tool_registry",
+        digest="sha256:compatible",
+        permissions=frozenset({"fs.read"}),
+    )
+    result = ReuseSearchPipeline(
+        (StaticReuseMetadataSource("tool_registry", (candidate,)),)
+    ).search(gap)
+
+    version, selected = service.choose_reuse(
+        gap=gap,
+        expected_version=version,
+        search_result=result,
+    )
+    assert selected == candidate
+    row = repository.get_escalation(task_id=gap.task_id, capability_id=gap.requested_capability)
+    assert row is not None
+    assert row["state"] == CandidateState.REUSE_SELECTED.value
+    assert int(row["row_version"]) == version
+
+
+def test_legacy_candidate_iterable_cannot_authorize_build(tmp_path: Path) -> None:
+    store, repository, service = _service_for_reuse(tmp_path)
+    gap = _gap()
+    version, state = service.begin(gap)
+    assert state is CandidateState.PROPOSED
+
+    version, selected = service.choose_reuse(
+        gap=gap,
+        expected_version=version,
+        candidates=(),
+    )
+    assert selected is None
+    row = repository.get_escalation(task_id=gap.task_id, capability_id=gap.requested_capability)
+    assert row is not None
+    assert row["state"] == CandidateState.BLOCKED.value
+    assert int(row["row_version"]) == version
+    checkpoint = CheckpointService(store).latest(gap.task_id)
+    assert checkpoint is not None
+    assert "canonical reuse search result" in str(checkpoint.payload["reason"])
+
+
+def test_reuse_source_capability_identity_mismatch_fails_search() -> None:
+    class MismatchedSource(StaticReuseMetadataSource):
+        def search(self, capability_id: str) -> tuple[ReuseCandidate, ...]:
+            return (
+                ReuseCandidate(
+                    capability_id="tool.other",
+                    version="1.0.0",
+                    source=self.source_id,
+                    digest="sha256:foreign",
+                    permissions=frozenset({"fs.read"}),
+                ),
+            )
+
+    pipeline = ReuseSearchPipeline(
+        (MismatchedSource("tool_registry", ()),)
+    )
+    try:
+        pipeline.search(_gap())
+    except ValueError as exc:
+        assert "mismatched capability identity" in str(exc)
+    else:
+        raise AssertionError("mismatched capability identity must fail closed")
