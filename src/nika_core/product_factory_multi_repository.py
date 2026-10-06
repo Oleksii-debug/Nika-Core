@@ -210,9 +210,11 @@ class MultiRepositoryProductFactoryHost:
         self._coordinator_checkpoints.save(
             host_task_id=host_task_id,
             checkpoint=binding.checkpoint(coordinator),
-            read_only_precondition=lambda conn: self._require_current_project_version(
+            read_only_precondition=lambda conn: self._require_exact_project_version(
                 conn,
-                project,
+                project_id=authority.project_id,
+                spec_version=authority.spec_version,
+                row_version=authority.row_version,
             ),
         )
         state = MultiRepositoryExecutionState(authority, binding, coordinator)
@@ -317,12 +319,25 @@ class MultiRepositoryProductFactoryHost:
         decision: ReviewDecision,
     ) -> WorkRecord:
         self._assert_state(host_task_id=host_task_id, state=state)
+        expected_project_version = (
+            state.authority.project_id,
+            state.authority.spec_version,
+            state.authority.row_version,
+        )
         return self._program.review_and_checkpoint(
             host_task_id=host_task_id,
             binding=state.binding,
             coordinator=state.coordinator,
             component_id=component_id,
             decision=decision,
+            read_only_precondition=lambda connection: (
+                self._require_exact_project_version(
+                    connection,
+                    project_id=expected_project_version[0],
+                    spec_version=expected_project_version[1],
+                    row_version=expected_project_version[2],
+                )
+            ),
         )
 
     def preview_repair(
@@ -404,9 +419,11 @@ class MultiRepositoryProductFactoryHost:
             component_id=component_id,
             base_sha=intent.to_base_sha,
             reason=reason,
-            read_only_precondition=lambda conn: self._require_current_project_version(
+            read_only_precondition=lambda conn: self._require_exact_project_version(
                 conn,
-                state.binding.project,
+                project_id=intent.project_id,
+                spec_version=intent.spec_version,
+                row_version=intent.row_version,
             ),
         )
         if request != preview:
@@ -489,7 +506,8 @@ class MultiRepositoryProductFactoryHost:
             or graph_version < 1
         ):
             raise MultiRepositoryExecutionError("graph_version must be positive")
-        if graph.project_id != project.project_id:
+        project_id, spec_version, row_version = _project_version_snapshot(project)
+        if graph.project_id != project_id:
             raise MultiRepositoryExecutionError(
                 "repository graph does not belong to ProductProject"
             )
@@ -500,9 +518,9 @@ class MultiRepositoryProductFactoryHost:
         edges = _dependency_edges(graph, graph_version)
         payload = {
             "schema": _GRAPH_SCHEMA,
-            "project_id": project.project_id,
-            "spec_version": project.spec_version,
-            "row_version": project.row_version,
+            "project_id": project_id,
+            "spec_version": spec_version,
+            "row_version": row_version,
             "graph_version": graph_version,
             "graph_digest": graph_digest,
             "graph": graph_payload,
@@ -518,19 +536,26 @@ class MultiRepositoryProductFactoryHost:
         canonical = _canonical(payload)
         checksum = _sha256(canonical)
         checkpoint_id = f"pf-repository-graph:{_sha256(host_task_id + ':' + checksum)}"
-        authority_fingerprint = _graph_authority_fingerprint(
-            project=project,
+        authority_fingerprint = _graph_authority_fingerprint_values(
+            project_id=project_id,
+            spec_version=spec_version,
+            row_version=row_version,
             graph_version=graph_version,
             graph_digest=graph_digest,
         )
 
         with self.store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            self._require_current_project_version(conn, project)
+            self._require_exact_project_version(
+                conn,
+                project_id=project_id,
+                spec_version=spec_version,
+                row_version=row_version,
+            )
             host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
-                project_id=project.project_id,
+                project_id=project_id,
             )
             rows = conn.execute(
                 """
@@ -556,7 +581,7 @@ class MultiRepositoryProductFactoryHost:
                 self._audit(
                     conn,
                     event_type="product_factory.repository_graph_authority_bound",
-                    project_id=project.project_id,
+                    project_id=project_id,
                     payload={
                         "host_task_id": host_task_id,
                         "graph_version": graph_version,
@@ -577,8 +602,8 @@ class MultiRepositoryProductFactoryHost:
                 if (
                     authority.graph_digest != graph_digest
                     or authority.graph_version != graph_version
-                    or authority.spec_version != project.spec_version
-                    or authority.row_version != project.row_version
+                    or authority.spec_version != spec_version
+                    or authority.row_version != row_version
                 ):
                     raise RepositoryGraphIntegrityError(
                         "host task repository graph authority cannot be silently replaced"
@@ -609,7 +634,7 @@ class MultiRepositoryProductFactoryHost:
             self._audit(
                 conn,
                 event_type="product_factory.repository_graph_bound",
-                project_id=project.project_id,
+                project_id=project_id,
                 payload={
                     "host_task_id": host_task_id,
                     "checkpoint_id": checkpoint_id,
@@ -622,9 +647,9 @@ class MultiRepositoryProductFactoryHost:
 
         return RepositoryGraphAuthority(
             checkpoint_id=checkpoint_id,
-            project_id=project.project_id,
-            spec_version=project.spec_version,
-            row_version=project.row_version,
+            project_id=project_id,
+            spec_version=spec_version,
+            row_version=row_version,
             graph_version=graph_version,
             graph_digest=graph_digest,
             graph=graph,
@@ -772,7 +797,12 @@ class MultiRepositoryProductFactoryHost:
                 host_task_id=host_task_id,
                 project_id=state.authority.project_id,
             )
-            self._require_current_project_version(conn, state.binding.project)
+            self._require_exact_project_version(
+                conn,
+                project_id=intent.project_id,
+                spec_version=intent.spec_version,
+                row_version=intent.row_version,
+            )
             rows = conn.execute(
                 """
                 SELECT checkpoint_id, payload_json, checksum_sha256
@@ -1059,10 +1089,11 @@ class MultiRepositoryProductFactoryHost:
         state: MultiRepositoryExecutionState,
     ) -> None:
         project = state.binding.project
+        project_id, spec_version, row_version = _project_version_snapshot(project)
         if (
-            state.authority.project_id != project.project_id
-            or state.authority.spec_version != project.spec_version
-            or state.authority.row_version != project.row_version
+            state.authority.project_id != project_id
+            or state.authority.spec_version != spec_version
+            or state.authority.row_version != row_version
         ):
             raise MultiRepositoryExecutionError(
                 "execution state is stale for current ProductProject"
@@ -1087,16 +1118,24 @@ class MultiRepositoryProductFactoryHost:
             raise MultiRepositoryExecutionError(
                 "coordinator does not use durable repository graph authority"
             )
-        expected_host_authority = _graph_authority_fingerprint(
-            project=project,
+        expected_host_authority = _graph_authority_fingerprint_values(
+            project_id=state.authority.project_id,
+            spec_version=state.authority.spec_version,
+            row_version=state.authority.row_version,
             graph_version=state.authority.graph_version,
             graph_digest=state.authority.graph_digest,
         )
         with self.store.connection() as conn:
+            self._require_exact_project_version(
+                conn,
+                project_id=state.authority.project_id,
+                spec_version=state.authority.spec_version,
+                row_version=state.authority.row_version,
+            )
             host_payload = self._require_host_task(
                 conn,
                 host_task_id=host_task_id,
-                project_id=project.project_id,
+                project_id=state.authority.project_id,
             )
         if host_payload.get(_GRAPH_AUTHORITY_KEY) != expected_host_authority:
             raise MultiRepositoryExecutionError(
@@ -1313,18 +1352,58 @@ def _encode_lineage(intent: RepairLineageIntent) -> dict[str, Any]:
     }
 
 
+def _project_version_snapshot(project: ProductProject) -> tuple[str, int, int]:
+    try:
+        project_id = project.project_id
+        spec_version = project.spec_version
+        row_version = project.row_version
+    except AttributeError as exc:
+        raise MultiRepositoryExecutionError(
+            "ProductProject version carrier is structurally invalid"
+        ) from exc
+    if type(project_id) is not str or not project_id.strip():
+        raise MultiRepositoryExecutionError("ProductProject identity authority is invalid")
+    if type(spec_version) is not int or spec_version < 1:
+        raise MultiRepositoryExecutionError(
+            "ProductProject spec-version authority is invalid"
+        )
+    if type(row_version) is not int or row_version < 0:
+        raise MultiRepositoryExecutionError(
+            "ProductProject row-version authority is invalid"
+        )
+    return project_id, spec_version, row_version
+
+
 def _graph_authority_fingerprint(
     *,
     project: ProductProject,
     graph_version: int,
     graph_digest: str,
 ) -> str:
+    project_id, spec_version, row_version = _project_version_snapshot(project)
+    return _graph_authority_fingerprint_values(
+        project_id=project_id,
+        spec_version=spec_version,
+        row_version=row_version,
+        graph_version=graph_version,
+        graph_digest=graph_digest,
+    )
+
+
+def _graph_authority_fingerprint_values(
+    *,
+    project_id: str,
+    spec_version: int,
+    row_version: int,
+    graph_version: int,
+    graph_digest: str,
+) -> str:
     return _sha256(
         _canonical(
             {
-                "project_id": project.project_id,
-                "spec_version": project.spec_version,
-                "row_version": project.row_version,
+                "project_id": project_id,
+                "spec_version": spec_version,
+                "row_version": row_version,
                 "graph_version": graph_version,
                 "graph_digest": graph_digest,
             }
