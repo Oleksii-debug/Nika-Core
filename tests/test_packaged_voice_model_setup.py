@@ -365,6 +365,27 @@ def test_voice_model_setup_rejects_symlinked_source_root(
     assert not (data_root / "voice" / "whisper").exists()
 
 
+def test_voice_model_setup_rejects_indirected_data_root_before_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    data_root = tmp_path / "nika-data"
+    try:
+        data_root.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on this host")
+
+    setup = PackagedVoiceModelSetup(data_root)
+    result = setup.install({"source_root": str(source)})
+
+    assert result.status == "failed"
+    assert not (outside / "voice").exists()
+
+
 def test_voice_model_setup_rejects_indirected_canonical_install(
     tmp_path: Path,
 ) -> None:
