@@ -28,11 +28,12 @@ def _store(tmp_path: pathlib.Path) -> SQLiteStore:
 
 def _repository_ref(
     *,
+    repository_id: str = "repo-1",
     provider: str = "github",
     locator: str = "Oleksii-debug/example",
 ) -> RepositoryRef:
     return RepositoryRef(
-        repository_id="repo-1",
+        repository_id=repository_id,
         provider=provider,
         locator=locator,
         default_branch="main",
@@ -43,6 +44,13 @@ def _create_project(
     store: SQLiteStore,
     repository: RepositoryRef,
 ):
+    return _create_project_with_repositories(store, (repository,))
+
+
+def _create_project_with_repositories(
+    store: SQLiteStore,
+    repositories: tuple[RepositoryRef, ...],
+):
     projects = ProductProjectRepository(store)
     return projects.create(
         project_id="product-1",
@@ -50,7 +58,7 @@ def _create_project(
         spec=ProductProjectSpec(
             goal="Build the product",
             desired_outcome="Verified package",
-            repository_refs=(repository.locator,),
+            repository_refs=tuple(repository.locator for repository in repositories),
         ),
         idempotency_key="create:product-1",
     )
@@ -167,6 +175,88 @@ def test_binding_update_requires_exact_version(
     assert bindings.require(project.project_id, repository.repository_id).root == (
         second_root.resolve(strict=True)
     )
+
+
+def test_binding_rejects_same_physical_root_for_different_repository_ids(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    first_repository = _repository_ref(
+        repository_id="repo-1",
+        locator="Oleksii-debug/first",
+    )
+    second_repository = _repository_ref(
+        repository_id="repo-2",
+        locator="Oleksii-debug/second",
+    )
+    project = _create_project_with_repositories(
+        store,
+        (first_repository, second_repository),
+    )
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=first_repository,
+        root=root,
+        expected_binding_version=None,
+    )
+
+    alias_path = root / ".." / root.name
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="already bound to another repository identity",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=second_repository,
+            root=alias_path,
+            expected_binding_version=None,
+        )
+
+    assert bindings.require(
+        project.project_id,
+        first_repository.repository_id,
+    ).binding_version == first.binding_version
+    with pytest.raises(KeyError):
+        bindings.require(project.project_id, second_repository.repository_id)
+
+
+def test_binding_allows_distinct_roots_for_distinct_repository_ids(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    first_repository = _repository_ref(
+        repository_id="repo-1",
+        locator="Oleksii-debug/first",
+    )
+    second_repository = _repository_ref(
+        repository_id="repo-2",
+        locator="Oleksii-debug/second",
+    )
+    project = _create_project_with_repositories(
+        store,
+        (first_repository, second_repository),
+    )
+    first_root = _root(tmp_path, "first repository")
+    second_root = _root(tmp_path, "second repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=first_repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    second = bindings.bind(
+        project_id=project.project_id,
+        repository=second_repository,
+        root=second_root,
+        expected_binding_version=None,
+    )
+
+    assert first.root == first_root.resolve(strict=True)
+    assert second.root == second_root.resolve(strict=True)
 
 
 def test_binding_rejects_locator_outside_current_product_project(
