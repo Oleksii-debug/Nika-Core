@@ -744,8 +744,12 @@ def prepare_private_git_workspace(
         str(plan.repository_root),
         str(plan.private_git_dir),
     )
+    _git(
+        clone_argv,
+        cwd=job_root,
+        environment=plan.environment,
         expected_executable_sha256=git_executable_sha256,
-    _git(clone_argv, cwd=job_root, environment=plan.environment)
+    )
 
     git_prefix = (git_executable, *plan.config_args, "--git-dir", str(plan.private_git_dir))
     remote_names = tuple(
