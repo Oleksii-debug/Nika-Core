@@ -508,13 +508,30 @@ class PhysicalPilotConfig:
                 name="initial_adapter_path",
             )
             try:
-                progression_proof = TrainingScaleProgressionProof.from_canonical_payload(
-                    value["progression_proof"]
+                progression_claim = (
+                    TrainingScaleProgressionProof.validate_serialized_claim(
+                        value["progression_proof"]
+                    )
                 )
             except TrainingScaleError as exc:
                 raise PhysicalPilotDriverError(
                     "progression_proof is not canonical"
                 ) from exc
+            matching = tuple(
+                index
+                for index, tier in enumerate(scale_plan.tiers)
+                if tier.tier_id == scale_tier_id
+            )
+            if len(matching) != 1 or matching[0] == 0:
+                _fail("scale_tier_id must select a declared higher tier")
+            if progression_claim["tier_index"] != matching[0] - 1:
+                _fail("progression_proof does not authorize the previous scale tier")
+            if progression_claim["candidate_artifact_ref"] != value["base_artifact_ref"]:
+                _fail("higher-tier base artifact must be the promoted candidate")
+            _fail(
+                "schema v3 requires independently trusted prior-run and comparison "
+                "authority; serialized config claims cannot authorize a higher tier"
+            )
         else:
             _fail("unsupported physical pilot config schema")
         if frozenset(value) != expected_keys:
