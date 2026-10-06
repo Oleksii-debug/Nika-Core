@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pathlib
+import sqlite3
 import threading
 
 import pytest
@@ -233,6 +234,99 @@ def test_plan_and_binding_snapshot_uses_one_active_store_transaction(
 
     assert observed_active_transactions == [True]
     assert dict(versions) == {repository.repository_id: bound.binding_version}
+
+
+def test_resolve_for_plan_holds_writer_fence_across_repository_set(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    first_repository = _repository_ref()
+    second_repository = _repository_ref(
+        repository_id="repo-2",
+        locator="Oleksii-debug/example-two",
+    )
+    project = _create_project_with_repositories(
+        store,
+        (first_repository, second_repository),
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first_root = _root(tmp_path, "first resolve repository")
+    second_root = _root(tmp_path, "second resolve repository")
+    bindings.bind(
+        project_id=project.project_id,
+        repository=first_repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    bindings.bind(
+        project_id=project.project_id,
+        repository=second_repository,
+        root=second_root,
+        expected_binding_version=None,
+    )
+    graph = ProductRepositoryGraph(
+        project_id=project.project_id,
+        repositories=(first_repository, second_repository),
+        components=(
+            ProductComponent(
+                component_id="core",
+                repository_id=first_repository.repository_id,
+                paths=("src",),
+            ),
+            ProductComponent(
+                component_id="docs",
+                repository_id=second_repository.repository_id,
+                paths=("docs",),
+            ),
+        ),
+    )
+    plan = PackagedProductFactoryExecutionPlan(
+        project_id=project.project_id,
+        expected_spec_version=project.spec_version,
+        expected_row_version=project.row_version,
+        graph=graph,
+        graph_version=1,
+        base_shas={
+            first_repository.repository_id: "a" * 40,
+            second_repository.repository_id: "b" * 40,
+        },
+        component_goals={
+            "core": "Implement core",
+            "docs": "Update documentation",
+        },
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+    original_require = bindings.require
+    observed: list[str] = []
+
+    def require_under_writer_fence(
+        project_id: str,
+        repository_id: str,
+    ):
+        contender = sqlite3.connect(store.path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute("BEGIN IMMEDIATE")
+            observed.append(repository_id)
+        finally:
+            contender.close()
+        return original_require(project_id, repository_id)
+
+    monkeypatch.setattr(bindings, "require", require_under_writer_fence)
+
+    resolved = bindings.resolve_for_plan(plan)
+
+    assert dict(resolved) == {
+        first_repository.repository_id: first_root.resolve(strict=True),
+        second_repository.repository_id: second_root.resolve(strict=True),
+    }
+    assert observed == [
+        first_repository.repository_id,
+        second_repository.repository_id,
+    ]
 
 
 def test_binding_update_requires_exact_version(
