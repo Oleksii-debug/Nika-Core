@@ -509,7 +509,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             "Перевірте доступність папки даних; наявну базу не видаляйте."
         )
         return 1
-    launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
+    try:
+        launch_windows_shell(bridge, title=f"Nika Core {config.app_version}")
+    except Exception as exc:  # noqa: BLE001 - redact packaged GUI startup failures
+        logging.getLogger(__name__).error(
+            "Packaged shell launch failed: exception_type=%s", type(exc).__name__
+        )
+        show_recovery_error(
+            "Не вдалося відкрити інтерфейс Nika. Перезапустіть програму. "
+            "Якщо помилка повторюється, перевірте компонент WebView2 або "
+            "перевстановіть застосунок."
+        )
+        return 1
     return 0
 
 

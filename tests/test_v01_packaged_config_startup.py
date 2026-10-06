@@ -122,3 +122,62 @@ def test_actual_corrupt_database_is_not_overwritten_during_failed_startup(
     assert len(messages) == 1
     assert "PRIVATE_" not in messages[0]
     assert database.read_bytes() == original_bytes
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        FileNotFoundError("PRIVATE_UI_RESOURCE_PATH_CANARY"),
+        RuntimeError("PRIVATE_WEBVIEW2_STARTUP_CANARY"),
+    ],
+)
+def test_shell_launch_failure_is_accessible_private_and_returns_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: Exception,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+    bridge = object()
+    products = object()
+    monkeypatch.setattr(
+        nika_windows,
+        "build_windows_bridge",
+        lambda _config: (bridge, products),
+    )
+    messages: list[str] = []
+    monkeypatch.setattr("nika_core.ui.startup_error.show_recovery_error", messages.append)
+
+    def fail_shell(actual_bridge: object, *, title: str) -> None:
+        assert actual_bridge is bridge
+        assert title == f"Nika Core {config.app_version}"
+        raise failure
+
+    monkeypatch.setattr(nika_windows, "launch_windows_shell", fail_shell)
+
+    assert nika_windows.main([]) == 1
+    assert len(messages) == 1
+    assert "Не вдалося відкрити інтерфейс Nika" in messages[0]
+    assert "PRIVATE_" not in messages[0]
+
+
+def test_shell_launch_boundary_does_not_swallow_process_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
+    monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
+    monkeypatch.setattr(
+        nika_windows,
+        "build_windows_bridge",
+        lambda _config: (object(), object()),
+    )
+
+    def stop_process(*_args: object, **_kwargs: object) -> None:
+        raise SystemExit(73)
+
+    monkeypatch.setattr(nika_windows, "launch_windows_shell", stop_process)
+
+    with pytest.raises(SystemExit) as caught:
+        nika_windows.main([])
+    assert caught.value.code == 73
+
