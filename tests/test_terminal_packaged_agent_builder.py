@@ -263,3 +263,48 @@ def test_windows_composition_creates_and_replays_builder_draft_without_task(
     replayed = reopened.get_state()["state"]
     assert replayed["tasks"] == []
     assert replayed["agent_builder_definitions"] == [definition]
+
+
+def test_ambiguous_agent_command_invokes_no_handler(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "ambiguous.db")
+    store.initialize()
+    products = ProductProjectCommandService(ProductProjectRepository(store))
+    ordinary = _RecordingHandler("ordinary")
+    builder = _RecordingHandler("builder")
+    router = PackagedProductCommandRouter(
+        products=products,
+        ordinary_handler=ordinary,
+        agent_builder_handler=builder,
+    )
+
+    with pytest.raises(PackagedProductJourneyError, match="одночасно"):
+        router.create({"command": "Створи агента і додай потрібний плагін"})
+
+    assert builder.calls == []
+    assert ordinary.calls == []
+    assert router.active_project_id is None
+
+
+def test_builder_route_preserves_current_product_selection(tmp_path: Path) -> None:
+    store = SQLiteStore(tmp_path / "selection.db")
+    store.initialize()
+    products = ProductProjectCommandService(ProductProjectRepository(store))
+    ordinary = _RecordingHandler("ordinary")
+    builder = _RecordingHandler("builder")
+    router = PackagedProductCommandRouter(
+        products=products,
+        ordinary_handler=ordinary,
+        agent_builder_handler=builder,
+    )
+    product_command = "Створи застосунок для доступного каталогу"
+    product_result = router.create({"command": product_command})
+    selected = router.active_project_id
+
+    result = router.create({"command": "Створи агента для перевірки каталогу"})
+
+    assert product_result.status == "completed"
+    assert selected is not None
+    assert result.message == "builder"
+    assert router.active_project_id == selected
+    assert ordinary.calls == []
+    assert len(builder.calls) == 1
