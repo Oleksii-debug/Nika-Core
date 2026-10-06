@@ -621,7 +621,9 @@ def _open_release_file_for_snapshot(path: Path) -> Any:
         try:
             descriptor = msvcrt.open_osfhandle(
                 int(handle),
-                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+                os.O_RDONLY
+                | int(getattr(os, "O_BINARY", 0))
+                | int(getattr(os, "O_NOINHERIT", 0)),
             )
         except (OSError, OverflowError, ValueError):
             close_handle = kernel32.CloseHandle
