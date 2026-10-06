@@ -10,10 +10,12 @@ on:
       - "src/nika_core/ui/web/app.js"
       - "src/nika_core/product_factory_packaged_local_settings.py"
       - "src/nika_core/product_factory_packaged_local_startup.py"
+      - "src/nika_core/product_factory_packaged_repository_binding.py"
       - "src/nika_core/product_factory_local_model_program.py"
       - "src/nika_core/training_ollama_manifest.py"
       - "src/nika_core/v01_model_settings.py"
       - "tests/test_product_factory_packaged_local_startup.py"
+      - "tests/test_packaged_product_factory_repository_binding.py"
       - ".github/workflows/pf11-packaged-local-startup.yml"
   workflow_dispatch:
 
@@ -59,10 +61,13 @@ jobs:
           src/nika_core/kernel/default_actions.py
           src/nika_core/product_factory_packaged_local_settings.py
           src/nika_core/product_factory_packaged_local_startup.py
+          src/nika_core/product_factory_packaged_repository_binding.py
           src/nika_core/v01_model_settings.py
           tests/test_product_factory_packaged_local_startup.py
+          tests/test_packaged_product_factory_repository_binding.py
       - name: Run packaged local startup regressions
         run: >-
           python -m pytest
           tests/test_product_factory_packaged_local_startup.py
+          tests/test_packaged_product_factory_repository_binding.py
           -q
