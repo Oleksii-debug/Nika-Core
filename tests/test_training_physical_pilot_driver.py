@@ -409,6 +409,29 @@ def test_configured_multi_tier_plan_binds_frozen_evaluation_set(tmp_path: Path) 
     assert plan.tiers[1].max_steps == 8
 
 
+def test_physical_step_budget_preserves_pilot_and_scales_higher_tier(
+    tmp_path: Path,
+) -> None:
+    config = driver.PhysicalPilotConfig.from_json(json.dumps(_payload_v2(tmp_path)))
+    plan = driver._scale_plan_for_physical_pilot(
+        config,
+        evaluation_set_sha256="e" * 64,
+        training_records=3,
+        training_bytes=1024,
+        validation_records=2,
+        validation_bytes=512,
+    )
+
+    assert driver._physical_training_max_steps(
+        tier_index=0,
+        tier=plan.tiers[0],
+    ) == 2
+    assert driver._physical_training_max_steps(
+        tier_index=1,
+        tier=plan.tiers[1],
+    ) == 8
+
+
 def test_legacy_scale_plan_uses_observed_pilot_bounds(tmp_path: Path) -> None:
     config = _config(tmp_path)
 
