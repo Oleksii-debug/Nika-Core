@@ -331,6 +331,71 @@ def test_resolve_rejects_replaced_repository_root(
         bindings.resolve_for_plan(_plan(project, repository))
 
 
+def test_bind_rejects_product_project_changed_before_write(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = _root(tmp_path)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    validation_started = threading.Event()
+    validation_release = threading.Event()
+    original_filesystem_identity = binding_module._filesystem_identity
+
+    def blocked_filesystem_identity(path: pathlib.Path):
+        identity = original_filesystem_identity(path)
+        if threading.current_thread().name == "binding-writer":
+            validation_started.set()
+            if not validation_release.wait(timeout=10):
+                raise AssertionError("binding validation release timed out")
+        return identity
+
+    monkeypatch.setattr(
+        binding_module,
+        "_filesystem_identity",
+        blocked_filesystem_identity,
+    )
+    errors: list[Exception] = []
+
+    def bind_repository() -> None:
+        try:
+            bindings.bind(
+                project_id=project.project_id,
+                repository=repository,
+                root=root,
+                expected_binding_version=None,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    writer = threading.Thread(target=bind_repository, name="binding-writer")
+    writer.start()
+    assert validation_started.wait(timeout=10)
+
+    ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed while local root was being validated",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="concurrent binding regression",
+        idempotency_key="update:product-1:binding-race",
+    )
+    validation_release.set()
+    writer.join(timeout=10)
+    assert not writer.is_alive()
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], ProductFactoryLocalRepositoryBindingError)
+    assert "ProductProject changed while binding" in str(errors[0])
+    with pytest.raises(KeyError):
+        bindings.require(project.project_id, repository.repository_id)
+
+
 def test_require_rejects_binding_changed_during_filesystem_validation(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -369,12 +434,12 @@ def test_require_rejects_binding_changed_during_filesystem_validation(
         "_require_filesystem_identity",
         blocked_require_identity,
     )
-    errors: list[BaseException] = []
+    errors: list[Exception] = []
 
     def read_binding() -> None:
         try:
             bindings.require(project.project_id, repository.repository_id)
-        except BaseException as exc:
+        except Exception as exc:
             errors.append(exc)
 
     reader = threading.Thread(target=read_binding, name="binding-reader")
