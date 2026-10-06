@@ -300,6 +300,29 @@ def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
     return b"".join(chunks)
 
 
+def _require_open_snapshot_identity(
+    path: Path,
+    descriptor: int,
+    *,
+    name: str,
+) -> None:
+    """Bind one held descriptor to the exact live regular-file pathname."""
+
+    try:
+        opened = os.fstat(descriptor)
+        current = os.lstat(path)
+    except OSError as exc:
+        raise ProofError(f"{name} identity could not be verified") from exc
+    if (
+        not stat.S_ISREG(opened.st_mode)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+        or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+    ):
+        _fail(f"{name} identity changed")
+
+
 def _write_new_file(path: Path, payload: bytes) -> None:
     if type(payload) is not bytes or not payload:
         _fail("physical evaluation evidence payload is invalid")
@@ -343,6 +366,11 @@ def _verified_candidate_tokenization_from_snapshot(
             descriptor: int | None = None
             try:
                 descriptor = _open_readonly_snapshot(snapshot_path)
+                _require_open_snapshot_identity(
+                    snapshot_path,
+                    descriptor,
+                    name="candidate verification snapshot",
+                )
                 if (
                     _stable_file_bytes(
                         snapshot_path,
@@ -355,6 +383,11 @@ def _verified_candidate_tokenization_from_snapshot(
                         "physical evaluation candidate snapshot changed before manifest read"
                     )
                 manifest = candidate_adapter_manifest(snapshot_path.resolve(strict=True))
+                _require_open_snapshot_identity(
+                    snapshot_path,
+                    descriptor,
+                    name="candidate verification snapshot",
+                )
                 if (
                     _stable_file_bytes(
                         snapshot_path,
