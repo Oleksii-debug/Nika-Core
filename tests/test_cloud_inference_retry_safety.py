@@ -202,7 +202,7 @@ def test_fresh_retry_preserves_exact_generic_output_compatibility() -> None:
 def test_retry_policy_rejects_behavioral_retry_count_carriers() -> None:
     spoofed = _SpoofingRetryCount(1)
     assert int(spoofed) == 1
-    assert spoofed >= 1 is False
+    assert (spoofed >= 1) is False
 
     with pytest.raises(ValueError, match="max_retries must be a non-negative integer"):
         RetryPolicy(max_retries=spoofed)
