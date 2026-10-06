@@ -30,6 +30,13 @@ class PackagedBoundLocalProductFactoryHostError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class _ProjectSnapshot:
+    project_id: str
+    spec_version: int
+    row_version: int
+
+
+@dataclass(frozen=True, slots=True)
 class _BindingSnapshot:
     project_id: str
     repository_id: str
@@ -41,6 +48,7 @@ class _BindingSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class _ProgramEntry:
+    project: _ProjectSnapshot
     program: ContainedLocalCodingProgram
     bindings: Mapping[str, _BindingSnapshot]
 
@@ -49,6 +57,7 @@ class _ProgramEntry:
 class _EntryRepositoryAuthority:
     bindings: ProductFactoryLocalRepositoryBindings
     projects: ProductProjectRepository
+    expected_project: _ProjectSnapshot
     expected: Mapping[str, _BindingSnapshot]
 
     def require_component_root(
@@ -81,11 +90,11 @@ class _EntryRepositoryAuthority:
                 "ProductProject is unavailable during contained-local execution"
             ) from exc
         if (
-            project.status != "active"
+            _project_snapshot(project) != self.expected_project
             or expected.locator not in project.spec.repository_refs
         ):
             raise PackagedBoundLocalProductFactoryHostError(
-                "local repository binding is no longer authorized by ProductProject"
+                "ProductProject changed during contained-local execution"
             )
         if Path(root) != expected.root:
             raise PackagedBoundLocalProductFactoryHostError(
@@ -148,7 +157,7 @@ class PackagedBoundLocalProductFactoryHost:
         )
         self._bindings.resolve_for_plan(plan)
         bindings = self._bindings_for_graph(project, graph)
-        entry = self._entry_for(host_task_id, bindings)
+        entry = self._entry_for(host_task_id, project, bindings)
         state = entry.program.multi_repository_host.initialize(
             host_task_id=host_task_id,
             project=project,
@@ -172,7 +181,7 @@ class PackagedBoundLocalProductFactoryHost:
             raise PackagedBoundLocalProductFactoryHostError(
                 "ProductProject has no durable local repository bindings"
             )
-        temporary = self._build_entry(current.values())
+        temporary = self._build_entry(project, current.values())
         state = temporary.program.multi_repository_host.restore(
             host_task_id=host_task_id,
             project=project,
@@ -182,7 +191,10 @@ class PackagedBoundLocalProductFactoryHost:
             state.authority.graph,
         )
         with self._lock:
-            self._entries[host_task_id] = self._build_entry(exact.values())
+            self._entries[host_task_id] = self._build_entry(
+                state.binding.project,
+                exact.values(),
+            )
         self._require_state_bindings(host_task_id, state)
         return state
 
@@ -340,29 +352,43 @@ class PackagedBoundLocalProductFactoryHost:
     def _entry_for(
         self,
         host_task_id: str,
+        project: ProductProject,
         bindings: Mapping[str, ProductFactoryLocalRepositoryBinding],
     ) -> _ProgramEntry:
+        expected_project = _project_snapshot(project)
         expected = _snapshot_map(bindings.values())
         with self._lock:
             current = self._entries.get(host_task_id)
             if current is not None:
-                if dict(current.bindings) != expected:
+                if (
+                    current.project != expected_project
+                    or dict(current.bindings) != expected
+                ):
                     raise PackagedBoundLocalProductFactoryHostError(
-                        "local repository bindings changed after host composition"
+                        "ProductProject or local repository bindings changed after host composition"
                     )
                 return current
-            entry = self._build_entry(bindings.values())
+            entry = self._build_entry(project, bindings.values())
             self._entries[host_task_id] = entry
             return entry
 
     def _build_entry(
         self,
+        project: ProductProject,
         bindings: Iterable[ProductFactoryLocalRepositoryBinding],
     ) -> _ProgramEntry:
+        project_snapshot = _project_snapshot(project)
         snapshots = _snapshot_map(bindings)
         if not snapshots:
             raise PackagedBoundLocalProductFactoryHostError(
                 "ProductProject has no durable local repository bindings"
+            )
+        if any(
+            snapshot.project_id != project_snapshot.project_id
+            for snapshot in snapshots.values()
+        ):
+            raise PackagedBoundLocalProductFactoryHostError(
+                "local repository bindings belong to another ProductProject"
             )
         repositories = {
             repository_id: snapshot.root
@@ -377,9 +403,14 @@ class PackagedBoundLocalProductFactoryHost:
         program.ports.repository_authority = _EntryRepositoryAuthority(
             bindings=self._bindings,
             projects=self._projects,
+            expected_project=project_snapshot,
             expected=snapshots,
         )
-        return _ProgramEntry(program=program, bindings=snapshots)
+        return _ProgramEntry(
+            project=project_snapshot,
+            program=program,
+            bindings=snapshots,
+        )
 
     def _require_state_bindings(
         self,
@@ -396,7 +427,15 @@ class PackagedBoundLocalProductFactoryHost:
         with self._lock:
             entry = self._entries.get(host_task_id)
         if entry is None:
-            entry = self._entry_for(host_task_id, current)
+            entry = self._entry_for(
+                host_task_id,
+                state.binding.project,
+                current,
+            )
+        if entry.project != _project_snapshot(state.binding.project):
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject changed after Product Factory preparation"
+            )
         selected = {
             repository_id: entry.bindings.get(repository_id)
             for repository_id in expected
@@ -406,6 +445,20 @@ class PackagedBoundLocalProductFactoryHost:
                 "local repository bindings changed after Product Factory preparation"
             )
         return entry
+
+
+def _project_snapshot(project: ProductProject) -> _ProjectSnapshot:
+    if type(project) is not ProductProject:
+        raise TypeError("project must be an exact ProductProject")
+    if project.status != "active":
+        raise PackagedBoundLocalProductFactoryHostError(
+            "ProductProject must remain active for contained-local execution"
+        )
+    return _ProjectSnapshot(
+        project_id=project.project_id,
+        spec_version=project.spec_version,
+        row_version=project.row_version,
+    )
 
 
 def _snapshot_map(
