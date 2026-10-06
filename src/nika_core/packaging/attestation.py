@@ -10,8 +10,12 @@ from typing import Any
 
 from nika_core.packaging.release import (
     _bounded_json_depth,
+    _bounded_json_int,
+    _finite_json_float,
     _read_stable_release_bytes,
+    _reject_json_constant,
     _stable_release_file_identity,
+    _unique_json_object,
     verify_distributable_evidence,
 )
 
@@ -54,8 +58,14 @@ def _read_verification(path: Path) -> list[dict[str, Any]]:
     if not _bounded_json_depth(content):
         raise ValueError("attestation verification output exceeds structural limits")
     try:
-        payload = json.loads(content.decode("utf-8-sig"))
-    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
+        payload = json.loads(
+            content.decode("utf-8-sig"),
+            object_pairs_hook=_unique_json_object,
+            parse_float=_finite_json_float,
+            parse_int=_bounded_json_int,
+            parse_constant=_reject_json_constant,
+        )
+    except (UnicodeError, ValueError, RecursionError) as exc:
         raise ValueError("attestation verification output is invalid JSON") from exc
     if not isinstance(payload, list) or not payload:
         raise ValueError("attestation verification output must contain at least one result")
