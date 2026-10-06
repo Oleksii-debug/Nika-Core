@@ -56,6 +56,22 @@ def test_task_state_filter_supports_bounded_offset_and_validates_it(tmp_path: Pa
     backend.close()
 
 
+def test_later_task_page_fails_closed_on_noncanonical_durable_state(
+    tmp_path: Path,
+) -> None:
+    backend, queue = _backend(tmp_path)
+    task_ids = [_ready(queue, index) for index in range(55)]
+    with queue.store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET state = ? WHERE task_id = ?",
+            ("UNKNOWN_STATE", task_ids[0]),
+        )
+
+    with pytest.raises(ValueError, match="UNKNOWN_STATE"):
+        queue.list_by_states((TaskState.READY,), limit=50, offset=50)
+    backend.close()
+
+
 def test_task_state_pages_have_deterministic_tie_order(tmp_path: Path) -> None:
     backend, queue = _backend(tmp_path)
     task_ids = [_ready(queue, index) for index in range(55)]

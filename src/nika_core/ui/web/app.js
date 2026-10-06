@@ -392,7 +392,7 @@
       || typeof snapshot.has_next !== "boolean"
       || typeof snapshot.unfinished_only !== "boolean"
       || snapshot.has_previous !== (snapshot.offset > 0)
-      || (snapshot.offset > 0 && !snapshot.unfinished_only)
+      || snapshot.unfinished_only !== (snapshot.has_previous || snapshot.has_next)
     ) {
       return failClosed();
     }
