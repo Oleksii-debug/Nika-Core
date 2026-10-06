@@ -145,7 +145,7 @@ class MemoryService:
         expires_at: datetime | None,
         expected_updated_at: datetime | None | object,
     ) -> MemoryRecord:
-        self._store.require_connection(conn)
+        self._store.require_transaction_connection(conn)
         scope = _require_scope(scope)
         owner_id = _required("owner_id", owner_id)
         namespace = _required("namespace", namespace)

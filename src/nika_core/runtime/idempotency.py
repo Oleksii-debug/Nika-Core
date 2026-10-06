@@ -241,7 +241,7 @@ class IdempotencyLedger:
         input_fingerprint: str,
     ) -> tuple[IdempotencyRecord, bool]:
         """Reserve a side effect inside a caller-owned transaction."""
-        self._store.require_connection(conn)
+        self._store.require_transaction_connection(conn)
         operation_key = _require_exact_text(operation_key, field_name="operation_key")
         task_id = _require_exact_text(task_id, field_name="task_id")
         operation_type = _require_exact_text(operation_type, field_name="operation_type")
@@ -333,7 +333,7 @@ class IdempotencyLedger:
         conn: sqlite3.Connection,
         operation_key: str,
     ) -> None:
-        self._store.require_connection(conn)
+        self._store.require_transaction_connection(conn)
         current = self._require_with_connection(conn, operation_key)
         if current.status != IdempotencyStatus.PENDING:
             raise IdempotencyConflictError("only pending operations may be released")
@@ -377,7 +377,7 @@ class IdempotencyLedger:
         result: Mapping[str, Any] | None = None,
     ) -> IdempotencyRecord:
         """Complete an exact pending reservation inside a caller-owned transaction."""
-        self._store.require_connection(conn)
+        self._store.require_transaction_connection(conn)
         self._require_matching_pending_with_connection(
             conn,
             operation_key=operation_key,
@@ -611,7 +611,7 @@ class IdempotencyLedger:
         *,
         allow_uncertain_completion: bool = False,
     ) -> IdempotencyRecord:
-        self._store.require_connection(conn)
+        self._store.require_transaction_connection(conn)
         operation_key = _require_exact_text(operation_key, field_name="operation_key")
         if type(status) is not IdempotencyStatus:
             raise TypeError("status must be an IdempotencyStatus")

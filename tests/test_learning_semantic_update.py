@@ -570,3 +570,59 @@ def test_router_rejects_foreign_caller_owned_connection_before_effect(
             namespace=address.namespace,
             key=address.key,
         ) is None
+
+def test_router_requires_active_caller_owned_transaction_before_effect(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "router-active-transaction.db")
+    store.initialize()
+    memory = MemoryService(store)
+    router = LearningSemanticUpdateRouter(
+        memory=LearningMemoryApplier(memory),
+        world_model=LearningWorldModelApplier(WorldModelService(memory)),
+        self_model=LearningSelfModelApplier(SelfModelService(memory)),
+        skill=LearningSkillApplier(LearnedSkillService(memory)),
+    )
+    candidate = _candidate()
+    verification = _verification(candidate)
+    payload = b'{"blocked":"missing-transaction"}'
+    address = MemoryUpdateAddress(
+        scope=MemoryScope.WORKSPACE,
+        owner_id=candidate.workspace_id,
+        namespace="learned",
+        key="missing-transaction",
+    )
+    intent = _intent(
+        candidate=candidate,
+        verification=verification,
+        target=LearningUpdateTarget.MEMORY,
+        target_ref_sha256=memory_target_ref_sha256(
+            scope=address.scope,
+            owner_id=address.owner_id,
+            namespace=address.namespace,
+            key=address.key,
+        ),
+        update_schema=MEMORY_UPDATE_SCHEMA,
+        payload=payload,
+    )
+
+    with store.connection() as conn:
+        assert conn.in_transaction is False
+        with pytest.raises(ValueError, match="active caller-owned transaction"):
+            router.apply_with_connection(
+                conn,
+                intent=intent,
+                candidate=candidate,
+                verification=verification,
+                expected_verification_policy_sha256=POLICY,
+                expected_requirements=_requirements(),
+                payload=payload,
+                address=address,
+            )
+
+    assert memory.get(
+        scope=address.scope,
+        owner_id=address.owner_id,
+        namespace=address.namespace,
+        key=address.key,
+    ) is None
