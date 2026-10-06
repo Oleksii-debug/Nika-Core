@@ -687,7 +687,7 @@ def _encode_model_authority(
 ) -> dict[str, object]:
     if type(authority) is not _PackagedLocalOllamaAuthority:
         raise TypeError("model_authority carrier is invalid")
-    return {
+    payload: dict[str, object] = {
         "schema": _MODEL_AUTHORITY_SCHEMA,
         "revision": authority.revision,
         "selection_sha256": authority.selection_sha256,
