@@ -1269,6 +1269,120 @@ def test_prepare_revalidates_tampered_nested_graph_carriers_before_effect(
     assert _task_count(store) == 0
 
 
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "Oleksii-debug/Nika-Core?token=must-not-survive",
+        "Oleksii-debug/Nika-Core?access%5Ftoken%3Dmust-not-survive",
+        "https%3A%2F%2Ftoken-value%40github.com%2Fexample%2Frepository",
+    ],
+)
+def test_execution_plan_rejects_credential_bearing_repository_locator(
+    tmp_path: Path,
+    locator: str,
+) -> None:
+    (
+        _store,
+        _repository,
+        _tasks,
+        _service,
+        project,
+        graph,
+        _plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path)
+    repository = graph.repositories[0]
+    unsafe_graph = ProductRepositoryGraph(
+        project_id=graph.project_id,
+        repositories=(
+            RepositoryRef(
+                repository_id=repository.repository_id,
+                provider=repository.provider,
+                locator=locator,
+                default_branch=repository.default_branch,
+            ),
+        ),
+        components=graph.components,
+    )
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="credential",
+    ):
+        PackagedProductFactoryExecutionPlan(
+            project_id=project.project_id,
+            expected_spec_version=project.spec_version,
+            expected_row_version=project.row_version,
+            graph=unsafe_graph,
+            graph_version=1,
+            base_shas={"repo-core": "a" * 40},
+            component_goals={
+                "core": "Implement the exact accepted ProductProject work"
+            },
+            permission_ceiling=frozenset(
+                {"read_source", "write_source", "run_tests"}
+            ),
+        )
+
+
+def test_prepare_rejects_tampered_repository_locator_before_effect(
+    tmp_path: Path,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    object.__setattr__(
+        plan.graph.repositories[0],
+        "locator",
+        "Oleksii-debug/Nika-Core?token=must-not-survive",
+    )
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="credential",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
+@pytest.mark.parametrize(
+    ("target", "field"),
+    [
+        ("plan", "project_id"),
+        ("repository", "repository_id"),
+        ("repository", "provider"),
+        ("repository", "default_branch"),
+        ("repository", "credential_ref"),
+        ("component", "component_id"),
+        ("component", "repository_id"),
+    ],
+)
+def test_prepare_rejects_control_bearing_identity_before_effect(
+    tmp_path: Path,
+    target: str,
+    field: str,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    carrier = plan
+    if target == "repository":
+        carrier = plan.graph.repositories[0]
+    elif target == "component":
+        carrier = plan.graph.components[0]
+    object.__setattr__(carrier, field, "identity\nforged")
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="single-line identity text",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
 def test_prepare_normalizes_tampered_graph_invariant_failure_before_effect(
     tmp_path: Path,
 ) -> None:
