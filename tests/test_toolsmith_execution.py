@@ -59,6 +59,16 @@ def _make_source_repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
     return repository, _git(repository, "rev-parse", "HEAD")
 
 
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_branch_name_rejects_unicode_line_boundaries(separator: str) -> None:
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        execution_module._validate_branch_name(f"toolsmith{separator}branch")
+
+
+def test_branch_name_preserves_safe_unicode_identity() -> None:
+    execution_module._validate_branch_name("toolsmith/гілка")
+
+
 def test_prepare_private_git_workspace_has_no_remote_or_visible_dot_git(
     tmp_path: pathlib.Path,
 ) -> None:
