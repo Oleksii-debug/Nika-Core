@@ -1242,6 +1242,8 @@ def run_physical_training_pilot(
         state=TrainingRunState.COMPLETED,
         label="completed run",
     )
+    if completed.next_step != canonical_spec.max_steps:
+        _fail("trainer did not reach the authorized bounded completion step")
     resumed_consumed_materials_sha256 = _require_sha256(
         resumed_worker.last_accepted_consumed_materials_sha256,
         name="resumed worker accepted consumed_materials_sha256",
