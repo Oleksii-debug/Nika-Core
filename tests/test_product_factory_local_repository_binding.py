@@ -141,6 +141,9 @@ def test_schema_migration_adds_local_repository_binding_table(
     ]
     assert "git_target_device" in binding_columns
     assert "git_target_inode" in binding_columns
+    assert "git_commondir_sha256" in binding_columns
+    assert "git_common_device" in binding_columns
+    assert "git_common_inode" in binding_columns
 
 
 def test_binding_survives_restart_and_resolves_exact_plan(
@@ -508,6 +511,73 @@ def test_gitfile_binding_accepts_relative_gitdir_and_rejects_malformed_record(
     with pytest.raises(
         ProductFactoryLocalRepositoryBindingError,
         match="invalid gitdir record",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=root,
+            expected_binding_version=None,
+        )
+
+
+def test_gitfile_binding_tracks_common_directory_identity(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = tmp_path / "linked common worktree"
+    root.mkdir()
+    git_directory = tmp_path / "worktree gitdir"
+    git_directory.mkdir()
+    common = tmp_path / "common git metadata"
+    common.mkdir()
+    (root / ".git").write_text(f"gitdir: {git_directory}\n", encoding="utf-8")
+    (git_directory / "commondir").write_text(
+        "../common git metadata\n",
+        encoding="utf-8",
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    assert bindings.require(project.project_id, repository.repository_id) == bound
+
+    moved = tmp_path / "original common git metadata"
+    common.rename(moved)
+    common.mkdir()
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="filesystem identity changed",
+    ):
+        bindings.require(project.project_id, repository.repository_id)
+
+
+def test_gitfile_binding_rejects_malformed_commondir_record(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    root = tmp_path / "malformed common worktree"
+    root.mkdir()
+    git_directory = tmp_path / "malformed common gitdir"
+    git_directory.mkdir()
+    (root / ".git").write_text(f"gitdir: {git_directory}\n", encoding="utf-8")
+    (git_directory / "commondir").write_text(
+        "../common\nsecond-line\n",
+        encoding="utf-8",
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="commondir metadata has an invalid record",
     ):
         bindings.bind(
             project_id=project.project_id,

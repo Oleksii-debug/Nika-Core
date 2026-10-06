@@ -183,10 +183,17 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
         WHERE excluded.last_binding_version >
               product_factory_local_repository_binding_generations.last_binding_version
         """,
-    ),    8: (
+    ),
+    8: (
         "ALTER TABLE product_factory_local_repository_bindings "
         "ADD COLUMN git_target_device TEXT",
         "ALTER TABLE product_factory_local_repository_bindings "
         "ADD COLUMN git_target_inode TEXT",
+        "ALTER TABLE product_factory_local_repository_bindings "
+        "ADD COLUMN git_commondir_sha256 TEXT",
+        "ALTER TABLE product_factory_local_repository_bindings "
+        "ADD COLUMN git_common_device TEXT",
+        "ALTER TABLE product_factory_local_repository_bindings "
+        "ADD COLUMN git_common_inode TEXT",
     ),
 }

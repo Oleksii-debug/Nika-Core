@@ -62,6 +62,9 @@ class _FilesystemIdentity:
     gitfile_sha256: str | None
     git_target_device: str | None
     git_target_inode: str | None
+    git_commondir_sha256: str | None
+    git_common_device: str | None
+    git_common_inode: str | None
 
 
 class ProductFactoryLocalRepositoryBindings:
@@ -204,8 +207,10 @@ class ProductFactoryLocalRepositoryBindings:
                     "INSERT INTO product_factory_local_repository_bindings("
                     "project_id,repository_id,provider,locator,root_path,root_device,"
                     "root_inode,git_metadata_kind,git_metadata_device,git_metadata_inode,"
-                    "gitfile_sha256,git_target_device,git_target_inode,binding_version,updated_at"
-                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "gitfile_sha256,git_target_device,git_target_inode,"
+                    "git_commondir_sha256,git_common_device,git_common_inode,"
+                    "binding_version,updated_at"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         project_id,
                         repository.repository_id,
@@ -220,6 +225,9 @@ class ProductFactoryLocalRepositoryBindings:
                         identity.gitfile_sha256,
                         identity.git_target_device,
                         identity.git_target_inode,
+                        identity.git_commondir_sha256,
+                        identity.git_common_device,
+                        identity.git_common_inode,
                         version,
                         now,
                     ),
@@ -251,6 +259,7 @@ class ProductFactoryLocalRepositoryBindings:
                     "provider=?,locator=?,root_path=?,root_device=?,root_inode=?,"
                     "git_metadata_kind=?,git_metadata_device=?,git_metadata_inode=?,"
                     "gitfile_sha256=?,git_target_device=?,git_target_inode=?,"
+                    "git_commondir_sha256=?,git_common_device=?,git_common_inode=?,"
                     "binding_version=?,updated_at=? "
                     "WHERE project_id=? AND repository_id=? AND binding_version=?",
                     (
@@ -265,6 +274,9 @@ class ProductFactoryLocalRepositoryBindings:
                         identity.gitfile_sha256,
                         identity.git_target_device,
                         identity.git_target_inode,
+                        identity.git_commondir_sha256,
+                        identity.git_common_device,
+                        identity.git_common_inode,
                         version,
                         now,
                         project_id,
@@ -592,15 +604,12 @@ def _snapshot_repository(repository: RepositoryRef) -> RepositoryRef:
     )
 
 
-def _gitfile_target_identity(
-    metadata: pathlib.Path,
-    raw: bytes,
-) -> tuple[str, str]:
+def _pointer_line(raw: bytes, *, label: str, prefix: str = "") -> str:
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as exc:
         raise ProductFactoryLocalRepositoryBindingError(
-            "Product Factory .git metadata file must be UTF-8 text"
+            f"Product Factory {label} must be UTF-8 text"
         ) from exc
     if text.endswith("\r\n"):
         line = text[:-2]
@@ -609,32 +618,99 @@ def _gitfile_target_identity(
     else:
         line = text
     if (
-        not line.startswith("gitdir: ")
-        or len(line) == len("gitdir: ")
+        (prefix and not line.startswith(prefix))
+        or (prefix and len(line) == len(prefix))
+        or (not prefix and not line)
         or "\n" in line
         or "\r" in line
         or "\x00" in line
     ):
         raise ProductFactoryLocalRepositoryBindingError(
-            "Product Factory .git metadata file has an invalid gitdir record"
+            f"Product Factory {label} has an invalid record"
         )
-    target_text = line[len("gitdir: "):]
-    if any(ord(character) < 32 or ord(character) == 127 for character in target_text):
+    value = line[len(prefix):] if prefix else line
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ProductFactoryLocalRepositoryBindingError(
-            "Product Factory .git metadata target contains control characters"
+            f"Product Factory {label} target contains control characters"
         )
-    target = pathlib.Path(target_text)
+    return value
+
+
+def _resolved_pointer_directory(
+    *,
+    base: pathlib.Path,
+    value: str,
+    label: str,
+) -> pathlib.Path:
+    target = pathlib.Path(value)
     if not target.is_absolute():
-        target = metadata.parent / target
+        target = base / target
     try:
-        resolved_target = ensure_real_directory_root(
-            target,
-            label="Product Factory gitdir target",
-        )
+        return ensure_real_directory_root(target, label=f"Product Factory {label} target")
     except WorkspaceSecurityError as exc:
         raise ProductFactoryLocalRepositoryBindingError(str(exc)) from exc
+
+
+def _gitfile_target_identity(
+    metadata: pathlib.Path,
+    raw: bytes,
+) -> tuple[pathlib.Path, str, str]:
+    target_text = _pointer_line(
+        raw,
+        label=".git metadata file",
+        prefix="gitdir: ",
+    )
+    resolved_target = _resolved_pointer_directory(
+        base=metadata.parent,
+        value=target_text,
+        label="gitdir",
+    )
     target_stat = resolved_target.stat()
-    return str(target_stat.st_dev), str(target_stat.st_ino)
+    return resolved_target, str(target_stat.st_dev), str(target_stat.st_ino)
+
+
+def _commondir_identity(
+    git_directory: pathlib.Path,
+) -> tuple[str | None, str | None, str | None]:
+    marker = git_directory / "commondir"
+    try:
+        marker_stat = marker.lstat()
+    except FileNotFoundError:
+        return None, None, None
+    except OSError as exc:
+        raise ProductFactoryLocalRepositoryBindingError(
+            "Product Factory commondir metadata is unreadable"
+        ) from exc
+    if (
+        stat.S_ISLNK(marker_stat.st_mode)
+        or _is_reparse_point(marker_stat)
+        or not stat.S_ISREG(marker_stat.st_mode)
+    ):
+        raise ProductFactoryLocalRepositoryBindingError(
+            "Product Factory commondir metadata must be a regular non-indirect file"
+        )
+    try:
+        raw = marker.read_bytes()
+    except OSError as exc:
+        raise ProductFactoryLocalRepositoryBindingError(
+            "Product Factory commondir metadata is unreadable"
+        ) from exc
+    if not raw or len(raw) > _MAX_GITFILE_BYTES:
+        raise ProductFactoryLocalRepositoryBindingError(
+            "Product Factory commondir metadata file is invalid"
+        )
+    target_text = _pointer_line(raw, label="commondir metadata")
+    resolved_target = _resolved_pointer_directory(
+        base=git_directory,
+        value=target_text,
+        label="commondir",
+    )
+    target_stat = resolved_target.stat()
+    return (
+        hashlib.sha256(raw).hexdigest(),
+        str(target_stat.st_dev),
+        str(target_stat.st_ino),
+    )
 
 
 def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
@@ -661,6 +737,7 @@ def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
         gitfile_sha256 = None
         git_target_device = None
         git_target_inode = None
+        git_directory = metadata.resolve(strict=True)
     elif stat.S_ISREG(metadata_stat.st_mode):
         kind = "file"
         try:
@@ -674,11 +751,20 @@ def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
                 "Product Factory .git metadata file is invalid"
             )
         gitfile_sha256 = hashlib.sha256(raw).hexdigest()
-        git_target_device, git_target_inode = _gitfile_target_identity(metadata, raw)
+        (
+            git_directory,
+            git_target_device,
+            git_target_inode,
+        ) = _gitfile_target_identity(metadata, raw)
     else:
         raise ProductFactoryLocalRepositoryBindingError(
             "Product Factory .git metadata has an unsupported file type"
         )
+    (
+        git_commondir_sha256,
+        git_common_device,
+        git_common_inode,
+    ) = _commondir_identity(git_directory)
     return _FilesystemIdentity(
         root_path=str(resolved),
         root_device=str(root_stat.st_dev),
@@ -689,6 +775,9 @@ def _filesystem_identity(root: pathlib.Path) -> _FilesystemIdentity:
         gitfile_sha256=gitfile_sha256,
         git_target_device=git_target_device,
         git_target_inode=git_target_inode,
+        git_commondir_sha256=git_commondir_sha256,
+        git_common_device=git_common_device,
+        git_common_inode=git_common_inode,
     )
 
 
@@ -716,6 +805,9 @@ def _same_physical_repository(
         and first.gitfile_sha256 == second.gitfile_sha256
         and first.git_target_device == second.git_target_device
         and first.git_target_inode == second.git_target_inode
+        and first.git_commondir_sha256 == second.git_commondir_sha256
+        and first.git_common_device == second.git_common_device
+        and first.git_common_inode == second.git_common_inode
     )
 
 
@@ -770,6 +862,36 @@ def _binding_from_row(row: object) -> tuple[
                 )
             git_target_device = None
             git_target_inode = None
+        git_commondir_sha256 = row["git_commondir_sha256"]
+        raw_git_common_device = row["git_common_device"]
+        raw_git_common_inode = row["git_common_inode"]
+        if git_commondir_sha256 is None:
+            if raw_git_common_device is not None or raw_git_common_inode is not None:
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "persisted commondir metadata identity is incomplete"
+                )
+            git_common_device = None
+            git_common_inode = None
+        else:
+            if (
+                type(git_commondir_sha256) is not str
+                or len(git_commondir_sha256) != 64
+                or any(
+                    char not in "0123456789abcdef"
+                    for char in git_commondir_sha256
+                )
+            ):
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "invalid persisted commondir metadata digest"
+                )
+            git_common_device = _stored_decimal(
+                raw_git_common_device,
+                "git_common_device",
+            )
+            git_common_inode = _stored_decimal(
+                raw_git_common_inode,
+                "git_common_inode",
+            )
         version = _stored_positive_int(row["binding_version"], "binding_version")
         updated_at = _stored_text(row["updated_at"], "updated_at")
     except (KeyError, TypeError) as exc:
@@ -792,6 +914,9 @@ def _binding_from_row(row: object) -> tuple[
         gitfile_sha256=gitfile_sha256,
         git_target_device=git_target_device,
         git_target_inode=git_target_inode,
+        git_commondir_sha256=git_commondir_sha256,
+        git_common_device=git_common_device,
+        git_common_inode=git_common_inode,
     )
     return (
         ProductFactoryLocalRepositoryBinding(
