@@ -1312,6 +1312,77 @@ def test_durable_progression_loader_restores_only_completed_promoted_authority(
     assert restored.proof_sha256 == proof.proof_sha256
 
 
+def test_durable_progression_loader_does_not_materialize_task_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, claim, proof = _durable_loader_fixture(tmp_path, monkeypatch)
+
+    def forbid_list_for_task(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("progression restore must stream durable ledger rows")
+
+    monkeypatch.setattr(
+        driver.IdempotencyLedger,
+        "list_for_task",
+        forbid_list_for_task,
+    )
+
+    restored = driver.load_trusted_scale_progression_proof(
+        root,
+        workspace_id="evaluation-workspace",
+        expected_claim=claim,
+    )
+
+    assert restored.canonical_payload() == proof.canonical_payload()
+    assert restored.proof_sha256 == proof.proof_sha256
+
+
+def test_durable_progression_loader_rejects_corrupt_irrelevant_ledger_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root, claim, _ = _durable_loader_fixture(tmp_path, monkeypatch)
+    store = SQLiteStore(root / "physical-pilot.sqlite3")
+    store.initialize()
+    task = driver._find_pilot_task(
+        store,
+        workspace_id="evaluation-workspace",
+        job_id="pilot-job",
+    )
+    ledger = driver.IdempotencyLedger(store)
+    record, created = ledger.reserve_once(
+        operation_key="irrelevant-ledger-record",
+        task_id=task.task_id,
+        operation_type="training.irrelevant",
+        input_fingerprint="sha256:" + "a" * 64,
+    )
+    assert created is True
+    ledger.complete_pending_if_matches(
+        operation_key=record.operation_key,
+        task_id=record.task_id,
+        operation_type=record.operation_type,
+        input_fingerprint=record.input_fingerprint,
+        created_at=record.created_at,
+        result={"ignored": True},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE idempotency_records SET operation_type = ? "
+            "WHERE operation_key = ?",
+            (b"training.irrelevant", record.operation_key),
+        )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="durable idempotency record is non-canonical",
+    ):
+        driver.load_trusted_scale_progression_proof(
+            root,
+            workspace_id="evaluation-workspace",
+            expected_claim=claim,
+        )
+
+
 def test_durable_progression_loader_rejects_legacy_evaluation_report(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
