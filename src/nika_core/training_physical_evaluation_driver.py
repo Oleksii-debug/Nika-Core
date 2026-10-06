@@ -1752,6 +1752,8 @@ def _validate_recovered_report_payload(
     if type(result) is not dict:
         _fail("completed evaluation ledger result is not a canonical report payload")
     schema_version = result.get("schema_version")
+    if type(schema_version) is not int:
+        _fail("completed evaluation ledger result uses an invalid report schema version")
     if schema_version == _LEGACY_REPORT_SCHEMA_VERSION:
         expected_keys = _REPORT_KEYS_V1
         expected_schema = _LEGACY_REPORT_SCHEMA
