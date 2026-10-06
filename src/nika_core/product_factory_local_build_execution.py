@@ -7,7 +7,7 @@ import pathlib
 import stat
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from types import MappingProxyType
 from typing import Protocol
@@ -30,6 +30,7 @@ from nika_core.toolsmith.contracts import (
     normalize_relative_path,
 )
 from nika_core.toolsmith.execution import (
+    ProcessExecutionError,
     _git,
     _resolve_host_git_executable,
     cleanup_private_git_workspace,
@@ -131,6 +132,11 @@ class ContainedLocalBuildExecutionNode:
     artifact_bindings: tuple[LocalBuildArtifactBinding, ...]
     git_executable: str
     source_environment: Mapping[str, str] | None = None
+    _state_root: pathlib.Path = field(init=False, repr=False)
+    _artifact_by_command: Mapping[str, LocalBuildArtifactBinding] = field(
+        init=False,
+        repr=False,
+    )
 
     def __post_init__(self) -> None:
         if (
@@ -187,12 +193,9 @@ class ContainedLocalBuildExecutionNode:
             raise BuildExecutionPortError(
                 "local build dispatch already has durable result; inspection is required"
             )
-        self._claim_dispatch(fingerprint)
 
         job_root = self._create_job_root(fingerprint)
         plan = None
-        process_digest: str | None = None
-        changed_files: tuple[ChangedFile, ...] = ()
         try:
             binding = self._require_binding(admitted)
             plan = make_sterile_git_plan(
@@ -216,11 +219,19 @@ class ContainedLocalBuildExecutionNode:
                 must_exist=True,
             )
             if not cwd.is_dir():
-                raise WorkspaceSecurityError("local build command cwd must be a directory")
+                raise WorkspaceSecurityError(
+                    "local build command cwd must be a directory"
+                )
 
+            # The durable provider claim is the last step before the external process
+            # effect.  If the process starts and acknowledgement/receipt publication is
+            # lost, this marker survives restart and prevents a blind replay.
+            self._claim_dispatch(fingerprint)
             process = run_typed_process(
                 admitted.grant.argv,
-                process_policy=ProcessPolicy(tuple(self.policy.allowed_executables)),
+                process_policy=ProcessPolicy(
+                    tuple(self.policy.allowed_executables)
+                ),
                 resource_budget=ResourceBudget(
                     timeout_seconds=self.policy.resource_budget.timeout_seconds,
                     max_output_bytes=self.policy.resource_budget.max_output_bytes,
@@ -230,19 +241,46 @@ class ContainedLocalBuildExecutionNode:
                 environment=self.source_environment,
                 workspace_root=plan.worktree_root,
             )
-            process_digest = _process_evidence_digest(admitted, process)
-            self._require_same_binding(admitted, binding)
+        except (
+            BuildExecutionPortError,
+            OSError,
+            ProcessExecutionError,
+            ValueError,
+            WorkspaceSecurityError,
+        ) as exc:
+            if plan is not None:
+                self._cleanup_plan(plan, job_root)
+            else:
+                self._cleanup_unprepared_job_root(job_root)
+            raise BuildExecutionPortError(
+                "contained local build provider could not prove a safe exact outcome"
+            ) from exc
 
+        process_digest = _process_evidence_digest(admitted, process)
+        try:
+            self._require_same_binding(admitted, binding)
+        except BuildExecutionPortError as exc:
+            # The process effect happened under an authority that changed before its
+            # outcome could be trusted. Persist uncertainty for inspection; never
+            # convert this into a definite success/failure or replay it.
+            uncertain = _uncertain_result(admitted, process_digest)
+            self._cleanup_plan(plan, job_root)
+            self._save_receipt(fingerprint, uncertain, ())
+            raise BuildExecutionPortError(
+                "local repository authority changed after build execution"
+            ) from exc
+
+        process_succeeded = (
+            process.returncode == 0
+            and not process.timed_out
+            and not process.cancelled
+            and not process.output_limit_exceeded
+        )
+        changed_files: tuple[ChangedFile, ...] = ()
+        try:
             changed_files = self._collect_changed_files(
                 plan,
                 max_changed_files=self.policy.resource_budget.max_changed_files,
-            )
-
-            process_succeeded = (
-                process.returncode == 0
-                and not process.timed_out
-                and not process.cancelled
-                and not process.output_limit_exceeded
             )
             if process_succeeded:
                 result = self._success_or_invalid_artifact(
@@ -258,36 +296,33 @@ class ContainedLocalBuildExecutionNode:
                     process_digest,
                     reason="process",
                 )
+        except (
+            BuildExecutionPortError,
+            OSError,
+            ValueError,
+            WorkspaceSecurityError,
+        ):
+            # The process returned a definite status but its output cannot satisfy the
+            # trusted evidence contract. This is a definite failed build, not an
+            # uncertain transport outcome.
+            changed_files = ()
+            result = _definite_failed_result(
+                admitted,
+                process_digest,
+                reason="evidence",
+            )
 
-            cleanup_error = self._cleanup_plan(plan, job_root)
-            plan = None
-            if cleanup_error is not None:
-                result = _definite_failed_result(
-                    admitted,
-                    process_digest,
-                    reason="cleanup",
-                )
+        cleanup_error = self._cleanup_plan(plan, job_root)
+        if cleanup_error is not None:
+            changed_files = ()
+            result = _definite_failed_result(
+                admitted,
+                process_digest,
+                reason="cleanup",
+            )
 
-            self._save_receipt(fingerprint, result, changed_files)
-            return result
-        except BuildExecutionPortError:
-            raise
-        except (OSError, ValueError, WorkspaceSecurityError) as exc:
-            if process_digest is not None:
-                uncertain = _uncertain_result(admitted, process_digest)
-                if plan is not None:
-                    self._cleanup_plan(plan, job_root)
-                    plan = None
-                try:
-                    self._save_receipt(fingerprint, uncertain, changed_files)
-                except Exception:
-                    pass
-            elif plan is not None:
-                self._cleanup_plan(plan, job_root)
-                plan = None
-            raise BuildExecutionPortError(
-                "contained local build provider could not prove a safe exact outcome"
-            ) from exc
+        self._save_receipt(fingerprint, result, changed_files)
+        return result
 
     def inspect(self, dispatch: BuildExecutionDispatch) -> BuildExecutionResult | None:
         admitted = _readmit_dispatch(dispatch)
@@ -395,6 +430,13 @@ class ContainedLocalBuildExecutionNode:
         except OSError as exc:
             raise BuildExecutionPortError("local build workspace could not be created") from exc
         return ensure_real_directory_root(root, label="local build job root")
+
+    @staticmethod
+    def _cleanup_unprepared_job_root(job_root: pathlib.Path) -> None:
+        try:
+            job_root.rmdir()
+        except OSError:
+            pass
 
     def _collect_changed_files(
         self,
