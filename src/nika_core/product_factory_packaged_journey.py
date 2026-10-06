@@ -230,7 +230,8 @@ def packaged_plan_current_product_factory_command(command: str) -> bool:
     """Recognize an exact command that persists a planning-only Product Factory team plan."""
     if type(command) is not str:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
-    return " ".join(command.split()).casefold().strip(" :") in _PLAN_CURRENT_PRODUCT_FACTORY_COMMANDS
+    normalized = " ".join(command.split()).casefold().strip(" :")
+    return normalized in _PLAN_CURRENT_PRODUCT_FACTORY_COMMANDS
 
 
 def packaged_show_current_product_factory_plan_command(command: str) -> bool:
