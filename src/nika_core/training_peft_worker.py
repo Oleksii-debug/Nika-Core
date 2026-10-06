@@ -2457,16 +2457,16 @@ def _train_one_step(
         invalid_code="adapter_candidate_invalid",
         non_finite_code="adapter_candidate_non_finite",
     )
+    if hmac.compare_digest(
+        loaded_adapter_tensors_sha256,
+        trained_adapter_tensors_sha256,
+    ):
+        _fail("training_step_no_tensor_mutation")
     previous_adapter_tensors_sha256 = (
         loaded_adapter_tensors_sha256
         if previous_checkpoint is not None or initial_adapter_dir is not None
         else None
     )
-    if previous_adapter_tensors_sha256 is not None and hmac.compare_digest(
-        previous_adapter_tensors_sha256,
-        trained_adapter_tensors_sha256,
-    ):
-        _fail("training_step_no_tensor_mutation")
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
     marker_sha256 = _write_checkpoint_marker(
         checkpoint,
