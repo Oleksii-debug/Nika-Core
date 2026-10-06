@@ -71,25 +71,25 @@ function Get-NikaDatabaseAliasIdentity {
     # Match pathlib's Windows path identity for compatibility aliases without
     # resolving '..' into a different spelling. Separators, redundant
     # separators and '.' are non-semantic; '..' remains part of the identity.
-    $normalized = $Path.Replace('/', '\\')
+    $normalized = $Path.Replace([char]'/', [char]'\')
     $root = [System.IO.Path]::GetPathRoot($normalized)
     if ([string]::IsNullOrWhiteSpace($root)) {
         throw "Configured Nika Core database path must be fully qualified."
     }
     $relative = $normalized.Substring($root.Length)
     $parts = [System.Collections.Generic.List[string]]::new()
-    foreach ($part in $relative.Split([char]'\\')) {
+    foreach ($part in $relative.Split([char]'\')) {
         if ([string]::IsNullOrEmpty($part) -or $part -eq ".") {
             continue
         }
         $parts.Add($part)
     }
 
-    $rootIdentity = $root.TrimEnd([char]'\\')
+    $rootIdentity = $root.TrimEnd([char]'\')
     if ($parts.Count -eq 0) {
-        return $rootIdentity + "\\"
+        return $rootIdentity + "\"
     }
-    return $rootIdentity + "\\" + [string]::Join("\\", $parts)
+    return $rootIdentity + "\" + [string]::Join("\", $parts)
 }
 
 function Test-NikaPathWithin {
@@ -114,8 +114,11 @@ function Test-NikaPathWithin {
 function Get-NikaCanonicalDataRoot {
     $primaryDatabasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DB_PATH")
     $compatDatabasePath = [System.Environment]::GetEnvironmentVariable("NIKA_DATABASE_PATH")
-    $hasPrimaryDatabasePath = -not [string]::IsNullOrWhiteSpace($primaryDatabasePath)
-    $hasCompatDatabasePath = -not [string]::IsNullOrWhiteSpace($compatDatabasePath)
+    # Match AppConfig.from_environment: an explicitly present alias is
+    # authoritative even when its value is empty/whitespace, so invalid values
+    # fail closed instead of silently falling back to another/default database.
+    $hasPrimaryDatabasePath = $null -ne $primaryDatabasePath
+    $hasCompatDatabasePath = $null -ne $compatDatabasePath
 
     $primaryIdentity = $null
     $compatIdentity = $null
