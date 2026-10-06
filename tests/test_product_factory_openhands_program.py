@@ -266,6 +266,7 @@ def test_multi_repository_host_rejects_post_composition_store_drift(
     foreign_store.initialize()
 
     program.multi_repository_host.store = foreign_store
+    program.host.store = foreign_store
 
     with pytest.raises(MultiRepositoryExecutionError, match="store changed"):
         program.multi_repository_host._assert_program_composition()

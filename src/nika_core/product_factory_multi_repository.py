@@ -170,6 +170,13 @@ class MultiRepositoryProductFactoryHost:
     reviewer_principals: ReviewerPrincipalBindings = field(default=(), repr=False)
     program_host: ProductFactoryProgramHost | None = field(default=None, repr=False)
     _program: ProductFactoryProgramHost = field(init=False, repr=False)
+    _composition_program_host: ProductFactoryProgramHost = field(init=False, repr=False)
+    _composition_store: SQLiteStore = field(init=False, repr=False)
+    _composition_worker: ProductFactoryProgramWorkerPort = field(init=False, repr=False)
+    _composition_review_evidence_authority: ProductFactoryReviewAuthorityPort | None = field(
+        init=False,
+        repr=False,
+    )
     _coordinator_checkpoints: ProductFactoryCheckpointHost = field(
         init=False,
         repr=False,
@@ -200,29 +207,59 @@ class MultiRepositoryProductFactoryHost:
                 raise MultiRepositoryExecutionError(
                     "reused Product Factory program host review authority changed"
                 )
+        self._composition_program_host = program
+        self._composition_store = self.store
+        self._composition_worker = self.worker
+        self._composition_review_evidence_authority = self.review_evidence_authority
         self._program = program
         self._coordinator_checkpoints = ProductFactoryCheckpointHost(self.store)
 
     def _assert_program_composition(self) -> None:
-        if self.program_host is not None and self.program_host is not self._program:
+        if self._program is not self._composition_program_host:
+            raise MultiRepositoryExecutionError(
+                "Product Factory program host changed after composition"
+            )
+        if (
+            self.program_host is not None
+            and self.program_host is not self._composition_program_host
+        ):
             raise MultiRepositoryExecutionError(
                 "reused Product Factory program host changed after composition"
             )
-        if self.store is not self._program.store:
+        if (
+            self.store is not self._composition_store
+            or self._program.store is not self._composition_store
+        ):
             raise MultiRepositoryExecutionError(
                 "Product Factory program store changed after composition"
             )
-        if self.worker is not self._program.worker:
+        if (
+            self.worker is not self._composition_worker
+            or self._program.worker is not self._composition_worker
+        ):
             raise MultiRepositoryExecutionError(
                 "Product Factory program worker changed after composition"
             )
-        if self.review_evidence_authority is not self._program.review_evidence_authority:
+        if (
+            self.review_evidence_authority
+            is not self._composition_review_evidence_authority
+            or self._program.review_evidence_authority
+            is not self._composition_review_evidence_authority
+        ):
             raise MultiRepositoryExecutionError(
                 "Product Factory review authority changed after composition"
             )
-        if self._coordinator_checkpoints._store is not self._program.store:
+        if self._coordinator_checkpoints._store is not self._composition_store:
             raise MultiRepositoryExecutionError(
                 "Product Factory checkpoint store changed after composition"
+            )
+        if self._program._ledger._store is not self._composition_store:
+            raise MultiRepositoryExecutionError(
+                "Product Factory idempotency store changed after composition"
+            )
+        if self._program._ownership._store is not self._composition_store:
+            raise MultiRepositoryExecutionError(
+                "Product Factory ownership store changed after composition"
             )
 
     def initialize(
