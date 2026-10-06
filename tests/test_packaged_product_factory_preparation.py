@@ -168,6 +168,47 @@ class FailureResultWorker:
         raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
 
 
+class CrashThenRecoverWorker:
+    def __init__(self) -> None:
+        self.dispatch_calls = 0
+        self.inspect_calls = 0
+        self.recover_calls = 0
+
+    @staticmethod
+    def _failure(request) -> WorkerResultEnvelope:
+        return WorkerResultEnvelope(
+            work_id=request.work_id,
+            component_id=request.component_id,
+            repository_id=request.repository_id,
+            base_sha=request.base_sha,
+            result_sha="e" * 40,
+            diff_digest="b" * 64,
+            coding_result=CodingResult(
+                job_id=request.work_id,
+                failure=WorkerFailure(
+                    kind=WorkerFailureKind.PROCESS_FAILED,
+                    message="recovered deterministic worker failure",
+                    retryable=True,
+                ),
+            ),
+            producer_actor_id="worker-actor",
+        )
+
+    async def dispatch(self, request):
+        self.dispatch_calls += 1
+        raise asyncio.CancelledError
+
+    async def inspect(self, work_id: str) -> RecoveryState | None:
+        self.inspect_calls += 1
+        return RecoveryState(phase="running", opaque_token=f"resume:{work_id}")
+
+    async def recover(self, request, state):
+        self.recover_calls += 1
+        assert state.phase == "running"
+        assert state.opaque_token == f"resume:{request.work_id}"
+        return self._failure(request)
+
+
 def _fixture(tmp_path: Path, *, worker=None):
     store = SQLiteStore(tmp_path / "product factory підготовка.db")
     store.initialize()
@@ -316,6 +357,58 @@ def test_prepare_after_execution_progress_restores_latest_without_reset(
     assert resumed.state.coordinator.snapshot() == progressed
     assert resumed.state.coordinator is not prepared.state.coordinator
     assert worker.dispatch_calls == 1
+
+
+def test_prepare_after_crash_left_running_recovers_without_redispatch(
+    tmp_path: Path,
+) -> None:
+    worker = CrashThenRecoverWorker()
+    (
+        _store,
+        _repository,
+        _tasks,
+        service,
+        project,
+        _graph,
+        plan,
+        _bases,
+        _goals,
+    ) = _fixture(tmp_path, worker=worker)
+    prepared = service.prepare(plan)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(
+            service._host.dispatch_ready(
+                host_task_id=prepared.host_task_id,
+                state=prepared.state,
+                max_parallel=1,
+                max_count=1,
+            )
+        )
+
+    crash_snapshot = prepared.state.coordinator.snapshot()
+    assert crash_snapshot.records[0].state is WorkState.RUNNING
+    assert worker.dispatch_calls == 1
+
+    resumed = service.prepare(plan)
+    assert resumed.state.coordinator.snapshot() == crash_snapshot
+
+    outcomes = asyncio.run(
+        service._host.recover_running(
+            host_task_id=resumed.host_task_id,
+            state=resumed.state,
+            max_parallel=1,
+        )
+    )
+
+    assert len(outcomes) == 1
+    assert outcomes[0].disposition.value == "repair_required"
+    assert worker.dispatch_calls == 1
+    assert worker.inspect_calls == 1
+    assert worker.recover_calls == 1
+    recovered = service.restore(project.project_id)
+    assert recovered.state.coordinator.snapshot() == resumed.state.coordinator.snapshot()
+    assert recovered.state.coordinator.snapshot().records[0].state is WorkState.REPAIR_REQUIRED
 
 
 def test_prepare_rejects_changed_plan_without_resetting_durable_progress(
