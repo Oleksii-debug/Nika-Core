@@ -72,7 +72,13 @@ def test_product_project_renderer_tracks_bounded_bridge_projection() -> None:
     assert "node.textContent = String(project[field]);" in render_block
     assert "renderProductProjectStatuses(project);" in render_block
     assert "renderProductProjectOperator(project.operator);" in render_block
-    assert "productProjectOperatorFields[field].textContent = operator[field];" in render_block
+    operator_renderer = _between(
+        source,
+        "function renderProductProjectOperator(operator) {",
+        "function renderProductProject(project) {",
+    )
+    assert "productProjectOperatorFields[field].textContent = operator[field];" in operator_renderer
+    assert "innerHTML" not in operator_renderer
     assert "productProjectDecisionFields.question.textContent = decision.question;" in render_block
     assert 'productProjectDecisionFields.state.textContent = "Очікує рішення";' in render_block
     assert "productProjectDecision.hidden = false;" in render_block
