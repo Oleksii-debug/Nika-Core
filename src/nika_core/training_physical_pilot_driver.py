@@ -985,10 +985,10 @@ def _physical_training_max_steps(
         raise TypeError("tier must be exact TrainingScaleTier")
     if tier.max_steps < 2:
         _fail("physical training tier must allow the durable two-step proof boundary")
-    if tier.max_steps > PHYSICAL_TRAINING_MAX_STEPS:
-        _fail("physical training tier max_steps exceeds the physical execution ceiling")
     if tier_index == 0:
         return 2
+    if tier.max_steps > PHYSICAL_TRAINING_MAX_STEPS:
+        _fail("physical training tier max_steps exceeds the physical execution ceiling")
     return tier.max_steps
 
 
