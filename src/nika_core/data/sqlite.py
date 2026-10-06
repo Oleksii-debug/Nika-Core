@@ -57,6 +57,12 @@ class SQLiteStore:
         if actual_identity != self._database_identity:
             raise ValueError("connection does not belong to this SQLiteStore")
 
+    def require_transaction_connection(self, conn: sqlite3.Connection) -> None:
+        """Require an owned connection whose SQLite transaction is already active."""
+        self.require_connection(conn)
+        if not conn.in_transaction:
+            raise ValueError("connection must have an active caller-owned transaction")
+
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
         self.path.parent.mkdir(parents=True, exist_ok=True)

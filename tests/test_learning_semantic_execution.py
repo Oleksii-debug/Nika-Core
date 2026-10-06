@@ -726,3 +726,23 @@ def test_idempotency_rejects_foreign_caller_owned_connection(
 
     assert ledger.list_for_task("foreign-connection-task") == ()
     assert IdempotencyLedger(foreign_store).list_for_task("foreign-connection-task") == ()
+
+def test_idempotency_requires_active_caller_owned_transaction(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "idempotency-active-transaction.db")
+    store.initialize()
+    ledger = IdempotencyLedger(store)
+
+    with store.connection() as conn:
+        assert conn.in_transaction is False
+        with pytest.raises(ValueError, match="active caller-owned transaction"):
+            ledger.reserve_with_connection(
+                conn,
+                operation_key="learning-semantic-update:" + "e" * 64,
+                task_id="missing-transaction-task",
+                operation_type="learning.semantic_update",
+                input_fingerprint="e" * 64,
+            )
+
+    assert ledger.list_for_task("missing-transaction-task") == ()
