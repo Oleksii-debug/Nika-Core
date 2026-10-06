@@ -267,6 +267,7 @@ def test_voice_model_setup_inflight_task_cancel_waits_for_worker_settlement(
     worker_settled = model_setup.Event()
     cancel_event = model_setup.Event()
     started_event = model_setup.Event()
+    submission_cancelled_event = model_setup.Event()
 
     def blocked_install(
         source_text: str,
@@ -293,6 +294,7 @@ def test_voice_model_setup_inflight_task_cancel_waits_for_worker_settlement(
                 generation=1,
                 cancel_event=cancel_event,
                 started_event=started_event,
+                submission_cancelled_event=submission_cancelled_event,
             )
         )
         loop = asyncio.get_running_loop()
@@ -328,6 +330,8 @@ def test_voice_model_setup_precancelled_run_never_starts_worker(
     cancel_event = model_setup.Event()
     cancel_event.set()
     started_event = model_setup.Event()
+    submission_cancelled_event = model_setup.Event()
+    submission_cancelled_event.set()
     calls = 0
 
     def forbidden_install(
@@ -353,6 +357,7 @@ def test_voice_model_setup_precancelled_run_never_starts_worker(
                 generation=1,
                 cancel_event=cancel_event,
                 started_event=started_event,
+                submission_cancelled_event=submission_cancelled_event,
             )
         )
 
