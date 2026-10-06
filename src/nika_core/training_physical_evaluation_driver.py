@@ -990,16 +990,33 @@ def _find_pilot_task(
     workspace_id: str,
     job_id: str,
 ) -> TaskRecord:
-    matches = tuple(
-        task
-        for task in TaskQueue(store).list_recent(limit=500)
-        if task.workspace_id == workspace_id
-        and task.agent_id == "physical-peft-pilot"
-        and _matches_physical_training_task_payload(
-            task.payload,
-            job_id=job_id,
+    matches: list[TaskRecord] = []
+    queue = TaskQueue(store)
+    with store.connection() as conn:
+        conn.execute("BEGIN")
+        cursor = conn.execute(
+            "SELECT task_id, workspace_id, agent_id, state, payload_json "
+            "FROM tasks WHERE workspace_id = ? AND agent_id = ? "
+            "ORDER BY task_id ASC",
+            (workspace_id, "physical-peft-pilot"),
         )
-    )
+        while True:
+            rows = cursor.fetchmany(128)
+            if not rows:
+                break
+            for row in rows:
+                task = queue._record_from_row(row)
+                if not _matches_physical_training_task_payload(
+                    task.payload,
+                    job_id=job_id,
+                ):
+                    continue
+                matches.append(task)
+                if len(matches) > 1:
+                    _fail(
+                        "physical pilot database must contain exactly one matching "
+                        "training task"
+                    )
     if len(matches) != 1:
         _fail("physical pilot database must contain exactly one matching training task")
     return matches[0]
