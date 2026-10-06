@@ -946,7 +946,7 @@ def verify(root: Path) -> None:
     if type(workspace_id) is not str or not workspace_id:
         _fail("tier-0 workspace identity is invalid")
     tier0_package_path = root / "frozen-package.json"
-    tier0_package = _load_frozen_package_snapshot(
+    tier0_package, tier0_package_bytes = _frozen_package_snapshot(
         tier0_package_path,
         expected_manifest_sha256=str(
             tier0_config.get("frozen_package_sha256", "")
@@ -1202,7 +1202,7 @@ def verify(root: Path) -> None:
     )
     _write_new(
         evidence / "tier0-frozen-package.json",
-        tier0_package.to_json().encode("utf-8"),
+        tier0_package_bytes,
     )
     _write_new(
         evidence / "tier1-frozen-package.json",

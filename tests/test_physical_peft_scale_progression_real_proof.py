@@ -217,11 +217,20 @@ def test_sha256_file_rejects_wrong_held_identity(
         proof._sha256_file(target)
 
 
-def test_scale_verify_preserves_admitted_tier1_package_bytes_for_evidence() -> None:
+def test_scale_verify_preserves_admitted_package_bytes_for_evidence() -> None:
     source = (
         _ROOT / "scripts" / "physical_peft_scale_progression_real_proof.py"
     ).read_text(encoding="utf-8")
 
+    assert (
+        "tier0_package, tier0_package_bytes = _frozen_package_snapshot("
+        in source
+    )
+    assert (
+        'evidence / "tier0-frozen-package.json",\\n'
+        "        tier0_package_bytes,"
+        in source
+    )
     assert (
         "tier1_package, tier1_package_bytes = _frozen_package_snapshot("
         in source
