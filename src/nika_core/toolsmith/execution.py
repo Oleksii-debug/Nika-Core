@@ -29,6 +29,7 @@ from nika_core.toolsmith.workspace_security import (
     ensure_real_directory_root,
     sterile_process_environment,
     validate_git_branch_name,
+    validate_git_commit_sha,
     validate_sterile_git_config_args,
     validate_sterile_git_environment,
     validate_typed_argv,
@@ -68,6 +69,7 @@ class PreparedGitWorkspace:
     tree_evidence: TreeEvidence
 
     def __post_init__(self) -> None:
+        validate_git_commit_sha(self.head_sha, label="private workspace HEAD")
         if self.head_sha.lower() != self.plan.base_sha.lower():
             raise WorkspaceSecurityError("private workspace HEAD must equal the pinned base SHA")
         if self.remotes:

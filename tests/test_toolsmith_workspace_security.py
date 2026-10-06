@@ -168,6 +168,67 @@ def test_sterile_git_plan_rejects_noncanonical_execution_context(tmp_path: Path)
 
 
 @pytest.mark.parametrize(
+    "base_sha",
+    (
+        "a" * 39,
+        "a" * 41,
+        "g" * 40,
+        ("a" * 39) + " ",
+    ),
+)
+def test_sterile_git_plan_rejects_invalid_base_sha(
+    tmp_path: Path,
+    base_sha: str,
+) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-invalid-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name="toolsmith/job",
+            base_sha=base_sha,
+        )
+
+
+def test_sterile_git_plan_rejects_behavioral_base_sha(tmp_path: Path) -> None:
+    class BaseSha(str):
+        pass
+
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-behavioral-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name="toolsmith/job",
+            base_sha=BaseSha("a" * 40),
+        )
+
+
+def test_sterile_git_plan_preserves_uppercase_hex_base_sha(tmp_path: Path) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-uppercase-base"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/job",
+        base_sha="A" * 40,
+    )
+
+    assert plan.base_sha == "A" * 40
+
+
+@pytest.mark.parametrize(
     "branch_name",
     (
         " toolsmith/job",
@@ -320,6 +381,20 @@ def test_tree_evidence_refuses_symlinks(tmp_path: Path) -> None:
         pytest.skip("symlink creation unavailable on this host")
     with pytest.raises(WorkspaceSecurityError, match="symlinks"):
         collect_tree_evidence(root)
+
+
+def test_production_integrity_snapshot_rejects_behavioral_identity_carriers() -> None:
+    class BaseSha(str):
+        pass
+
+    class TreeDigest(str):
+        pass
+
+    with pytest.raises(WorkspaceSecurityError, match="40-character hexadecimal SHA"):
+        ProductionIntegritySnapshot(BaseSha("c" * 40), "d" * 64)
+
+    with pytest.raises(WorkspaceSecurityError, match="tree_digest"):
+        ProductionIntegritySnapshot("c" * 40, TreeDigest("d" * 64))
 
 
 def test_production_integrity_must_match_exactly() -> None:

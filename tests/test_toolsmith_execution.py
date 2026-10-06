@@ -775,6 +775,33 @@ def test_typed_runner_uses_final_executable_launch_guard(
     assert observed[0] == pathlib.Path(sys.executable).resolve(strict=True)
 
 
+def test_prepared_git_workspace_rejects_behavioral_head_sha() -> None:
+    class HeadSha(str):
+        pass
+
+    plan = execution_module.SterileGitPlan(
+        repository_root=pathlib.Path("production"),
+        private_git_dir=pathlib.Path("jobs") / "_nika_private_git",
+        worktree_root=pathlib.Path("jobs") / "worktree",
+        branch_name="toolsmith/job",
+        base_sha="a" * 40,
+        environment={},
+        config_args=(),
+    )
+
+    with pytest.raises(WorkspaceSecurityError, match="private workspace HEAD"):
+        execution_module.PreparedGitWorkspace(
+            plan=plan,
+            head_sha=HeadSha("a" * 40),
+            remotes=(),
+            tree_evidence=execution_module.TreeEvidence(
+                files=(),
+                digest="b" * 64,
+                total_bytes=0,
+            ),
+        )
+
+
 def test_private_git_workspace_refuses_ambiguous_reuse(tmp_path: pathlib.Path) -> None:
     repository, base_sha = _make_source_repository(tmp_path)
     job_root = tmp_path / "jobs" / "job-1"
