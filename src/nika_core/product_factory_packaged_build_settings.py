@@ -16,11 +16,18 @@ from nika_core.product_factory_deployment import (
     Platform,
     ResourceEnvelope,
 )
+from nika_core.product_factory_multi_repository import MultiRepositoryExecutionState
 from nika_core.product_factory_packaged_build_authority import (
     PackagedBuildAuthorityError,
     PackagedBuildAuthorityRuntime,
     PackagedBuildAuthorityStore,
     PackagedBuildAuthorityTemplate,
+)
+from nika_core.product_factory_packaged_build_host import (
+    build_packaged_local_durable_build_host,
+)
+from nika_core.product_factory_packaged_build_loop import (
+    PackagedReviewedBuildLoopController,
 )
 from nika_core.product_factory_packaged_local_startup import (
     PackagedLocalProductFactoryStartup,
@@ -118,6 +125,89 @@ class ActivatedPackagedBuildRuntime:
             raise PackagedBuildRuntimeSettingsError(
                 "Компонент не має активної packaged PF5 конфігурації."
             )
+
+
+@dataclass(slots=True)
+class ConfiguredPackagedReviewedBuildController:
+    """Gate the canonical explicit PF5 controller by this launch's config membership."""
+
+    activation: ActivatedPackagedBuildRuntime
+    controller: PackagedReviewedBuildLoopController
+
+    def __post_init__(self) -> None:
+        if type(self.activation) is not ActivatedPackagedBuildRuntime:
+            raise TypeError("activation must be exact ActivatedPackagedBuildRuntime")
+        if type(self.controller) is not PackagedReviewedBuildLoopController:
+            raise TypeError(
+                "controller must be exact PackagedReviewedBuildLoopController"
+            )
+        if self.controller.authorities is not self.activation.runtime:
+            raise PackagedBuildRuntimeSettingsError(
+                "PF5 controller must share the exact activated authority runtime."
+            )
+
+    def advance_component(
+        self,
+        *,
+        state: MultiRepositoryExecutionState,
+        component_id: str,
+    ):
+        if type(state) is not MultiRepositoryExecutionState:
+            raise TypeError("state must be exact MultiRepositoryExecutionState")
+        matches = tuple(
+            component
+            for component in state.authority.graph.components
+            if component.component_id == component_id
+        )
+        if len(matches) != 1:
+            raise PackagedBuildRuntimeSettingsError(
+                "Компонент відсутній або неоднозначний у поточному repository graph."
+            )
+        component = matches[0]
+        self.activation.require_component(
+            project_id=state.authority.project_id,
+            repository_id=component.repository_id,
+            component_id=component.component_id,
+        )
+        return self.controller.advance_component(
+            state=state,
+            component_id=component.component_id,
+        )
+
+
+def build_configured_packaged_reviewed_build_controller(
+    store: SQLiteStore,
+    *,
+    host_task_id: str,
+    project_id: str,
+    startup: PackagedLocalProductFactoryStartup,
+    activation: ActivatedPackagedBuildRuntime,
+) -> ConfiguredPackagedReviewedBuildController:
+    """Compose explicit packaged PF5 build authority without enabling PF6 implicitly."""
+
+    if type(store) is not SQLiteStore:
+        raise TypeError("store must be exact SQLiteStore")
+    if type(startup) is not PackagedLocalProductFactoryStartup:
+        raise TypeError("startup must be exact PackagedLocalProductFactoryStartup")
+    if type(activation) is not ActivatedPackagedBuildRuntime:
+        raise TypeError("activation must be exact ActivatedPackagedBuildRuntime")
+    host = build_packaged_local_durable_build_host(
+        store,
+        host_task_id=host_task_id,
+        project_id=project_id,
+        node=activation.node,
+        startup=startup,
+        trusted_authority=activation.runtime.trusted_execution,
+        output_policies=activation.runtime.output_policies,
+    )
+    controller = PackagedReviewedBuildLoopController(
+        authorities=activation.runtime,
+        build_host=host,
+    )
+    return ConfiguredPackagedReviewedBuildController(
+        activation=activation,
+        controller=controller,
+    )
 
 
 def activate_packaged_build_runtime(
@@ -559,7 +649,12 @@ def _text(mapping: Mapping[str, object], key: str) -> str:
         type(value) is not str
         or not value
         or value != value.strip()
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or character in "\u0085\u2028\u2029"
+            for character in value
+        )
     ):
         raise PackagedBuildRuntimeSettingsError(
             f"PF5 поле {key} має бути канонічним непорожнім текстом."

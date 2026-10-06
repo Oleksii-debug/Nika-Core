@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -15,11 +17,16 @@ from nika_core.product_factory_deployment import (
     ResourceEnvelope,
 )
 from nika_core.product_factory_local_coding import ContainedLocalCodingPolicy
+from nika_core.product_factory_multi_repository import MultiRepositoryExecutionState
 from nika_core.product_factory_packaged_build_authority import (
     PackagedBuildAuthorityStore,
     PackagedBuildAuthorityTemplate,
 )
+from nika_core.product_factory_packaged_build_loop import (
+    PackagedReviewedBuildLoopController,
+)
 from nika_core.product_factory_packaged_build_settings import (
+    ConfiguredPackagedReviewedBuildController,
     PackagedBuildRuntimeConfig,
     PackagedBuildRuntimeSettings,
     PackagedBuildRuntimeSettingsError,
@@ -104,6 +111,29 @@ def test_decode_rejects_duplicate_json_key() -> None:
 
     with pytest.raises(PackagedBuildRuntimeSettingsError, match="некоректний"):
         decode_packaged_build_runtime_config(raw)
+
+
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_decode_rejects_unicode_line_separators_across_runtime_authority(
+    separator: str,
+) -> None:
+    node_payload = _payload()
+    node = dict(cast(dict[str, object], node_payload["node"]))
+    node["architecture"] = f"x86{separator}64"
+    node_payload["node"] = node
+
+    with pytest.raises(PackagedBuildRuntimeSettingsError, match="node або component"):
+        decode_packaged_build_runtime_config(_json(node_payload))
+
+    feature_payload = _payload()
+    templates = feature_payload["templates"]
+    assert isinstance(templates, list)
+    template = dict(templates[0])
+    template["required_features"] = ["build", f"gpu{separator}scope"]
+    feature_payload["templates"] = [template]
+
+    with pytest.raises(PackagedBuildRuntimeSettingsError, match="node або component"):
+        decode_packaged_build_runtime_config(_json(feature_payload))
 
 
 def test_decode_rejects_template_for_another_node() -> None:
@@ -281,3 +311,97 @@ def test_activation_changes_revision_only_when_host_template_changes(
 
     assert authority.revision == 2
     assert authority.template.argv[-1] == "print('changed')"
+
+def _configured_state(
+    *,
+    project_id: str = PROJECT_ID,
+    repository_id: str = "repo-core",
+    component_id: str = "core",
+) -> MultiRepositoryExecutionState:
+    graph = SimpleNamespace(
+        components=(
+            SimpleNamespace(
+                component_id=component_id,
+                repository_id=repository_id,
+            ),
+        )
+    )
+    authority = SimpleNamespace(project_id=project_id, graph=graph)
+    return MultiRepositoryExecutionState(
+        authority=cast(Any, authority),
+        binding=cast(Any, object()),
+        coordinator=cast(Any, object()),
+    )
+
+
+def test_configured_controller_allows_only_launch_frozen_component(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, startup, config = _activation_config(tmp_path)
+    activation = activate_packaged_build_runtime(
+        store,
+        startup=startup,
+        config=config,
+    )
+    controller = object.__new__(PackagedReviewedBuildLoopController)
+    object.__setattr__(controller, "authorities", activation.runtime)
+    object.__setattr__(controller, "build_host", cast(Any, object()))
+    object.__setattr__(controller, "deployment_handoff", None)
+    sentinel = object()
+
+    def advance(_self, *, state, component_id):
+        assert type(state) is MultiRepositoryExecutionState
+        assert component_id == "core"
+        return sentinel
+
+    monkeypatch.setattr(
+        PackagedReviewedBuildLoopController,
+        "advance_component",
+        advance,
+    )
+    configured = ConfiguredPackagedReviewedBuildController(
+        activation=activation,
+        controller=controller,
+    )
+
+    assert configured.advance_component(
+        state=_configured_state(),
+        component_id="core",
+    ) is sentinel
+
+
+def test_configured_controller_rejects_stale_component_before_pf5_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store, startup, config = _activation_config(tmp_path)
+    activation = activate_packaged_build_runtime(
+        store,
+        startup=startup,
+        config=config,
+    )
+    controller = object.__new__(PackagedReviewedBuildLoopController)
+    object.__setattr__(controller, "authorities", activation.runtime)
+    object.__setattr__(controller, "build_host", cast(Any, object()))
+    object.__setattr__(controller, "deployment_handoff", None)
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("stale component must not reach PF5 controller")
+
+    monkeypatch.setattr(
+        PackagedReviewedBuildLoopController,
+        "advance_component",
+        forbidden,
+    )
+    configured = ConfiguredPackagedReviewedBuildController(
+        activation=activation,
+        controller=controller,
+    )
+
+    with pytest.raises(PackagedBuildRuntimeSettingsError, match="активної"):
+        configured.advance_component(
+            state=_configured_state(component_id="removed"),
+            component_id="removed",
+        )
+

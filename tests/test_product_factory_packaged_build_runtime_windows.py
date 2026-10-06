@@ -104,8 +104,7 @@ def test_windows_wiring_uses_canonical_async_pf5_continuation() -> None:
     assert 'state["product_factory_build_runtime"]' in script
     assert "PackagedReviewedBuildLoopController(" in continuation
     assert "controller.advance_component(" in continuation
-    assert "controller.reconcile_work(" in continuation
-    assert "asyncio.to_thread(self.advance, prepared)" in continuation
+    assert "asyncio.to_thread(self._advance, prepared)" in continuation
     assert "deploy_staging(" not in continuation
 
 

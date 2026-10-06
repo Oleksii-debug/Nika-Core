@@ -227,6 +227,25 @@ def _template(
     )
 
 
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_template_rejects_unicode_line_separators_in_authority_sets(
+    separator: str,
+) -> None:
+    base = _template()
+
+    with pytest.raises(PackagedBuildAuthorityError, match="canonical text"):
+        replace(
+            base,
+            required_features=frozenset({"build", f"gpu{separator}scope"}),
+        )
+
+    with pytest.raises(PackagedBuildAuthorityError, match="canonical text"):
+        replace(
+            base,
+            required_toolchains=frozenset({"python", f"tool{separator}chain"}),
+        )
+
+
 def _runtime(
     tmp_path: Path,
 ) -> tuple[
