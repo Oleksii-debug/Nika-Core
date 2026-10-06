@@ -170,7 +170,7 @@ def _parse_utc(value: object, *, field_name: str) -> datetime:
 
 
 def _validate_retry_count(value: int, *, field_name: str, minimum: int) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+    if type(value) is not int or value < minimum:
         qualifier = "positive" if minimum == 1 else "non-negative"
         raise ValueError(f"{field_name} must be a {qualifier} integer")
     return value
@@ -184,7 +184,7 @@ def _normalize_retry_number(value: float, *, field_name: str) -> float:
 
 
 def _validate_retry_delay(value: float, *, field_name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
+    if type(value) not in (int, float):
         raise TypeError(f"{field_name} must be a finite non-negative number")
     normalized = _normalize_retry_number(value, field_name=field_name)
     if not isfinite(normalized) or normalized < 0:

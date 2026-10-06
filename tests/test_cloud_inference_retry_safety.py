@@ -111,6 +111,26 @@ class _SpoofingSafetyKey(str):
     """String-shaped key whose carrier type must not cross the retry boundary."""
 
 
+class _SpoofingRetryCount(int):
+    """Integer-shaped counter that lies at retry-limit comparisons."""
+
+    def __lt__(self, other: object) -> bool:
+        del other
+        return False
+
+    def __ge__(self, other: object) -> bool:
+        del other
+        return False
+
+
+class _SpoofingRetryDelay(float):
+    """Float-shaped delay that lies about being zero after validation."""
+
+    def __eq__(self, other: object) -> bool:
+        del other
+        return True
+
+
 def test_fresh_retry_rejects_behavioral_output_mapping_authority() -> None:
     output = _BehavioralSafetyOutput()
     assert "provider_retryable" in output
@@ -177,6 +197,43 @@ def test_fresh_retry_preserves_exact_generic_output_compatibility() -> None:
 
     assert fresh_retry_safety_evidence(result) is None
     assert policy.should_retry(result, retries_used=0) is True
+
+
+def test_retry_policy_rejects_behavioral_retry_count_carriers() -> None:
+    spoofed = _SpoofingRetryCount(1)
+    assert int(spoofed) == 1
+    assert (spoofed >= 1) is False
+
+    with pytest.raises(ValueError, match="max_retries must be a non-negative integer"):
+        RetryPolicy(max_retries=spoofed)
+
+    result = RuntimeResult(
+        outcome=RuntimeOutcome.FAILED,
+        output={"diagnostic": "temporary"},
+        error="temporary generic runtime failure",
+        error_code=RuntimeErrorCode.TRANSIENT,
+    )
+    policy = _cloud_retry_policy()
+    with pytest.raises(ValueError, match="retries_used must be a non-negative integer"):
+        policy.should_retry(result, retries_used=spoofed)
+
+
+def test_retry_policy_rejects_behavioral_backoff_carrier() -> None:
+    spoofed = _SpoofingRetryDelay(1.0)
+    assert float(spoofed) == 1.0
+    assert spoofed == 0
+
+    with pytest.raises(
+        TypeError,
+        match="base_delay_seconds must be a finite non-negative number",
+    ):
+        RetryPolicy(
+            max_retries=1,
+            retryable_error_codes=frozenset({RuntimeErrorCode.TRANSIENT}),
+            base_delay_seconds=spoofed,
+            max_delay_seconds=1.0,
+            allow_fresh_retry=True,
+        )
 
 
 class _ForeignRetryRuntime:
