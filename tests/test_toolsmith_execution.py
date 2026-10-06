@@ -365,6 +365,86 @@ def test_private_git_rejects_replacement_after_host_git_admission(
     assert run_called is False
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor identity only")
+def test_posix_executable_admission_rejects_path_swap_after_descriptor_open(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner"
+    replacement = tmp_path / "replacement"
+    executable.write_bytes(b"trusted executable bytes")
+    replacement.write_bytes(b"replacement executable bytes")
+    original_resolve = execution_module._resolve_pinned_executable
+    calls = 0
+
+    def swapping_resolve(
+        candidate: pathlib.Path,
+        arguments: tuple[str, ...],
+    ) -> pathlib.Path:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            os.replace(replacement, executable)
+        return original_resolve(candidate, arguments)
+
+    monkeypatch.setattr(
+        execution_module,
+        "_resolve_pinned_executable",
+        swapping_resolve,
+    )
+
+    with pytest.raises(
+        execution_module.ProcessExecutionError,
+        match="changed before process launch",
+    ):
+        execution_module._admit_pinned_executable(executable, ())
+
+    assert calls == 2
+    assert executable.read_bytes() == b"replacement executable bytes"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics only")
+def test_windows_executable_admission_holds_lock_through_readmission(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = tmp_path / "runner.exe"
+    replacement = tmp_path / "replacement.exe"
+    executable.write_bytes(b"trusted executable bytes")
+    replacement.write_bytes(b"replacement executable bytes")
+    original_resolve = execution_module._resolve_pinned_executable
+    calls = 0
+    replacement_blocked = False
+
+    def probing_resolve(
+        candidate: pathlib.Path,
+        arguments: tuple[str, ...],
+    ) -> pathlib.Path:
+        nonlocal calls, replacement_blocked
+        calls += 1
+        if calls == 2:
+            with pytest.raises(OSError):
+                os.replace(replacement, executable)
+            replacement_blocked = True
+        return original_resolve(candidate, arguments)
+
+    monkeypatch.setattr(
+        execution_module,
+        "_resolve_pinned_executable",
+        probing_resolve,
+    )
+
+    admission = execution_module._admit_pinned_executable(executable, ())
+
+    assert calls == 2
+    assert replacement_blocked is True
+    assert admission.sha256 == execution_module._pinned_executable_sha256(executable)
+    assert replacement.exists()
+
+    os.replace(replacement, executable)
+    assert executable.read_bytes() == b"replacement executable bytes"
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows CreateProcess boundary only")
 def test_windows_typed_runner_holds_launch_paths_during_popen(
     tmp_path: pathlib.Path,
