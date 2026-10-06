@@ -273,7 +273,7 @@ class MultiRepositoryProductFactoryHost:
         component_goals: Mapping[str, str],
         permission_ceiling: frozenset[str],
     ) -> MultiRepositoryExecutionState:
-        """Bind one immutable graph authority and create the first durable work checkpoint."""
+        """Bind fresh authority or resume an exact durable plan without resetting progress."""
 
         self._assert_program_composition()
         binding = self._binding(project, graph)
@@ -283,23 +283,46 @@ class MultiRepositoryProductFactoryHost:
             graph=graph,
             graph_version=graph_version,
         )
-        coordinator = binding.plan(
+        candidate = binding.plan(
             base_shas=dict(base_shas),
             component_goals=dict(component_goals),
             permission_ceiling=permission_ceiling,
         )
-        self._coordinator_checkpoints.save(
+        existing = self._coordinator_checkpoints.latest(
             host_task_id=host_task_id,
-            checkpoint=binding.checkpoint(coordinator),
-            read_only_precondition=lambda conn: self._require_exact_project_version(
-                conn,
-                project_id=authority.project_id,
-                spec_version=authority.spec_version,
-                row_version=authority.row_version,
-            ),
+            project_id=authority.project_id,
         )
+        if existing is None:
+            self._coordinator_checkpoints.save(
+                host_task_id=host_task_id,
+                checkpoint=binding.checkpoint(candidate),
+                read_only_precondition=lambda conn: self._require_exact_project_version(
+                    conn,
+                    project_id=authority.project_id,
+                    spec_version=authority.spec_version,
+                    row_version=authority.row_version,
+                ),
+            )
+            coordinator = candidate
+        else:
+            if (
+                existing.checkpoint.trusted_plan_fingerprint
+                != candidate.trusted_plan_fingerprint
+            ):
+                raise MultiRepositoryExecutionError(
+                    "durable Product Factory trusted plan authority "
+                    "does not match candidate plan"
+                )
+            coordinator = self._program.restore_latest(
+                host_task_id=host_task_id,
+                binding=binding,
+            )
         state = MultiRepositoryExecutionState(authority, binding, coordinator)
         self._assert_state(host_task_id=host_task_id, state=state)
+        self._validate_repair_lineage(
+            host_task_id=host_task_id,
+            state=state,
+        )
         return state
 
     def restore(
