@@ -4,7 +4,7 @@ import hashlib
 import importlib.util
 import json
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -166,6 +166,102 @@ def test_prepare_tier0_rejects_wrong_frozen_package_digest(
 
     with pytest.raises(ValueError, match="trusted learning-package digest mismatch"):
         proof.prepare_tier0(tmp_path)
+
+
+def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = _package()
+    (tmp_path / "frozen-package.json").write_text(
+        package.to_json(),
+        encoding="utf-8",
+    )
+    tier0_config = {
+        "schema_version": 2,
+        "workspace_id": "physical-proof-workspace",
+        "frozen_package_sha256": package.manifest_sha256,
+        "base_artifact_ref": "models/base",
+        "output_root": str(tmp_path / "run"),
+        "candidate_artifact_ref": "models/tier0-adapter",
+        "scale_plan": {
+            "plan_id": "physical-real-scale-progression",
+            "tiers": [
+                {"tier_id": "pilot", "max_steps": 2},
+                {"tier_id": "scale-1", "max_steps": 3},
+            ],
+        },
+    }
+    (tmp_path / "physical-pilot.json").write_text(
+        json.dumps(tier0_config),
+        encoding="utf-8",
+    )
+    tier0_root = tmp_path / "run"
+    tier0_root.mkdir()
+    candidate = tmp_path / "tier0-adapter.safetensors"
+    candidate.write_bytes(b"promoted-adapter")
+    candidate_sha256 = _sha(candidate.read_bytes())
+    report = SimpleNamespace(
+        candidate_artifact_ref="models/tier0-adapter",
+        candidate_sha256=candidate_sha256,
+        candidate_byte_count=candidate.stat().st_size,
+    )
+    (tier0_root / "physical-old-new-evaluation-report.json").write_text(
+        json.dumps(
+            {
+                "experiment_status": "promoted",
+                "selected_candidate_id": report.candidate_artifact_ref,
+            }
+        ),
+        encoding="utf-8",
+    )
+    claim = {
+        "plan_sha256": _sha(b"plan"),
+        "tier_index": 0,
+        "candidate_artifact_ref": report.candidate_artifact_ref,
+        "candidate_sha256": report.candidate_sha256,
+    }
+    progression = SimpleNamespace(
+        tier_index=0,
+        candidate_artifact_ref=report.candidate_artifact_ref,
+        candidate_sha256=report.candidate_sha256,
+        canonical_payload=lambda: claim,
+    )
+    monkeypatch.setattr(proof, "_pilot_report", lambda _root: report)
+    monkeypatch.setattr(
+        proof,
+        "_trusted_progression",
+        lambda _root, workspace_id: progression,
+    )
+    monkeypatch.setattr(
+        proof,
+        "candidate_artifact_path",
+        lambda _root, _ref: candidate,
+    )
+
+    proof.prepare_tier1(tmp_path)
+
+    tier1_package_path = tmp_path / "tier1-frozen-package.json"
+    tier1_package = FrozenLearningPackage.from_json(
+        tier1_package_path.read_bytes()
+    )
+    assert tier1_package.base_artifact_sha256 == candidate_sha256
+    assert tier1_package.evaluation_set_sha256 == package.evaluation_set_sha256
+    tier1 = json.loads(
+        (tmp_path / "tier1-physical-pilot.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert tier1["schema_version"] == 3
+    assert tier1["base_artifact_ref"] == report.candidate_artifact_ref
+    assert tier1["frozen_package_sha256"] == tier1_package.manifest_sha256
+    assert tier1["scale_tier_id"] == "scale-1"
+    assert tier1["progression_proof"] == claim
+    assert Path(tier1["initial_adapter_path"]) == candidate.resolve()
+    assert tier1["candidate_artifact_ref"] == (
+        "models/nika-physical-scale-tier1-adapter"
+    )
 
 
 def test_configure_promotion_uses_explicit_non_regression_policy(
