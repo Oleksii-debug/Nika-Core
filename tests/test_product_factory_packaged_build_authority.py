@@ -205,6 +205,7 @@ def _template(
     *,
     argv_suffix: tuple[str, ...] = (),
     node_id: str = NODE_ID,
+    max_changed_files: int = 8,
 ) -> PackagedBuildAuthorityTemplate:
     executable = str(Path(sys.executable).resolve())
     return PackagedBuildAuthorityTemplate(
@@ -220,7 +221,7 @@ def _template(
         command_id="build",
         argv=(executable, "-m", "build", *argv_suffix),
         output_paths=("products/build",),
-        max_changed_files=8,
+        max_changed_files=max_changed_files,
         lease_seconds=120,
     )
 
@@ -397,6 +398,37 @@ def test_stale_configure_revision_is_fail_closed(tmp_path: Path) -> None:
     )
     assert snapshot.revision == 1
     assert snapshot.template.argv[-2:] == ("-m", "build")
+
+
+def test_zero_output_ceiling_is_rejected_before_authority_storage(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "nika.db")
+    store.initialize()
+    authorities = PackagedBuildAuthorityStore(
+        store,
+        node=_node(),
+        startup=_startup(tmp_path),
+    )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="max_changed_files must be 1..10000",
+    ):
+        authorities.configure(
+            _template(max_changed_files=0),
+            expected_revision=0,
+        )
+
+    with pytest.raises(
+        PackagedBuildAuthorityError,
+        match="no packaged build authority",
+    ):
+        authorities.snapshot(
+            project_id=PROJECT_ID,
+            repository_id=REPOSITORY_ID,
+            component_id=COMPONENT_ID,
+        )
 
 
 def test_runtime_node_mismatch_is_rejected_before_persistence(
