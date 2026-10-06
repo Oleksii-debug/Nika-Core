@@ -49,3 +49,25 @@ def test_packaged_uia_proof_keeps_intelligence_and_targeted_task_journeys() -> N
     assert proof.index(intelligence) < proof.index(source) < proof.index(targeted)
     assert "if task_count != 0:" in proof
     assert "if len(rows) != 1:" in proof
+
+
+def test_current_terminal_voice_controls_coexist_with_command_authorities() -> None:
+    html = HTML.read_text(encoding="utf-8")
+    app = APP.read_text(encoding="utf-8")
+    entry = WINDOWS_ENTRY.read_text(encoding="utf-8")
+    proof = UIA_PROOF.read_text(encoding="utf-8")
+
+    assert 'id="voice-heading"' in html
+    assert 'id="voice-model-source"' in html
+    assert 'data-action-id="voice.start"' in html
+    assert 'data-action-id="voice.model.import"' in html
+    assert "build_packaged_voice(" in entry
+    assert "voice_model_setup = PackagedVoiceModelSetup(" in entry
+    assert '"voice.start": voice.start' in entry
+    assert '"voice.model.import": voice_model_setup.start' in entry
+    assert 'state["voice"] = voice.snapshot()' in entry
+    assert 'state["voice_model_setup"] = voice_model_setup.snapshot()' in entry
+    assert 'document.getElementById("voice-use-command")' in app
+    assert "commandInput.value = voiceTranscriptValue" in app
+    assert "'Голосовий ввід'," in proof
+    assert "'Перенести розпізнаний текст у поле команди'," in proof
