@@ -216,8 +216,9 @@ class PackagedProductCommandRouter:
 
     Product intent creates/reopens a durable PF1 ProductProject through the public PF5 adapter.
     Explicit daily-report and training-status intents may call injected read-only handlers.
-    This boundary deliberately does not dispatch workers, deploy providers, Toolsmith, or any
-    high-impact external action. Those remain downstream explicit factory/security boundaries.
+    Explicit Agent Builder intent delegates only to an injected safe-draft handler. Toolsmith
+    remains a separate fail-closed route. No high-impact external action is launched merely by
+    command classification.
     """
 
     def __init__(

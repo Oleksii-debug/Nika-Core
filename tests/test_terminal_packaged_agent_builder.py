@@ -9,6 +9,7 @@ import pytest
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.config import AppConfig
 from nika_core.data.sqlite import SQLiteStore
+from nika_core.kernel.audit import AuditLog
 from nika_core.packaged_agent_builder import (
     PackagedAgentBuilderDraftHandler,
     PackagedAgentBuilderStateProjector,
@@ -113,7 +114,7 @@ def test_builder_handler_rejects_noncanonical_text_before_string_behavior(
 ) -> None:
     handler, _repository, _store = _builder(tmp_path / "hostile.db")
 
-    with pytest.raises(ValueError, match="звичайним текстом"):
+    with pytest.raises(TypeError, match="звичайним текстом"):
         handler({"command": _HostileCommand("Create an agent")})
 
 
@@ -138,6 +139,11 @@ def test_handler_persists_review_only_restart_idempotent_draft(tmp_path: Path) -
     assert stored.required_human_approvals == ()
     assert stored.highest_risk == 0
     assert first_repository.active(agent_id) is None
+    events = AuditLog(first_store).list_for(
+        entity_type="agent_definition",
+        entity_id=f"{agent_id}:1",
+    )
+    assert [event.event_type for event in events] == ["agent_definition.draft_saved"]
 
     second, second_repository, _second_store = _builder(path)
     replay = second({"command": command})

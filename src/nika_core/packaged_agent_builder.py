@@ -127,7 +127,7 @@ class PackagedAgentBuilderDraftHandler:
 
 def _normalized_goal(value: object) -> str:
     if type(value) is not str:
-        raise ValueError("Команда Agent Builder має бути звичайним текстом.")
+        raise TypeError("Команда Agent Builder має бути звичайним текстом.")
     normalized = unicodedata.normalize("NFC", " ".join(value.split()))
     if not normalized:
         raise ValueError("Введіть опис агента перед створенням чернетки.")

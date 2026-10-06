@@ -103,6 +103,6 @@ def route_command(text: str, *, active_project_id: str | None = None) -> Command
         )
     return CommandRouteDecision(
         route=CommandRouteKind.AGENT_TASK,
-        reason="No high-confidence long-lived product or capability-building intent was found.",
+        reason="No high-confidence specialized intent was found.",
         normalized_goal=normalized,
     )
