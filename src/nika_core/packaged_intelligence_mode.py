@@ -168,7 +168,7 @@ class PackagedIntelligenceModeCommandAdapter:
             "timeout_seconds": 60.0,
         }
 
-        if mode in {"deterministic", "детермінований"} and len(parts) == 1:
+        if mode in {"deterministic", "no_llm", "детермінований"} and len(parts) == 1:
             return self._configure(
                 {
                     **common,
@@ -179,7 +179,7 @@ class PackagedIntelligenceModeCommandAdapter:
                 }
             )
 
-        if mode in {"foundry", "foundry_local"} and len(parts) == 2:
+        if mode in {"foundry", "foundry_local", "embedded"} and len(parts) == 2:
             return self._configure(
                 {
                     **common,
@@ -190,7 +190,7 @@ class PackagedIntelligenceModeCommandAdapter:
                 }
             )
 
-        if mode == "ollama" and len(parts) == 3:
+        if mode in {"ollama", "local_external"} and len(parts) == 3:
             return self._configure(
                 {
                     **common,
@@ -201,7 +201,7 @@ class PackagedIntelligenceModeCommandAdapter:
                 }
             )
 
-        if mode in {"api", "openai_compatible"} and len(parts) == 6:
+        if mode in {"api", "openai_compatible", "api_configured"} and len(parts) == 6:
             privacy = parts[5].casefold()
             if privacy not in {"public", "private"}:
                 return self._rejected()
