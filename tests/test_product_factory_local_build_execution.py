@@ -167,17 +167,23 @@ def _repository(tmp_path: pathlib.Path) -> tuple[pathlib.Path, str]:
     return root, sha
 
 
-def _command(*, secret: str | None = None, outside: bool = False) -> tuple[str, ...]:
-    statements = []
+def _command(
+    *,
+    secret: str | None = None,
+    outside: bool = False,
+    production_escape: pathlib.Path | None = None,
+) -> tuple[str, ...]:
+    statements = ["from pathlib import Path"]
     if secret is not None:
         statements.append(f"print({secret!r})")
     if outside:
         statements.append(
-            "from pathlib import Path; "
             "Path('../../outside.txt').write_text('outside', encoding='utf-8')"
         )
-    else:
-        statements.append("from pathlib import Path")
+    if production_escape is not None:
+        statements.append(
+            f"Path({str(production_escape)!r}).write_text('escape', encoding='utf-8')"
+        )
     statements.append("Path('artifact.bin').write_bytes(b'nika-build-artifact')")
     return (_python(), "-c", "; ".join(statements))
 
@@ -554,6 +560,31 @@ def test_out_of_policy_private_workspace_mutation_is_failed_not_published(tmp_pa
     assert adapter.collect(dispatch, result) == ()
     assert (root / "outside.txt").exists() is False
     assert (root / "products" / "build" / "artifact.bin").exists() is False
+
+
+def test_absolute_path_escape_into_production_repository_fails_integrity_gate(
+    tmp_path,
+) -> None:
+    root, sha = _repository(tmp_path)
+    store = _store(tmp_path)
+    escaped = root / "escaped-by-build.txt"
+    command = _command(production_escape=escaped)
+    adapter = _adapter(
+        tmp_path,
+        store,
+        root,
+        Authority(_authority("work-prod-escape", command)),
+        Policies(_policy("work-prod-escape")),
+    )
+    dispatch = _dispatch(sha, "work-prod-escape", command)
+
+    result = adapter.run(dispatch)
+
+    assert result.succeeded is False
+    assert result.uncertain is False
+    assert adapter.collect(dispatch, result) == ()
+    assert escaped.read_text(encoding="utf-8") == "escape"
+    assert adapter.inspect(dispatch) == result
 
 
 def test_process_output_is_not_persisted_in_receipt(tmp_path) -> None:
