@@ -6,6 +6,7 @@ import pathlib
 import shutil
 import sqlite3
 import subprocess
+import threading
 
 import pytest
 
@@ -676,7 +677,6 @@ def test_windows_bridge_blocks_new_factory_pass_after_startup_settings_change(
             callback()
 
 
-
 def test_windows_bridge_holds_write_fence_during_local_host_composition(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -742,7 +742,6 @@ def test_windows_bridge_holds_write_fence_during_local_host_composition(
             callback()
 
 
-
 def test_windows_bridge_does_not_activate_mixed_model_authority_during_startup(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -761,6 +760,10 @@ def test_windows_bridge_does_not_activate_mixed_model_authority_during_startup(
     seed_store.initialize()
     _configure_ollama(V01ModelSettings(seed_store))
     original_build = nika_windows.build_packaged_local_product_factory_program
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    writer_results: list[object] = []
+    writers: list[threading.Thread] = []
 
     def build_then_change_model(
         store: SQLiteStore,
@@ -773,13 +776,24 @@ def test_windows_bridge_does_not_activate_mixed_model_authority_during_startup(
             settings=settings,
             startup=startup,
         )
-        changed = settings.configure(
-            _changed_ollama_payload(
-                revision=1,
-                model="qwen3:8b-raced",
+
+        def mutate_model() -> None:
+            writer_started.set()
+            writer_results.append(
+                settings.configure(
+                    _changed_ollama_payload(
+                        revision=1,
+                        model="qwen3:8b-raced",
+                    )
+                )
             )
-        )
-        assert changed.status == "completed"
+            writer_finished.set()
+
+        writer = threading.Thread(target=mutate_model)
+        writer.start()
+        writers.append(writer)
+        assert writer_started.wait(timeout=1.0)
+        assert not writer_finished.is_set()
         return program
 
     monkeypatch.setattr(
@@ -797,13 +811,35 @@ def test_windows_bridge_does_not_activate_mixed_model_authority_during_startup(
             start_startup_recovery=False,
             register_cleanup=cleanup.append,
         )
+        for writer in writers:
+            writer.join(timeout=5.0)
+            assert not writer.is_alive()
+        assert writer_finished.is_set()
+        assert len(writer_results) == 1
+        changed = writer_results[0]
+        assert getattr(changed, "status") == "completed"
+
         state = bridge.get_state()
         assert (
             state["state"]["product_factory_local_startup"]["runtime_status"]
-            == "invalid"
+            == "restart_required"
         )
-        assert state["state"]["product_factory_execution_plan"] is None
+        created = _bridge_command(
+            bridge,
+            request_id="create-after-serialized-model-change",
+            command="Створи застосунок для доступного каталогу",
+        )
+        assert created["status"] == "completed"
+        run = _bridge_command(
+            bridge,
+            request_id="run-after-serialized-model-change",
+            command="Run current Product Factory",
+        )
+        assert run["status"] == "rejected"
+        assert run["focus_id"] == "model-route-kind"
     finally:
+        for writer in writers:
+            writer.join(timeout=5.0)
         for callback in reversed(cleanup):
             callback()
 
@@ -830,6 +866,10 @@ def test_windows_bridge_does_not_activate_changed_startup_authority_mid_build(
     )
     assert saved.status == "completed"
     original_build = nika_windows.build_packaged_local_product_factory_program
+    writer_started = threading.Event()
+    writer_finished = threading.Event()
+    writer_results: list[object] = []
+    writers: list[threading.Thread] = []
 
     def build_then_change_startup(
         store: SQLiteStore,
@@ -850,10 +890,21 @@ def test_windows_bridge_does_not_activate_changed_startup_authority_mid_build(
             sort_keys=True,
             separators=(",", ":"),
         )
-        changed = PackagedLocalProductFactorySettings(store).configure(
-            {"revision": 1, "config_json": changed_raw}
-        )
-        assert changed.status == "completed"
+
+        def mutate_startup() -> None:
+            writer_started.set()
+            writer_results.append(
+                PackagedLocalProductFactorySettings(store).configure(
+                    {"revision": 1, "config_json": changed_raw}
+                )
+            )
+            writer_finished.set()
+
+        writer = threading.Thread(target=mutate_startup)
+        writer.start()
+        writers.append(writer)
+        assert writer_started.wait(timeout=1.0)
+        assert not writer_finished.is_set()
         return program
 
     monkeypatch.setattr(
@@ -868,15 +919,38 @@ def test_windows_bridge_does_not_activate_changed_startup_authority_mid_build(
             start_startup_recovery=False,
             register_cleanup=cleanup.append,
         )
+        for writer in writers:
+            writer.join(timeout=5.0)
+            assert not writer.is_alive()
+        assert writer_finished.is_set()
+        assert len(writer_results) == 1
+        changed = writer_results[0]
+        assert getattr(changed, "status") == "completed"
+
         state = bridge.get_state()
         assert (
             state["state"]["product_factory_local_startup"]["runtime_status"]
-            == "invalid"
+            == "restart_required"
         )
-        assert state["state"]["product_factory_execution_plan"] is None
+        created = _bridge_command(
+            bridge,
+            request_id="create-after-serialized-startup-change",
+            command="Створи застосунок для доступного каталогу",
+        )
+        assert created["status"] == "completed"
+        run = _bridge_command(
+            bridge,
+            request_id="run-after-serialized-startup-change",
+            command="Run current Product Factory",
+        )
+        assert run["status"] == "rejected"
+        assert run["focus_id"] == "product-factory-local-startup-json"
     finally:
+        for writer in writers:
+            writer.join(timeout=5.0)
         for callback in reversed(cleanup):
             callback()
+
 
 def test_packaged_local_startup_html_exposes_semantic_keyboard_controls() -> None:
     html = (
