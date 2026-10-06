@@ -1057,7 +1057,15 @@ def _reject_sensitive_argv(argv: tuple[str, ...]) -> None:
 
 def _exact_text_set(value: object, label: str) -> None:
     if type(value) is not frozenset or any(
-        type(item) is not str or not item or item != item.strip()
+        type(item) is not str
+        or not item
+        or item != item.strip()
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or character in "\u0085\u2028\u2029"
+            for character in item
+        )
         for item in value
     ):
         raise PackagedBuildAuthorityError(
