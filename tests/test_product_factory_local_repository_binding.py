@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import pathlib
+import threading
 
 import pytest
+
+import nika_core.product_factory_local_repository_binding as binding_module
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_local_repository_binding import (
@@ -326,6 +329,100 @@ def test_resolve_rejects_replaced_repository_root(
         match="filesystem identity changed",
     ):
         bindings.resolve_for_plan(_plan(project, repository))
+
+
+def test_require_rejects_binding_changed_during_filesystem_validation(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    first_root = _root(tmp_path, "first repository")
+    second_root = _root(tmp_path, "second repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    first = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=first_root,
+        expected_binding_version=None,
+    )
+    validation_started = threading.Event()
+    validation_release = threading.Event()
+    original_require_identity = binding_module._require_filesystem_identity
+
+    def blocked_require_identity(
+        root: pathlib.Path,
+        expected: object,
+    ) -> None:
+        original_require_identity(root, expected)
+        if (
+            threading.current_thread().name == "binding-reader"
+            and root == first.root
+        ):
+            validation_started.set()
+            if not validation_release.wait(timeout=10):
+                raise AssertionError("reader validation release timed out")
+
+    monkeypatch.setattr(
+        binding_module,
+        "_require_filesystem_identity",
+        blocked_require_identity,
+    )
+    errors: list[BaseException] = []
+
+    def read_binding() -> None:
+        try:
+            bindings.require(project.project_id, repository.repository_id)
+        except BaseException as exc:
+            errors.append(exc)
+
+    reader = threading.Thread(target=read_binding, name="binding-reader")
+    reader.start()
+    assert validation_started.wait(timeout=10)
+
+    second = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=second_root,
+        expected_binding_version=first.binding_version,
+    )
+    assert second.binding_version == first.binding_version + 1
+    validation_release.set()
+    reader.join(timeout=10)
+    assert not reader.is_alive()
+
+    assert len(errors) == 1
+    assert isinstance(errors[0], ProductFactoryLocalRepositoryBindingError)
+    assert "changed while resolving" in str(errors[0])
+
+
+def test_require_rejects_relative_persisted_root_path(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=_root(tmp_path),
+        expected_binding_version=None,
+    )
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_factory_local_repository_bindings "
+            "SET root_path=? WHERE project_id=? AND repository_id=?",
+            ("relative-repository", project.project_id, repository.repository_id),
+        )
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="invalid persisted root_path",
+    ):
+        bindings.require(project.project_id, repository.repository_id)
 
 
 def test_binding_rejects_inline_repository_credentials(
