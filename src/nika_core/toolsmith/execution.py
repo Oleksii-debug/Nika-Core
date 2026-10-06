@@ -785,7 +785,12 @@ def _validate_branch_name(branch_name: str) -> None:
         or branch_name != branch_name.strip()
         or branch_name.startswith("-")
         or "\x00" in branch_name
-        or any(ord(character) < 32 or ord(character) == 127 for character in branch_name)
+        or any(
+            ord(character) < 32
+            or ord(character) == 127
+            or character in "\u0085\u2028\u2029"
+            for character in branch_name
+        )
     ):
         raise WorkspaceSecurityError("branch name is empty, ambiguous or contains control data")
 
