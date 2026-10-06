@@ -33,6 +33,7 @@ from nika_core.toolsmith.workspace_security import (
 
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_FILE_SHARE_WRITE = 0x00000002
 _WINDOWS_OPEN_EXISTING = 3
 _WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
 _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
@@ -138,8 +139,8 @@ def _open_windows_directory_launch_lock(path: pathlib.Path) -> int:
         create_file.restype = ctypes.c_void_p
         handle = create_file(
             str(path),
-            _WINDOWS_GENERIC_READ,
-            _WINDOWS_FILE_SHARE_READ,
+            0,
+            _WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
             None,
             _WINDOWS_OPEN_EXISTING,
             _WINDOWS_FILE_FLAG_BACKUP_SEMANTICS | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
