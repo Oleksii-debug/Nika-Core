@@ -136,15 +136,24 @@ class ModelGateway:
             )
             self._authorize_cloud_effect(attempt_request, capabilities)
 
-            response: ModelResponse | None = None
+            canonical_response: ModelResponse | None = None
+            response_error: ModelGatewayError | None = None
+            missing_response = False
             terminal_error: ModelGatewayError | None = None
             cancelled = False
             try:
                 async with asyncio.timeout(remaining):
                     provider_task = asyncio.create_task(
-                        self._invoke_provider_complete(provider, attempt_request)
+                        self._invoke_provider_complete(
+                            provider,
+                            attempt_request,
+                            trusted_provider_id=capabilities.provider_id,
+                            trusted_provider_kind=capabilities.kind,
+                        )
                     )
-                    response = await provider_task
+                    canonical_response, response_error, missing_response = (
+                        await provider_task
+                    )
             except TimeoutError:
                 error = ModelGatewayError(
                     ModelErrorCode.TIMEOUT,
@@ -202,7 +211,7 @@ class ModelGateway:
                 raise asyncio.CancelledError()
             if terminal_error is not None:
                 raise terminal_error
-            if response is None:
+            if missing_response:
                 error = ModelGatewayError(
                     ModelErrorCode.PROVIDER_ERROR,
                     "model provider completed without a response",
@@ -212,42 +221,6 @@ class ModelGateway:
                 self._audit_failure(request, capabilities.provider_id, error)
                 raise error
 
-            snapshot_cancelled = False
-            snapshot_terminal_error: ModelGatewayError | None = None
-            try:
-                snapshot_task = asyncio.create_task(
-                    self._snapshot_provider_response(
-                        response=response,
-                        request=request,
-                        trusted_provider_id=capabilities.provider_id,
-                        trusted_provider_kind=capabilities.kind,
-                    )
-                )
-                canonical_response, response_error = await snapshot_task
-            except asyncio.CancelledError:
-                current_task = asyncio.current_task()
-                if current_task is not None and current_task.cancelling():
-                    self._audit(
-                        event_type="model.cancelled",
-                        request=request,
-                        payload={"provider_id": capabilities.provider_id},
-                    )
-                    snapshot_cancelled = True
-                else:
-                    error = ModelGatewayError(
-                        ModelErrorCode.PROVIDER_ERROR,
-                        "model provider returned an invalid success response",
-                        provider_id=capabilities.provider_id,
-                        retryable=False,
-                        failure_effect=ModelFailureEffect.UNKNOWN,
-                    )
-                    self._audit_failure(request, capabilities.provider_id, error)
-                    snapshot_terminal_error = error
-
-            if snapshot_cancelled:
-                raise asyncio.CancelledError()
-            if snapshot_terminal_error is not None:
-                raise snapshot_terminal_error
             if response_error is not None:
                 self._audit_failure(
                     request,
@@ -283,8 +256,20 @@ class ModelGateway:
     async def _invoke_provider_complete(
         provider: ModelProvider,
         request: ModelRequest,
-    ) -> ModelResponse:
-        return await provider.complete(request)
+        *,
+        trusted_provider_id: str,
+        trusted_provider_kind: ProviderKind,
+    ) -> tuple[ModelResponse | None, ModelGatewayError | None, bool]:
+        response = await provider.complete(request)
+        if response is None:
+            return None, None, True
+        canonical_response, response_error = ModelGateway._snapshot_success_response(
+            response=response,
+            request=request,
+            trusted_provider_id=trusted_provider_id,
+            trusted_provider_kind=trusted_provider_kind,
+        )
+        return canonical_response, response_error, False
 
     def _authorize_cloud_effect(
         self,
@@ -393,21 +378,6 @@ class ModelGateway:
             supports_streaming=supports_streaming,
             supports_hard_cancellation=supports_hard_cancellation,
             effect_network_host=effect_network_host,
-        )
-
-    @staticmethod
-    async def _snapshot_provider_response(
-        *,
-        response: object,
-        request: ModelRequest,
-        trusted_provider_id: str,
-        trusted_provider_kind: ProviderKind,
-    ) -> tuple[ModelResponse | None, ModelGatewayError | None]:
-        return ModelGateway._snapshot_success_response(
-            response=response,
-            request=request,
-            trusted_provider_id=trusted_provider_id,
-            trusted_provider_kind=trusted_provider_kind,
         )
 
     @staticmethod
