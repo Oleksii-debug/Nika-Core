@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import os
+import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -83,6 +85,46 @@ def test_staging_canonical_installer_fails_closed_when_source_is_missing(
 
     with pytest.raises(RuntimeError, match="canonical Windows installer is missing or unsafe"):
         _stage_canonical_installer(project_root, bundle)
+
+
+def test_staging_rejects_regular_mode_reparse_carrier_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "repo"
+    scripts = project_root / "scripts"
+    scripts.mkdir(parents=True)
+    canonical = scripts / "install_nika_core.ps1"
+    canonical.write_bytes(b"canonical installer\n")
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+
+    real_lstat = Path.lstat
+    real_snapshot = canonical.lstat()
+    reparse_flag = int(getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400))
+
+    def synthetic_lstat(path: Path):
+        if path == canonical:
+            return SimpleNamespace(
+                st_mode=real_snapshot.st_mode,
+                st_dev=real_snapshot.st_dev,
+                st_ino=real_snapshot.st_ino,
+                st_size=real_snapshot.st_size,
+                st_mtime_ns=real_snapshot.st_mtime_ns,
+                st_file_attributes=(
+                    int(getattr(real_snapshot, "st_file_attributes", 0))
+                    | reparse_flag
+                ),
+            )
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", synthetic_lstat)
+
+    with pytest.raises(RuntimeError, match="canonical Windows installer is missing or unsafe"):
+        _stage_canonical_installer(project_root, bundle)
+
+    assert not (bundle / "install_nika_core.ps1").exists()
+    assert not list(bundle.glob(".install_nika_core-*.tmp"))
 
 
 def test_staging_rejects_source_changed_between_lstat_and_open(
