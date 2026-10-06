@@ -255,6 +255,67 @@ def test_voice_model_setup_failed_submit_future_is_sanitized_and_recoverable(
     submitted[0].close()
 
 
+def test_voice_model_setup_inflight_task_cancel_waits_for_worker_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    setup = PackagedVoiceModelSetup(data_root)
+    worker_started = model_setup.Event()
+    worker_settled = model_setup.Event()
+    cancel_event = model_setup.Event()
+    started_event = model_setup.Event()
+
+    def blocked_install(
+        source_text: str,
+        *,
+        cancel_event: model_setup.Event | None,
+    ) -> None:
+        assert source_text == str(tmp_path)
+        assert cancel_event is not None
+        worker_started.set()
+        assert cancel_event.wait(timeout=2.0)
+        worker_settled.set()
+        raise model_setup._SetupCancelled("cancelled")  # noqa: SLF001
+
+    monkeypatch.setattr(setup, "_perform_install", blocked_install)
+    with setup._lock:  # noqa: SLF001 - focused lifecycle state setup
+        setup._generation = 1  # noqa: SLF001
+        setup._active = True  # noqa: SLF001
+        setup._cancel_event = cancel_event  # noqa: SLF001
+
+    async def scenario() -> None:
+        task = asyncio.create_task(
+            setup._run_import(  # noqa: SLF001
+                {"source_root": str(tmp_path)},
+                generation=1,
+                cancel_event=cancel_event,
+                started_event=started_event,
+            )
+        )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 1.0
+        while not worker_started.is_set() and loop.time() < deadline:
+            await asyncio.sleep(0.005)
+        assert worker_started.is_set()
+        assert setup.snapshot()["status"] == "importing"
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(scenario())
+
+    snapshot = setup.snapshot()
+    assert started_event.is_set()
+    assert worker_settled.is_set()
+    assert cancel_event.is_set()
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is False
+
+
 def test_voice_model_setup_existing_install_is_idempotent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
