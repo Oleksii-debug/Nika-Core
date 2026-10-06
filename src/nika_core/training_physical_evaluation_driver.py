@@ -990,16 +990,51 @@ def _find_pilot_task(
     workspace_id: str,
     job_id: str,
 ) -> TaskRecord:
-    matches = tuple(
-        task
-        for task in TaskQueue(store).list_recent(limit=500)
-        if task.workspace_id == workspace_id
-        and task.agent_id == "physical-peft-pilot"
-        and _matches_physical_training_task_payload(
-            task.payload,
-            job_id=job_id,
+    matches: list[TaskRecord] = []
+    queue = TaskQueue(store)
+    with store.connection() as conn:
+        conn.execute("BEGIN")
+        cursor = conn.execute(
+            "SELECT task_id, workspace_id, agent_id, state, payload_json "
+            "FROM tasks WHERE "
+            "(workspace_id = ? OR "
+            "(typeof(workspace_id) != 'text' AND CAST(workspace_id AS TEXT) = ?)) "
+            "AND (agent_id = ? OR "
+            "(typeof(agent_id) != 'text' AND CAST(agent_id AS TEXT) = ?)) "
+            "ORDER BY task_id ASC",
+            (
+                workspace_id,
+                workspace_id,
+                "physical-peft-pilot",
+                "physical-peft-pilot",
+            ),
         )
-    )
+        while True:
+            rows = cursor.fetchmany(128)
+            if not rows:
+                break
+            for row in rows:
+                if (
+                    type(row["task_id"]) is not str
+                    or not row["task_id"]
+                    or type(row["workspace_id"]) is not str
+                    or row["workspace_id"] != workspace_id
+                    or type(row["agent_id"]) is not str
+                    or row["agent_id"] != "physical-peft-pilot"
+                ):
+                    _fail("physical pilot task identity storage is non-canonical")
+                task = queue._record_from_row(row)
+                if not _matches_physical_training_task_payload(
+                    task.payload,
+                    job_id=job_id,
+                ):
+                    continue
+                matches.append(task)
+                if len(matches) > 1:
+                    _fail(
+                        "physical pilot database must contain exactly one matching "
+                        "training task"
+                    )
     if len(matches) != 1:
         _fail("physical pilot database must contain exactly one matching training task")
     return matches[0]

@@ -485,6 +485,115 @@ def test_find_pilot_task_requires_exact_unique_identity(tmp_path: Path) -> None:
     assert actual.task_id == expected.task_id
 
 
+def test_find_pilot_task_finds_old_identity_beyond_recent_window(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    queue = TaskQueue(store)
+    expected = queue.create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+    )
+    for index in range(500):
+        queue.create(
+            workspace_id="evaluation-workspace",
+            agent_id="physical-peft-pilot",
+            payload={
+                "job_id": f"noise-{index:03d}",
+                "kind": "physical_peft_pilot",
+            },
+        )
+
+    actual = driver._find_pilot_task(
+        store,
+        workspace_id="evaluation-workspace",
+        job_id="pilot-job",
+    )
+
+    assert actual.task_id == expected.task_id
+
+
+def test_find_pilot_task_rejects_hidden_duplicate_beyond_recent_window(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    queue = TaskQueue(store)
+    queue.create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+    )
+    for index in range(500):
+        queue.create(
+            workspace_id="evaluation-workspace",
+            agent_id="physical-peft-pilot",
+            payload={
+                "job_id": f"noise-{index:03d}",
+                "kind": "physical_peft_pilot",
+            },
+        )
+    queue.create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+    )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="exactly one matching training task",
+    ):
+        driver._find_pilot_task(
+            store,
+            workspace_id="evaluation-workspace",
+            job_id="pilot-job",
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "stored_alias"),
+    (
+        ("workspace_id", b"evaluation-workspace"),
+        ("agent_id", b"physical-peft-pilot"),
+    ),
+)
+def test_find_pilot_task_rejects_matching_sqlite_storage_alias(
+    tmp_path: Path,
+    field: str,
+    stored_alias: bytes,
+) -> None:
+    store = SQLiteStore(tmp_path / "pilot.sqlite3")
+    store.initialize()
+    queue = TaskQueue(store)
+    queue.create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+    )
+    alias = queue.create(
+        workspace_id="evaluation-workspace",
+        agent_id="physical-peft-pilot",
+        payload={"job_id": "pilot-job", "kind": "physical_peft_pilot"},
+    )
+    with store.connection() as conn:
+        conn.execute(
+            f"UPDATE tasks SET {field} = ? WHERE task_id = ?",
+            (stored_alias, alias.task_id),
+        )
+
+    with pytest.raises(
+        driver.PhysicalEvaluationDriverError,
+        match="task identity storage is non-canonical",
+    ):
+        driver._find_pilot_task(
+            store,
+            workspace_id="evaluation-workspace",
+            job_id="pilot-job",
+        )
+
+
 @pytest.mark.parametrize(
     ("kind", "proof_sha256"),
     (
