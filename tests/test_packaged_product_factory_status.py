@@ -332,6 +332,18 @@ def test_packaged_state_exposes_bounded_component_status_without_evidence(
     ]
     assert product_state["status_items_truncated"] is False
     assert "evidence" not in product_state["status_items"][0]
+    assert product_state["operator"] == {
+        "project": project.project_id,
+        "work": "core=ready",
+        "owner": "unassigned",
+        "state": "active",
+        "blocker": "none",
+        "candidate": "unknown",
+        "test": "unknown",
+        "qa": "unknown",
+        "integration": "not_started",
+        "next": "continue_work:core",
+    }
 
 
 def _status_router(
