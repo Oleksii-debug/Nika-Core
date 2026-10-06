@@ -12,6 +12,7 @@ from nika_core.data.schema import SCHEMA_VERSION
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.diagnostics import HealthService, HealthStatus
 from nika_core.diagnostics import __main__ as diagnostics_cli
+from nika_core.research.knowledge_schema import KNOWLEDGE_SCHEMA_VERSION
 from nika_core.resources.contracts import ResourceSnapshot
 
 _FIXED_NOW = datetime(2026, 8, 26, 20, 0, tzinfo=UTC)
@@ -96,7 +97,9 @@ def test_healthy_snapshot_is_pass_and_hides_provider_identity(tmp_path: Path) ->
 
     assert report.overall is HealthStatus.PASS
     assert report.exit_code == 0
-    assert all(status is HealthStatus.PASS for status in _check_map(report).values())
+    checks = _check_map(report)
+    assert all(status is HealthStatus.PASS for status in checks.values())
+    assert checks["database.schema.knowledge"] is HealthStatus.PASS
     rendered = report.render_text()
     payload = json.dumps(report.as_dict(), ensure_ascii=False, sort_keys=True)
     assert _SECRET_CANARY not in rendered
@@ -216,6 +219,40 @@ def test_future_core_schema_fails_closed(tmp_path: Path) -> None:
     )
 
     assert _check_map(report)["database.schema.core"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
+
+
+def test_future_knowledge_schema_fails_closed(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    _write_healthy_database(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute(
+            "INSERT INTO knowledge_schema_migrations(version, applied_at) "
+            "VALUES (?, 'future')",
+            (KNOWLEDGE_SCHEMA_VERSION + 1,),
+        )
+
+    report = _run(
+        _config(database),
+        _StaticObserver(ResourceSnapshot(10.0, 20.0, 1024)),
+    )
+
+    assert _check_map(report)["database.schema.knowledge"] is HealthStatus.FAIL
+    assert report.overall is HealthStatus.FAIL
+
+
+def test_missing_knowledge_migration_history_fails_closed(tmp_path: Path) -> None:
+    database = tmp_path / "nika.db"
+    _write_healthy_database(database)
+    with sqlite3.connect(database) as conn:
+        conn.execute("DROP TABLE knowledge_schema_migrations")
+
+    report = _run(
+        _config(database),
+        _StaticObserver(ResourceSnapshot(10.0, 20.0, 1024)),
+    )
+
+    assert _check_map(report)["database.schema.knowledge"] is HealthStatus.FAIL
     assert report.overall is HealthStatus.FAIL
 
 
