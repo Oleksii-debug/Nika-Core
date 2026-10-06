@@ -29,6 +29,11 @@ _MAX_RUNTIME_EVIDENCE_JSON_BYTES = 1024 * 1024
 _MAX_RUNTIME_EVIDENCE_JSON_DEPTH = 64
 _MAX_RUNTIME_EVIDENCE_JSON_INTEGER_BITS = 4096
 _MAX_RUNTIME_EVIDENCE_JSON_INTEGER_DECIMAL_CHARS = 1234
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
 def parser() -> argparse.ArgumentParser:
@@ -100,8 +105,14 @@ def _require_bounded_runtime_json_depth(content: bytes) -> None:
 
 
 def _read_runtime_evidence_json(path: Path, *, label: str) -> object:
+    descriptor = -1
     try:
-        with path.open("rb") as handle:
+        descriptor = _open_readonly_nofollow_snapshot(path)
+        opened = os.fstat(descriptor)
+        if not _is_regular_non_reparse(opened):
+            raise ValueError("runtime evidence is not a regular non-link file")
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            descriptor = -1
             content = handle.read(_MAX_RUNTIME_EVIDENCE_JSON_BYTES + 1)
         if len(content) > _MAX_RUNTIME_EVIDENCE_JSON_BYTES:
             raise ValueError("runtime evidence exceeds the byte limit")
@@ -115,6 +126,9 @@ def _read_runtime_evidence_json(path: Path, *, label: str) -> object:
         )
     except (OSError, UnicodeError, ValueError, RecursionError) as exc:
         raise RuntimeError(f"{label} is invalid or oversized JSON") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
 
 
 def _stable_file_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
@@ -135,6 +149,60 @@ def _is_regular_non_reparse(value: os.stat_result) -> bool:
     return not (reparse_flag and attributes & reparse_flag)
 
 
+def _open_readonly_nofollow_snapshot(path: Path) -> int:
+    """Open one authority file without links and deny Windows write/delete sharing."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows artifact snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY
+                | int(getattr(os, "O_BINARY", 0))
+                | int(getattr(os, "O_NOINHERIT", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY
+    for flag_name in ("O_BINARY", "O_CLOEXEC", "O_NOINHERIT", "O_NOFOLLOW", "O_NONBLOCK"):
+        flags |= int(getattr(os, flag_name, 0))
+    return os.open(path, flags)
+
+
 def _snapshot_release_artifact(source: Path, snapshot_dir: Path) -> Path:
     """Copy one stable regular release artifact into a private verification snapshot."""
     try:
@@ -150,11 +218,7 @@ def _snapshot_release_artifact(source: Path, snapshot_dir: Path) -> Path:
     temporary: Path | None = None
     target = snapshot_dir / "verified-distributable.zip"
     try:
-        flags = os.O_RDONLY
-        flags |= getattr(os, "O_BINARY", 0)
-        flags |= getattr(os, "O_CLOEXEC", 0)
-        flags |= getattr(os, "O_NOFOLLOW", 0)
-        descriptor = os.open(source, flags)
+        descriptor = _open_readonly_nofollow_snapshot(source)
         opened = os.fstat(descriptor)
         if (
             not _is_regular_non_reparse(opened)
