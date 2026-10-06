@@ -577,6 +577,18 @@ def attested_training_comparison_evidence_sha256(value: object) -> str:
         or value.get("schema") != "nika-attested-training-comparison-v1"
     ):
         raise ValueError("comparison evidence payload does not match the strict schema")
+    for key in _COMPARISON_EVIDENCE_OPTIONAL_KEYS:
+        if key not in value:
+            continue
+        digest = value[key]
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ValueError(
+                f"{key} must be omitted or a lowercase SHA-256 digest"
+            )
     encoded = json.dumps(
         value,
         allow_nan=False,
