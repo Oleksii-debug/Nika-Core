@@ -6,7 +6,7 @@ import pathlib
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import pytest
 
@@ -722,6 +722,28 @@ def test_duplicate_receipt_fails_closed_as_durable_corruption(tmp_path) -> None:
 
     with pytest.raises(BuildExecutionPortError, match="receipt is invalid"):
         adapter.inspect(dispatch)
+
+
+def test_dispatch_digest_binds_full_grant_authority_identity() -> None:
+    command = _command()
+    original = _dispatch("a" * 40, "work-grant-digest", command)
+    changed_nodes = replace(
+        original,
+        grant=replace(
+            original.grant,
+            allowed_node_ids=("local-1", "local-2"),
+        ),
+    )
+    changed_evidence = replace(
+        original,
+        grant=replace(
+            original.grant,
+            authority_evidence_refs=("authority://trusted-plan/other",),
+        ),
+    )
+
+    assert _dispatch_digest(original) != _dispatch_digest(changed_nodes)
+    assert _dispatch_digest(original) != _dispatch_digest(changed_evidence)
 
 
 def test_dispatch_digest_does_not_serialize_raw_command_or_credentials() -> None:
