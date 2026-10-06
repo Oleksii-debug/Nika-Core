@@ -207,6 +207,7 @@ def test_windows_typed_runner_holds_launch_paths_during_popen(
     workspace = tmp_path / "workspace"
     cwd = workspace / "cwd"
     moved_cwd = workspace / "moved-cwd"
+    moved_workspace = tmp_path / "moved-workspace"
     workspace.mkdir()
     cwd.mkdir()
     shutil.copy2(source, executable)
@@ -221,6 +222,8 @@ def test_windows_typed_runner_holds_launch_paths_during_popen(
             os.replace(replacement, executable)
         with pytest.raises(OSError):
             os.replace(cwd, moved_cwd)
+        with pytest.raises(OSError):
+            os.replace(workspace, moved_workspace)
         return original_popen(*args, **kwargs)
 
     monkeypatch.setattr(execution_module.subprocess, "Popen", probing_popen)
@@ -248,8 +251,9 @@ def test_windows_typed_runner_holds_launch_paths_during_popen(
 
     os.replace(replacement, executable)
     os.replace(cwd, moved_cwd)
+    os.replace(workspace, moved_workspace)
     assert executable.read_bytes() == b"replacement executable bytes"
-    assert moved_cwd.is_dir()
+    assert (moved_workspace / "moved-cwd").is_dir()
 
 
 def test_typed_runner_rechecks_cancellation_at_final_launch_boundary(
@@ -305,17 +309,23 @@ def test_typed_runner_rechecks_deadline_at_final_launch_boundary(
     monotonic_calls = 0
     popen_called = False
 
-    def fake_monotonic() -> float:
-        nonlocal monotonic_calls
-        monotonic_calls += 1
-        return 0.0 if monotonic_calls == 1 else 2.0
+    class FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            nonlocal monotonic_calls
+            monotonic_calls += 1
+            return 0.0 if monotonic_calls == 1 else 2.0
+
+        @staticmethod
+        def sleep(_seconds: float) -> None:
+            raise AssertionError("sleep must not occur before rejected launch")
 
     def forbidden_popen(*args: object, **kwargs: object) -> object:
         nonlocal popen_called
         popen_called = True
         raise AssertionError("Popen crossed an expired final launch boundary")
 
-    monkeypatch.setattr(execution_module.time, "monotonic", fake_monotonic)
+    monkeypatch.setattr(execution_module, "time", FakeTime())
     monkeypatch.setattr(execution_module.subprocess, "Popen", forbidden_popen)
 
     result = run_typed_process(
