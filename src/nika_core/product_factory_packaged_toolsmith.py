@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from nika_core.product_factory_coordinator import ComponentWorkRequest
 from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryPreparationService,
     PreparedProductFactory,
@@ -100,7 +101,7 @@ class _PackagedRepairAuthority(DurableProductFactoryRepairPort):
         *,
         component_id: str,
         reason: str,
-    ):
+    ) -> ComponentWorkRequest:
         return self.preparation.preview_repair(
             self.prepared,
             component_id=component_id,
@@ -113,7 +114,7 @@ class _PackagedRepairAuthority(DurableProductFactoryRepairPort):
         component_id: str,
         reason: str,
         expected_next_work_id: str,
-    ):
+    ) -> ComponentWorkRequest:
         return self.preparation.commit_repair(
             self.prepared,
             component_id=component_id,

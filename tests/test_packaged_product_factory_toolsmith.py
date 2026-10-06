@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
@@ -12,7 +13,11 @@ from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_factory_checkpoint_host import ProductFactoryCheckpointHost
 from nika_core.product_factory_coding_worker_adapter import CodingWorkerComponentAdapter
 from nika_core.product_factory_coordinator import WorkerResultEnvelope
-from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
+from nika_core.product_factory_multi_repository import (
+    MultiRepositoryExecutionError,
+    MultiRepositoryProductFactoryHost,
+    RepairLineageError,
+)
 from nika_core.product_factory_orchestration import (
     ProductComponent,
     ProductRepositoryGraph,
@@ -57,6 +62,32 @@ class NeverDispatchWorker:
 
     async def inspect(self, work_id: str) -> RecoveryState | None:
         raise AssertionError(f"unexpected inspect: {work_id}")
+
+    async def recover(self, request, state):
+        raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
+
+
+class FailingProgramWorker:
+    async def dispatch(self, request):
+        return WorkerResultEnvelope(
+            work_id=request.work_id,
+            component_id=request.component_id,
+            repository_id=request.repository_id,
+            base_sha=request.base_sha,
+            result_sha=SHA_B,
+            diff_digest=DIFF_DIGEST,
+            coding_result=CodingResult(
+                job_id=request.work_id,
+                failure=WorkerFailure(
+                    WorkerFailureKind.PROCESS_FAILED,
+                    "canonical bounded worker lacks exact TOML editing capability",
+                    retryable=True,
+                ),
+            ),
+        )
+
+    async def inspect(self, _work_id: str) -> RecoveryState | None:
+        return None
 
     async def recover(self, request, state):
         raise AssertionError(f"unexpected recover: {request.work_id}:{state}")
@@ -134,7 +165,12 @@ class RecordingBridge:
         return self.resume_result
 
 
-def _fixture(tmp_path: Path, *, failed: bool = True):
+def _fixture(
+    tmp_path: Path,
+    *,
+    failed: bool = True,
+    canonical_failure: bool = False,
+):
     store = SQLiteStore(tmp_path / "packaged factory toolsmith.db")
     store.initialize()
     repository = ProductProjectRepository(store)
@@ -167,7 +203,10 @@ def _fixture(tmp_path: Path, *, failed: bool = True):
             ),
         ),
     )
-    host = MultiRepositoryProductFactoryHost(store, NeverDispatchWorker())
+    host = MultiRepositoryProductFactoryHost(
+        store,
+        FailingProgramWorker() if canonical_failure else NeverDispatchWorker(),
+    )
     preparation = PackagedProductFactoryPreparationService(
         repository=repository,
         tasks=TaskQueue(store),
@@ -187,7 +226,19 @@ def _fixture(tmp_path: Path, *, failed: bool = True):
     prepared = preparation.prepare(execution_plan)
     record = prepared.state.coordinator.snapshot().records[0]
     request = record.request
-    if failed:
+    if failed and canonical_failure:
+        outcomes = asyncio.run(
+            host.dispatch_ready(
+                host_task_id=prepared.host_task_id,
+                state=prepared.state,
+                max_parallel=1,
+                max_count=1,
+            )
+        )
+        assert len(outcomes) == 1
+        assert outcomes[0].state.value == "repair_required"
+        request = prepared.state.coordinator.snapshot().records[0].request
+    elif failed:
         request = prepared.state.coordinator.start("core")
         prepared.state.coordinator.record_result(
             WorkerResultEnvelope(
@@ -564,7 +615,10 @@ def test_bridge_exact_guards_preserve_current_none_resume_behavior(
 def test_real_registered_capability_resumes_factory_with_durable_repair_lineage(
     tmp_path: Path,
 ) -> None:
-    store, _repository, preparation, prepared, request, plan = _fixture(tmp_path)
+    store, _repository, preparation, prepared, request, plan = _fixture(
+        tmp_path,
+        canonical_failure=True,
+    )
     toolsmith, bridge = _real_toolsmith(store)
     packaged = PackagedProductFactoryToolsmithService(
         preparation=preparation,
@@ -608,7 +662,10 @@ def test_toolsmith_resume_recovers_after_failure_before_factory_checkpoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store, _repository, preparation, prepared, request, plan = _fixture(tmp_path)
+    store, _repository, preparation, prepared, request, plan = _fixture(
+        tmp_path,
+        canonical_failure=True,
+    )
     toolsmith, bridge = _real_toolsmith(store)
     packaged = PackagedProductFactoryToolsmithService(
         preparation=preparation,
@@ -674,7 +731,7 @@ def test_commit_repair_rejects_changed_preview_identity_without_state_advance(
     before = prepared.state.coordinator.snapshot()
 
     with pytest.raises(
-        Exception,
+        RepairLineageError,
         match="current repair preview differs from the expected next work identity",
     ):
         preparation.commit_repair(
@@ -682,6 +739,45 @@ def test_commit_repair_rejects_changed_preview_identity_without_state_advance(
             component_id="core",
             reason="registered capability toml-editor is ready",
             expected_next_work_id="stale-next-work-id",
+        )
+
+    assert prepared.state.coordinator.snapshot() == before
+    assert prepared.state.coordinator.snapshot().records[0].request == request
+
+
+def test_project_revision_between_repair_preview_and_commit_fails_closed(
+    tmp_path: Path,
+) -> None:
+    _store, repository, preparation, prepared, request, _plan = _fixture(
+        tmp_path,
+        canonical_failure=True,
+    )
+    preview = preparation.preview_repair(
+        prepared,
+        component_id="core",
+        reason="registered capability toml-editor is ready",
+    )
+    before = prepared.state.coordinator.snapshot()
+    current = repository.get(request.project_id)
+    repository.update_spec(
+        current.project_id,
+        replace(
+            current.spec,
+            desired_outcome="Newer owner-approved ProductProject revision",
+        ),
+        expected_row_version=current.row_version,
+        change_reason="regression: revise after repair preview",
+    )
+
+    with pytest.raises(
+        MultiRepositoryExecutionError,
+        match="ProductProject changed before durable Product Factory authority publication",
+    ):
+        preparation.commit_repair(
+            prepared,
+            component_id="core",
+            reason="registered capability toml-editor is ready",
+            expected_next_work_id=preview.work_id,
         )
 
     assert prepared.state.coordinator.snapshot() == before

@@ -378,6 +378,10 @@ class MultiRepositoryProductFactoryHost:
             component_id=component_id,
             base_sha=intent.to_base_sha,
             reason=reason,
+            read_only_precondition=lambda conn: self._require_current_project_version(
+                conn,
+                state.binding.project,
+            ),
         )
         if request != preview:
             raise RepairLineageError(
@@ -742,6 +746,7 @@ class MultiRepositoryProductFactoryHost:
                 host_task_id=host_task_id,
                 project_id=state.authority.project_id,
             )
+            self._require_current_project_version(conn, state.binding.project)
             rows = conn.execute(
                 """
                 SELECT checkpoint_id, payload_json, checksum_sha256
