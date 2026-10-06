@@ -475,3 +475,201 @@ def test_default_packaged_startup_adopts_and_source_runtime_does_not(tmp_path, m
     monkeypatch.setattr(sys, "frozen", True)
     assert AppConfig.from_environment().database_path == target
     assert len(_rows(target, "tasks")) == 1
+
+
+@pytest.mark.parametrize("alias_first", [False, True])
+def test_hardlink_alias_with_uncheckpointed_wal_is_ambiguous(tmp_path, alias_first):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "alias.db"
+    try:
+        alias.hardlink_to(source)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        assert source.with_name(source.name + "-wal").stat().st_size > 0
+        # Repeating an identical path is still one unambiguous WAL source.
+        assert adoption._known_sources(target, [source, source]) == [source.resolve()]
+        before = source.read_bytes()
+        candidates = [alias, source] if alias_first else [source, alias]
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption._known_sources(target, candidates)
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption.prepare_default_database(target, candidates)
+        assert not target.exists()
+        assert source.read_bytes() == before
+        assert json.loads(_rows(source, "tasks")[0][4]) == {"from_wal": True}
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_broken_indirect_sidecar_makes_hardlink_alias_ambiguous(tmp_path, suffix):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    alias = tmp_path / "alias.db"
+    try:
+        alias.hardlink_to(source)
+        alias.with_name(alias.name + suffix).symlink_to(tmp_path / "missing-sidecar")
+    except OSError:
+        pytest.skip("File system does not support hard links or symlinks")
+    original = source.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption._known_sources(target, [alias, source])
+    assert not target.exists()
+    assert source.read_bytes() == original
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+@pytest.mark.parametrize("indirect", [False, True])
+def test_unsafe_single_source_sidecar_fails_before_any_backup(tmp_path, suffix, indirect):
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    sidecar = source.with_name(source.name + suffix)
+    if indirect:
+        try:
+            sidecar.symlink_to(tmp_path / "missing-sidecar")
+        except OSError:
+            pytest.skip("File system does not support symlinks")
+    else:
+        sidecar.mkdir()
+    original = source.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [source])
+    assert source.read_bytes() == original
+    assert not target.exists()
+    assert not (target.parent / "legacy-adoption-backups").exists()
+
+
+@pytest.mark.parametrize("writer_side", ["canonical", "alias"])
+@pytest.mark.parametrize("candidate_first", [False, True])
+def test_canonical_hardlink_alias_with_live_wal_never_silently_skips(
+    tmp_path, writer_side, candidate_first
+):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    writer = target if writer_side == "canonical" else alias
+    candidates = [target, alias] if candidate_first else [alias, target]
+    with closing(sqlite3.connect(writer)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        wal = writer.with_name(writer.name + "-wal")
+        assert wal.stat().st_size > 0
+        main_before, wal_before = target.read_bytes(), wal.read_bytes()
+        with pytest.raises(adoption.LegacyDatabaseConflict):
+            adoption.prepare_default_database(target, candidates)
+        assert target.read_bytes() == main_before
+        assert wal.read_bytes() == wal_before
+        assert json.loads(_rows(writer, "tasks")[0][4]) == {"from_wal": True}
+        assert not (target.parent / "legacy-adoption-backups").exists()
+        assert not target.with_name(f".{target.name}.legacy-adoption.json").exists()
+
+
+def test_canonical_hardlink_without_sidecars_is_not_a_second_database(tmp_path):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    adoption.prepare_default_database(target, [alias, target])
+    assert len(_rows(target, "tasks")) == 1
+    assert not (target.parent / "legacy-adoption-backups").exists()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_canonical_hardlink_rejects_indirect_alias_sidecar(tmp_path, suffix):
+    target = tmp_path / "canonical" / "nika.db"
+    _legacy(target)
+    alias = tmp_path / "legacy-alias.db"
+    try:
+        alias.hardlink_to(target)
+    except OSError:
+        pytest.skip("File system does not support hard links")
+    sidecar = alias.with_name(alias.name + suffix)
+    try:
+        sidecar.symlink_to(tmp_path / "nonexistent-sidecar")
+    except (OSError, NotImplementedError):
+        pytest.skip("File system does not support symlinks")
+    before = target.read_bytes()
+    with pytest.raises(adoption.LegacyDatabaseConflict):
+        adoption.prepare_default_database(target, [alias])
+    assert target.read_bytes() == before
+    assert sidecar.is_symlink()
+    assert not (target.parent / "legacy-adoption-backups").exists()
+
+
+def test_frozen_online_wal_backup_inspection_does_not_create_sidecars(tmp_path):
+    """Archived WAL-header copies are immutable; the live source is not."""
+    source = tmp_path / "old.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        live_wal = source.with_name(source.name + "-wal")
+        assert live_wal.stat().st_size > 0
+        expected = adoption._inspect(source)
+        assert expected is not None
+        backup = tmp_path / "snapshot.sqlite3"
+        manager = SQLiteRecoveryManager(SQLiteStore(source))
+        artifact = manager.create_backup(backup, record_audit=False)
+        for suffix in ("-wal", "-shm"):
+            assert not backup.with_name(backup.name + suffix).exists()
+        frozen = adoption._inspect(backup, immutable=True)
+        assert frozen is not None and frozen.digest == expected.digest
+        assert manager.verify_backup(backup).sha256 == artifact.sha256
+        for suffix in ("-wal", "-shm"):
+            assert not backup.with_name(backup.name + suffix).exists()
+        assert live_wal.stat().st_size > 0
+        assert adoption._inspect(source).digest == expected.digest
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm"])
+def test_immutable_backup_inspection_rejects_unbound_sidecars(tmp_path, suffix):
+    source = tmp_path / "old.db"
+    _legacy(source)
+    backup = tmp_path / "snapshot.sqlite3"
+    SQLiteRecoveryManager(SQLiteStore(source)).create_backup(backup, record_audit=False)
+    sidecar = backup.with_name(backup.name + suffix)
+    sidecar.write_bytes(b"")
+    with pytest.raises(adoption.BackupRecoveryError):
+        adoption._inspect(backup, immutable=True)
+    assert sidecar.exists()
+
+
+def test_wal_adoption_internal_pipeline_preserves_live_wal_and_receipt(tmp_path):
+    """Expose the internal stage of a live-WAL failure without the UI error wrapper."""
+    source, target = tmp_path / "old.db", tmp_path / "new" / "nika.db"
+    _legacy(source)
+    with closing(sqlite3.connect(source)) as live:
+        live.execute("PRAGMA journal_mode=WAL")
+        live.execute("PRAGMA wal_autocheckpoint=0")
+        live.execute("UPDATE tasks SET payload_json = ?", ('{"from_wal":true}',))
+        live.commit()
+        wal = source.with_name(source.name + "-wal")
+        assert wal.stat().st_size > 0
+        expected = adoption._inspect(source)
+        assert expected is not None
+        with adoption._startup_lock(target):
+            adoption._prepare_locked(target, [source])
+        assert json.loads(_rows(target, "tasks")[0][4]) == {"from_wal": True}
+        assert wal.stat().st_size > 0
+        assert adoption._inspect(source).digest == expected.digest
+        archives = list((target.parent / "legacy-adoption-backups").glob("*.sqlite3"))
+        assert len(archives) == 2
+        for archive in archives:
+            assert not archive.with_name(archive.name + "-wal").exists()
+            assert not archive.with_name(archive.name + "-shm").exists()
+        assert not target.with_name(f".{target.name}.legacy-adoption.json").exists()
