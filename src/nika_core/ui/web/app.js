@@ -26,6 +26,21 @@
   const voiceStart = document.getElementById("voice-start");
   const voiceCancel = document.getElementById("voice-cancel");
   const voiceUseCommand = document.getElementById("voice-use-command");
+  const voiceModelSource = document.getElementById("voice-model-source");
+  const voiceModelStatus = document.getElementById("voice-model-status");
+  const voiceModelImport = document.getElementById("voice-model-import");
+  const voiceModelCancel = document.getElementById("voice-model-cancel");
+  const allowedVoiceModelSetupStatuses = new Set([
+    "missing",
+    "installed",
+    "partial",
+    "importing",
+    "cancelling",
+    "restart_required",
+    "failed",
+    "cancelled",
+  ]);
+  let voiceModelTerminalSignature = null;
   const allowedVoiceStatuses = new Set([
     "idle",
     "running",
@@ -1361,6 +1376,94 @@
   }
 
 
+  function renderVoiceModelSetup(snapshot) {
+    const failClosed = (message = "Стан локальної голосової моделі недоступний або несумісний.") => {
+      voiceModelTerminalSignature = null;
+      if (voiceModelStatus) voiceModelStatus.textContent = message;
+      if (voiceModelSource) voiceModelSource.disabled = true;
+      if (voiceModelImport) voiceModelImport.disabled = true;
+      if (voiceModelCancel) voiceModelCancel.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || snapshot.schema !== "nika.packaged-voice-model-setup:v1"
+      || !allowedVoiceModelSetupStatuses.has(snapshot.status)
+      || !Number.isSafeInteger(snapshot.generation)
+      || snapshot.generation < 0
+      || typeof snapshot.active !== "boolean"
+      || typeof snapshot.installed !== "boolean"
+      || typeof snapshot.can_import !== "boolean"
+      || typeof snapshot.restart_required !== "boolean"
+      || typeof snapshot.message !== "string"
+      || snapshot.message.length === 0
+    ) {
+      return failClosed();
+    }
+
+    const activeStatus = snapshot.status === "importing" || snapshot.status === "cancelling";
+    if (snapshot.active !== activeStatus) return failClosed();
+    const retryableTerminal = snapshot.status === "failed" || snapshot.status === "cancelled";
+    const validState = (
+      (snapshot.status === "missing"
+        && !snapshot.active
+        && !snapshot.installed
+        && !snapshot.restart_required)
+      || (snapshot.status === "installed"
+        && !snapshot.active
+        && snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "partial"
+        && !snapshot.active
+        && !snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "importing"
+        && snapshot.active
+        && !snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "cancelling"
+        && snapshot.active
+        && !snapshot.installed
+        && !snapshot.can_import
+        && !snapshot.restart_required)
+      || (snapshot.status === "restart_required"
+        && !snapshot.active
+        && snapshot.installed
+        && !snapshot.can_import
+        && snapshot.restart_required)
+      || (retryableTerminal
+        && !snapshot.active
+        && !snapshot.installed
+        && !snapshot.restart_required)
+    );
+    if (!validState) return failClosed();
+
+    if (voiceModelStatus) voiceModelStatus.textContent = snapshot.message;
+    if (voiceModelSource) voiceModelSource.disabled = !snapshot.can_import;
+    if (voiceModelImport) voiceModelImport.disabled = !snapshot.can_import;
+    if (voiceModelCancel) {
+      voiceModelCancel.disabled = !snapshot.active || snapshot.status === "cancelling";
+    }
+    if (snapshot.status === "restart_required" && voiceModelSource) {
+      voiceModelSource.value = "";
+    }
+
+    const terminal = ["restart_required", "failed", "cancelled"].includes(snapshot.status);
+    const signature = terminal && snapshot.generation > 0
+      ? JSON.stringify([snapshot.generation, snapshot.status, snapshot.message])
+      : null;
+    if (signature !== null && signature !== voiceModelTerminalSignature) {
+      voiceModelTerminalSignature = signature;
+      announce(snapshot.message, snapshot.status === "failed");
+    } else if (!terminal) {
+      voiceModelTerminalSignature = null;
+    }
+    return true;
+  }
+
   function renderVoice(snapshot) {
     const failClosed = (message = "Стан голосового вводу недоступний або несумісний.") => {
       voiceTranscriptValue = "";
@@ -1485,6 +1588,8 @@
     if (!globalThis.pywebview?.api?.get_state) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      renderVoiceModelSetup(null);
+      renderVoice(null);
       lastStateReady = false;
       reportStateUnavailable();
       return false;
@@ -1496,6 +1601,8 @@
       if (!isCurrentStateRead()) return requireCurrentGeneration ? false : lastStateReady;
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      renderVoiceModelSetup(null);
+      renderVoice(null);
       lastStateReady = false;
       reportStateUnavailable();
       return false;
@@ -1504,6 +1611,8 @@
     if (!response?.ok) {
       if (autostartReadGeneration === autostartGeneration) renderAutostart(null);
       if (modelReadGeneration === modelGeneration) renderModelSettings(null);
+      renderVoiceModelSetup(null);
+      renderVoice(null);
       lastStateReady = false;
       reportStateUnavailable();
       return false;
@@ -1513,6 +1622,7 @@
     if (autostartReadGeneration === autostartGeneration) renderAutostart(state.autostart ?? null);
     if (modelReadGeneration === modelGeneration) renderModelSettings(state.v01_model_settings ?? null);
     renderSourceSetup(state.v01_sources ?? null);
+    renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderSpeech(state.speech ?? null);
     renderVoice(state.voice ?? null);
     renderItems(
@@ -1611,6 +1721,7 @@
     try {
       const payload = {};
       if (actionId === "task.create") payload.command = commandInput.value.trim();
+      if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
       if (actionId === "speech.start") payload.text = speechText?.value ?? "";
       if (actionId === "team.sources.configure") {
         payload.revision = sourceRevision;
