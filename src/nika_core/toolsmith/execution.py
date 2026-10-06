@@ -28,6 +28,8 @@ from nika_core.toolsmith.workspace_security import (
     ensure_path_policy,
     ensure_real_directory_root,
     sterile_process_environment,
+    validate_git_branch_name,
+    validate_git_commit_sha,
     validate_typed_argv,
 )
 
@@ -65,6 +67,7 @@ class PreparedGitWorkspace:
     tree_evidence: TreeEvidence
 
     def __post_init__(self) -> None:
+        validate_git_commit_sha(self.head_sha, label="private workspace HEAD")
         if self.head_sha.lower() != self.plan.base_sha.lower():
             raise WorkspaceSecurityError("private workspace HEAD must equal the pinned base SHA")
         if self.remotes:
@@ -780,14 +783,7 @@ def run_typed_process(
 
 
 def _validate_branch_name(branch_name: str) -> None:
-    if (
-        not branch_name
-        or branch_name != branch_name.strip()
-        or branch_name.startswith("-")
-        or "\x00" in branch_name
-        or any(ord(character) < 32 or ord(character) == 127 for character in branch_name)
-    ):
-        raise WorkspaceSecurityError("branch name is empty, ambiguous or contains control data")
+    validate_git_branch_name(branch_name)
 
 
 def _git(
