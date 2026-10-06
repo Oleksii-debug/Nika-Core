@@ -313,24 +313,52 @@ class ToolsmithRepository:
                 raise StaleTransitionError(
                     "verified candidate identity changed before exact registry publication"
                 )
+            manifest_json = _json(
+                {**asdict(manifest), "permissions": sorted(manifest.permissions)}
+            )
+            registered_at = _now()
             conflicting = conn.execute(
-                "SELECT digest FROM capability_registry WHERE capability_id = ? AND version = ?",
+                "SELECT digest, manifest_json, active FROM capability_registry "
+                "WHERE capability_id = ? AND version = ?",
                 (manifest.capability_id, manifest.version),
             ).fetchone()
-            if conflicting is not None and str(conflicting["digest"]) != manifest.digest:
-                raise RuntimeError("capability version collision with a different digest")
-            conn.execute(
-                "INSERT OR IGNORE INTO capability_registry("
-                "capability_id, version, digest, manifest_json, registered_at, active) "
-                "VALUES (?, ?, ?, ?, ?, 1)",
-                (
-                    manifest.capability_id,
-                    manifest.version,
-                    manifest.digest,
-                    _json({**asdict(manifest), "permissions": sorted(manifest.permissions)}),
-                    _now(),
-                ),
-            )
+            if conflicting is not None:
+                if str(conflicting["digest"]) != manifest.digest:
+                    raise RuntimeError("capability version collision with a different digest")
+                if str(conflicting["manifest_json"]) != manifest_json:
+                    raise RuntimeError(
+                        "capability version collision with a different manifest identity"
+                    )
+                if int(conflicting["active"]) != 1:
+                    cursor = conn.execute(
+                        "UPDATE capability_registry SET active = 1, registered_at = ? "
+                        "WHERE capability_id = ? AND version = ? AND digest = ? "
+                        "AND manifest_json = ? AND active = 0",
+                        (
+                            registered_at,
+                            manifest.capability_id,
+                            manifest.version,
+                            manifest.digest,
+                            manifest_json,
+                        ),
+                    )
+                    if cursor.rowcount != 1:
+                        raise StaleTransitionError(
+                            "capability registry identity changed during reactivation"
+                        )
+            else:
+                conn.execute(
+                    "INSERT INTO capability_registry("
+                    "capability_id, version, digest, manifest_json, registered_at, active) "
+                    "VALUES (?, ?, ?, ?, ?, 1)",
+                    (
+                        manifest.capability_id,
+                        manifest.version,
+                        manifest.digest,
+                        manifest_json,
+                        registered_at,
+                    ),
+                )
             conn.execute(
                 "UPDATE capability_escalations SET pinned_version = ?, pinned_digest = ?, "
                 "updated_at = ? WHERE task_id = ? AND requested_capability = ?",

@@ -57,7 +57,7 @@ def _reject_constant(value: str) -> NoReturn:
     _fail(f"non-finite JSON constant: {value}")
 
 
-def _read_object(path: Path) -> dict[str, object]:
+def _read_object_snapshot(path: Path) -> tuple[dict[str, object], bytes]:
     try:
         raw = path.read_bytes()
         if not raw or len(raw) > _MAX_JSON_BYTES:
@@ -73,6 +73,11 @@ def _read_object(path: Path) -> dict[str, object]:
         raise ProofError(f"invalid JSON authority: {path.name}") from exc
     if type(value) is not dict:
         _fail(f"JSON authority must be an object: {path.name}")
+    return value, raw
+
+
+def _read_object(path: Path) -> dict[str, object]:
+    value, _ = _read_object_snapshot(path)
     return value
 
 
@@ -136,6 +141,16 @@ def _sha256_file(path: Path) -> tuple[str, int]:
     if total <= 0:
         _fail(f"authority is empty: {path.name}")
     return digest.hexdigest(), total
+
+
+def _candidate_manifest_sha256(manifest: dict[str, object]) -> str:
+    try:
+        encoded = _canonical_json(manifest).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise ProofError("candidate manifest is not canonical JSON evidence") from exc
+    if not encoded or len(encoded) > _MAX_JSON_BYTES:
+        _fail("candidate manifest has invalid canonical size")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _candidate_training_digests(
@@ -475,7 +490,9 @@ def verify(root: Path) -> None:
         name="tier-0 promoted adapter",
     )
     if (
-        tier0_previous_tensors_sha256
+        _candidate_manifest_sha256(initial_manifest)
+        != tier0.candidate_manifest_sha256
+        or tier0_previous_tensors_sha256
         != tier0.previous_adapter_tensors_sha256
         or initial_tensors_sha256 != tier0.trained_adapter_tensors_sha256
     ):
@@ -569,13 +586,17 @@ def verify(root: Path) -> None:
         or tier1_trained_tensors_sha256
         != tier1.trained_adapter_tensors_sha256
         or tier1_tokenization_sha256 != tier0_tokenization_sha256
+        or _candidate_manifest_sha256(manifest)
+        != tier1.candidate_manifest_sha256
         or manifest.get("foundation_model_sha256") != base_gguf_sha256
     ):
         _fail("tier-1 candidate manifest does not bind warm-start foundation authority")
 
     staged_assets_path = root / "staged-assets.json"
-    staged_assets = _read_object(staged_assets_path)
-    staged_assets_sha256, _ = _sha256_file(staged_assets_path)
+    staged_assets, staged_assets_bytes = _read_object_snapshot(
+        staged_assets_path
+    )
+    staged_assets_sha256 = hashlib.sha256(staged_assets_bytes).hexdigest()
 
     evidence = root / "scale-evidence"
     try:
@@ -583,7 +604,7 @@ def verify(root: Path) -> None:
     except OSError as exc:
         raise ProofError("scale evidence directory could not be created") from exc
     summary = {
-        "schema": "nika-real-physical-scale-progression-proof-v1",
+        "schema": "nika-real-physical-scale-progression-proof-v2",
         "source_sha": source_sha,
         "platform": "windows",
         "promotion_policy": "non-regression",
@@ -597,6 +618,7 @@ def verify(root: Path) -> None:
         "staged_assets_sha256": staged_assets_sha256,
         "tier0_frozen_package_sha256": tier0.frozen_package_sha256,
         "tier0_candidate_sha256": tier0.candidate_sha256,
+        "tier0_candidate_manifest_sha256": tier0.candidate_manifest_sha256,
         "tier0_completed_steps": tier0.completed_steps,
         "tier0_previous_adapter_tensors_sha256": (
             tier0_previous_tensors_sha256
@@ -605,6 +627,7 @@ def verify(root: Path) -> None:
         "tokenization_sha256": tier0_tokenization_sha256,
         "tier1_frozen_package_sha256": tier1.frozen_package_sha256,
         "tier1_candidate_sha256": tier1.candidate_sha256,
+        "tier1_candidate_manifest_sha256": tier1.candidate_manifest_sha256,
         "tier1_completed_steps": tier1.completed_steps,
         "tier1_previous_adapter_tensors_sha256": (
             tier1.previous_adapter_tensors_sha256
@@ -639,7 +662,7 @@ def verify(root: Path) -> None:
     )
     _write_new(
         evidence / "staged-assets.json",
-        (_canonical_json(staged_assets) + "\n").encode("utf-8"),
+        staged_assets_bytes,
     )
     print(_canonical_json(summary))
 
