@@ -29,12 +29,14 @@ from nika_core.training_runtime import (
 )
 from nika_core.training_scale import TrainingScaleAuthorization
 
-_SCHEMA_VERSION = 5
-_REPORT_DOMAIN = b"nika-peft-physical-pilot-report-v5\x00"
+_SCHEMA_VERSION = 6
+_LEGACY_SCHEMA_VERSION = 5
+_REPORT_DOMAIN_V5 = b"nika-peft-physical-pilot-report-v5\x00"
+_REPORT_DOMAIN_V6 = b"nika-peft-physical-pilot-report-v6\x00"
 _MAX_REPORT_BYTES = 32 * 1024
 _MAX_CANDIDATE_MANIFEST_BYTES = 512 * 1024
 _MAX_TEXT_BYTES = 1024
-_MAX_STEPS = 1_000_000
+PHYSICAL_TRAINING_MAX_STEPS = 1_000_000
 _WINDOWS_GENERIC_READ = 0x80000000
 _WINDOWS_FILE_SHARE_READ = 0x00000001
 _WINDOWS_FILE_SHARE_WRITE = 0x00000002
@@ -488,7 +490,10 @@ class PhysicalTrainingPilotReport:
     schema_version: int = _SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version not in {_LEGACY_SCHEMA_VERSION, _SCHEMA_VERSION}
+        ):
             _fail("unsupported physical pilot report schema")
         if type(self.platform) is not str or self.platform != "windows":
             _fail("physical PEFT pilot report must identify Windows")
@@ -547,11 +552,13 @@ class PhysicalTrainingPilotReport:
             or self.candidate_byte_count > (1 << 63) - 1
         ):
             _fail("candidate_byte_count must be a positive signed-64 integer")
-        if (
-            type(self.completed_steps) is not int
-            or self.completed_steps != 2
-        ):
-            _fail("physical pilot report requires exactly two completed steps")
+        if type(self.completed_steps) is not int:
+            _fail("physical pilot report completed_steps must be an integer")
+        if self.schema_version == _LEGACY_SCHEMA_VERSION:
+            if self.completed_steps != 2:
+                _fail("legacy physical pilot report requires exactly two completed steps")
+        elif not 2 <= self.completed_steps <= PHYSICAL_TRAINING_MAX_STEPS:
+            _fail("physical pilot report requires a bounded multi-step completion")
 
     def canonical_payload(self) -> dict[str, object]:
         return {
@@ -587,8 +594,13 @@ class PhysicalTrainingPilotReport:
 
     @property
     def evidence_sha256(self) -> str:
+        domain = (
+            _REPORT_DOMAIN_V5
+            if self.schema_version == _LEGACY_SCHEMA_VERSION
+            else _REPORT_DOMAIN_V6
+        )
         return hashlib.sha256(
-            _REPORT_DOMAIN + _canonical_json_bytes(self.canonical_payload())
+            domain + _canonical_json_bytes(self.canonical_payload())
         ).hexdigest()
 
     def to_json(self) -> str:
@@ -858,7 +870,7 @@ def _snapshot_run_evidence(
         if (
             type(value.next_step) is not int
             or value.next_step < 0
-            or value.next_step > _MAX_STEPS
+            or value.next_step > PHYSICAL_TRAINING_MAX_STEPS
         ):
             _fail(f"{label} has an invalid step boundary")
         base = value.base_artifact
@@ -962,8 +974,8 @@ def build_physical_training_pilot_report(
         _fail("physical pilot must pause exactly after its first trainer step")
     if restart_probe.next_step != 1:
         _fail("restarted runtime did not reopen the one-step durable checkpoint")
-    if completed.next_step != 2:
-        _fail("physical pilot must complete exactly the bounded two-step run")
+    if not 2 <= completed.next_step <= PHYSICAL_TRAINING_MAX_STEPS:
+        _fail("physical pilot must complete a bounded multi-step run")
     if paused.candidate_sha256 is not None or restart_probe.candidate_sha256 is not None:
         _fail("paused pilot evidence must not already publish a candidate")
     checkpoint_ids = (
@@ -1116,7 +1128,7 @@ def run_physical_training_pilot(
     ],
     candidate_root: Path | None = None,
 ) -> PhysicalTrainingPilotReport:
-    """Exercise one real Windows subprocess step, reopen, resume, and verify candidate bytes."""
+    """Exercise one Windows step, reopen, resume to bounded completion, and verify bytes."""
 
     if not _is_windows():
         _fail("physical PEFT pilot must execute on Windows")
@@ -1131,8 +1143,8 @@ def run_physical_training_pilot(
         raise TypeError("restart factories must be callable")
     if not callable(candidate_descriptor_factory):
         raise TypeError("candidate_descriptor_factory must be callable")
-    if canonical_spec.max_steps != 2:
-        _fail("physical pilot requires exactly max_steps == 2")
+    if not 2 <= canonical_spec.max_steps <= PHYSICAL_TRAINING_MAX_STEPS:
+        _fail("physical pilot requires at least two bounded training steps")
     if worker.last_accepted_consumed_materials_sha256 is not None:
         _fail("initial worker already carries accepted consumed-material evidence")
     initial_execution_plan_sha256 = _require_sha256(
@@ -1242,6 +1254,8 @@ def run_physical_training_pilot(
         state=TrainingRunState.COMPLETED,
         label="completed run",
     )
+    if completed.next_step != canonical_spec.max_steps:
+        _fail("trainer did not reach the authorized bounded completion step")
     resumed_consumed_materials_sha256 = _require_sha256(
         resumed_worker.last_accepted_consumed_materials_sha256,
         name="resumed worker accepted consumed_materials_sha256",
