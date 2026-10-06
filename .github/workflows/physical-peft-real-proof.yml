@@ -52,20 +52,32 @@ jobs:
       - name: Stage immutable public model and canonical proof authorities
         shell: pwsh
         run: |
-          $proofRoot = Join-Path $env:RUNNER_TEMP ("nika-physical-peft-proof-" + $env:GITHUB_RUN_ID + "-" + $env:GITHUB_RUN_ATTEMPT)
+          $proofName = "nika-physical-peft-proof-" + $env:GITHUB_RUN_ID
+          $proofName += "-" + $env:GITHUB_RUN_ATTEMPT
+          $proofRoot = Join-Path $env:RUNNER_TEMP $proofName
           if (Test-Path -LiteralPath $proofRoot) {
             throw "physical proof root already exists"
           }
           $trainer = (Get-Command nika-peft-trainer -ErrorAction Stop).Source
-          python scripts/physical_peft_real_proof.py prepare --root $proofRoot --trainer-executable $trainer
+          $prepareArgs = @(
+            "scripts/physical_peft_real_proof.py",
+            "prepare",
+            "--root",
+            $proofRoot,
+            "--trainer-executable",
+            $trainer
+          )
+          python @prepareArgs
           if ($LASTEXITCODE -ne 0) {
             exit $LASTEXITCODE
           }
-          "NIKA_PHYSICAL_PROOF_ROOT=$proofRoot" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "HF_HUB_OFFLINE=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TRANSFORMERS_OFFLINE=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "HF_DATASETS_OFFLINE=1" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-          "TOKENIZERS_PARALLELISM=false" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          $envFile = $env:GITHUB_ENV
+          "NIKA_PHYSICAL_PROOF_ROOT=$proofRoot" |
+            Out-File -FilePath $envFile -Encoding utf8 -Append
+          "HF_HUB_OFFLINE=1" | Out-File -FilePath $envFile -Encoding utf8 -Append
+          "TRANSFORMERS_OFFLINE=1" | Out-File -FilePath $envFile -Encoding utf8 -Append
+          "HF_DATASETS_OFFLINE=1" | Out-File -FilePath $envFile -Encoding utf8 -Append
+          "TOKENIZERS_PARALLELISM=false" | Out-File -FilePath $envFile -Encoding utf8 -Append
 
       - name: Execute canonical Windows physical PEFT pilot
         shell: pwsh
