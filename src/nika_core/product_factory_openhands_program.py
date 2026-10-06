@@ -599,9 +599,13 @@ def build_openhands_product_factory_program(
         raise OpenHandsProductFactoryError(
             "OpenHands client/profile authority must be injected callables"
         )
-    if sandbox_provider is None or acceptance_runtime is None:
+    if not isinstance(sandbox_provider, OpenHandsSandboxProviderPort):
         raise OpenHandsProductFactoryError(
-            "OpenHands sandbox and independent acceptance authorities are required"
+            "OpenHands sandbox provider does not satisfy the trusted host contract"
+        )
+    if not isinstance(acceptance_runtime, SandboxedAcceptanceRuntimePort):
+        raise OpenHandsProductFactoryError(
+            "OpenHands independent acceptance runtime does not satisfy its contract"
         )
 
     ledger = idempotency if idempotency is not None else IdempotencyLedger(store)
