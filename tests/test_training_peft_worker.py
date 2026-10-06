@@ -959,6 +959,47 @@ def test_resumed_training_loads_from_verified_checkpoint_snapshot(
     assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
 
 
+def test_checkpoint_snapshot_revalidates_nested_source_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job_root = tmp_path / "job"
+    checkpoint = job_root / "trainer" / "checkpoint-1"
+    nested = checkpoint / "nested"
+    nested.mkdir(parents=True)
+    (nested / "optimizer.bin").write_bytes(b"optimizer-state")
+    expected_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    real_copy = peft._copy_checkpoint_snapshot_file
+    mutated = False
+
+    def _copy_then_mutate(
+        source: Path,
+        destination: Path,
+        *,
+        expected_size: int,
+    ) -> None:
+        nonlocal mutated
+        real_copy(source, destination, expected_size=expected_size)
+        if not mutated:
+            (nested / "late-state.bin").write_bytes(b"late-state")
+            mutated = True
+
+    monkeypatch.setattr(peft, "_copy_checkpoint_snapshot_file", _copy_then_mutate)
+
+    with pytest.raises(peft.PeftTrainerError, match="resume_checkpoint_changed"):
+        peft._snapshot_resume_checkpoint(
+            checkpoint,
+            expected_payload_sha256=expected_sha256,
+            job_root=job_root,
+        )
+
+    assert mutated is True
+    assert not any(
+        child.name.startswith(".resume-checkpoint-snapshot-")
+        for child in job_root.iterdir()
+    )
+
+
 def test_new_job_can_warm_start_from_promoted_candidate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
