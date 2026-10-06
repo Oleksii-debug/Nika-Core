@@ -233,6 +233,19 @@ def test_bounded_reader_rejects_path_mutation_during_read(
         driver._read_bounded_file(path, max_bytes=32, name="test input")
 
 
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_bounded_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    path = tmp_path / "authority.bin"
+    path.write_bytes(b"trusted")
+
+    with path.open("r+b"):
+        with pytest.raises(
+            driver.PhysicalPilotDriverError,
+            match="could not be read",
+        ):
+            driver._read_bounded_file(path, max_bytes=32, name="test input")
+
+
 def test_config_file_rejects_oversized_bytes(tmp_path: Path) -> None:
     path = tmp_path / "physical-pilot.json"
     path.write_bytes(b"x" * (driver._CONFIG_MAX_BYTES + 1))
@@ -620,6 +633,23 @@ def test_stable_file_sha256_rejects_mutation_during_read(
         match="changed while",
     ):
         driver._stable_file_sha256(path, name="candidate")
+
+
+def test_stable_file_sha256_rejects_linked_authority_file(tmp_path: Path) -> None:
+    target = tmp_path / "candidate.safetensors"
+    target.write_bytes(b"trusted")
+    path = tmp_path / "candidate-link.safetensors"
+    try:
+        path.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlink creation is unavailable on this runner")
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="canonical non-linked regular file",
+    ):
+        driver._stable_file_sha256(path, name="initial_adapter_path")
+
 
 def test_config_rejects_unknown_top_level_field(tmp_path: Path) -> None:
     payload = _payload(tmp_path)
