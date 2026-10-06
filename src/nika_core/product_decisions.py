@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import sqlite3
+import unicodedata
 from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -23,6 +24,7 @@ from nika_core.tools import ToolRisk
 
 _MAX_STORED_HANDOFF_BYTES = 1024 * 1024
 _SQLITE_INTEGER_MAX = (1 << 63) - 1
+_MAX_DECISION_ID_CHARS = 160
 
 
 def _reject_nonfinite_evidence(_value: str) -> None:
@@ -113,6 +115,23 @@ def _validated_text(value: object, *, label: str) -> str:
     return value
 
 
+def _validated_decision_id(value: object) -> str:
+    decision_id = _validated_text(value, label="product decision decision_id")
+    if (
+        len(decision_id) > _MAX_DECISION_ID_CHARS
+        or decision_id != decision_id.strip()
+        or any(
+            unicodedata.category(character) in {"Cc", "Cf", "Zl", "Zp"}
+            for character in decision_id
+        )
+    ):
+        raise ProductProjectError(
+            "product decision decision_id must be a safe presentation identity "
+            f"of at most {_MAX_DECISION_ID_CHARS} characters"
+        )
+    return decision_id
+
+
 def _snapshot_decision(decision: object) -> ProductDecision:
     if type(decision) is not ProductDecision:
         raise ProductProjectError("product decision must be an exact ProductDecision")
@@ -127,10 +146,7 @@ def _snapshot_decision(decision: object) -> ProductDecision:
     if type(state) is not ProductDecisionState:
         raise ProductProjectError("product decision state must be ProductDecisionState")
     return ProductDecision(
-        decision_id=_validated_text(
-            decision_id,
-            label="product decision decision_id",
-        ),
+        decision_id=_validated_decision_id(decision_id),
         option_id=_validated_text(
             option_id,
             label="product decision option_id",
@@ -521,12 +537,65 @@ class ProductDecisionRepository:
 
     def get(self, project_id: str, decision_id: str) -> StoredProductDecision:
         project_id = _validated_text(project_id, label="project_id")
-        decision_id = _validated_text(decision_id, label="decision_id")
+        decision_id = _validated_decision_id(decision_id)
         with self.store.connection() as conn:
             decision = self._latest_conn(conn, project_id, decision_id)
             if decision is None:
                 raise KeyError(decision_id)
             return decision
+
+    def list_latest_by_state(
+        self,
+        project_id: str,
+        state: ProductDecisionState,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[tuple[StoredProductDecision, ...], int]:
+        """Return one bounded page while validating the complete current decision set."""
+        project_id = _validated_text(project_id, label="project_id")
+        if type(state) is not ProductDecisionState:
+            raise TypeError("state must be an exact ProductDecisionState")
+        if type(limit) is not int or limit < 1 or limit > 500:
+            raise ValueError("limit must be an exact integer between 1 and 500")
+        if (
+            type(offset) is not int
+            or offset < 0
+            or offset > _SQLITE_INTEGER_MAX
+        ):
+            raise ValueError("offset must be an exact non-negative SQLite integer")
+
+        with self.store.connection() as conn:
+            conn.execute("BEGIN")
+            if not conn.execute(
+                "SELECT 1 FROM product_projects WHERE project_id=?",
+                (project_id,),
+            ).fetchone():
+                raise KeyError(project_id)
+            cursor = conn.execute(
+                "SELECT d.* FROM product_decisions d JOIN ("
+                "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
+                "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
+                ") latest ON latest.project_id=d.project_id "
+                "AND latest.decision_id=d.decision_id "
+                "AND latest.decision_version=d.decision_version "
+                "ORDER BY d.decision_id",
+                (project_id,),
+            )
+            selected: list[StoredProductDecision] = []
+            matching = 0
+            while True:
+                rows = cursor.fetchmany(128)
+                if not rows:
+                    break
+                for row in rows:
+                    stored = self._from_row(row)
+                    if stored.decision.state is not state:
+                        continue
+                    if matching >= offset and len(selected) < limit:
+                        selected.append(stored)
+                    matching += 1
+            return tuple(selected), matching
 
     def list(self, project_id: str) -> tuple[StoredProductDecision, ...]:
         project_id = _validated_text(project_id, label="project_id")
@@ -554,7 +623,7 @@ class ProductDecisionRepository:
         decision_id: str,
     ) -> tuple[StoredProductDecision, ...]:
         project_id = _validated_text(project_id, label="project_id")
-        decision_id = _validated_text(decision_id, label="decision_id")
+        decision_id = _validated_decision_id(decision_id)
         with self.store.connection() as conn:
             rows = conn.execute(
                 "SELECT * FROM product_decisions WHERE project_id=? AND decision_id=? "
@@ -575,7 +644,7 @@ class ProductDecisionRepository:
     ) -> ProductProject:
         project_id = _validated_text(project_id, label="project_id")
         requirement_id = _validated_text(requirement_id, label="requirement_id")
-        decision_id = _validated_text(decision_id, label="decision_id")
+        decision_id = _validated_decision_id(decision_id)
         expected_row_version = _strict_int(
             expected_row_version,
             label="expected ProductProject row_version",
@@ -680,10 +749,7 @@ class ProductDecisionRepository:
             replay["operation_kind"],
             label="persisted decision replay operation_kind",
         )
-        stored_entity_id = _validated_text(
-            replay["entity_id"],
-            label="persisted decision replay entity_id",
-        )
+        stored_entity_id = _validated_decision_id(replay["entity_id"])
         stored_fingerprint = _validated_text(
             replay["input_fingerprint"],
             label="persisted decision replay input_fingerprint",
@@ -871,10 +937,7 @@ class ProductDecisionRepository:
                 "persisted product decision state is invalid"
             ) from exc
         decision = ProductDecision(
-            decision_id=_validated_text(
-                row["decision_id"],
-                label="persisted product decision decision_id",
-            ),
+            decision_id=_validated_decision_id(row["decision_id"]),
             option_id=_validated_text(
                 row["option_id"],
                 label="persisted product decision option_id",

@@ -5,6 +5,7 @@ import re
 import unicodedata
 from collections import Counter
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
 
@@ -19,10 +20,16 @@ from nika_core.product_command.contracts import (
 )
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
+    ProductProjectDecisionNotFoundError,
     ProductProjectPresentationConsistencyError,
 )
 from nika_core.product_command.routing import route_command
-from nika_core.product_project import ProductProjectSpec
+from nika_core.product_project import (
+    ProductDecision,
+    ProductDecisionState,
+    ProductProjectSpec,
+)
+from nika_core.security import ApprovalAuthority
 from nika_core.ui.bridge_models import UIResult
 
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
@@ -58,6 +65,31 @@ _CURRENT_DECISION_COMMANDS = frozenset(
         "покажи поточне рішення productproject",
     }
 )
+_DECISION_APPROVE_PREFIXES = (
+    "approve product decision",
+    "схвали рішення productproject",
+    "схвалити рішення productproject",
+)
+_DECISION_REJECT_PREFIXES = (
+    "reject product decision",
+    "відхили рішення productproject",
+    "відхилити рішення productproject",
+)
+_DECISION_CONFIRM_PREFIXES = (
+    "confirm product decision approval",
+    "підтвердь схвалення рішення productproject",
+    "підтвердити схвалення рішення productproject",
+)
+_DECISION_SHOW_PREFIXES = (
+    "show product decision",
+    "покажи рішення productproject",
+)
+_PENDING_DECISION_LIST_COMMANDS = (
+    "list pending product decisions",
+    "покажи рішення productproject, що очікують",
+)
+_PENDING_DECISION_PAGE_SIZE = 8
+_MAX_PENDING_DECISION_PAGE = ((1 << 63) - 1) // _PENDING_DECISION_PAGE_SIZE + 1
 _DAILY_ACTIVITY_REPORT_COMMANDS = frozenset(
     {
         "daily activity report",
@@ -178,6 +210,106 @@ def packaged_current_product_decision_command(command: str) -> bool:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
     normalized = " ".join(command.split()).casefold().strip(" :.!?")
     return normalized in _CURRENT_DECISION_COMMANDS
+
+
+def _prefixed_owner_identifier(
+    command: str,
+    *,
+    prefixes: tuple[str, ...],
+    label: str,
+    maximum: int,
+) -> str | None:
+    normalized = " ".join(command.split())
+    lowered = normalized.casefold()
+    for prefix in prefixes:
+        if lowered == prefix:
+            raise PackagedProductJourneyError(f"Вкажіть {label} після команди.")
+        if not (
+            lowered.startswith(prefix + " ")
+            or lowered.startswith(prefix + ":")
+        ):
+            continue
+        value = normalized[len(prefix) :].strip(" :")
+        if (
+            not value
+            or len(value) > maximum
+            or not _valid_selection_id(value)
+        ):
+            raise PackagedProductJourneyError(
+                f"{label} має бути непорожнім безпечним ідентифікатором "
+                f"довжиною не більше {maximum} символів."
+            )
+        return value
+    return None
+
+
+def packaged_product_decision_action(command: str) -> tuple[str, str] | None:
+    """Recognize exact owner-decision commands without broad natural-language capture."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    for action, prefixes, label, maximum in (
+        ("approve", _DECISION_APPROVE_PREFIXES, "decision_id", 160),
+        ("reject", _DECISION_REJECT_PREFIXES, "decision_id", 160),
+        ("confirm", _DECISION_CONFIRM_PREFIXES, "approval request_id", 160),
+    ):
+        value = _prefixed_owner_identifier(
+            command,
+            prefixes=prefixes,
+            label=label,
+            maximum=maximum,
+        )
+        if value is None:
+            continue
+        if action == "confirm" and not value.startswith("approval-request-"):
+            raise PackagedProductJourneyError(
+                "approval request_id має починатися з «approval-request-»."
+            )
+        return action, value
+    return None
+
+
+def packaged_product_decision_query(command: str) -> tuple[str, str | int] | None:
+    """Recognize bounded decision discovery/read commands for ambiguous pending sets."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split())
+    lowered = normalized.casefold()
+    for base in _PENDING_DECISION_LIST_COMMANDS:
+        if lowered == base:
+            return "list", 1
+        for marker in (" page ", " сторінка "):
+            prefix = base + marker
+            if not lowered.startswith(prefix):
+                continue
+            raw_page = normalized[len(prefix) :].strip()
+            if not raw_page.isascii() or not raw_page.isdecimal():
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень має бути додатним цілим числом."
+                )
+            if len(raw_page) > len(str(_MAX_PENDING_DECISION_PAGE)):
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень перевищує підтримуваний SQLite offset."
+                )
+            page = int(raw_page)
+            if page < 1:
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень має бути додатним цілим числом."
+                )
+            if page > _MAX_PENDING_DECISION_PAGE:
+                raise PackagedProductJourneyError(
+                    "Номер сторінки рішень перевищує підтримуваний SQLite offset."
+                )
+            return "list", page
+
+    decision_id = _prefixed_owner_identifier(
+        command,
+        prefixes=_DECISION_SHOW_PREFIXES,
+        label="decision_id",
+        maximum=160,
+    )
+    if decision_id is not None:
+        return "show", decision_id
+    return None
 
 
 def packaged_daily_activity_report_command(command: str) -> bool:
@@ -323,6 +455,14 @@ class PackagedProductSelectionStore:
             conn.execute("DELETE FROM packaged_product_selection WHERE slot = 1")
 
 
+@dataclass(frozen=True, slots=True)
+class _PendingPackagedDecisionApproval:
+    project_id: str
+    decision: ProductDecision
+    expected_row_version: int
+    idempotency_key: str
+
+
 class PackagedProductCommandRouter:
     """Route packaged command input to durable ProductProject, read-only report, or task handling.
 
@@ -348,6 +488,7 @@ class PackagedProductCommandRouter:
         training_status_handler: TrainingStatusHandler | None = None,
         intelligence_mode_handler: IntelligenceModeCommandHandler | None = None,
         selection_store: PackagedProductSelectionStore | None = None,
+        decision_approval_authority: ApprovalAuthority | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
@@ -360,6 +501,10 @@ class PackagedProductCommandRouter:
         self._training_status_handler = training_status_handler
         self._intelligence_mode_handler = intelligence_mode_handler
         self._selection_store = selection_store
+        self._decision_approval_authority = decision_approval_authority
+        self._pending_decision_approvals: dict[
+            str, _PendingPackagedDecisionApproval
+        ] = {}
         self._active_project_id = selection_store.load() if selection_store is not None else None
 
     @property
@@ -434,6 +579,304 @@ class PackagedProductCommandRouter:
                 f"{decision.title}; ризик R{decision.risk_level}; {decision.question}"
             ),
             focus_id="product-project-decision-heading",
+        )
+
+    def _decision_read_project_id(self) -> str:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Спочатку створіть або відкрийте його."
+            )
+        return project_id
+
+    def _describe_product_decision(self, decision_id: str) -> UIResult:
+        project_id = self._decision_read_project_id()
+        try:
+            decision = self._products.inspect_decision(project_id, decision_id)
+        except ProductProjectDecisionNotFoundError as exc:
+            raise PackagedProductJourneyError(
+                f"Рішення ProductProject не знайдено: {decision_id}."
+            ) from exc
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. "
+                "Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while decision state was read; retry the command."
+            ) from exc
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Рішення ProductProject: {decision.decision_id}; "
+                f"{decision.title}; стан {decision.state}; ризик R{decision.risk_level}; "
+                f"{decision.question}"
+            ),
+            focus_id="product-project-heading",
+        )
+
+    def _list_pending_product_decisions(self, page: int) -> UIResult:
+        project_id = self._decision_read_project_id()
+        start = (page - 1) * _PENDING_DECISION_PAGE_SIZE
+        try:
+            selected, total = self._products.list_decisions_by_state(
+                project_id,
+                ProductDecisionState.PROPOSED,
+                limit=_PENDING_DECISION_PAGE_SIZE,
+                offset=start,
+            )
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject changed while decision state was read; retry the command."
+            ) from exc
+        if total == 0:
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message="Рішень ProductProject, що очікують власника, немає.",
+                focus_id="product-project-heading",
+            )
+        if not selected:
+            last_page = (total - 1) // _PENDING_DECISION_PAGE_SIZE + 1
+            raise PackagedProductJourneyError(
+                f"Сторінка {page} відсутня. Остання сторінка: {last_page}."
+            )
+        end = start + len(selected)
+        summary = " | ".join(
+            f"{item.decision_id}; {item.title}; R{item.risk_level}"
+            for item in selected
+        )
+        next_hint = (
+            ""
+            if end >= total
+            else (
+                " Наступна сторінка: list pending product decisions page "
+                f"{page + 1}."
+            )
+        )
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Рішення ProductProject, що очікують власника: "
+                f"{start + 1}-{end} із {total}. {summary}.{next_hint}"
+            ),
+            focus_id="product-project-heading",
+        )
+
+    def _prepare_owner_decision(
+        self,
+        decision_id: str,
+        target_state: ProductDecisionState,
+    ) -> tuple[str, ProductDecision, int, str]:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Спочатку створіть або відкрийте його."
+            )
+        idempotency_key = (
+            f"packaged-owner-decision:{project_id}:{decision_id}:{target_state.value}"
+        )
+        try:
+            decision, row_version = self._products.prepare_owner_decision(
+                project_id,
+                decision_id,
+                target_state,
+            )
+        except KeyError as exc:
+            raise PackagedProductJourneyError(
+                f"Рішення ProductProject не знайдено: {decision_id}."
+            ) from exc
+        except (ValueError, ProductProjectPresentationConsistencyError) as exc:
+            raise PackagedProductJourneyError(
+                "Рішення ProductProject змінилося, вже завершене іншим результатом "
+                "або недоступне. Оновіть стан і повторіть точну команду."
+            ) from exc
+        return project_id, decision, row_version, idempotency_key
+
+    def _prune_pending_decision_approvals(self) -> None:
+        authority = self._decision_approval_authority
+        if authority is None:
+            self._pending_decision_approvals.clear()
+            return
+        valid = {item.request_id for item in authority.pending_views()}
+        for request_id in tuple(self._pending_decision_approvals):
+            if request_id not in valid:
+                self._pending_decision_approvals.pop(request_id, None)
+
+    def _request_product_decision_approval(self, decision_id: str) -> UIResult:
+        authority = self._decision_approval_authority
+        if authority is None:
+            raise PackagedProductJourneyError(
+                "Trusted owner approval недоступне у цьому запуску."
+            )
+        project_id, decision, row_version, idempotency_key = self._prepare_owner_decision(
+            decision_id,
+            ProductDecisionState.APPROVED,
+        )
+
+        # Exact durable replay is intentionally attempted before a new request.
+        # The canonical repository returns an already-committed matching effect without
+        # demanding a second ApprovalEvidence.
+        try:
+            self._products.record_decision(
+                project_id,
+                decision,
+                expected_row_version=row_version,
+                idempotency_key=idempotency_key,
+            )
+        except PermissionError as exc:
+            if "trusted product-owner approval" not in str(exc):
+                raise PackagedProductJourneyError(
+                    "Trusted owner approval не пройшло перевірку."
+                ) from exc
+        except ValueError as exc:
+            raise PackagedProductJourneyError(
+                "Рішення ProductProject змінилося. Оновіть стан і повторіть команду."
+            ) from exc
+        else:
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message=f"Рішення ProductProject уже схвалено: {decision_id}.",
+                focus_id="product-project-decision-heading",
+            )
+
+        self._prune_pending_decision_approvals()
+        for request_id, pending in self._pending_decision_approvals.items():
+            if (
+                pending.project_id == project_id
+                and pending.decision.decision_id == decision_id
+                and pending.expected_row_version == row_version
+                and pending.idempotency_key == idempotency_key
+            ):
+                return UIResult(
+                    request_id="desktop-handler",
+                    status="completed",
+                    message=(
+                        "Схвалення ще не виконано. Підтвердіть exact approval request: "
+                        f"{request_id}. Команда: confirm product decision approval {request_id}"
+                    ),
+                    focus_id="command-input",
+                )
+
+        try:
+            intent = self._products.decision_approval_intent(
+                project_id,
+                decision,
+                expected_row_version=row_version,
+                idempotency_key=idempotency_key,
+            )
+            request = authority.request(intent)
+        except (PermissionError, ValueError) as exc:
+            raise PackagedProductJourneyError(
+                "Не вдалося створити точний trusted approval request. "
+                "Оновіть ProductProject і повторіть команду."
+            ) from exc
+        self._pending_decision_approvals[request.request_id] = (
+            _PendingPackagedDecisionApproval(
+                project_id=project_id,
+                decision=decision,
+                expected_row_version=row_version,
+                idempotency_key=idempotency_key,
+            )
+        )
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                "Рішення ще не схвалено. Створено одноразовий trusted approval request: "
+                f"{request.request_id}. Щоб підтвердити саме цю дію, введіть: "
+                f"confirm product decision approval {request.request_id}"
+            ),
+            focus_id="command-input",
+        )
+
+    def _confirm_product_decision_approval(self, request_id: str) -> UIResult:
+        authority = self._decision_approval_authority
+        if authority is None:
+            raise PackagedProductJourneyError(
+                "Trusted owner approval недоступне у цьому запуску."
+            )
+        self._prune_pending_decision_approvals()
+        pending = self._pending_decision_approvals.get(request_id)
+        if pending is None:
+            raise PackagedProductJourneyError(
+                "Approval request невідомий, прострочений або належить іншому запуску. "
+                "Створіть новий exact request командою схвалення."
+            )
+        if self._active_project_id != pending.project_id:
+            self._pending_decision_approvals.pop(request_id, None)
+            try:
+                authority.deny(request_id)
+            except (KeyError, PermissionError):
+                pass
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject змінився. Approval request скасовано; "
+                "відкрийте потрібний ProductProject і створіть новий."
+            )
+        try:
+            approval = authority.approve(request_id)
+        except (KeyError, PermissionError, ValueError) as exc:
+            self._pending_decision_approvals.pop(request_id, None)
+            raise PackagedProductJourneyError(
+                "Approval request невідомий або прострочений. Створіть новий."
+            ) from exc
+
+        self._pending_decision_approvals.pop(request_id, None)
+        try:
+            self._products.record_decision(
+                pending.project_id,
+                pending.decision,
+                expected_row_version=pending.expected_row_version,
+                idempotency_key=pending.idempotency_key,
+                approval=approval,
+            )
+        except (PermissionError, ValueError) as exc:
+            raise PackagedProductJourneyError(
+                "ProductProject, decision або evidence змінилися після запиту. "
+                "Схвалення не записано; оновіть стан і створіть новий approval request."
+            ) from exc
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                "Рішення ProductProject схвалено через trusted owner authority: "
+                f"{pending.decision.decision_id}."
+            ),
+            focus_id="product-project-heading",
+        )
+
+    def _reject_product_decision(self, decision_id: str) -> UIResult:
+        project_id, decision, row_version, idempotency_key = self._prepare_owner_decision(
+            decision_id,
+            ProductDecisionState.REJECTED,
+        )
+        try:
+            self._products.record_decision(
+                project_id,
+                decision,
+                expected_row_version=row_version,
+                idempotency_key=idempotency_key,
+            )
+        except (PermissionError, ValueError) as exc:
+            raise PackagedProductJourneyError(
+                "Рішення ProductProject змінилося. Відхилення не записано; "
+                "оновіть стан і повторіть точну команду."
+            ) from exc
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=f"Рішення ProductProject відхилено: {decision_id}.",
+            focus_id="product-project-heading",
         )
 
     def _describe_current_project(self) -> UIResult:
@@ -525,6 +968,28 @@ class PackagedProductCommandRouter:
             # Direct command text and unrelated UI fields are classification input only.
             # Only the canonical target identity crosses into incumbent task-control authority.
             return handler({"task_id": task_id} if task_id is not None else {})
+        decision_query = packaged_product_decision_query(command)
+        if decision_query is not None:
+            query, identity = decision_query
+            if query == "show":
+                if type(identity) is not str:
+                    raise PackagedProductJourneyError("invalid ProductDecision query identity")
+                return self._describe_product_decision(identity)
+            if query == "list":
+                if type(identity) is not int:
+                    raise PackagedProductJourneyError("invalid ProductDecision page identity")
+                return self._list_pending_product_decisions(identity)
+            raise PackagedProductJourneyError("unsupported ProductDecision query")
+        decision_action = packaged_product_decision_action(command)
+        if decision_action is not None:
+            action, identity = decision_action
+            if action == "approve":
+                return self._request_product_decision_approval(identity)
+            if action == "reject":
+                return self._reject_product_decision(identity)
+            if action == "confirm":
+                return self._confirm_product_decision_approval(identity)
+            raise PackagedProductJourneyError("unsupported ProductDecision owner action")
         if packaged_current_product_decision_command(command):
             return self._describe_current_decision()
         if packaged_current_product_command(command):
