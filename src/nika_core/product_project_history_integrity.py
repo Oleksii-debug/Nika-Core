@@ -49,6 +49,7 @@ class _LifecycleEvent:
     new_state: ProductProjectState
     reason: str
     changed_by_ref: str
+    created_at: datetime
 
 
 class ProductProjectHistoricalIntegrityService:
@@ -665,6 +666,10 @@ class ProductProjectHistoricalIntegrityService:
                 or not actor.strip()
             ):
                 raise ProductProjectError("incoherent ProductProject lifecycle audit chain")
+            created_at = self._time(
+                row["created_at"],
+                label=f"ProductProject lifecycle row {row_version}",
+            )
             events.append(
                 _LifecycleEvent(
                     row_version=row_version,
@@ -672,11 +677,11 @@ class ProductProjectHistoricalIntegrityService:
                     new_state=new_state,
                     reason=reason,
                     changed_by_ref=actor,
+                    created_at=created_at,
                 )
             )
             previous = new_state
             previous_row_version = row_version
-            self._time(row["created_at"], label=f"ProductProject lifecycle row {row_version}")
         if durable_state is not previous:
             raise ProductProjectError(
                 "durable ProductProject status does not match lifecycle audit tail"
@@ -937,12 +942,18 @@ class ProductProjectHistoricalIntegrityService:
         )
         if create_row["input_fingerprint"] != expected_create_fingerprint:
             raise ProductProjectError("ProductProject creation idempotency fingerprint drift")
-        self._time(
+        create_time = self._time(
             create_row["created_at"],
             label="ProductProject creation idempotency",
         )
+        initial_spec_time = self._time(
+            spec_rows[0]["created_at"],
+            label="initial ProductProject specification",
+        )
+        if create_time != initial_spec_time:
+            raise ProductProjectError("ProductProject creation idempotency timestamp drift")
 
-        durable_decisions: dict[tuple[str, int], str] = {}
+        durable_decisions: dict[tuple[str, int], tuple[str, datetime]] = {}
         for row in decision_rows:
             decision_id = self._required_text(
                 row["decision_id"],
@@ -976,7 +987,13 @@ class ProductProjectHistoricalIntegrityService:
                     ),
                 }
             )
-            durable_decisions[(decision_id, decision_version)] = expected_fingerprint
+            durable_decisions[(decision_id, decision_version)] = (
+                expected_fingerprint,
+                self._time(
+                    row["created_at"],
+                    label=f"product decision {decision_id} version {decision_version}",
+                ),
+            )
 
         lifecycle_by_version = {event.row_version: event for event in lifecycle}
         rows = conn.execute(
@@ -1011,19 +1028,22 @@ class ProductProjectHistoricalIntegrityService:
                 raise ProductProjectError("invalid ProductProject mutation idempotency record")
             seen_keys.add(operation_key)
             fingerprint = row["input_fingerprint"]
-            self._time(
+            receipt_time = self._time(
                 row["created_at"],
                 label=f"ProductProject mutation idempotency {operation_key}",
             )
             if operation_kind == "product_decision.record":
                 key = (entity_id, entity_version)
-                expected_fingerprint = durable_decisions.get(key)
-                if expected_fingerprint is None or key in seen_decisions:
+                expected = durable_decisions.get(key)
+                if expected is None or key in seen_decisions:
                     raise ProductProjectError(
                         "product decision idempotency record has no unique durable decision"
                     )
+                expected_fingerprint, decision_time = expected
                 if fingerprint != expected_fingerprint:
                     raise ProductProjectError("product decision idempotency fingerprint drift")
+                if receipt_time != decision_time:
+                    raise ProductProjectError("product decision idempotency timestamp drift")
                 seen_decisions.add(key)
             elif operation_kind == "product_project.status_transition":
                 event = lifecycle_by_version.get(entity_version)
@@ -1041,6 +1061,8 @@ class ProductProjectHistoricalIntegrityService:
                 )
                 if fingerprint != expected_fingerprint:
                     raise ProductProjectError("lifecycle idempotency fingerprint drift")
+                if receipt_time != event.created_at:
+                    raise ProductProjectError("lifecycle idempotency timestamp drift")
                 seen_lifecycle.add(entity_version)
             else:
                 raise ProductProjectError(

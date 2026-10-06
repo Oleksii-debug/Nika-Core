@@ -386,3 +386,50 @@ def test_history_rejects_modern_spec_idempotency_fingerprint_drift(tmp_path) -> 
     with pytest.raises(ProductProjectError, match="spec idempotency fingerprint"):
         ProductProjectHistoricalIntegrityService(store).validate("project-1")
 
+
+def test_history_rejects_create_idempotency_timestamp_drift(tmp_path) -> None:
+    store, _ = _project(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_project_idempotency SET created_at=? "
+            "WHERE project_id='project-1'",
+            ("2030-01-01T00:00:00+00:00",),
+        )
+    with pytest.raises(ProductProjectError, match="creation idempotency timestamp drift"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_history_rejects_decision_idempotency_timestamp_drift(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _decision(store, projects)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_project_mutation_idempotency SET created_at=? "
+            "WHERE project_id='project-1' AND operation_kind='product_decision.record'",
+            ("2030-01-01T00:00:00+00:00",),
+        )
+    with pytest.raises(ProductProjectError, match="decision idempotency timestamp drift"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_history_rejects_lifecycle_idempotency_timestamp_drift(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    current = projects.get("project-1")
+    ProductProjectLifecycleService(store).transition(
+        "project-1",
+        ProductProjectState.PAUSED,
+        expected_row_version=current.row_version,
+        idempotency_key="status:pause:timestamp-drift",
+        reason="Pause for timestamp verification",
+        changed_by_ref="policy://product-owner",
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_project_mutation_idempotency SET created_at=? "
+            "WHERE project_id='project-1' "
+            "AND operation_kind='product_project.status_transition'",
+            ("2030-01-01T00:00:00+00:00",),
+        )
+    with pytest.raises(ProductProjectError, match="lifecycle idempotency timestamp drift"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
