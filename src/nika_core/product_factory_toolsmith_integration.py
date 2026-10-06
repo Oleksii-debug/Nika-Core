@@ -94,6 +94,25 @@ class CapabilityEscalationPort(Protocol):
     ) -> dict[str, str] | None: ...
 
 
+class DurableProductFactoryRepairPort(Protocol):
+    """Exact repair preview/commit authority used by current Product Factory hosts."""
+
+    def preview_repair(
+        self,
+        *,
+        component_id: str,
+        reason: str,
+    ) -> ComponentWorkRequest: ...
+
+    def commit_repair(
+        self,
+        *,
+        component_id: str,
+        reason: str,
+        expected_next_work_id: str,
+    ) -> ComponentWorkRequest: ...
+
+
 @dataclass(slots=True)
 class ProductFactoryToolsmithBridge:
     """Component-scoped Product Factory ↔ Toolsmith integration.
@@ -232,6 +251,7 @@ class ProductFactoryToolsmithBridge:
         component_id: str,
         expected_work_id: str | None = None,
         expected_capability_id: str | None = None,
+        repair_authority: DurableProductFactoryRepairPort | None = None,
     ) -> ComponentCapabilityResume | None:
         """Restart-safe registered capability → exact Product Factory repair transition.
 
@@ -303,6 +323,17 @@ class ProductFactoryToolsmithBridge:
                     "prepared capability resume no longer matches Product Factory attempt"
                 )
 
+        if repair_authority is not None:
+            return self._resume_with_repair_authority(
+                bindings=bindings,
+                durable=durable,
+                coordinator=coordinator,
+                record=record,
+                checkpoint=checkpoint,
+                registered=registered,
+                repair_authority=repair_authority,
+            )
+
         before = coordinator.snapshot()
         checkpoint_saved = False
         try:
@@ -331,6 +362,82 @@ class ProductFactoryToolsmithBridge:
         finally:
             if not checkpoint_saved:
                 coordinator.restore(before)
+
+        try:
+            bindings.mark_consumed(durable)
+        except (ProductFactoryToolsmithBindingError, sqlite3.Error) as exc:
+            raise ProductFactoryToolsmithError(
+                "Product Factory repair checkpoint is durable but Toolsmith binding "
+                "finalization requires restart reconciliation"
+            ) from exc
+        return resume
+
+    def _resume_with_repair_authority(
+        self,
+        *,
+        bindings: ProductFactoryToolsmithBindingRepository,
+        durable: ComponentCapabilityBinding,
+        coordinator: ProductFactoryCoordinator,
+        record: WorkRecord,
+        checkpoint: ComponentCapabilityGap,
+        registered: dict[str, str],
+        repair_authority: DurableProductFactoryRepairPort,
+    ) -> ComponentCapabilityResume:
+        reason = _repair_reason(checkpoint.capability_id, registered)
+        try:
+            next_request = repair_authority.preview_repair(
+                component_id=checkpoint.component_id,
+                reason=reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ProductFactoryToolsmithError(
+                "canonical Product Factory repair preview was rejected"
+            ) from exc
+        _validate_authoritative_repair_preview(record, next_request)
+
+        resume = ComponentCapabilityResume(
+            component_id=checkpoint.component_id,
+            previous_work_id=checkpoint.work_id,
+            next_request=next_request,
+            capability_id=checkpoint.capability_id,
+            capability_version=registered["version"],
+            capability_digest=registered["digest"],
+        )
+        if durable.state is ComponentCapabilityBindingState.RESUME_PREPARED:
+            if next_request.work_id != durable.next_work_id:
+                raise ProductFactoryToolsmithError(
+                    "replayed repair preview differs from durable prepared resume"
+                )
+        else:
+            try:
+                durable = bindings.prepare_resume(
+                    durable,
+                    next_work_id=next_request.work_id,
+                    pinned_version=resume.capability_version,
+                    pinned_digest=resume.capability_digest,
+                )
+            except ProductFactoryToolsmithBindingError as exc:
+                raise ProductFactoryToolsmithError(str(exc)) from exc
+
+        try:
+            committed = repair_authority.commit_repair(
+                component_id=checkpoint.component_id,
+                reason=reason,
+                expected_next_work_id=next_request.work_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise ProductFactoryToolsmithError(
+                "canonical Product Factory repair commit requires restart reconciliation"
+            ) from exc
+        if committed != next_request:
+            raise ProductFactoryToolsmithError(
+                "canonical Product Factory repair commit differs from its preview"
+            )
+        current = _record_for_component(coordinator, checkpoint.component_id)
+        if current.state is not WorkState.READY or current.request != committed:
+            raise ProductFactoryToolsmithError(
+                "canonical Product Factory repair commit did not publish expected ready state"
+            )
 
         try:
             bindings.mark_consumed(durable)
@@ -464,6 +571,31 @@ def _require_repair_required(record: WorkRecord) -> None:
     if record.state is not WorkState.REPAIR_REQUIRED:
         raise ProductFactoryToolsmithError(
             "capability gap can resume only from repair_required component state"
+        )
+
+
+def _validate_authoritative_repair_preview(
+    record: WorkRecord,
+    preview: ComponentWorkRequest,
+) -> None:
+    if record.state is not WorkState.REPAIR_REQUIRED or record.result is None:
+        raise ProductFactoryToolsmithError(
+            "canonical repair preview requires exact repair-required result evidence"
+        )
+    prior = record.request
+    if (
+        preview.project_id != prior.project_id
+        or preview.component_id != prior.component_id
+        or preview.repository_id != prior.repository_id
+        or preview.goal != prior.goal
+        or preview.allowed_paths != prior.allowed_paths
+        or preview.permission_ceiling != prior.permission_ceiling
+        or preview.acceptance_commands != prior.acceptance_commands
+        or preview.attempt != prior.attempt + 1
+        or preview.base_sha != record.result.result_sha
+    ):
+        raise ProductFactoryToolsmithError(
+            "canonical repair preview changed Product Factory scope or lineage"
         )
 
 

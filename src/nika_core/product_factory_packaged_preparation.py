@@ -243,6 +243,48 @@ class PackagedProductFactoryPreparationService:
             )
         return prepared.host_task_id, record.request
 
+    def preview_repair(
+        self,
+        prepared: PreparedProductFactory,
+        *,
+        component_id: str,
+        reason: str,
+    ) -> ComponentWorkRequest:
+        """Preview one exact repair without changing coordinator or durable state."""
+
+        if type(prepared) is not PreparedProductFactory:
+            raise TypeError("prepared must be PreparedProductFactory")
+        return self._host.preview_repair(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            component_id=_plain_text(component_id, "component_id"),
+            reason=_plain_text(reason, "reason"),
+        )
+
+    def commit_repair(
+        self,
+        prepared: PreparedProductFactory,
+        *,
+        component_id: str,
+        reason: str,
+        expected_next_work_id: str,
+    ) -> ComponentWorkRequest:
+        """Persist lineage and checkpoint only for the exact prior preview identity."""
+
+        if type(prepared) is not PreparedProductFactory:
+            raise TypeError("prepared must be PreparedProductFactory")
+        request, _intent = self._host.commit_repair_and_checkpoint(
+            host_task_id=prepared.host_task_id,
+            state=prepared.state,
+            component_id=_plain_text(component_id, "component_id"),
+            reason=_plain_text(reason, "reason"),
+            expected_next_work_id=_plain_text(
+                expected_next_work_id,
+                "expected_next_work_id",
+            ),
+        )
+        return request
+
     @staticmethod
     def _require_plan_version(
         project: ProductProject,
