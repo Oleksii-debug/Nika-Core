@@ -2537,7 +2537,7 @@ class _TokenizedDataset:
         tokenizer: Any,
         max_length: int,
     ) -> None:
-        self._items: list[dict[str, object]] = []
+        self._items: list[tuple[tuple[int, ...], tuple[int, ...]]] = []
         digest = hashlib.sha256()
         digest.update(_TOKENIZATION_DOMAIN)
         digest.update(_canonical_json_bytes({"max_length": max_length}))
@@ -2565,13 +2565,17 @@ class _TokenizedDataset:
                 or any(type(mask) is not int or mask not in (0, 1) for mask in attention_mask)
             ):
                 _fail("response_tokens_truncated")
-            item = {"attention_mask": attention_mask, "input_ids": input_ids}
-            self._items.append(item)
+            frozen_input_ids = tuple(input_ids)
+            frozen_attention_mask = tuple(attention_mask)
+            self._items.append((frozen_input_ids, frozen_attention_mask))
             digest.update(
                 _canonical_json_bytes(
                     {
                         "index": index,
-                        "item": item,
+                        "item": {
+                            "attention_mask": frozen_attention_mask,
+                            "input_ids": frozen_input_ids,
+                        },
                     }
                 )
             )
@@ -2582,7 +2586,11 @@ class _TokenizedDataset:
         return len(self._items)
 
     def __getitem__(self, index: int) -> dict[str, object]:
-        return self._items[index]
+        input_ids, attention_mask = self._items[index]
+        return {
+            "attention_mask": list(attention_mask),
+            "input_ids": list(input_ids),
+        }
 
 
 def _tokenization_evidence_sha256(
