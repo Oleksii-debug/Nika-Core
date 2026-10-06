@@ -178,7 +178,7 @@ def test_dynamic_host_builds_worker_only_from_durable_repository_binding(
         project,
         _graph(project.project_id, repository),
     )
-    entry = host._entry_for("host-task", resolved)
+    entry = host._entry_for("host-task", project, resolved)
 
     assert resolved == {repository.repository_id: bound}
     assert entry.bindings[repository.repository_id].binding_version == 1
@@ -212,7 +212,7 @@ def test_rebind_after_host_composition_fails_closed_before_worker_reuse(
         project,
         _graph(project.project_id, repository),
     )
-    host._entry_for("host-task", initial)
+    host._entry_for("host-task", project, initial)
 
     second = bindings.bind(
         project_id=project.project_id,
@@ -267,7 +267,7 @@ def test_fresh_host_after_restart_uses_latest_durable_binding(
         project.project_id
     )
     current = host._bindings_for_project(reopened_project)
-    entry = host._entry_for("restarted-host-task", current)
+    entry = host._entry_for("restarted-host-task", reopened_project, current)
 
     assert (
         current[repository.repository_id].binding_version
@@ -414,7 +414,7 @@ def test_entry_repository_authority_rejects_same_root_rebind_version_change(
         project,
         _graph(project.project_id, repository),
     )
-    entry = host._entry_for("host-task", current)
+    entry = host._entry_for("host-task", project, current)
     authority = entry.program.ports.repository_authority
     assert authority is not None
 
@@ -436,6 +436,159 @@ def test_entry_repository_authority_rejects_same_root_rebind_version_change(
             repository_id=repository.repository_id,
             root=root,
         )
+
+
+@pytest.mark.asyncio
+async def test_entry_ports_fail_closed_if_binding_is_unbound_after_host_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+
+    bindings.unbind(
+        project_id=project.project_id,
+        repository_id=repository.repository_id,
+        expected_binding_version=bound.binding_version,
+    )
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="binding is unavailable during contained-local execution",
+    ):
+        await entry.program.ports.context_for(request)
+
+
+@pytest.mark.asyncio
+async def test_entry_ports_fail_closed_if_repository_is_replaced_after_host_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset({"read_source", "write_source", "run_tests"}),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+
+    moved = tmp_path / "moved repository"
+    root.rename(moved)
+    root.mkdir()
+    (root / ".git").mkdir()
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="binding is unavailable during contained-local execution",
+    ):
+        await entry.program.ports.context_for(request)
+
+@pytest.mark.asyncio
+async def test_entry_ports_reject_product_project_version_change_after_host_check(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    state = host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+    entry = host._require_state_bindings("host-task", state)
+    request = state.coordinator.snapshot().records[0].request
+
+    changed = ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed after host-level repository validation",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="effect-boundary ProductProject race regression",
+        idempotency_key="update:product-1:effect-boundary-race",
+    )
+    assert changed.row_version > project.row_version
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="ProductProject changed during contained-local execution",
+    ):
+        await entry.program.ports.context_for(request)
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="ProductProject changed during contained-local execution",
+    ):
+        await entry.program.ports.collect(request, object(), object())
 
 
 @pytest.mark.asyncio
