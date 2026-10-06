@@ -6,8 +6,8 @@ import sqlite3
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from urllib.parse import urlsplit
 from typing import Protocol
+from urllib.parse import urlsplit
 from uuid import uuid4
 
 from nika_core.data.sqlite import SQLiteStore
