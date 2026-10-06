@@ -575,6 +575,12 @@ class ProductProjectHistoricalIntegrityService:
                     label="product decision audit decision_id",
                 )
                 state = ProductDecisionState(payload["state"])
+                audit_decided_by_ref = payload.get("decided_by_ref")
+                if audit_decided_by_ref is not None:
+                    audit_decided_by_ref = self._required_text(
+                        audit_decided_by_ref,
+                        label="product decision audit decided_by_ref",
+                    )
                 raw_evidence = payload["evidence_package_ids"]
                 if not isinstance(raw_evidence, list) or any(
                     type(ref) is not str or not ref.strip()
@@ -599,6 +605,15 @@ class ProductProjectHistoricalIntegrityService:
             )
             if state.value != durable_state:
                 raise ProductProjectError("product decision audit state drift")
+            durable_decided_by_ref = self._required_text(
+                durable_row["decided_by_ref"],
+                label="durable product decision decided_by_ref",
+            )
+            if (
+                audit_decided_by_ref is not None
+                and audit_decided_by_ref != durable_decided_by_ref
+            ):
+                raise ProductProjectError("product decision audit actor drift")
             raw_durable_evidence = durable_row["evidence_package_ids_json"]
             if type(raw_durable_evidence) is not str:
                 raise ProductProjectError("invalid durable product decision evidence")
@@ -975,9 +990,13 @@ class ProductProjectHistoricalIntegrityService:
                         row["rationale"],
                         label="product decision rationale",
                     ),
-                    "decided_by_ref": self._required_text(
-                        row["decided_by_ref"],
-                        label="product decision decided_by_ref",
+                    "decided_by_ref": (
+                        None
+                        if state is ProductDecisionState.APPROVED
+                        else self._required_text(
+                            row["decided_by_ref"],
+                            label="product decision decided_by_ref",
+                        )
                     ),
                 }
             )
