@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import stat
 import tempfile
@@ -124,6 +125,13 @@ class ReleaseManifest:
     manifest_version: int = _MANIFEST_VERSION
 
 
+@dataclass(frozen=True, slots=True)
+class _ReleaseFileSnapshot:
+    size: int
+    sha256: str
+    contains_secret_assignment: bool
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -180,7 +188,27 @@ def _release_path_is_secret(value: object) -> bool:
 
 
 def _canonical_release_path(value: object) -> bool:
-    return _canonical_relative_path(value) and value != _RELEASE_MANIFEST_NAME
+    return (
+        _canonical_relative_path(value)
+        and value.casefold() != _RELEASE_MANIFEST_NAME
+    )
+
+
+def _release_file_directory_collisions(
+    file_paths: tuple[str, ...],
+    directory_paths: tuple[str, ...] = (),
+) -> tuple[str, ...]:
+    """Reject file ancestors of files/directories under Windows path identity."""
+    file_identities = {path.casefold() for path in file_paths}
+    collisions: list[str] = []
+    for path in (*file_paths, *directory_paths):
+        parts = path.casefold().split("/")
+        if any(
+            "/".join(parts[:index]) in file_identities
+            for index in range(1, len(parts))
+        ):
+            collisions.append(path)
+    return tuple(collisions)
 
 
 def _valid_product_version(value: object) -> bool:
@@ -204,6 +232,99 @@ def _secret_assignment_value_is_placeholder(value: bytes) -> bool:
     if normalized.startswith(b"%") and normalized.endswith(b"%") and len(normalized) > 2:
         return True
     return normalized.startswith((b"env:", b"keyring:", b"credential-ref:"))
+
+
+def _stream_release_file_snapshot(
+    handle: Any,
+    *,
+    scan_secrets: bool,
+) -> _ReleaseFileSnapshot:
+    digest = hashlib.sha256()
+    size = 0
+    overlap = b""
+    first_window = True
+    contains_secret_assignment = False
+
+    while True:
+        chunk = handle.read(_SECRET_SCAN_CHUNK_BYTES)
+        if not chunk:
+            break
+        size += len(chunk)
+        digest.update(chunk)
+        if not scan_secrets or contains_secret_assignment:
+            continue
+
+        raw_window = overlap + chunk
+        window = b"\n" + raw_window if first_window else raw_window
+        first_window = False
+        for match in _SECRET_ASSIGNMENT_RE.finditer(window):
+            if not _secret_assignment_value_is_placeholder(match.group("value")):
+                contains_secret_assignment = True
+                break
+        overlap = raw_window[-_SECRET_SCAN_OVERLAP_BYTES:]
+
+    return _ReleaseFileSnapshot(
+        size=size,
+        sha256=digest.hexdigest(),
+        contains_secret_assignment=contains_secret_assignment,
+    )
+
+
+def _release_file_snapshot_is_stable(
+    before: os.stat_result,
+    after: os.stat_result,
+    current: os.stat_result,
+    observed_size: int,
+) -> bool:
+    if not stat.S_ISREG(before.st_mode) or not stat.S_ISREG(after.st_mode):
+        return False
+    if observed_size != before.st_size or observed_size != after.st_size:
+        return False
+    if (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+        before.st_mtime_ns,
+        before.st_ctime_ns,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        after.st_size,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+    ):
+        return False
+    if not os.path.samestat(after, current):
+        return False
+    return (
+        current.st_size == after.st_size
+        and current.st_mtime_ns == after.st_mtime_ns
+        and current.st_ctime_ns == after.st_ctime_ns
+    )
+
+
+def _stable_release_file_snapshot(
+    path: Path,
+    *,
+    scan_secrets: bool,
+    root: Path | None = None,
+) -> _ReleaseFileSnapshot | None:
+    try:
+        with path.open("rb") as handle:
+            before = os.fstat(handle.fileno())
+            snapshot = _stream_release_file_snapshot(handle, scan_secrets=scan_secrets)
+            after = os.fstat(handle.fileno())
+        if root is None:
+            current = path.stat()
+        else:
+            resolved = path.resolve(strict=True)
+            resolved.relative_to(root)
+            current = resolved.stat()
+    except (OSError, RuntimeError, ValueError):
+        return None
+    if not _release_file_snapshot_is_stable(before, after, current, snapshot.size):
+        return None
+    return snapshot
 
 
 def _stream_contains_secret_assignment(handle: Any) -> bool:
@@ -290,6 +411,10 @@ def _manifest_structure_findings(manifest: ReleaseManifest) -> tuple[str, ...]:
             findings.append(f"manifest:size-format:{index}")
         if not isinstance(entry.sha256, str) or not _SHA256_RE.fullmatch(entry.sha256):
             findings.append(f"manifest:sha256-format:{index}")
+    for path in _release_file_directory_collisions(
+        tuple(sorted(seen_paths | {_RELEASE_MANIFEST_NAME}))
+    ):
+        findings.append(f"manifest:file-directory-collision:{path}")
     return tuple(findings)
 
 
@@ -307,15 +432,26 @@ def build_release_manifest(
     source_sha: str,
 ) -> ReleaseManifest:
     root = bundle_dir.resolve(strict=True)
-    entries = tuple(
-        ReleaseFile(
-            path=path.relative_to(root).as_posix(),
-            size=path.stat().st_size,
-            sha256=_sha256(path),
+    entries_list: list[ReleaseFile] = []
+    for path in _safe_files(root):
+        relative_path = path.relative_to(root).as_posix()
+        if relative_path == _RELEASE_MANIFEST_NAME:
+            continue
+        snapshot = _stable_release_file_snapshot(
+            path,
+            scan_secrets=False,
+            root=root,
         )
-        for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
-    )
+        if snapshot is None:
+            raise ValueError(f"release file changed while building manifest: {relative_path}")
+        entries_list.append(
+            ReleaseFile(
+                path=relative_path,
+                size=snapshot.size,
+                sha256=snapshot.sha256,
+            )
+        )
+    entries = tuple(entries_list)
     if not entries:
         raise ValueError("release bundle is empty")
     manifest = ReleaseManifest(
@@ -371,7 +507,7 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
     actual_paths = {
         path.relative_to(root).as_posix(): path
         for path in _safe_files(root)
-        if path.name != _RELEASE_MANIFEST_NAME
+        if path.relative_to(root).as_posix() != _RELEASE_MANIFEST_NAME
     }
     findings: list[str] = []
     for relative_path in sorted(actual_paths):
@@ -384,13 +520,24 @@ def verify_release_manifest(bundle_dir: Path, manifest: ReleaseManifest) -> tupl
     for relative_path in sorted(expected.keys() & actual_paths.keys()):
         entry = expected[relative_path]
         path = actual_paths[relative_path]
-        if path.stat().st_size != entry.size:
+        scan_secrets = (
+            PurePosixPath(relative_path).suffix.casefold() in _SECRET_CONTENT_SUFFIXES
+        )
+        snapshot = _stable_release_file_snapshot(
+            path,
+            scan_secrets=scan_secrets,
+            root=root,
+        )
+        if snapshot is None:
+            findings.append(f"unstable:{relative_path}")
+            continue
+        if snapshot.size != entry.size:
             findings.append(f"size:{relative_path}")
             continue
-        if _sha256(path) != entry.sha256:
+        if snapshot.sha256 != entry.sha256:
             findings.append(f"sha256:{relative_path}")
             continue
-        if _release_file_contains_secret_assignment(relative_path, path):
+        if snapshot.contains_secret_assignment:
             findings.append(f"secret-content:{relative_path}")
     return tuple(findings)
 
@@ -503,6 +650,7 @@ def verify_release_archive(
             by_path: dict[str, zipfile.ZipInfo] = {}
             seen_paths: set[str] = set()
             windows_paths: set[str] = set()
+            directory_paths: list[str] = []
             for index, member in enumerate(all_members):
                 member_path = _zip_member_path(member)
                 if not _canonical_relative_path(member_path):
@@ -526,8 +674,17 @@ def verify_release_archive(
                     continue
                 seen_paths.add(member_path)
                 windows_paths.add(windows_identity)
-                if not member.is_dir():
+                if member.is_dir():
+                    directory_paths.append(member_path)
+                else:
                     by_path[member_path] = member
+            if findings:
+                return tuple(findings)
+            for path in _release_file_directory_collisions(
+                tuple(by_path),
+                tuple(directory_paths),
+            ):
+                findings.append(f"archive:file-directory-collision:{path}")
             if findings:
                 return tuple(findings)
             if not by_path:
@@ -615,6 +772,9 @@ def verify_distributable_evidence(
         return ("distributable:expected-product-version-format",)
     if not artifact_path.is_file():
         return ("distributable:missing-artifact",)
+    artifact_snapshot = _stable_release_file_snapshot(artifact_path, scan_secrets=False)
+    if artifact_snapshot is None:
+        return ("distributable:unstable-artifact",)
 
     payload = _read_evidence_object(evidence_path)
     if payload is None:
@@ -651,12 +811,12 @@ def verify_distributable_evidence(
     expected_size = payload.get("distributable_zip_size")
     if type(expected_size) is not int or expected_size < 0:
         findings.append("distributable:size-format")
-    elif artifact_path.stat().st_size != expected_size:
+    elif artifact_snapshot.size != expected_size:
         findings.append("distributable:size")
 
     expected_sha256 = payload.get("distributable_zip_sha256")
     if not isinstance(expected_sha256, str) or not _SHA256_RE.fullmatch(expected_sha256):
         findings.append("distributable:sha256-format")
-    elif _sha256(artifact_path) != expected_sha256:
+    elif artifact_snapshot.sha256 != expected_sha256:
         findings.append("distributable:sha256")
     return tuple(findings)

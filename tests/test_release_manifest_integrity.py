@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import nika_core.packaging.release as release_module
 from nika_core.packaging.release import (
     ReleaseFile,
     ReleaseManifest,
@@ -216,6 +217,116 @@ def test_valid_manifest_still_verifies_and_writes(tmp_path: Path) -> None:
     assert target.is_file()
 
 
+def test_snapshot_identity_rejects_same_size_path_replacement(tmp_path: Path) -> None:
+    original = tmp_path / "original.bin"
+    replacement = tmp_path / "replacement.bin"
+    original.write_bytes(b"binary")
+    replacement.write_bytes(b"binary")
+
+    opened = original.stat()
+    current = replacement.stat()
+
+    assert not release_module._release_file_snapshot_is_stable(
+        opened,
+        opened,
+        current,
+        opened.st_size,
+    )
+
+
+def test_snapshot_rejects_path_outside_release_root(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    root.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+
+    assert (
+        release_module._stable_release_file_snapshot(
+            outside,
+            scan_secrets=False,
+            root=root,
+        )
+        is None
+    )
+
+
+def test_snapshot_rejects_external_symlink_target_when_supported(tmp_path: Path) -> None:
+    root = tmp_path / "bundle"
+    root.mkdir()
+    outside = tmp_path / "outside.bin"
+    outside.write_bytes(b"outside")
+    link = root / "payload.bin"
+    try:
+        link.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("file symlink creation is unavailable on this host")
+
+    assert (
+        release_module._stable_release_file_snapshot(
+            link,
+            scan_secrets=False,
+            root=root,
+        )
+        is None
+    )
+
+
+def test_builder_fails_closed_when_release_file_snapshot_is_unstable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, _ = _bundle(tmp_path)
+    original = release_module._stable_release_file_snapshot
+
+    def unstable(
+        path: Path,
+        *,
+        scan_secrets: bool,
+        root: Path | None = None,
+    ):
+        if path.name == "NikaCore.exe":
+            return None
+        return original(path, scan_secrets=scan_secrets, root=root)
+
+    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
+
+    with pytest.raises(ValueError, match="release file changed while building manifest"):
+        build_release_manifest(
+            bundle,
+            product="NikaCore",
+            version="1.0.0",
+            source_sha=SOURCE_SHA,
+        )
+
+
+def test_verifier_fails_closed_when_release_file_snapshot_is_unstable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, _ = _bundle(tmp_path)
+    manifest = build_release_manifest(
+        bundle,
+        product="NikaCore",
+        version="1.0.0",
+        source_sha=SOURCE_SHA,
+    )
+    original = release_module._stable_release_file_snapshot
+
+    def unstable(
+        path: Path,
+        *,
+        scan_secrets: bool,
+        root: Path | None = None,
+    ):
+        if path.name == "NikaCore.exe":
+            return None
+        return original(path, scan_secrets=scan_secrets, root=root)
+
+    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
+
+    assert verify_release_manifest(bundle, manifest) == ("unstable:NikaCore.exe",)
+
+
 def _write_release_zip(bundle: Path, target: Path) -> None:
     import zipfile
 
@@ -243,6 +354,37 @@ def _write_outer_evidence(evidence: Path, artifact: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def test_outer_evidence_fails_closed_when_artifact_snapshot_is_unstable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "NikaCore-1.0.0-windows-x64.zip"
+    artifact.write_bytes(b"candidate")
+    evidence = tmp_path / "evidence.json"
+    _write_outer_evidence(evidence, artifact)
+    original = release_module._stable_release_file_snapshot
+
+    def unstable(
+        path: Path,
+        *,
+        scan_secrets: bool,
+        root: Path | None = None,
+    ):
+        if path == artifact:
+            return None
+        return original(path, scan_secrets=scan_secrets, root=root)
+
+    monkeypatch.setattr(release_module, "_stable_release_file_snapshot", unstable)
+
+    assert release_module.verify_distributable_evidence(
+        artifact,
+        evidence,
+        source_sha=SOURCE_SHA,
+        artifact_reference="./dist/NikaCore-1.0.0-windows-x64.zip",
+        expected_product_version=PRODUCT_VERSION,
+    ) == ("distributable:unstable-artifact",)
 
 
 def _valid_release_zip(tmp_path: Path) -> tuple[Path, Path]:
