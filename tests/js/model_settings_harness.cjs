@@ -73,6 +73,9 @@ const tags = {
   "autostart-enabled": "INPUT",
   "autostart-save": "BUTTON",
   "command-input": "TEXTAREA",
+  "voice-start": "BUTTON",
+  "voice-cancel": "BUTTON",
+  "voice-use-command": "BUTTON",
   "speech-text": "TEXTAREA",
   "speech-start": "BUTTON",
   "speech-cancel": "BUTTON",
@@ -90,9 +93,25 @@ element("model-save").dataset.actionId = "settings.model.configure";
 element("model-reload").dataset.actionId = "settings.model.refresh";
 element("model-reload").dataset.errorFocusTarget = "model-settings-heading";
 element("autostart-save").dataset.actionId = "settings.autostart.configure";
+element("voice-start").dataset.actionId = "voice.start";
+element("voice-cancel").dataset.actionId = "voice.cancel";
 element("speech-start").dataset.actionId = "speech.start";
 element("speech-cancel").dataset.actionId = "speech.cancel";
 
+let currentVoice = {
+  schema: "nika.packaged-voice-state:v1",
+  available: true,
+  message: "Голосовий ввід готовий.",
+  turn: {
+    schema: "nika.desktop-voice-state:v1",
+    status: "idle",
+    request_id: null,
+    message: "Голосовий ввід готовий.",
+    activated: null,
+    transcript: null,
+    active: false,
+  },
+};
 let currentSpeech = {
   schema: "nika.packaged-speech-state:v1",
   available: true,
@@ -157,6 +176,7 @@ function snapshot() {
       startup_recovery: currentRecovery,
       v01_sources: { status: "missing", revision: 0, root: "", source_a: "", source_b: "" },
       v01_model_settings: currentModel,
+      voice: currentVoice,
       speech: currentSpeech,
       product_project: null,
       v01_team_task: null,
@@ -193,6 +213,27 @@ global.pywebview = { api: {
   dispatch: async (command) => {
     calls.push(command);
     if (dispatchMode === "disconnect") throw new Error("PRIVATE_MODEL_CANARY");
+    if (command.action_id === "voice.start") {
+      currentVoice = {
+        schema: "nika.packaged-voice-state:v1", available: true,
+        message: "Голосовий ввід завершено.",
+        turn: {
+          schema: "nika.desktop-voice-state:v1", status: "completed",
+          request_id: "voice-harness-1", message: "Голосовий ввід завершено.",
+          activated: true, transcript: "ніка створи чернетку", active: false,
+        },
+      };
+      return ack(command, { status: "accepted", message: "Голосовий ввід прийнято." });
+    }
+    if (command.action_id === "voice.cancel") {
+      currentVoice = {
+        ...currentVoice,
+        message: "Голосовий ввід скасовано.",
+        turn: { ...currentVoice.turn, status: "cancelled", active: false,
+          message: "Голосовий ввід скасовано.", transcript: null, activated: null },
+      };
+      return ack(command, { status: "accepted", message: "Скасування прийнято." });
+    }
     if (command.action_id === "speech.start") {
       currentSpeech = {
         schema: "nika.packaged-speech-state:v1", available: true,
@@ -261,6 +302,10 @@ const timeout = element("model-timeout");
 const save = element("model-save");
 const reload = element("model-reload");
 const status = element("model-settings-status");
+const commandInput = element("command-input");
+const voiceStart = element("voice-start");
+const voiceCancel = element("voice-cancel");
+const voiceUseCommand = element("voice-use-command");
 const speechText = element("speech-text");
 const speechStart = element("speech-start");
 const speechCancel = element("speech-cancel");
@@ -279,6 +324,47 @@ const speechCancel = element("speech-cancel");
   assert.equal(element("recovery-summary").hidden, false);
   assert.equal(element("recovery-auto-count").textContent, "0");
   assert.equal(element("recovery-uncertain-count").textContent, "0");
+
+  assert.equal(voiceStart.disabled, false);
+  assert.equal(voiceCancel.disabled, true);
+  assert.equal(voiceUseCommand.disabled, true);
+  const voiceCallCount = calls.length;
+  click(voiceStart);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.length, voiceCallCount + 1);
+  assert.equal(calls.at(-1).action_id, "voice.start");
+  assert.deepEqual(calls.at(-1).payload, {});
+  assert.equal(element("voice-status").textContent, "Голосовий ввід завершено.");
+  assert.equal(element("voice-transcript").textContent, "ніка створи чернетку");
+  assert.equal(voiceUseCommand.disabled, false);
+  const beforeStageCount = calls.length;
+  click(voiceUseCommand);
+  assert.equal(calls.length, beforeStageCount, "Transcript staging must not dispatch a task");
+  assert.equal(commandInput.value, "ніка створи чернетку");
+  assert.equal(document.activeElement, commandInput);
+  assert.match(element("app-status").textContent, /Перевірте його перед створенням завдання/);
+
+  currentVoice = {
+    schema: "nika.packaged-voice-state:v1", available: true,
+    message: "Голосовий ввід виконується.",
+    turn: {
+      schema: "nika.desktop-voice-state:v1", status: "running",
+      request_id: "voice-harness-2", message: "Голосовий ввід виконується.",
+      activated: null, transcript: null, active: true,
+    },
+  };
+  await poll();
+  assert.equal(voiceStart.disabled, true);
+  assert.equal(voiceCancel.disabled, false);
+  assert.equal(voiceUseCommand.disabled, true);
+  click(voiceCancel);
+  await tick(); await tick(); await tick();
+  assert.equal(calls.at(-1).action_id, "voice.cancel");
+  assert.deepEqual(calls.at(-1).payload, {});
+  assert.equal(element("voice-status").textContent, "Голосовий ввід скасовано.");
+  assert.equal(voiceStart.disabled, false);
+  assert.equal(voiceCancel.disabled, true);
+  assert.equal(voiceUseCommand.disabled, true);
 
   assert.equal(speechStart.disabled, false);
   assert.equal(speechCancel.disabled, true);
