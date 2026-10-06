@@ -80,6 +80,16 @@ class ProductFactoryLocalRepositoryBindings:
         self._store = store
         self._projects = projects or ProductProjectRepository(store)
 
+    def require_plan_current(
+        self,
+        plan: PackagedProductFactoryExecutionPlan,
+    ) -> None:
+        """Fail closed unless the loaded plan still owns the current ProductProject."""
+
+        if type(plan) is not PackagedProductFactoryExecutionPlan:
+            raise TypeError("plan must be an exact PackagedProductFactoryExecutionPlan")
+        _require_plan_project(plan, self._projects.get(plan.project_id))
+
     def bind(
         self,
         *,
@@ -88,9 +98,48 @@ class ProductFactoryLocalRepositoryBindings:
         root: pathlib.Path,
         expected_binding_version: int | None,
     ) -> ProductFactoryLocalRepositoryBinding:
+        return self._bind(
+            project_id=project_id,
+            repository=repository,
+            root=root,
+            expected_binding_version=expected_binding_version,
+            plan=None,
+        )
+
+    def bind_for_plan(
+        self,
+        *,
+        plan: PackagedProductFactoryExecutionPlan,
+        repository_id: str,
+        root: pathlib.Path,
+        expected_binding_version: int | None,
+    ) -> ProductFactoryLocalRepositoryBinding:
+        """Bind a repository only while the exact loaded plan remains current."""
+
+        self.require_plan_current(plan)
+        repository = _repository_for_plan(plan, repository_id)
+        return self._bind(
+            project_id=plan.project_id,
+            repository=repository,
+            root=root,
+            expected_binding_version=expected_binding_version,
+            plan=plan,
+        )
+
+    def _bind(
+        self,
+        *,
+        project_id: str,
+        repository: RepositoryRef,
+        root: pathlib.Path,
+        expected_binding_version: int | None,
+        plan: PackagedProductFactoryExecutionPlan | None,
+    ) -> ProductFactoryLocalRepositoryBinding:
         project_id = _canonical_text(project_id, "project_id")
         repository = _snapshot_repository(repository)
         project = self._require_project_repository(project_id, repository.locator)
+        if plan is not None:
+            _require_plan_project(plan, project)
         if project.status != "active":
             raise ProductFactoryLocalRepositoryBindingError(
                 "local repository binding requires an active ProductProject"
@@ -108,6 +157,8 @@ class ProductFactoryLocalRepositoryBindings:
                 raise ProductFactoryLocalRepositoryBindingError(
                     "ProductProject changed while binding local repository"
                 )
+            if plan is not None:
+                _require_plan_project(plan, current_project)
             alias_rows = conn.execute(
                 "SELECT * FROM product_factory_local_repository_bindings "
                 "WHERE project_id = ? AND repository_id <> ?",
@@ -214,19 +265,75 @@ class ProductFactoryLocalRepositoryBindings:
         repository_id: str,
         expected_binding_version: int,
     ) -> None:
+        self._unbind(
+            project_id=project_id,
+            repository_id=repository_id,
+            expected_binding_version=expected_binding_version,
+            plan=None,
+            repository=None,
+        )
+
+    def unbind_for_plan(
+        self,
+        *,
+        plan: PackagedProductFactoryExecutionPlan,
+        repository_id: str,
+        expected_binding_version: int,
+    ) -> None:
+        """Unbind only while the exact loaded plan still owns the repository."""
+
+        self.require_plan_current(plan)
+        repository = _repository_for_plan(plan, repository_id)
+        project = self._require_project_repository(plan.project_id, repository.locator)
+        _require_plan_project(plan, project)
+        self._unbind(
+            project_id=plan.project_id,
+            repository_id=repository.repository_id,
+            expected_binding_version=expected_binding_version,
+            plan=plan,
+            repository=repository,
+        )
+
+    def _unbind(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        expected_binding_version: int,
+        plan: PackagedProductFactoryExecutionPlan | None,
+        repository: RepositoryRef | None,
+    ) -> None:
         project_id = _canonical_text(project_id, "project_id")
         repository_id = _canonical_text(repository_id, "repository_id")
         expected = _positive_int(expected_binding_version, "expected_binding_version")
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if plan is not None:
+                if repository is None:
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "plan-aware unbind requires repository identity"
+                    )
+                current_project = self._require_project_repository(
+                    project_id,
+                    repository.locator,
+                )
+                _require_plan_project(plan, current_project)
             row = conn.execute(
-                "SELECT binding_version FROM product_factory_local_repository_bindings "
+                "SELECT binding_version,provider,locator "
+                "FROM product_factory_local_repository_bindings "
                 "WHERE project_id=? AND repository_id=?",
                 (project_id, repository_id),
             ).fetchone()
             if row is None:
                 raise KeyError((project_id, repository_id))
+            if repository is not None and (
+                row["provider"] != repository.provider
+                or row["locator"] != repository.locator
+            ):
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "local repository binding does not match the execution-plan repository"
+                )
             current = _stored_positive_int(row["binding_version"], "binding_version")
             if current != expected:
                 raise ProductFactoryLocalRepositoryBindingError(
@@ -334,6 +441,25 @@ class ProductFactoryLocalRepositoryBindings:
                 "repository locator is not present in current ProductProject"
             )
         return project
+
+
+def _repository_for_plan(
+    plan: PackagedProductFactoryExecutionPlan,
+    repository_id: str,
+) -> RepositoryRef:
+    if type(plan) is not PackagedProductFactoryExecutionPlan:
+        raise TypeError("plan must be an exact PackagedProductFactoryExecutionPlan")
+    repository_id = _canonical_text(repository_id, "repository_id")
+    matches = tuple(
+        repository
+        for repository in plan.graph.repositories
+        if repository.repository_id == repository_id
+    )
+    if len(matches) != 1:
+        raise ProductFactoryLocalRepositoryBindingError(
+            "execution-plan repository identity is unavailable"
+        )
+    return _snapshot_repository(matches[0])
 
 
 def _require_plan_project(
