@@ -9,7 +9,6 @@ from nika_core.builder.compiler import AgentCompiler
 from nika_core.builder.repository import AgentDefinitionRepository
 from nika_core.builder.spec import AgentDefinition
 from nika_core.data.sqlite import SQLiteStore
-
 from nika_core.model_gateway.contracts import (
     ModelAuditError,
     ModelErrorCode,
