@@ -132,15 +132,17 @@ class LearningWorldModelApplier:
         created = canonical.expected_revision_sha256 is None
         if conn is None:
             snapshot = self._world_model.compare_and_put(
-            workspace_id=workspace_id,
-            topic=topic,                value=value,
+                workspace_id=workspace_id,
+                topic=topic,
+                value=value,
                 expected_revision_sha256=canonical.expected_revision_sha256,
             )
         else:
             snapshot = self._world_model.compare_and_put_with_connection(
                 conn,
-            workspace_id=workspace_id,
-            topic=topic,                value=value,
+                workspace_id=workspace_id,
+                topic=topic,
+                value=value,
                 expected_revision_sha256=canonical.expected_revision_sha256,
             )
         return LearningWorldModelApplyReceipt(
