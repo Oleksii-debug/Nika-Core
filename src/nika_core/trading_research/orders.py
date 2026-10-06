@@ -51,8 +51,8 @@ class OrderIntent:
             raise TradingResearchError("intent_id must not be empty")
         if self.quantity <= 0:
             raise TradingResearchError("order quantity must be positive")
-        if self.submitted_slice < 0:
-            raise TradingResearchError("submitted_slice must be non-negative")
+        if type(self.submitted_slice) is not int or self.submitted_slice < 0:
+            raise TradingResearchError("submitted_slice must be a non-negative integer")
         submitted_at = require_aware_utc(self.submitted_at, "submitted_at")
         expires_at = (
             require_aware_utc(self.expires_at, "expires_at") if self.expires_at is not None else None
@@ -144,6 +144,8 @@ class RiskApprovedOrder:
         if type(self.authority) is not OrderAuthority:
             raise TradingResearchError("approved order requires host OrderAuthority")
         approved_at = require_aware_utc(self.approved_at, "approved_at")
+        if type(self.approved_slice) is not int or self.approved_slice < 0:
+            raise TradingResearchError("approved_slice must be a non-negative integer")
         if self.approved_slice < self.authority.submitted_slice:
             raise TradingResearchError("approval cannot precede authority slice")
         if approved_at < self.authority.submitted_at:
@@ -181,6 +183,8 @@ class SimulatedFill:
             raise TradingResearchError("simulated fill requires host OrderAuthority")
         if self.quantity <= 0 or self.price <= 0 or self.fee < 0:
             raise TradingResearchError("fill quantity/price must be positive and fee non-negative")
+        if type(self.filled_slice) is not int:
+            raise TradingResearchError("filled_slice must be an integer")
         if self.filled_slice <= self.authority.submitted_slice:
             raise TradingResearchError("fill must occur after host submission slice")
         filled_at = require_aware_utc(self.filled_at, "filled_at")
