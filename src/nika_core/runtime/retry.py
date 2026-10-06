@@ -20,17 +20,36 @@ def usable_resume_token(value: object) -> str | None:
 def fresh_retry_safety_evidence(result: RuntimeResult) -> bool | None:
     """Return model/provider replay authority when a runtime exposes that evidence.
 
-    Generic runtimes may opt into fresh replay without model-provider semantics. Once either
-    provider safety field is present, both become authoritative and incomplete, false, or
-    ambiguous evidence fails closed.
+    Fresh replay is an external-effect authority boundary. Behavioral mapping carriers can
+    change membership/value answers between checks, so provider replay evidence is trusted only
+    from an exact built-in dict with exact built-in field carriers.
     """
 
     output = result.output
-    has_provider_retryable = "provider_retryable" in output
-    has_failure_effect = "failure_effect" in output
+    if type(output) is not dict:
+        return False
+
+    provider_retryable: object = None
+    failure_effect: object = None
+    has_provider_retryable = False
+    has_failure_effect = False
+    for key, value in output.items():
+        if type(key) is not str:
+            continue
+        if key == "provider_retryable":
+            has_provider_retryable = True
+            provider_retryable = value
+        elif key == "failure_effect":
+            has_failure_effect = True
+            failure_effect = value
+
     if not has_provider_retryable and not has_failure_effect:
         return None
-    return output.get("provider_retryable") is True and output.get("failure_effect") == "no_effect"
+    return (
+        provider_retryable is True
+        and type(failure_effect) is str
+        and failure_effect == "no_effect"
+    )
 
 
 @dataclass(frozen=True, slots=True)
