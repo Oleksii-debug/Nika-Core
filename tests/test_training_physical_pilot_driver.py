@@ -432,6 +432,26 @@ def test_physical_step_budget_preserves_pilot_and_scales_higher_tier(
     ) == 8
 
 
+def test_physical_step_budget_rejects_oversized_tier_before_execution() -> None:
+    tier = driver.TrainingScaleTier(
+        tier_id="oversized",
+        max_training_records=100,
+        max_training_bytes=65536,
+        max_validation_records=20,
+        max_validation_bytes=8192,
+        max_steps=driver.PHYSICAL_TRAINING_MAX_STEPS + 1,
+    )
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="max_steps exceeds the physical execution ceiling",
+    ):
+        driver._physical_training_max_steps(
+            tier_index=1,
+            tier=tier,
+        )
+
+
 def test_legacy_scale_plan_uses_observed_pilot_bounds(tmp_path: Path) -> None:
     config = _config(tmp_path)
 
