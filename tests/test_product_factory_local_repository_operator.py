@@ -313,3 +313,108 @@ def test_missing_plan_snapshot_and_actions_fail_closed(
         }
     )
     assert result.status == "rejected"
+
+
+def test_operator_rejects_stale_plan_bind_without_durable_mutation(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    stale_plan = _plan(project, repository)
+    operator = _operator(store, stale_plan)
+    updated = ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed while the loaded plan stayed stale",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="operator stale bind regression",
+        idempotency_key="update:product-1:operator-stale-bind",
+    )
+    root = _root(tmp_path)
+
+    snapshot = operator.snapshot(project.project_id)
+    rejected = operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(root),
+            "expected_binding_version": None,
+        }
+    )
+
+    assert snapshot["status"] == "invalid"
+    assert rejected.status == "rejected"
+    with pytest.raises(KeyError):
+        ProductFactoryLocalRepositoryBindings(store).require(
+            project.project_id,
+            repository.repository_id,
+        )
+
+    current = _operator(store, _plan(updated, repository))
+    assert current.snapshot(project.project_id)["status"] == "ready"
+    assert current.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(root),
+            "expected_binding_version": None,
+        }
+    ).status == "completed"
+
+
+def test_operator_rejects_stale_plan_unbind_without_revoking_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    operator = _operator(store, plan)
+    root = _root(tmp_path)
+    assert operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(root),
+            "expected_binding_version": None,
+        }
+    ).status == "completed"
+    updated = ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed before stale operator unbind",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="operator stale unbind regression",
+        idempotency_key="update:product-1:operator-stale-unbind",
+    )
+
+    rejected = operator.unbind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "expected_binding_version": 1,
+        }
+    )
+    assert rejected.status == "rejected"
+    assert (
+        ProductFactoryLocalRepositoryBindings(store)
+        .require(project.project_id, repository.repository_id)
+        .binding_version
+        == 1
+    )
+
+    current = _operator(store, _plan(updated, repository))
+    assert current.unbind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "expected_binding_version": 1,
+        }
+    ).status == "completed"
