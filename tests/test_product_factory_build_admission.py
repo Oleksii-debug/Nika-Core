@@ -317,6 +317,96 @@ def test_restored_pf4_snapshot_preserves_exact_build_admission_identity() -> Non
     assert restored_spec == original_spec
 
 
+def test_accepted_repair_attempt_enters_pf5_with_new_exact_source() -> None:
+    graph = _graph()
+    coordinator = ProductFactoryCoordinator(
+        graph,
+        review_authority=AllowReviewAuthority(),
+    )
+    coordinator.plan(
+        base_shas={REPOSITORY_ID: BASE_SHA},
+        goals={COMPONENT_ID: "Build accessible Windows desktop product"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests", "build_release"}
+        ),
+    )
+    first = coordinator.start(COMPONENT_ID)
+    coordinator.record_result(
+        WorkerResultEnvelope(
+            work_id=first.work_id,
+            component_id=COMPONENT_ID,
+            repository_id=REPOSITORY_ID,
+            base_sha=BASE_SHA,
+            result_sha=RESULT_SHA,
+            diff_digest=DIFF_DIGEST,
+            coding_result=CodingResult(
+                job_id=first.work_id,
+                test_evidence=(
+                    TestEvidence(
+                        command=TEST_COMMAND,
+                        exit_code=0,
+                        output_digest="e" * 64,
+                    ),
+                ),
+            ),
+            producer_actor_id=PRODUCER,
+        )
+    )
+    coordinator.review(
+        COMPONENT_ID,
+        ReviewDecision(
+            reviewer_id=REVIEWER,
+            accepted=False,
+            reason="repair required",
+            evidence_refs=("review://independent/rejected",),
+        ),
+    )
+    repair = coordinator.prepare_repair(
+        COMPONENT_ID,
+        base_sha=RESULT_SHA,
+        reason="address independent review",
+    )
+    second = coordinator.start(COMPONENT_ID)
+    assert second == repair
+    repaired_sha = "f" * 40
+    coordinator.record_result(
+        WorkerResultEnvelope(
+            work_id=second.work_id,
+            component_id=COMPONENT_ID,
+            repository_id=REPOSITORY_ID,
+            base_sha=RESULT_SHA,
+            result_sha=repaired_sha,
+            diff_digest="9" * 64,
+            coding_result=CodingResult(
+                job_id=second.work_id,
+                test_evidence=(
+                    TestEvidence(
+                        command=TEST_COMMAND,
+                        exit_code=0,
+                        output_digest="8" * 64,
+                    ),
+                ),
+            ),
+            producer_actor_id=PRODUCER,
+        )
+    )
+    coordinator.review(
+        COMPONENT_ID,
+        ReviewDecision(
+            reviewer_id=REVIEWER,
+            accepted=True,
+            reason="repair independently accepted",
+            evidence_refs=("review://independent/accepted",),
+        ),
+    )
+
+    spec = _spec(coordinator, graph)
+
+    assert spec.source_sha == repaired_sha
+    assert coordinator.snapshot().records[0].request.attempt == 2
+    assert spec.request.work_id.startswith("pf5-build:")
+
+
 def test_review_required_candidate_cannot_enter_pf5() -> None:
     graph = _graph()
     coordinator = _coordinator(graph, review=False)
