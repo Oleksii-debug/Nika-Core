@@ -185,6 +185,7 @@ class PackagedLocalRepositoryOperator:
                         binding_version=binding.binding_version,
                     )
                 )
+            self._bindings.validate_plan(plan)
             message = (
                 "Виберіть репозиторій з поточного плану та явно вкажіть "
                 "його локальний Git-корінь."
