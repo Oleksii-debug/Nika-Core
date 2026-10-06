@@ -873,8 +873,12 @@ def _same_physical_repository(
     first: _FilesystemIdentity,
     second: _FilesystemIdentity,
 ) -> bool:
+    if pathlib.Path(first.root_path) == pathlib.Path(second.root_path):
+        return True
     return (
-        first.root_device == second.root_device
+        first.root_inode != "0"
+        and second.root_inode != "0"
+        and first.root_device == second.root_device
         and first.root_inode == second.root_inode
     )
 
