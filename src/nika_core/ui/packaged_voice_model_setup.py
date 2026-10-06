@@ -79,6 +79,20 @@ class PackagedVoiceModelSetup:
                 ),
             )
 
+        if not self._canonical_data_root_is_safe():
+            return self._public_state(
+                status="partial",
+                generation=generation,
+                active=False,
+                installed=False,
+                can_import=False,
+                restart_required=False,
+                message=(
+                    "Канонічна папка даних Nika Core має небезпечний або недоступний "
+                    "шлях. Імпорт голосової моделі заблоковано."
+                ),
+            )
+
         state = self._installation_state()
         if restart_required and state == "installed":
             return self._public_state(
@@ -155,6 +169,15 @@ class PackagedVoiceModelSetup:
             self._source_path_from_text(source_text)
         except _SetupInputError as exc:
             return self._result("rejected", exc.public_message)
+
+        if not self._canonical_data_root_is_safe():
+            return self._result(
+                "rejected",
+                (
+                    "Канонічна папка даних Nika Core має небезпечний або недоступний "
+                    "шлях. Імпорт голосової моделі заблоковано."
+                ),
+            )
 
         state = self._installation_state()
         if state == "installed":
@@ -310,6 +333,15 @@ class PackagedVoiceModelSetup:
                 "rejected",
                 "Імпорт локальної голосової моделі доступний лише у Windows.",
             )
+        if not self._canonical_data_root_is_safe():
+            return self._result(
+                "rejected",
+                (
+                    "Канонічна папка даних Nika Core має небезпечний або недоступний "
+                    "шлях. Імпорт голосової моделі заблоковано."
+                ),
+            )
+
         state = self._installation_state()
         if state == "installed":
             return UIResult(
@@ -529,6 +561,14 @@ class PackagedVoiceModelSetup:
         finally:
             if stage is not None:
                 shutil.rmtree(stage, ignore_errors=True)
+
+    def _canonical_data_root_is_safe(self) -> bool:
+        try:
+            self._require_regular_directory(self._data_root)
+            self._require_no_reparse_ancestors(self._data_root)
+        except OSError:
+            return False
+        return True
 
     def _installation_state(self) -> str:
         model_root = self._data_root / _MODEL_DIR
