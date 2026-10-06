@@ -252,3 +252,136 @@ def test_history_rejects_nontext_lifecycle_actor(tmp_path) -> None:
         )
     with pytest.raises(ProductProjectError, match="lifecycle audit"):
         ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+def _different_sha256(value: str) -> str:
+    candidate = "0" * 64
+    return "1" * 64 if value == candidate else candidate
+
+
+def test_history_rejects_tampered_create_idempotency_fingerprint(tmp_path) -> None:
+    store, _ = _project(tmp_path)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT input_fingerprint FROM product_project_idempotency "
+            "WHERE project_id='project-1'"
+        ).fetchone()
+        conn.execute(
+            "UPDATE product_project_idempotency SET input_fingerprint=? "
+            "WHERE project_id='project-1'",
+            (_different_sha256(row["input_fingerprint"]),),
+        )
+    with pytest.raises(ProductProjectError, match="creation idempotency fingerprint"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_history_rejects_missing_decision_idempotency_receipt(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _decision(store, projects)
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM product_project_mutation_idempotency "
+            "WHERE project_id='project-1' AND operation_kind='product_decision.record'"
+        )
+    with pytest.raises(ProductProjectError, match="decision mutation lacks idempotency receipt"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_history_rejects_decision_idempotency_fingerprint_drift(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _decision(store, projects)
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT input_fingerprint FROM product_project_mutation_idempotency "
+            "WHERE project_id='project-1' AND operation_kind='product_decision.record'"
+        ).fetchone()
+        conn.execute(
+            "UPDATE product_project_mutation_idempotency SET input_fingerprint=? "
+            "WHERE project_id='project-1' AND operation_kind='product_decision.record'",
+            (_different_sha256(row["input_fingerprint"]),),
+        )
+    with pytest.raises(ProductProjectError, match="decision idempotency fingerprint"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_history_rejects_unknown_mutation_idempotency_kind(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    _decision(store, projects)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_project_mutation_idempotency SET operation_kind=? "
+            "WHERE project_id='project-1' AND operation_kind='product_decision.record'",
+            ("product_project.unknown",),
+        )
+    with pytest.raises(ProductProjectError, match="unsupported .* operation kind"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_history_rejects_lifecycle_idempotency_fingerprint_drift(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    current = projects.get("project-1")
+    ProductProjectLifecycleService(store).transition(
+        "project-1",
+        ProductProjectState.PAUSED,
+        expected_row_version=current.row_version,
+        idempotency_key="status:pause:fingerprint-drift",
+        reason="Pause for fingerprint verification",
+        changed_by_ref="policy://product-owner",
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT input_fingerprint FROM product_project_mutation_idempotency "
+            "WHERE project_id='project-1' "
+            "AND operation_kind='product_project.status_transition'"
+        ).fetchone()
+        conn.execute(
+            "UPDATE product_project_mutation_idempotency SET input_fingerprint=? "
+            "WHERE project_id='project-1' "
+            "AND operation_kind='product_project.status_transition'",
+            (_different_sha256(row["input_fingerprint"]),),
+        )
+    with pytest.raises(ProductProjectError, match="lifecycle idempotency fingerprint"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_history_rejects_missing_modern_spec_idempotency_receipt(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    current = projects.get("project-1")
+    projects.update_spec(
+        "project-1",
+        replace(current.spec, hypothesis="modern durable receipt"),
+        expected_row_version=current.row_version,
+        change_reason="record modern durable receipt",
+        idempotency_key="spec:modern-receipt",
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "DELETE FROM product_project_spec_idempotency "
+            "WHERE project_id='project-1' AND result_spec_version=2"
+        )
+    with pytest.raises(ProductProjectError, match="lack exact idempotency receipts"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+
+
+def test_history_rejects_modern_spec_idempotency_fingerprint_drift(tmp_path) -> None:
+    store, projects = _project(tmp_path)
+    current = projects.get("project-1")
+    projects.update_spec(
+        "project-1",
+        replace(current.spec, hypothesis="modern fingerprint authority"),
+        expected_row_version=current.row_version,
+        change_reason="record modern fingerprint authority",
+        idempotency_key="spec:modern-fingerprint",
+    )
+    with store.connection() as conn:
+        row = conn.execute(
+            "SELECT input_fingerprint FROM product_project_spec_idempotency "
+            "WHERE project_id='project-1' AND result_spec_version=2"
+        ).fetchone()
+        conn.execute(
+            "UPDATE product_project_spec_idempotency SET input_fingerprint=? "
+            "WHERE project_id='project-1' AND result_spec_version=2",
+            (_different_sha256(row["input_fingerprint"]),),
+        )
+    with pytest.raises(ProductProjectError, match="spec idempotency fingerprint"):
+        ProductProjectHistoricalIntegrityService(store).validate("project-1")
+

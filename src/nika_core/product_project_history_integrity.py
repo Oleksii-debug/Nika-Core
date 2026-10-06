@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from itertools import pairwise
 from typing import Any
@@ -46,6 +47,8 @@ class _LifecycleEvent:
     row_version: int
     previous_state: ProductProjectState
     new_state: ProductProjectState
+    reason: str
+    changed_by_ref: str
 
 
 class ProductProjectHistoricalIntegrityService:
@@ -101,7 +104,7 @@ class ProductProjectHistoricalIntegrityService:
                 (project_id,),
             ).fetchall()
             decision_rows = conn.execute(
-                "SELECT decision_id,decision_version,option_id,state,"
+                "SELECT decision_id,decision_version,option_id,state,rationale,decided_by_ref,"
                 "evidence_package_ids_json,created_at FROM product_decisions "
                 "WHERE project_id=? ORDER BY decision_id,decision_version",
                 (project_id,),
@@ -472,6 +475,7 @@ class ProductProjectHistoricalIntegrityService:
         idempotency_count = self._validate_idempotency(
             conn,
             project_id,
+            spec_rows=spec_rows,
             decision_rows=decision_rows,
             lifecycle=lifecycle,
         )
@@ -666,6 +670,8 @@ class ProductProjectHistoricalIntegrityService:
                     row_version=row_version,
                     previous_state=old_state,
                     new_state=new_state,
+                    reason=reason,
+                    changed_by_ref=actor,
                 )
             )
             previous = new_state
@@ -677,45 +683,312 @@ class ProductProjectHistoricalIntegrityService:
             )
         return tuple(events)
 
+    @staticmethod
+    def _canonical(value: Any) -> str:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+    @classmethod
+    def _fingerprint(cls, value: Any) -> str:
+        return hashlib.sha256(cls._canonical(value).encode()).hexdigest()
+
+    def _validate_spec_idempotency(
+        self,
+        conn: Any,
+        project_id: str,
+        *,
+        spec_rows: list[Any],
+    ) -> int:
+        receipts = conn.execute(
+            "SELECT operation_key,operation_kind,expected_row_version,"
+            "previous_spec_version,result_spec_version,result_row_version,"
+            "input_fingerprint,spec_sha256,change_reason,created_at "
+            "FROM product_project_spec_idempotency WHERE project_id=? "
+            "ORDER BY result_spec_version",
+            (project_id,),
+        ).fetchall()
+        spec_by_version = {
+            self._required_json_int(
+                row["spec_version"],
+                minimum=1,
+                label="ProductProject spec_version",
+            ): row
+            for row in spec_rows
+        }
+        receipt_by_version: dict[int, Any] = {}
+        for row in receipts:
+            operation_key = self._required_text(
+                row["operation_key"],
+                label="ProductProject spec idempotency operation_key",
+            )
+            operation_kind = self._required_text(
+                row["operation_kind"],
+                label="ProductProject spec idempotency operation_kind",
+            )
+            if operation_kind != "product_project.spec_update.v2":
+                raise ProductProjectError("invalid ProductProject spec idempotency operation kind")
+            expected_row_version = self._required_json_int(
+                row["expected_row_version"],
+                minimum=0,
+                label="ProductProject spec idempotency expected_row_version",
+            )
+            previous_spec_version = self._required_json_int(
+                row["previous_spec_version"],
+                minimum=1,
+                label="ProductProject spec idempotency previous_spec_version",
+            )
+            result_spec_version = self._required_json_int(
+                row["result_spec_version"],
+                minimum=2,
+                label="ProductProject spec idempotency result_spec_version",
+            )
+            result_row_version = self._required_json_int(
+                row["result_row_version"],
+                minimum=1,
+                label="ProductProject spec idempotency result_row_version",
+            )
+            if result_spec_version in receipt_by_version:
+                raise ProductProjectError("duplicate ProductProject spec idempotency result")
+            if result_spec_version != previous_spec_version + 1:
+                raise ProductProjectError("invalid ProductProject spec idempotency lineage")
+            if result_row_version != expected_row_version + 1:
+                raise ProductProjectError("invalid ProductProject spec idempotency row lineage")
+            change_reason = self._required_text(
+                row["change_reason"],
+                label="ProductProject spec idempotency change_reason",
+            )
+            fingerprint = row["input_fingerprint"]
+            spec_sha256 = row["spec_sha256"]
+            if not self._valid_sha256(fingerprint) or not self._valid_sha256(spec_sha256):
+                raise ProductProjectError("invalid ProductProject spec idempotency digest")
+            spec_row = spec_by_version.get(result_spec_version)
+            if spec_row is None:
+                raise ProductProjectError(
+                    "ProductProject spec idempotency record has no durable specification"
+                )
+            raw_spec = spec_row["spec_json"]
+            if type(raw_spec) is not str:
+                raise ProductProjectError("invalid ProductProject specification JSON")
+            actual_spec_sha256 = hashlib.sha256(raw_spec.encode()).hexdigest()
+            if spec_sha256 != actual_spec_sha256:
+                raise ProductProjectError("ProductProject spec idempotency digest drift")
+            raw = self._json_object(
+                raw_spec,
+                label=f"ProductProject spec version {result_spec_version}",
+            )
+            try:
+                durable_spec = ProductProjectSpec.from_dict(raw)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProductProjectError(
+                    f"invalid ProductProject spec version {result_spec_version}"
+                ) from exc
+            effective_spec = replace(
+                durable_spec,
+                supersedes_spec_version=None,
+                revision_reason="",
+            )
+            expected_fingerprint = self._fingerprint(
+                {
+                    "project_id": project_id,
+                    "expected_row_version": expected_row_version,
+                    "spec": effective_spec.to_dict(),
+                    "change_reason": change_reason,
+                }
+            )
+            if fingerprint != expected_fingerprint:
+                raise ProductProjectError("ProductProject spec idempotency fingerprint drift")
+            receipt_time = self._time(
+                row["created_at"],
+                label=f"ProductProject spec idempotency {result_spec_version}",
+            )
+            spec_time = self._time(
+                spec_row["created_at"],
+                label=f"ProductProject spec version {result_spec_version}",
+            )
+            if receipt_time != spec_time:
+                raise ProductProjectError("ProductProject spec idempotency timestamp drift")
+            receipt_by_version[result_spec_version] = row
+
+        modern_audits: dict[int, tuple[dict[str, Any], datetime]] = {}
+        for audit in conn.execute(
+            "SELECT payload_json,created_at FROM audit_events "
+            "WHERE event_type='product_project.spec_versioned' "
+            "AND entity_type='product_project' AND entity_id=? ORDER BY event_id",
+            (project_id,),
+        ).fetchall():
+            payload = self._json_object(
+                audit["payload_json"],
+                label="ProductProject spec revision audit",
+            )
+            if payload.get("operation_kind") != "product_project.spec_update.v2":
+                continue
+            version = self._required_json_int(
+                payload.get("spec_version"),
+                minimum=2,
+                label="ProductProject spec revision audit spec_version",
+            )
+            if version in modern_audits:
+                raise ProductProjectError("duplicate modern ProductProject spec revision audit")
+            modern_audits[version] = (
+                payload,
+                self._time(
+                    audit["created_at"],
+                    label=f"ProductProject spec revision audit {version}",
+                ),
+            )
+
+        if set(modern_audits) != set(receipt_by_version):
+            raise ProductProjectError(
+                "modern ProductProject spec revisions lack exact idempotency receipts"
+            )
+        for version, row in receipt_by_version.items():
+            payload, audit_time = modern_audits[version]
+            operation_key = self._required_text(
+                row["operation_key"],
+                label="ProductProject spec idempotency operation_key",
+            )
+            expected_payload = {
+                "spec_version": version,
+                "supersedes_spec_version": self._required_json_int(
+                    row["previous_spec_version"],
+                    minimum=1,
+                    label="ProductProject spec idempotency previous_spec_version",
+                ),
+                "change_reason": self._required_text(
+                    row["change_reason"],
+                    label="ProductProject spec idempotency change_reason",
+                ),
+                "row_version": self._required_json_int(
+                    row["result_row_version"],
+                    minimum=1,
+                    label="ProductProject spec idempotency result_row_version",
+                ),
+                "expected_row_version": self._required_json_int(
+                    row["expected_row_version"],
+                    minimum=0,
+                    label="ProductProject spec idempotency expected_row_version",
+                ),
+                "operation_kind": "product_project.spec_update.v2",
+                "operation_key_sha256": hashlib.sha256(operation_key.encode()).hexdigest(),
+                "input_fingerprint": row["input_fingerprint"],
+                "spec_sha256": row["spec_sha256"],
+            }
+            if payload != expected_payload:
+                raise ProductProjectError("ProductProject spec idempotency audit drift")
+            receipt_time = self._time(
+                row["created_at"],
+                label=f"ProductProject spec idempotency {version}",
+            )
+            if audit_time != receipt_time:
+                raise ProductProjectError("ProductProject spec idempotency audit timestamp drift")
+        return len(receipts)
+
     def _validate_idempotency(
         self,
         conn: Any,
         project_id: str,
         *,
+        spec_rows: list[Any],
         decision_rows: list[Any],
         lifecycle: tuple[_LifecycleEvent, ...],
     ) -> int:
         create_rows = conn.execute(
-            "SELECT operation_key,input_fingerprint FROM product_project_idempotency "
-            "WHERE project_id=?",
+            "SELECT operation_key,input_fingerprint,created_at "
+            "FROM product_project_idempotency WHERE project_id=?",
             (project_id,),
         ).fetchall()
         if len(create_rows) != 1:
             raise ProductProjectError("ProductProject creation idempotency identity is missing")
-        if not self._valid_idempotency_row(create_rows[0]):
+        create_row = create_rows[0]
+        if not self._valid_idempotency_row(create_row):
             raise ProductProjectError("invalid ProductProject creation idempotency record")
+        project_row = conn.execute(
+            "SELECT name FROM product_projects WHERE project_id=?",
+            (project_id,),
+        ).fetchone()
+        if project_row is None:
+            raise ProductProjectError("ProductProject creation idempotency project is missing")
+        project_name = self._required_text(
+            project_row["name"],
+            label="ProductProject name",
+        )
+        if not spec_rows:
+            raise ProductProjectError("ProductProject initial specification is missing")
+        initial_version = self._required_json_int(
+            spec_rows[0]["spec_version"],
+            minimum=1,
+            label="initial ProductProject spec_version",
+        )
+        if initial_version != 1:
+            raise ProductProjectError("ProductProject initial specification version is invalid")
+        initial_raw = self._json_object(
+            spec_rows[0]["spec_json"],
+            label="initial ProductProject specification",
+        )
+        try:
+            initial_spec = ProductProjectSpec.from_dict(initial_raw)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProductProjectError("invalid initial ProductProject specification") from exc
+        expected_create_fingerprint = self._fingerprint(
+            {
+                "project_id": project_id,
+                "name": project_name,
+                "spec": initial_spec.to_dict(),
+            }
+        )
+        if create_row["input_fingerprint"] != expected_create_fingerprint:
+            raise ProductProjectError("ProductProject creation idempotency fingerprint drift")
+        self._time(
+            create_row["created_at"],
+            label="ProductProject creation idempotency",
+        )
 
+        durable_decisions: dict[tuple[str, int], str] = {}
+        for row in decision_rows:
+            decision_id = self._required_text(
+                row["decision_id"],
+                label="product decision identity",
+            )
+            decision_version = self._required_json_int(
+                row["decision_version"],
+                minimum=1,
+                label="product decision version",
+            )
+            try:
+                state = ProductDecisionState(row["state"])
+            except (TypeError, ValueError) as exc:
+                raise ProductProjectError("invalid durable product decision state") from exc
+            expected_fingerprint = self._fingerprint(
+                {
+                    "project_id": project_id,
+                    "decision_id": decision_id,
+                    "option_id": self._required_text(
+                        row["option_id"],
+                        label="product decision option_id",
+                    ),
+                    "state": state.value,
+                    "rationale": self._required_text(
+                        row["rationale"],
+                        label="product decision rationale",
+                    ),
+                    "decided_by_ref": self._required_text(
+                        row["decided_by_ref"],
+                        label="product decision decided_by_ref",
+                    ),
+                }
+            )
+            durable_decisions[(decision_id, decision_version)] = expected_fingerprint
+
+        lifecycle_by_version = {event.row_version: event for event in lifecycle}
         rows = conn.execute(
-            "SELECT operation_key,operation_kind,entity_id,entity_version,input_fingerprint "
-            "FROM product_project_mutation_idempotency WHERE project_id=? ORDER BY operation_key",
+            "SELECT operation_key,operation_kind,entity_id,entity_version,"
+            "input_fingerprint,created_at "
+            "FROM product_project_mutation_idempotency "
+            "WHERE project_id=? ORDER BY operation_key",
             (project_id,),
         ).fetchall()
-        durable_decisions = {
-            (
-                self._required_text(
-                    row["decision_id"],
-                    label="product decision identity",
-                ),
-                self._required_json_int(
-                    row["decision_version"],
-                    minimum=1,
-                    label="product decision version",
-                ),
-            )
-            for row in decision_rows
-        }
-        lifecycle_versions = {event.row_version for event in lifecycle}
         seen_keys: set[str] = set()
+        seen_decisions: set[tuple[str, int]] = set()
+        seen_lifecycle: set[int] = set()
         for row in rows:
             operation_key = self._required_text(
                 row["operation_key"],
@@ -737,28 +1010,68 @@ class ProductProjectHistoricalIntegrityService:
             if operation_key in seen_keys or not self._valid_idempotency_row(row):
                 raise ProductProjectError("invalid ProductProject mutation idempotency record")
             seen_keys.add(operation_key)
+            fingerprint = row["input_fingerprint"]
+            self._time(
+                row["created_at"],
+                label=f"ProductProject mutation idempotency {operation_key}",
+            )
             if operation_kind == "product_decision.record":
-                if (entity_id, entity_version) not in durable_decisions:
+                key = (entity_id, entity_version)
+                expected_fingerprint = durable_decisions.get(key)
+                if expected_fingerprint is None or key in seen_decisions:
                     raise ProductProjectError(
-                        "product decision idempotency record has no durable decision"
+                        "product decision idempotency record has no unique durable decision"
                     )
+                if fingerprint != expected_fingerprint:
+                    raise ProductProjectError("product decision idempotency fingerprint drift")
+                seen_decisions.add(key)
             elif operation_kind == "product_project.status_transition":
-                if entity_id != project_id or entity_version not in lifecycle_versions:
+                event = lifecycle_by_version.get(entity_version)
+                if event is None or entity_id != project_id or entity_version in seen_lifecycle:
                     raise ProductProjectError(
-                        "lifecycle idempotency record has no durable status audit"
+                        "lifecycle idempotency record has no unique durable status audit"
                     )
-            elif not operation_kind.strip() or not entity_id.strip() or entity_version < 1:
-                raise ProductProjectError("invalid ProductProject mutation idempotency identity")
-        return len(rows)
+                expected_fingerprint = self._fingerprint(
+                    {
+                        "project_id": project_id,
+                        "new_state": event.new_state.value,
+                        "reason": event.reason,
+                        "changed_by_ref": event.changed_by_ref,
+                    }
+                )
+                if fingerprint != expected_fingerprint:
+                    raise ProductProjectError("lifecycle idempotency fingerprint drift")
+                seen_lifecycle.add(entity_version)
+            else:
+                raise ProductProjectError(
+                    "unsupported ProductProject mutation idempotency operation kind"
+                )
+
+        if seen_decisions != set(durable_decisions):
+            raise ProductProjectError("product decision mutation lacks idempotency receipt")
+        if seen_lifecycle != set(lifecycle_by_version):
+            raise ProductProjectError("lifecycle mutation lacks idempotency receipt")
+        spec_receipt_count = self._validate_spec_idempotency(
+            conn,
+            project_id,
+            spec_rows=spec_rows,
+        )
+        return len(rows) + spec_receipt_count
 
     @staticmethod
-    def _valid_idempotency_row(row: Any) -> bool:
+    def _valid_sha256(value: Any) -> bool:
+        return (
+            type(value) is str
+            and len(value) == 64
+            and value == value.lower()
+            and all(character in "0123456789abcdef" for character in value)
+        )
+
+    @classmethod
+    def _valid_idempotency_row(cls, row: Any) -> bool:
         key = row["operation_key"]
-        fingerprint = row["input_fingerprint"]
         return (
             type(key) is str
             and bool(key.strip())
-            and type(fingerprint) is str
-            and len(fingerprint) == 64
-            and all(character in "0123456789abcdef" for character in fingerprint.lower())
+            and cls._valid_sha256(row["input_fingerprint"])
         )
