@@ -279,6 +279,38 @@
         <dt>Рішення</dt>
         <dd id="product-project-decision-count">—</dd>
       </dl>
+      <div aria-labelledby="product-factory-execution-plan-heading">
+        <h3 id="product-factory-execution-plan-heading" tabindex="-1">
+          План виконання Product Factory
+        </h3>
+        <p id="product-factory-execution-plan-help">
+          Вкажіть повний шлях до JSON-плану. Nika читає лише прямий звичайний файл,
+          не зберігає шлях і не приймає секрети замість посилань на облікові дані.
+        </p>
+        <label for="product-factory-execution-plan-path">
+          JSON-план виконання Product Factory — повний шлях
+        </label>
+        <input
+          id="product-factory-execution-plan-path"
+          type="text"
+          spellcheck="false"
+          autocomplete="off"
+          aria-describedby="product-factory-execution-plan-help product-factory-execution-plan-status"
+        >
+        <p id="product-factory-execution-plan-status">
+          JSON-план виконання Product Factory ще не завантажено.
+        </p>
+        <div class="actions">
+          <button
+            type="button"
+            id="product-factory-execution-plan-load"
+            data-action-id="product.factory.execution_plan.load"
+            data-error-focus-target="product-factory-execution-plan-path"
+          >
+            Завантажити план виконання
+          </button>
+        </div>
+      </div>
       <div id="product-project-statuses" hidden>
         <h3 id="product-project-statuses-heading" tabindex="-1">Статус ProductProject</h3>
         <p id="product-project-statuses-empty">Статусних записів немає.</p>
