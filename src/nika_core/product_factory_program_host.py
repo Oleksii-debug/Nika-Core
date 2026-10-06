@@ -179,6 +179,7 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         max_parallel: int = 4,
         max_count: int = 32,
+        effect_admission_precondition: Callable[[object], None] | None = None,
     ) -> tuple[ProgramWorkOutcome, ...]:
         if (
             type(max_parallel) is not int
@@ -255,6 +256,7 @@ class ProductFactoryProgramHost:
                     coordinator=coordinator,
                     request=request,
                     lease=lease_by_work[request.work_id],
+                    effect_admission_precondition=effect_admission_precondition,
                 )
                 for request in started
             )
@@ -270,6 +272,7 @@ class ProductFactoryProgramHost:
         binding: ProductProjectCoordinatorBinding,
         coordinator: ProductFactoryCoordinator,
         max_parallel: int = 4,
+        effect_admission_precondition: Callable[[object], None] | None = None,
     ) -> tuple[ProgramWorkOutcome, ...]:
         if type(max_parallel) is not int or max_parallel <= 0:
             raise ValueError("max_parallel must be an exact positive integer")
@@ -293,6 +296,7 @@ class ProductFactoryProgramHost:
                     binding=binding,
                     coordinator=coordinator,
                     record=record,
+                    effect_admission_precondition=effect_admission_precondition,
                 )
                 for record in running
             )
@@ -497,6 +501,7 @@ class ProductFactoryProgramHost:
         coordinator: ProductFactoryCoordinator,
         request: ComponentWorkRequest,
         lease: WorkOwnershipLease,
+        effect_admission_precondition: Callable[[object], None] | None,
     ) -> ProgramWorkOutcome:
         operation_key = _operation_key(request)
         try:
@@ -520,6 +525,7 @@ class ProductFactoryProgramHost:
                         host_task_id=host_task_id,
                         request=request,
                         lease=lease,
+                        effect_admission_precondition=effect_admission_precondition,
                     )
                 except IdempotencyConflictError:
                     durable_status = self._matching_operation_status(
@@ -614,6 +620,7 @@ class ProductFactoryProgramHost:
         binding: ProductProjectCoordinatorBinding,
         coordinator: ProductFactoryCoordinator,
         record: WorkRecord,
+        effect_admission_precondition: Callable[[object], None] | None,
     ) -> ProgramWorkOutcome:
         request = _snapshot_component_work_request(record.request)
         operation_key = _operation_key(request)
@@ -649,6 +656,7 @@ class ProductFactoryProgramHost:
                             host_task_id=host_task_id,
                             request=request,
                             lease=lease,
+                            effect_admission_precondition=effect_admission_precondition,
                         )
                     except IdempotencyConflictError:
                         durable_status = self._matching_operation_status(
@@ -761,6 +769,7 @@ class ProductFactoryProgramHost:
                     host_task_id=host_task_id,
                     request=request,
                     lease=lease,
+                    effect_admission_precondition=effect_admission_precondition,
                 )
                 if claimed is None:
                     return _outcome(
@@ -1040,10 +1049,13 @@ class ProductFactoryProgramHost:
         host_task_id: str,
         request: ComponentWorkRequest,
         lease: WorkOwnershipLease,
+        effect_admission_precondition: Callable[[object], None] | None = None,
     ) -> tuple[IdempotencyRecord, bool]:
         with self.store.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_lease(connection, lease)
+            if effect_admission_precondition is not None:
+                effect_admission_precondition(connection)
             return self._ledger.reserve_with_connection(
                 connection,
                 operation_key=_operation_key(request),
@@ -1058,11 +1070,14 @@ class ProductFactoryProgramHost:
         host_task_id: str,
         request: ComponentWorkRequest,
         lease: WorkOwnershipLease,
+        effect_admission_precondition: Callable[[object], None] | None = None,
     ) -> IdempotencyRecord | None:
         operation_key = _operation_key(request)
         with self.store.connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
             self._assert_lease(connection, lease)
+            if effect_admission_precondition is not None:
+                effect_admission_precondition(connection)
             current = self._ledger._require_with_connection(connection, operation_key)
             if (
                 current.task_id != host_task_id
