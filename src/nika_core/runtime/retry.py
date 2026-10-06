@@ -34,8 +34,12 @@ def fresh_retry_safety_evidence(result: RuntimeResult) -> bool | None:
     has_provider_retryable = False
     has_failure_effect = False
     for key, value in output.items():
+        # RuntimeResult.output is typed as Mapping[str, Any]. A non-exact key is
+        # therefore a malformed authority carrier, not evidence that provider
+        # safety fields are absent. Ignoring it could downgrade provider-shaped
+        # evidence into the generic-runtime fresh-retry path.
         if type(key) is not str:
-            continue
+            return False
         if key == "provider_retryable":
             has_provider_retryable = True
             provider_retryable = value
