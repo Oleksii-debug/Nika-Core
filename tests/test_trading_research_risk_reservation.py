@@ -10,6 +10,7 @@ from nika_core.trading_research.accounting import AccountSnapshot, Position
 from nika_core.trading_research.contracts import EventTime, Instrument, Quote, Venue
 from nika_core.trading_research.orders import (
     ExecutionPolicy,
+    OrderAuthority,
     OrderIntent,
     OrderType,
     RiskApprovedOrder,
@@ -20,6 +21,10 @@ from nika_core.trading_research.risk import RiskEngine, RiskLimits, RiskRejected
 
 _NOW = datetime(2026, 8, 26, 9, 0, tzinfo=UTC)
 _INSTRUMENT = Instrument("NIKA-RISK", Venue("SIM", "UTC"), "USD")
+
+
+def _authority(order_id: str, *, submitted_slice: int = 1) -> OrderAuthority:
+    return OrderAuthority("workspace", "risk-run", order_id, _NOW, submitted_slice)
 
 
 def _snapshot(*, cash: Decimal = Decimal(100), equity: Decimal = Decimal(100)) -> AccountSnapshot:
@@ -83,6 +88,7 @@ def _approve(
 ):
     return risk.approve(
         intent,
+        authority=_authority(intent.intent_id),
         snapshot=_snapshot() if snapshot is None else snapshot,
         mark_price=Decimal(99),
         pending_signed_quantity=pending_signed_quantity,
@@ -152,7 +158,14 @@ def test_cash_reservation_rejects_order_even_when_leverage_limit_would_allow_it(
 def test_pending_remaining_quantity_avoids_double_counting_already_filled_exposure() -> None:
     policy = ExecutionPolicy("partial-pending", fixed_fee=Decimal(1))
     original = _intent("partial-parent", Decimal(1))
-    approved = RiskApprovedOrder("risk:partial-parent", original, _NOW, 1, policy)
+    approved = RiskApprovedOrder(
+        "risk:partial-parent",
+        original,
+        _authority("partial-parent"),
+        _NOW,
+        1,
+        policy,
+    )
     position = Position(_INSTRUMENT, Decimal("0.5"), Decimal(99), Decimal(0))
     snapshot = AccountSnapshot(
         cash=Decimal(100),
@@ -194,6 +207,7 @@ def test_fixed_fee_is_charged_once_across_partial_fills() -> None:
     order = RiskApprovedOrder(
         "risk:partial-fee",
         intent,
+        _authority("partial-fee", submitted_slice=0),
         _NOW,
         0,
         ExecutionPolicy("one-fixed", fixed_fee=Decimal(1)),

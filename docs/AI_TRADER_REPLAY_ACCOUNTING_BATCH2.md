@@ -55,6 +55,39 @@ A committed fill row and its resulting account snapshot commit in one SQLite tra
 
 Current limit: Batch 2 stores the resulting account snapshot as deterministic Decimal-string JSON evidence. Full durable session/order reconstruction is reserved for the paper-session Batch 4 unless earlier Batch 2 CI/audit proves it is required for fill/account correctness.
 
+## Full instrument and venue identity
+
+Paper-trading authority uses one complete immutable identity tuple:
+venue ID, venue timezone, native instrument ID and currency. Portfolio positions,
+risk marks/deltas and replay matching no longer key by the native instrument ID alone.
+Risk-generated approval IDs, ReplayBook internal order state and deterministic fill IDs
+bind that same full identity (fill IDs use its SHA-256 digest), so equal native IDs on
+different venues cannot alias approval, pending/terminal replay state or a simulated fill.
+
+`OrderIntent` remains strategy proposal metadata. Executable submission identity is
+host-stamped in immutable `OrderAuthority(workspace_id, run_id, order_id, submitted_at,
+submitted_slice)`; risk approval, same-slice execution guards, replay order state and
+simulated fills use that authority instead of strategy-provided intent ID/time/slice.
+Pending risk from another workspace/run fails closed.
+
+Durable Trader schema v3 writes fills to `trading_research_run_fills` under composite
+`(workspace_id, run_id, fill_id)` authority and stores account snapshots independently
+per workspace/run. Venue/timezone/currency and host order ID remain explicit durable
+evidence. Empty development v1/v2 state can advance under one `BEGIN IMMEDIATE` writer
+transaction while the legacy tables remain inert. Non-empty v1/v2 fails closed because
+missing venue/run authority cannot be reconstructed honestly. Exact fill retries are
+idempotent only when every persisted identity/economic field matches; conflicting reuse
+of the same scoped fill ID fails closed.
+
+Limit-order simulation applies deterministic adverse slippage but caps the final
+paper fill at the legal limit: BUY fills never exceed the limit and SELL fills never
+fall below it. Full OHLC bars are not executable market data because the current Bar
+contract does not yet prove interval-end chronology; quote execution remains the bounded
+safe surface. Within one slice, conflicting events with the same full instrument identity,
+availability/event time and source sequence fail closed instead of inheriting caller tuple
+order. Distinct source sequence values remain the explicit deterministic ordering authority.
+This remains simulation-only; there is no broker/network order route.
+
 ## Numerical oracle set
 
 `tests/fixtures/trading_research_numerical_oracles.json` contains exactly 42 unique manually calculable cases:
@@ -68,11 +101,36 @@ The accounting cases cover long/short open, add, partial close, full close, reve
 
 Focused reservation regressions additionally cover deterministic fee-induced leverage rejection, exact leverage boundary acceptance, cash reservation, fail-closed aggregate pending costs, exact pending-order costs, partial-order remaining quantity and once-per-order fixed fees across multiple fills.
 
+
+A second fixture, `trading_research_end_to_end_oracles.json`, contains exactly 32
+literal full-path scenarios: 20 single-order cases and 12 multi-step cases. Each case
+travels through host order authority, pre-trade risk approval, Quote execution,
+deterministic costs, PortfolioLedger accounting, post-fill risk and final marked account
+state. It includes long/short opens, adds, partial/full closes, reversals, market/limit
+orders, partial liquidity, fees and slippage.
+
+The fixture stores expected Decimal strings rather than deriving them from production
+helpers. Its hand-check equations are intentionally elementary:
+
+- executable side quote = ask for BUY, bid for SELL;
+- market slipped price = side quote * (1 + side_sign * slippage_bps / 10000);
+- final limit price = min(slipped, limit) for BUY and max(slipped, limit) for SELL;
+- fill quantity = min(order quantity, side liquidity * max_fill_fraction);
+- fee = fixed_fee + fill_quantity * fill_price * fee_bps / 10000;
+- BUY cash delta = -(notional + fee); SELL cash delta = notional - fee;
+- same-direction basis is quantity-weighted; closes realize
+  `(fill_price - basis) * closed_quantity * prior_position_sign`;
+- final unrealized P&L = `(mark - basis) * open_quantity`;
+- equity = cash + open_quantity * mark; gross/net exposure are absolute/signed market value.
+
+Those equations plus each fixture row are sufficient for independent manual
+recalculation without importing Trader implementation functions.
+
 ## REUSE / ADAPT / CUSTOM
 
 - REUSE canonical `SQLiteStore`, `ExecutionPolicy`, `fee_for`, `apply_slippage`, `RiskApprovedOrder`, `AccountSnapshot` and Python `Decimal`/datetime primitives.
 - ADAPT the integrated Batch 1 market/causality contracts and the existing canonical RiskEngine so deterministic accepted-pending and candidate economics are projected before approval.
-- CUSTOM thin: `PendingRiskOrder` and small deterministic reservation helpers. No second risk/accounting engine and no new dependency.
+- CUSTOM thin: `OrderAuthority`, `PendingRiskOrder` and small deterministic identity/reservation helpers. No second runtime, risk/accounting engine, persistence store or new dependency.
 
 No pandas, NumPy, scikit-learn, Gymnasium, pyarrow, LEAN, Nautilus, Zipline, vectorbt, backtesting.py, QuantStats or broker SDK is added by this batch.
 

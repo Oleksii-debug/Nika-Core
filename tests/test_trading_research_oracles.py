@@ -9,8 +9,10 @@ import pytest
 
 from nika_core.trading_research.accounting import AccountSnapshot, PortfolioLedger
 from nika_core.trading_research.contracts import Instrument, Venue
+from nika_core.trading_research.identity import instrument_identity
 from nika_core.trading_research.orders import (
     ExecutionPolicy,
+    OrderAuthority,
     OrderIntent,
     OrderType,
     Side,
@@ -76,6 +78,13 @@ def _assert_account_oracle(case: dict[str, object]) -> None:
                 fill_id=f"oracle:{case['id']}:{index}",
                 approval_id="approval",
                 intent_id="intent",
+                authority=OrderAuthority(
+                    "oracle-workspace",
+                    "oracle-account",
+                    f"{case['id']}:{index}",
+                    NOW,
+                    0,
+                ),
                 instrument=INSTRUMENT,
                 side=side,
                 quantity=Decimal(str(raw["qty"])),
@@ -85,7 +94,7 @@ def _assert_account_oracle(case: dict[str, object]) -> None:
                 filled_slice=index + 1,
             )
         )
-    snapshot = ledger.snapshot({INSTRUMENT.instrument_id: Decimal(str(case["mark"]))})
+    snapshot = ledger.snapshot({instrument_identity(INSTRUMENT): Decimal(str(case["mark"]))})
     position = ledger.position(INSTRUMENT)
     expected = case["expected"]
     assert isinstance(expected, dict)
@@ -127,6 +136,13 @@ def _assert_risk_oracle(case: dict[str, object]) -> None:
         positions=(),
     )
     kwargs = {
+        "authority": OrderAuthority(
+            "oracle-workspace",
+            "oracle-risk",
+            str(case["id"]),
+            NOW,
+            0,
+        ),
         "snapshot": snapshot,
         "mark_price": Decimal(str(case["mark"])),
         "pending_signed_quantity": Decimal(str(case["pending"])),

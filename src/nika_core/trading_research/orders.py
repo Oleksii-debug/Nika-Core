@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -49,8 +51,8 @@ class OrderIntent:
             raise TradingResearchError("intent_id must not be empty")
         if self.quantity <= 0:
             raise TradingResearchError("order quantity must be positive")
-        if self.submitted_slice < 0:
-            raise TradingResearchError("submitted_slice must be non-negative")
+        if type(self.submitted_slice) is not int or self.submitted_slice < 0:
+            raise TradingResearchError("submitted_slice must be a non-negative integer")
         submitted_at = require_aware_utc(self.submitted_at, "submitted_at")
         expires_at = (
             require_aware_utc(self.expires_at, "expires_at") if self.expires_at is not None else None
@@ -64,6 +66,47 @@ class OrderIntent:
             raise TradingResearchError("market orders cannot carry limit_price")
         object.__setattr__(self, "expires_at", expires_at)
         object.__setattr__(self, "submitted_at", submitted_at)
+
+
+@dataclass(frozen=True, slots=True)
+class OrderAuthority:
+    """Host-stamped execution identity; strategy proposal metadata is not authority."""
+
+    workspace_id: str
+    run_id: str
+    order_id: str
+    submitted_at: datetime
+    submitted_slice: int
+
+    def __post_init__(self) -> None:
+        for field_name in ("workspace_id", "run_id", "order_id"):
+            value = getattr(self, field_name)
+            if type(value) is not str or not value.strip():
+                raise TradingResearchError(f"{field_name} must be nonblank text")
+        if type(self.submitted_slice) is not int or self.submitted_slice < 0:
+            raise TradingResearchError("authority submitted_slice must be non-negative")
+        object.__setattr__(
+            self,
+            "submitted_at",
+            require_aware_utc(self.submitted_at, "authority submitted_at"),
+        )
+
+
+def order_authority_sha256(authority: OrderAuthority) -> str:
+    if type(authority) is not OrderAuthority:
+        raise TradingResearchError("order authority must be an OrderAuthority")
+    payload = json.dumps(
+        (
+            authority.workspace_id,
+            authority.run_id,
+            authority.order_id,
+            authority.submitted_at.isoformat(),
+            authority.submitted_slice,
+        ),
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,6 +133,7 @@ class ExecutionPolicy:
 class RiskApprovedOrder:
     approval_id: str
     intent: OrderIntent
+    authority: OrderAuthority
     approved_at: datetime
     approved_slice: int
     policy: ExecutionPolicy
@@ -97,11 +141,20 @@ class RiskApprovedOrder:
     def __post_init__(self) -> None:
         if not self.approval_id.strip():
             raise TradingResearchError("approval_id must not be empty")
+        if type(self.authority) is not OrderAuthority:
+            raise TradingResearchError("approved order requires host OrderAuthority")
         approved_at = require_aware_utc(self.approved_at, "approved_at")
-        if self.approved_slice < self.intent.submitted_slice:
-            raise TradingResearchError("approval cannot precede intent slice")
-        if approved_at < self.intent.submitted_at:
-            raise TradingResearchError("approval cannot precede intent time")
+        if type(self.approved_slice) is not int or self.approved_slice < 0:
+            raise TradingResearchError("approved_slice must be a non-negative integer")
+        if self.approved_slice < self.authority.submitted_slice:
+            raise TradingResearchError("approval cannot precede authority slice")
+        if approved_at < self.authority.submitted_at:
+            raise TradingResearchError("approval cannot precede authority time")
+        if (
+            self.intent.expires_at is not None
+            and self.intent.expires_at <= self.authority.submitted_at
+        ):
+            raise TradingResearchError("intent expiry must be later than host submission")
         object.__setattr__(self, "approved_at", approved_at)
 
     @property
@@ -114,6 +167,7 @@ class SimulatedFill:
     fill_id: str
     approval_id: str
     intent_id: str
+    authority: OrderAuthority
     instrument: Instrument
     side: Side
     quantity: Decimal
@@ -125,11 +179,18 @@ class SimulatedFill:
     def __post_init__(self) -> None:
         if not self.fill_id.strip():
             raise TradingResearchError("fill_id must not be empty")
+        if type(self.authority) is not OrderAuthority:
+            raise TradingResearchError("simulated fill requires host OrderAuthority")
         if self.quantity <= 0 or self.price <= 0 or self.fee < 0:
             raise TradingResearchError("fill quantity/price must be positive and fee non-negative")
-        if self.filled_slice < 0:
-            raise TradingResearchError("filled_slice must be non-negative")
-        object.__setattr__(self, "filled_at", require_aware_utc(self.filled_at, "filled_at"))
+        if type(self.filled_slice) is not int:
+            raise TradingResearchError("filled_slice must be an integer")
+        if self.filled_slice <= self.authority.submitted_slice:
+            raise TradingResearchError("fill must occur after host submission slice")
+        filled_at = require_aware_utc(self.filled_at, "filled_at")
+        if filled_at < self.authority.submitted_at:
+            raise TradingResearchError("fill cannot precede host submission time")
+        object.__setattr__(self, "filled_at", filled_at)
 
 
 def fee_for(

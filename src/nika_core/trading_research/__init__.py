@@ -36,8 +36,10 @@ from .dataset import (
     ValidationReport,
     event_sort_key,
 )
+from .identity import InstrumentIdentity, instrument_identity, instrument_identity_sha256
 from .orders import (
     ExecutionPolicy,
+    OrderAuthority,
     OrderIntent,
     OrderState,
     OrderType,
@@ -46,6 +48,7 @@ from .orders import (
     SimulatedFill,
     apply_slippage,
     fee_for,
+    order_authority_sha256,
 )
 from .persistence import TradingStateRepository
 from .replay import OrderUpdate, ReplayBook, ReplayPhase, SimulationExecutionEngine, TimeSlice
@@ -68,8 +71,10 @@ __all__ = [
     "FutureAccessError",
     "InMemoryDataProvider",
     "Instrument",
+    "InstrumentIdentity",
     "MarketEvent",
     "OddsSnapshot",
+    "OrderAuthority",
     "OrderIntent",
     "OrderState",
     "OrderStrategy",
@@ -108,5 +113,8 @@ __all__ = [
     "event_sort_key",
     "fee_for",
     "fill_missing",
+    "instrument_identity",
+    "instrument_identity_sha256",
+    "order_authority_sha256",
     "trailing_mean",
 ]
