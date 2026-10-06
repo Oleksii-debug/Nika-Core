@@ -359,6 +359,8 @@ def test_regular_hash_and_bounded_read_refuse_preexisting_writer(tmp_path: Path)
     path.write_bytes(b"trusted")
 
     with path.open("r+b"):
+        with pytest.raises(peft.PeftTrainerError, match="file_read_failed"):
+            peft._sha256_file(path)
         with pytest.raises(peft.PeftTrainerError, match="snapshot_locked"):
             peft._hash_regular_snapshot(path, code="snapshot_locked")
         with pytest.raises(peft.PeftTrainerError, match="bounded_locked"):
