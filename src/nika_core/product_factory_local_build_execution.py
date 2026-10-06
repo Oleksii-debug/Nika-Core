@@ -91,7 +91,9 @@ class LocalBuildArtifactBinding:
             normalized = normalize_relative_path(self.artifact_relpath).as_posix()
             ensure_worker_mutation_path(normalized)
         except (ValueError, WorkspaceSecurityError) as exc:
-            raise ValueError("local build artifact path must be a safe repository-relative path") from exc
+            raise ValueError(
+                "local build artifact path must be a safe repository-relative path"
+            ) from exc
         if normalized != self.artifact_relpath.replace("\\", "/"):
             raise ValueError("local build artifact path must already be canonical")
         if (
@@ -343,7 +345,9 @@ class ContainedLocalBuildExecutionNode:
         if receipt is None:
             raise BuildExecutionPortError("local build changed-file receipt is unavailable")
         if receipt.result != result:
-            raise BuildExecutionPortError("local build result does not match durable provider receipt")
+            raise BuildExecutionPortError(
+                "local build result does not match durable provider receipt"
+            )
         return receipt.changed_files
 
     def _admit_dispatch(
