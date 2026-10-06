@@ -590,7 +590,7 @@ class DesktopBackend:
                 entity_id=task_id,
                 payload={"runtime_id": self._runtime.runtime_id},
             )
-        except BaseException as exc:
+        except BaseException as exc:  # noqa: BLE001
             _LOGGER.error(
                 "Desktop task-admission reconciliation failed; exception_type=%s",
                 type(exc).__name__,
