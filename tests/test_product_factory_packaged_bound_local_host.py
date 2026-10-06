@@ -262,7 +262,7 @@ def test_admitted_entry_keeps_frozen_model_if_revision_changes_after_recheck(
     )
     original_build = getattr(
         packaged_bound_local_host,
-        "build_repository_bound_packaged_local_product_factory_program",
+        "_build_repository_bound_packaged_local_product_factory_program_with_authority",
     )
     observed: dict[str, object] = {}
 
@@ -299,7 +299,7 @@ def test_admitted_entry_keeps_frozen_model_if_revision_changes_after_recheck(
 
     monkeypatch.setattr(
         packaged_bound_local_host,
-        "build_repository_bound_packaged_local_product_factory_program",
+        "_build_repository_bound_packaged_local_product_factory_program_with_authority",
         mutate_after_admission_then_build,
     )
 
