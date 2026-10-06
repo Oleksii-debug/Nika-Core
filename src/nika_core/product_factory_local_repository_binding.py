@@ -100,6 +100,14 @@ class ProductFactoryLocalRepositoryBindings:
 
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            current_project = self._require_project_repository(
+                project_id,
+                repository.locator,
+            )
+            if current_project != project or current_project.status != "active":
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "ProductProject changed while binding local repository"
+                )
             alias_rows = conn.execute(
                 "SELECT * FROM product_factory_local_repository_bindings "
                 "WHERE project_id = ? AND repository_id <> ?",
