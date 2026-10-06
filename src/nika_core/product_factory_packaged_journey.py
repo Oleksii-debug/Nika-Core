@@ -47,6 +47,7 @@ ActivityReportHandler = Callable[[], UIResult]
 TrainingStatusHandler = Callable[[str], UIResult]
 IntelligenceModeCommandHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
+FactoryOperatorStatusReader = Callable[[str], ProductProjectDetail]
 _PRODUCT_PROJECT_ID = re.compile(r"product-[0-9a-f]{64}", re.IGNORECASE)
 _REOPEN_PREFIXES = (
     "open productproject",
@@ -77,6 +78,15 @@ _SHOW_CURRENT_PRODUCT_FACTORY_PLAN_COMMANDS = frozenset(
         "show current product factory plan",
         "поточний план product factory",
         "покажи поточний план product factory",
+    }
+)
+_SHOW_CURRENT_PRODUCT_FACTORY_STATUS_COMMANDS = frozenset(
+    {
+        "current product factory status",
+        "show current product factory status",
+        "поточний стан product factory",
+        "покажи поточний стан product factory",
+        "статус поточного product factory",
     }
 )
 _PRODUCT_STATUS_PREVIEW_LIMIT = 24
@@ -243,6 +253,14 @@ def packaged_show_current_product_factory_plan_command(command: str) -> bool:
         " ".join(command.split()).casefold().strip(" :")
         in _SHOW_CURRENT_PRODUCT_FACTORY_PLAN_COMMANDS
     )
+
+
+def packaged_show_current_product_factory_status_command(command: str) -> bool:
+    """Recognize an exact read-only command for the current trusted Factory projection."""
+    if type(command) is not str:
+        raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
+    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    return normalized in _SHOW_CURRENT_PRODUCT_FACTORY_STATUS_COMMANDS
 
 
 def packaged_current_product_decision_command(command: str) -> bool:
@@ -531,6 +549,7 @@ class PackagedProductCommandRouter:
         selection_store: PackagedProductSelectionStore | None = None,
         decision_approval_authority: ApprovalAuthority | None = None,
         team_planner: PackagedProductFactoryTeamPlanner | None = None,
+        factory_status_reader: FactoryOperatorStatusReader | None = None,
     ) -> None:
         self._products = products
         self._ordinary_handler = ordinary_handler
@@ -545,6 +564,7 @@ class PackagedProductCommandRouter:
         self._selection_store = selection_store
         self._decision_approval_authority = decision_approval_authority
         self._team_planner = team_planner
+        self._factory_status_reader = factory_status_reader
         self._pending_decision_approvals: dict[
             str, _PendingPackagedDecisionApproval
         ] = {}
@@ -955,6 +975,42 @@ class PackagedProductCommandRouter:
             focus_id="tasks-heading",
         )
 
+    def _describe_current_product_factory_status(self) -> UIResult:
+        project_id = self._active_project_id
+        if project_id is None:
+            raise PackagedProductJourneyError(
+                "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
+            )
+        if self._factory_status_reader is None:
+            raise PackagedProductJourneyError(
+                "Операторський стан Product Factory недоступний у цьому запуску."
+            )
+        try:
+            detail = self._factory_status_reader(project_id)
+        except KeyError as exc:
+            self.clear_stale_selection()
+            raise PackagedProductJourneyError(
+                "Збережений ProductProject більше не існує. Застарілий вибір очищено."
+            ) from exc
+        except ProductProjectPresentationConsistencyError as exc:
+            raise PackagedProductJourneyError(
+                "Product Factory state changed while the operator projection was read; retry."
+            ) from exc
+        projection = project_operator_status(detail)
+        if projection.project != project_id:
+            raise PackagedProductJourneyError(
+                "Операторський стан Product Factory має неузгоджену ProductProject identity."
+            )
+        return UIResult(
+            request_id="desktop-handler",
+            status="completed",
+            message=(
+                f"Стан Product Factory: state {projection.state}; "
+                f"blocker {projection.blocker}; next {projection.next}."
+            ),
+            focus_id="product-project-operator-heading",
+        )
+
     def _plan_current_product_factory(self) -> UIResult:
         planner, project_id = self._require_team_planner_and_project()
         try:
@@ -1081,6 +1137,8 @@ class PackagedProductCommandRouter:
             return self._describe_current_decision()
         if packaged_current_product_command(command):
             return self._describe_current_project()
+        if packaged_show_current_product_factory_status_command(command):
+            return self._describe_current_product_factory_status()
         if packaged_plan_current_product_factory_command(command):
             return self._plan_current_product_factory()
         if packaged_show_current_product_factory_plan_command(command):
