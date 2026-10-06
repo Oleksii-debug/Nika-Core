@@ -15,7 +15,6 @@ from nika_core.security.standing_permission import (
 )
 from nika_core.tools import ToolRisk
 
-
 NOW = datetime(2026, 10, 5, 4, 55, tzinfo=UTC)
 
 
@@ -52,7 +51,7 @@ def test_grant_transaction_rolls_back_grant_and_audit_on_dependent_failure(
     store, audit, permissions = _authority(tmp_path)
     permission_id = "model-cloud:atomic-rollback"
 
-    with pytest.raises(RuntimeError, match="dependent binding failed"):
+    with pytest.raises(RuntimeError, match="dependent binding failed"):  # noqa: SIM117
         with permissions.grant_transaction(
             permission_id=permission_id,
             scope=_scope(),
@@ -83,7 +82,7 @@ def test_grant_transaction_keeps_commit_control_inside_store(
     store, audit, permissions = _authority(tmp_path)
     permission_id = "model-cloud:no-caller-commit"
 
-    with pytest.raises(RuntimeError, match="dependent write rejected"):
+    with pytest.raises(RuntimeError, match="dependent write rejected"):  # noqa: SIM117
         with permissions.grant_transaction(
             permission_id=permission_id,
             scope=_scope(),
@@ -124,7 +123,7 @@ def test_grant_transaction_abrupt_exit_leaves_no_grant_or_audit(
     _store, audit, permissions = _authority(tmp_path)
     permission_id = "model-cloud:atomic-system-exit"
 
-    with pytest.raises(SystemExit):
+    with pytest.raises(SystemExit):  # noqa: SIM117
         with permissions.grant_transaction(
             permission_id=permission_id,
             scope=_scope(),

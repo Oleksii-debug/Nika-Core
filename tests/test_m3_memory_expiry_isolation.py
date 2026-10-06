@@ -114,7 +114,7 @@ def test_namespace_expiry_accepts_aware_offset_and_rejects_naive_time(tmp_path: 
             scope=MemoryScope.TASK,
             owner_id="task",
             namespace="scratch",
-            now=datetime(2036, 1, 1),
+            now=datetime(2036, 1, 1),  # noqa: DTZ001
         )
     assert len(
         memory.list_namespace(
