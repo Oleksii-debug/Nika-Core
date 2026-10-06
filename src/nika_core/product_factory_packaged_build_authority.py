@@ -5,6 +5,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -843,13 +844,11 @@ class PackagedReviewedBuildExecutionPolicyPort:
 @dataclass(slots=True)
 class PackagedTrustedExecutionAuthorityPort:
     authorities: PackagedBuildAuthorityStore
-    _historical_recovery_dispatches: dict[str, str] = field(
-        default_factory=dict,
-        init=False,
-        repr=False,
-    )
-    _historical_recovery_active: bool = field(
-        default=False,
+    _historical_recovery_dispatches: ContextVar[dict[str, str] | None] = field(
+        default_factory=lambda: ContextVar(
+            "pf5_historical_recovery_dispatches",
+            default=None,
+        ),
         init=False,
         repr=False,
     )
@@ -882,17 +881,15 @@ class PackagedTrustedExecutionAuthorityPort:
                     "historical recovery contains conflicting dispatch identity"
                 )
             recovered[work_id] = dispatch_id
-        if self._historical_recovery_active:
+        if self._historical_recovery_dispatches.get() is not None:
             raise PackagedBuildAuthorityError(
                 "nested PF5 historical recovery authority is not allowed"
             )
-        self._historical_recovery_active = True
-        self._historical_recovery_dispatches = recovered
+        token = self._historical_recovery_dispatches.set(recovered)
         try:
             yield
         finally:
-            self._historical_recovery_dispatches = {}
-            self._historical_recovery_active = False
+            self._historical_recovery_dispatches.reset(token)
 
     def mark_effect_started_with_connection(
         self,
@@ -915,7 +912,8 @@ class PackagedTrustedExecutionAuthorityPort:
                 work_id=work_id,
             )
         except PackagedBuildAuthorityError:
-            recovery_dispatch_id = self._historical_recovery_dispatches.get(work_id)
+            recovery = self._historical_recovery_dispatches.get()
+            recovery_dispatch_id = None if recovery is None else recovery.get(work_id)
             if recovery_dispatch_id is None:
                 raise
             _bound, snapshot = self.authorities.historical_bound_snapshot(
