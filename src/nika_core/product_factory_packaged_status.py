@@ -146,6 +146,8 @@ class PackagedProductCommandCenter:
         self,
         project_id: str,
     ) -> tuple[ProductProjectDetail, ProductDecisionSetSummary]:
+        """Compose bounded decision state plus trusted PF2 status under one status fence."""
+
         try:
             coordinator = self._status_reader.read(project_id)
             detail, decision_summary = self._base.inspect_packaged_project(

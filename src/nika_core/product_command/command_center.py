@@ -58,7 +58,7 @@ class ProductCommandCenter:
         *,
         coordinator: CoordinatorSnapshot | None = None,
     ) -> tuple[ProductProjectDetail, ProductDecisionSetSummary]:
-        """Compose bounded packaged state with optional trusted coordinator status."""
+        """Compose the bounded packaged read model with optional trusted PF2 status."""
 
         detail, _credential_refs, decision_summary = (
             self._projects.inspect_project_presentation_context(project_id)

@@ -38,14 +38,14 @@ from nika_core.product_factory_packaged_journey import (
     PackagedProductStateProvider,
     product_project_identity,
 )
-from nika_core.product_factory_packaged_status import (
-    PackagedProductCommandCenter,
-    PackagedProductFactoryStatusReader,
-)
 from nika_core.product_factory_packaged_planning import (
     TEAM_PLAN_REF_PREFIX,
     PackagedProductFactoryTeamPlanner,
     PackagedTeamPlanResult,
+)
+from nika_core.product_factory_packaged_status import (
+    PackagedProductCommandCenter,
+    PackagedProductFactoryStatusReader,
 )
 from nika_core.product_project import ProductProjectRepository
 from nika_core.security import ApprovalAuthority
