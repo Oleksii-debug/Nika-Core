@@ -214,6 +214,10 @@ def _decode_repository(value: object, index: int) -> RepositoryRef:
 
 def _repository_locator(value: object, label: str) -> str:
     locator = _canonical_text(value, label)
+    if any(ord(character) < 32 or ord(character) == 127 for character in locator):
+        raise PackagedExecutionPlanAdmissionError(
+            f"{label} must be an opaque single-line locator"
+        )
     normalized = locator.casefold()
     for _round in range(_MAX_LOCATOR_DECODE_ROUNDS):
         _require_safe_repository_locator_view(normalized, label)
