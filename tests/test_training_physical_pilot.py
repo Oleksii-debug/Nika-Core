@@ -165,10 +165,14 @@ def _run_evidence(
     )
 
 
-def _completed_for(payload: bytes) -> TrainingRunEvidence:
+def _completed_for(
+    payload: bytes,
+    *,
+    next_step: int = 2,
+) -> TrainingRunEvidence:
     return _run_evidence(
         state=TrainingRunState.COMPLETED,
-        next_step=2,
+        next_step=next_step,
         checkpoint_id="checkpoint-completed",
         candidate_sha256=_sha256(payload),
     )
@@ -309,6 +313,23 @@ def test_report_round_trip_is_canonical_and_digest_stable(tmp_path: Path) -> Non
         separators=(",", ":"),
         sort_keys=True,
     )
+
+
+def test_report_accepts_bounded_higher_tier_completion(tmp_path: Path) -> None:
+    report = _build_report(tmp_path)
+    payload = report.canonical_payload()
+    payload["completed_steps"] = 8
+
+    restored = PhysicalTrainingPilotReport.from_json(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+
+    assert restored.completed_steps == 8
 
 
 def test_report_from_json_rejects_legacy_v4_without_tensor_evidence(
@@ -1189,18 +1210,51 @@ def _install_runner_fakes(
     return result, sentinel, calls
 
 
-def test_physical_runner_requires_exact_two_step_bound(
+def test_physical_runner_requires_durable_two_step_boundary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with pytest.raises(
         PhysicalTrainingPilotError,
-        match="exactly max_steps == 2",
+        match="at least two bounded training steps",
     ):
         _install_runner_fakes(
             monkeypatch,
             resumed_probe=_restart_probe(),
             completed=_completed_for(b"candidate"),
-            max_steps=3,
+            max_steps=1,
+        )
+
+
+def test_physical_runner_resumes_to_larger_authorized_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, sentinel, calls = _install_runner_fakes(
+        monkeypatch,
+        resumed_probe=_restart_probe(),
+        completed=_completed_for(b"candidate", next_step=8),
+        max_steps=8,
+    )
+
+    assert result is sentinel
+    assert calls == [
+        ("initial", True),
+        ("resumed", True),
+        ("resumed", False),
+    ]
+
+
+def test_physical_runner_rejects_completion_before_authorized_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    with pytest.raises(
+        PhysicalTrainingPilotError,
+        match="authorized bounded completion step",
+    ):
+        _install_runner_fakes(
+            monkeypatch,
+            resumed_probe=_restart_probe(),
+            completed=_completed_for(b"candidate"),
+            max_steps=8,
         )
 
 
