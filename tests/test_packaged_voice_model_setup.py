@@ -407,11 +407,27 @@ def test_voice_model_setup_rejects_indirected_data_root_before_mutation(
         data_root.symlink_to(outside, target_is_directory=True)
     except OSError:
         pytest.skip("directory symlinks are unavailable on this host")
+    submit_calls = 0
 
-    setup = PackagedVoiceModelSetup(data_root)
-    result = setup.install({"source_root": str(source)})
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        nonlocal submit_calls
+        submit_calls += 1
+        coroutine.close()
+        return Future()
 
-    assert result.status == "failed"
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    snapshot = setup.snapshot()
+    installed = setup.install({"source_root": str(source)})
+    started = setup.start({"source_root": str(source)})
+
+    assert snapshot["status"] == "partial"
+    assert snapshot["can_import"] is False
+    assert "папка даних" in str(snapshot["message"])
+    assert installed.status == "rejected"
+    assert started.status == "rejected"
+    assert "папка даних" in installed.message
+    assert "папка даних" in started.message
+    assert submit_calls == 0
     assert not (outside / "voice").exists()
 
 
