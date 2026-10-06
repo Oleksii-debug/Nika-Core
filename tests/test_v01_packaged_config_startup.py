@@ -459,6 +459,66 @@ def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
     assert events == ["loaded", "recovery", "destroy"]
 
 
+def test_shell_deferred_startup_relays_system_exit_to_main_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class LoadedEvent:
+        @staticmethod
+        def wait(timeout: int) -> bool:
+            assert timeout == 20
+            events.append("loaded")
+            return True
+
+    class ShownEvent:
+        @staticmethod
+        def is_set() -> bool:
+            return True
+
+    class Events:
+        loaded = LoadedEvent()
+        shown = ShownEvent()
+
+    class Window:
+        events = Events()
+
+        def show(self) -> None:
+            events.append("show")
+
+        def destroy(self) -> None:
+            events.append("destroy")
+
+    window = Window()
+
+    class WebView:
+        @staticmethod
+        def create_window(_title: str, _url: str, **_kwargs: object) -> Window:
+            return window
+
+        @staticmethod
+        def start(func=None, *, gui: str) -> None:
+            assert gui == "edgechromium"
+            assert func is not None
+            func()
+
+    def stop_process() -> None:
+        events.append("recovery")
+        raise SystemExit(73)
+
+    monkeypatch.setattr(ui_shell, "preflight_windows_shell", lambda: None)
+    monkeypatch.setattr(ui_shell, "import_module", lambda _name: WebView)
+
+    with pytest.raises(SystemExit) as caught:
+        ui_shell.launch_windows_shell(
+            object(),
+            on_gui_started=stop_process,
+        )
+
+    assert caught.value.code == 73
+    assert events == ["loaded", "recovery", "destroy"]
+
+
 @pytest.mark.parametrize(
     "failure",
     [
@@ -509,7 +569,6 @@ def test_shell_launch_failure_is_accessible_private_and_returns_error(
     assert "PRIVATE_" not in messages[0]
     assert "PRIVATE_" not in caplog.text
     assert f"exception_type={type(failure).__name__}" in caplog.text
-
 
 
 def test_deferred_recovery_failure_uses_recovery_error_boundary(
