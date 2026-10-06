@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-TRAINING_SCALE_PROGRESSION_SCHEMA_VERSION = 1
+TRAINING_SCALE_PROGRESSION_SCHEMA_VERSION = 2
 
 TRAINING_SCALE_PROGRESSION_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -23,6 +23,23 @@ TRAINING_SCALE_PROGRESSION_MIGRATIONS: dict[int, tuple[str, ...]] = {
                 tier_index,
                 candidate_artifact_ref,
                 candidate_sha256
+            )""",
+    ),
+    2: (
+        """CREATE TABLE IF NOT EXISTS training_scale_authorization_authority (
+            authorization_sha256 TEXT PRIMARY KEY,
+            authorization_json TEXT NOT NULL UNIQUE,
+            plan_sha256 TEXT NOT NULL,
+            tier_index INTEGER NOT NULL CHECK(tier_index >= 0),
+            job_id TEXT NOT NULL,
+            progression_proof_sha256 TEXT,
+            created_at TEXT NOT NULL
+        )""",
+        """CREATE INDEX IF NOT EXISTS idx_training_scale_authorization_job
+            ON training_scale_authorization_authority(
+                plan_sha256,
+                tier_index,
+                job_id
             )""",
     ),
 }

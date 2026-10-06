@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.training_scale import (
+    TrainingScaleAuthorization,
     TrainingScaleError,
     TrainingScaleProgressionProof,
     _build_progression_proof,
@@ -15,6 +16,7 @@ from nika_core.training_scale import (
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _MAX_PROOF_JSON_BYTES = 64 * 1024
+_MAX_AUTHORIZATION_JSON_BYTES = 2 * 1024 * 1024
 
 
 class TrainingScaleProgressionRepositoryError(RuntimeError):
@@ -112,6 +114,55 @@ def _restore_stored_proof(
             "stored progression authority digest does not match its key"
         )
     return proof
+
+
+
+
+def _decode_authorization_payload(raw: object) -> dict[str, object]:
+    if type(raw) is not str:
+        raise TrainingScaleProgressionRepositoryError(
+            "stored scale authorization must be UTF-8 JSON text"
+        )
+    if len(raw.encode("utf-8")) > _MAX_AUTHORIZATION_JSON_BYTES:
+        raise TrainingScaleProgressionRepositoryError(
+            "stored scale authorization exceeds the configured byte limit"
+        )
+    try:
+        value = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate_fields,
+            parse_constant=_reject_json_constant,
+            parse_float=_reject_json_float,
+        )
+    except (TypeError, ValueError) as exc:
+        raise TrainingScaleProgressionRepositoryError(
+            "stored scale authorization is not canonical"
+        ) from exc
+    if type(value) is not dict:
+        raise TrainingScaleProgressionRepositoryError(
+            "stored scale authorization must be an exact object"
+        )
+    return value
+
+
+def _encode_authorization_payload(payload: dict[str, object]) -> str:
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError) as exc:
+        raise TrainingScaleProgressionRepositoryError(
+            "scale authorization payload is not canonical JSON"
+        ) from exc
+    if len(encoded.encode("utf-8")) > _MAX_AUTHORIZATION_JSON_BYTES:
+        raise TrainingScaleProgressionRepositoryError(
+            "scale authorization payload exceeds the configured byte limit"
+        )
+    return encoded
 
 
 class SQLiteTrainingScaleProgressionRepository:
@@ -224,3 +275,113 @@ class SQLiteTrainingScaleProgressionRepository:
                 "stored progression authority does not match the requested claim"
             )
         return proof
+
+class SQLiteTrainingScaleAuthorizationRepository:
+    """Internal durable authority for exact scale authorizations used by a run."""
+
+    def __init__(self, store: SQLiteStore) -> None:
+        if type(store) is not SQLiteStore:
+            raise TypeError("store must be an exact SQLiteStore")
+        self._store = store
+        self._progression = SQLiteTrainingScaleProgressionRepository(store)
+
+    def put(self, authorization: TrainingScaleAuthorization) -> TrainingScaleAuthorization:
+        if type(authorization) is not TrainingScaleAuthorization:
+            raise TypeError("authorization must be an exact TrainingScaleAuthorization")
+        canonical = authorization.revalidated()
+        proof = canonical.progression_proof
+        if proof is not None:
+            self._progression.put(proof)
+        payload = canonical.canonical_payload()
+        encoded = _encode_authorization_payload(payload)
+        authorization_sha256 = canonical.authorization_sha256
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT authorization_json "
+                "FROM training_scale_authorization_authority "
+                "WHERE authorization_sha256 = ?",
+                (authorization_sha256,),
+            ).fetchone()
+            if row is not None:
+                if row["authorization_json"] != encoded:
+                    raise TrainingScaleProgressionRepositoryError(
+                        "scale authorization digest collides with different stored evidence"
+                    )
+                return canonical
+            try:
+                conn.execute(
+                    "INSERT INTO training_scale_authorization_authority("
+                    "authorization_sha256, authorization_json, plan_sha256, "
+                    "tier_index, job_id, progression_proof_sha256, created_at"
+                    ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        authorization_sha256,
+                        encoded,
+                        canonical.plan.plan_sha256,
+                        canonical.tier_index,
+                        canonical.job_id,
+                        None if proof is None else proof.proof_sha256,
+                        datetime.now(UTC).isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise TrainingScaleProgressionRepositoryError(
+                    "scale authorization conflicts with existing durable evidence"
+                ) from exc
+        return canonical
+
+    def get(self, authorization_sha256: str) -> TrainingScaleAuthorization:
+        if (
+            type(authorization_sha256) is not str
+            or _SHA256_RE.fullmatch(authorization_sha256) is None
+        ):
+            raise TrainingScaleProgressionRepositoryError(
+                "scale authorization key must be an exact lowercase SHA-256 digest"
+            )
+        with self._store.connection() as conn:
+            row = conn.execute(
+                "SELECT authorization_sha256, authorization_json, "
+                "progression_proof_sha256 "
+                "FROM training_scale_authorization_authority "
+                "WHERE authorization_sha256 = ?",
+                (authorization_sha256,),
+            ).fetchone()
+        if row is None:
+            raise TrainingScaleProgressionRepositoryError(
+                "trusted scale authorization was not found"
+            )
+        payload = _decode_authorization_payload(row["authorization_json"])
+        raw_proof = payload.get("progression_proof")
+        stored_proof_sha256 = row["progression_proof_sha256"]
+        trusted_proof: TrainingScaleProgressionProof | None
+        if raw_proof is None:
+            if stored_proof_sha256 is not None:
+                raise TrainingScaleProgressionRepositoryError(
+                    "stored scale authorization progression key is inconsistent"
+                )
+            trusted_proof = None
+        else:
+            if type(stored_proof_sha256) is not str:
+                raise TrainingScaleProgressionRepositoryError(
+                    "stored scale authorization progression key is missing"
+                )
+            trusted_proof = self._progression.get(stored_proof_sha256)
+            if trusted_proof.canonical_payload() != raw_proof:
+                raise TrainingScaleProgressionRepositoryError(
+                    "stored scale authorization embeds different progression evidence"
+                )
+        try:
+            authorization = TrainingScaleAuthorization.from_canonical_payload(
+                payload,
+                trusted_progression_proof=trusted_proof,
+            )
+        except (TrainingScaleError, TypeError, ValueError) as exc:
+            raise TrainingScaleProgressionRepositoryError(
+                "stored scale authorization could not be restored"
+            ) from exc
+        if authorization.authorization_sha256 != row["authorization_sha256"]:
+            raise TrainingScaleProgressionRepositoryError(
+                "stored scale authorization digest does not match its key"
+            )
+        return authorization
+
