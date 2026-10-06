@@ -1873,6 +1873,23 @@ def _publish_initial_adapter_config(path: Path, payload: bytes) -> None:
         _fail("initial_adapter_config_write_failed")
 
 
+def _validated_initial_adapter_config(
+    manifest: dict[str, object],
+    *,
+    config: TrainerConfig,
+    request: ParsedRequest,
+) -> dict[str, object]:
+    if manifest.get("candidate_artifact_ref") != request.base_artifact_ref:
+        _fail("initial_adapter_artifact_ref_mismatch")
+    foundation_model_sha256 = _candidate_foundation_model_sha256(manifest)
+    if foundation_model_sha256 != config.base_gguf_sha256:
+        _fail("initial_adapter_foundation_model_mismatch")
+    adapter_config = manifest.get("adapter_config")
+    if type(adapter_config) is not dict:
+        _fail("initial_adapter_manifest_invalid")
+    return dict(adapter_config)
+
+
 def _stage_initial_adapter(
     config: TrainerConfig,
     request: ParsedRequest,
@@ -1908,19 +1925,136 @@ def _stage_initial_adapter(
             expected_sha256=config.initial_adapter_sha256,
         )
     manifest = candidate_adapter_manifest(target)
-    if manifest.get("candidate_artifact_ref") != request.base_artifact_ref:
-        _fail("initial_adapter_artifact_ref_mismatch")
-    foundation_model_sha256 = _candidate_foundation_model_sha256(manifest)
-    if foundation_model_sha256 != config.base_gguf_sha256:
-        _fail("initial_adapter_foundation_model_mismatch")
-    adapter_config = manifest.get("adapter_config")
-    if type(adapter_config) is not dict:
-        _fail("initial_adapter_manifest_invalid")
+    adapter_config = _validated_initial_adapter_config(
+        manifest,
+        config=config,
+        request=request,
+    )
     adapter_config_payload = _canonical_json_bytes(adapter_config)
     adapter_config_path = target_dir / "adapter_config.json"
     _publish_initial_adapter_config(adapter_config_path, adapter_config_payload)
     _adapter_config_snapshot(target_dir, request, config)
     return target_dir
+
+
+def _close_initial_adapter_load_authority(
+    authority: tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...],
+) -> None:
+    for _path, descriptor, _identity in authority:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _initial_adapter_directory_paths(adapter_dir: Path) -> tuple[Path, ...]:
+    try:
+        return tuple(
+            sorted(
+                adapter_dir.iterdir(),
+                key=lambda item: item.name,
+            )
+        )
+    except OSError:
+        _fail("initial_adapter_load_authority_invalid")
+
+
+def _open_initial_adapter_load_authority(
+    adapter_dir: Path,
+    *,
+    config: TrainerConfig,
+    request: ParsedRequest,
+) -> tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...]:
+    if config.initial_adapter_sha256 is None:
+        _fail("initial_adapter_authority_invalid")
+    candidate = adapter_dir / _CANDIDATE_FILE
+    config_path = adapter_dir / "adapter_config.json"
+    expected_paths = (config_path, candidate)
+    if _initial_adapter_directory_paths(adapter_dir) != expected_paths:
+        _fail("initial_adapter_load_authority_invalid")
+
+    opened: list[tuple[Path, int, tuple[int, int, int, int, int]]] = []
+    try:
+        for path in expected_paths:
+            before = _require_regular_unlinked(
+                path,
+                code="initial_adapter_load_authority_invalid",
+            )
+            if before.st_nlink != 1:
+                _fail("initial_adapter_load_authority_invalid")
+            descriptor = _open_readonly_snapshot(path)
+            opened_stat = os.fstat(descriptor)
+            identity = _stable_stat_identity(before)
+            if (
+                not stat.S_ISREG(opened_stat.st_mode)
+                or _is_reparse(opened_stat)
+                or opened_stat.st_nlink != 1
+                or _stable_stat_identity(opened_stat) != identity
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                _fail("initial_adapter_load_authority_invalid")
+            opened.append((path, descriptor, identity))
+
+        candidate_sha256, _ = _hash_regular_snapshot(
+            candidate,
+            code="initial_adapter_load_authority_invalid",
+        )
+        if candidate_sha256 != config.initial_adapter_sha256:
+            _fail("initial_adapter_stage_digest_mismatch")
+        manifest = candidate_adapter_manifest(candidate)
+        adapter_config = _validated_initial_adapter_config(
+            manifest,
+            config=config,
+            request=request,
+        )
+        expected_config_bytes = _canonical_json_bytes(adapter_config)
+        observed_config_bytes = _read_regular_snapshot(
+            config_path,
+            max_bytes=256 * 1024,
+            code="initial_adapter_load_authority_invalid",
+        )
+        if not hmac.compare_digest(
+            observed_config_bytes,
+            expected_config_bytes,
+        ):
+            _fail("initial_adapter_config_mismatch")
+        _adapter_config_snapshot(adapter_dir, request, config)
+        return tuple(opened)
+    except PeftTrainerError:
+        _close_initial_adapter_load_authority(tuple(opened))
+        raise
+    except OSError:
+        _close_initial_adapter_load_authority(tuple(opened))
+        _fail("initial_adapter_load_authority_invalid")
+
+
+def _verify_initial_adapter_load_authority(
+    authority: tuple[tuple[Path, int, tuple[int, int, int, int, int]], ...],
+    *,
+    adapter_dir: Path,
+) -> None:
+    expected_paths = tuple(path for path, _descriptor, _identity in authority)
+    if _initial_adapter_directory_paths(adapter_dir) != expected_paths:
+        _fail("initial_adapter_changed_during_load")
+    for path, descriptor, identity in authority:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail("initial_adapter_changed_during_load")
+        current = _require_regular_unlinked(
+            path,
+            code="initial_adapter_changed_during_load",
+        )
+        if (
+            opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != identity
+            or _stable_stat_identity(current) != identity
+        ):
+            _fail("initial_adapter_changed_during_load")
 
 
 def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root: Path) -> Path:
@@ -2918,6 +3052,15 @@ def _train_one_step(
         if previous_checkpoint is None
         else None
     )
+    initial_adapter_load_authority: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]], ...
+    ] = ()
+    if initial_adapter_dir is not None:
+        initial_adapter_load_authority = _open_initial_adapter_load_authority(
+            initial_adapter_dir,
+            config=config,
+            request=request,
+        )
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(
@@ -3007,6 +3150,17 @@ def _train_one_step(
             safe_serialize=safe_serialize,
             torch=torch,
         )
+        if initial_adapter_load_authority:
+            if initial_adapter_dir is None:
+                _fail("initial_adapter_load_authority_invalid")
+            _verify_initial_adapter_load_authority(
+                initial_adapter_load_authority,
+                adapter_dir=initial_adapter_dir,
+            )
+            _close_initial_adapter_load_authority(
+                initial_adapter_load_authority
+            )
+            initial_adapter_load_authority = ()
 
         completed_step = _completed_step_checkpoint(
             job_root,
@@ -3077,6 +3231,10 @@ def _train_one_step(
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("training_step_failed")
     finally:
+        if initial_adapter_load_authority:
+            _close_initial_adapter_load_authority(
+                initial_adapter_load_authority
+            )
         if "torch" in locals() and hasattr(torch, "cuda") and torch.cuda.is_available():
             torch.cuda.empty_cache()
         if resume_snapshot_root is not None:
