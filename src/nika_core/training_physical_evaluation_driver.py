@@ -11,6 +11,7 @@ import os
 import re
 import stat
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 
 import nika_core.training_scale as training_scale
@@ -1486,18 +1487,51 @@ def _task_progression_proof(
     return restored
 
 
+def _iter_task_idempotency_records(
+    ledger: IdempotencyLedger,
+    *,
+    task_id: str,
+) -> Iterator[IdempotencyRecord]:
+    if type(ledger) is not IdempotencyLedger:
+        raise TypeError("ledger must be an exact IdempotencyLedger")
+    canonical_task_id = _require_text(task_id, name="task_id")
+    with ledger._store.connection() as conn:
+        conn.execute("BEGIN")
+        cursor = conn.execute(
+            "SELECT * FROM idempotency_records WHERE "
+            "(task_id = ? OR "
+            "(typeof(task_id) != 'text' AND CAST(task_id AS TEXT) = ?)) "
+            "ORDER BY created_at ASC, operation_key ASC",
+            (canonical_task_id, canonical_task_id),
+        )
+        while True:
+            rows = cursor.fetchmany(128)
+            if not rows:
+                return
+            for row in rows:
+                try:
+                    record = IdempotencyLedger._from_row(row)
+                except (RuntimeError, TypeError, ValueError) as exc:
+                    raise PhysicalEvaluationDriverError(
+                        "durable idempotency record is non-canonical"
+                    ) from exc
+                if record.task_id != canonical_task_id:
+                    _fail("durable idempotency task identity storage is non-canonical")
+                yield record
+
+
 def _completed_progression_record(
     ledger: IdempotencyLedger,
     *,
     task_id: str,
     expected_claim: dict[str, object],
 ) -> IdempotencyRecord:
-    matches: list[IdempotencyRecord] = []
-    for record in ledger.list_for_task(
-        task_id,
-        status=IdempotencyStatus.COMPLETED,
-    ):
-        if record.operation_type != _SCALE_PROGRESSION_OPERATION_TYPE:
+    match: IdempotencyRecord | None = None
+    for record in _iter_task_idempotency_records(ledger, task_id=task_id):
+        if (
+            record.status is not IdempotencyStatus.COMPLETED
+            or record.operation_type != _SCALE_PROGRESSION_OPERATION_TYPE
+        ):
             continue
         result = record.result
         if (
@@ -1506,10 +1540,12 @@ def _completed_progression_record(
             and result.get("schema") == "nika-physical-scale-progression-record-v1"
             and result.get("proof") == expected_claim
         ):
-            matches.append(record)
-    if len(matches) != 1:
+            if match is not None:
+                _fail("exactly one completed durable scale progression record is required")
+            match = record
+    if match is None:
         _fail("exactly one completed durable scale progression record is required")
-    return matches[0]
+    return match
 
 
 def _completed_progression_evaluation_record(
@@ -1518,12 +1554,12 @@ def _completed_progression_evaluation_record(
     task_id: str,
     comparison_evidence_sha256: str,
 ) -> IdempotencyRecord:
-    matches: list[IdempotencyRecord] = []
-    for record in ledger.list_for_task(
-        task_id,
-        status=IdempotencyStatus.COMPLETED,
-    ):
-        if record.operation_type != _EVALUATION_OPERATION_TYPE:
+    match: IdempotencyRecord | None = None
+    for record in _iter_task_idempotency_records(ledger, task_id=task_id):
+        if (
+            record.status is not IdempotencyStatus.COMPLETED
+            or record.operation_type != _EVALUATION_OPERATION_TYPE
+        ):
             continue
         result = record.result
         if (
@@ -1531,10 +1567,12 @@ def _completed_progression_evaluation_record(
             and result.get("comparison_evidence_sha256")
             == comparison_evidence_sha256
         ):
-            matches.append(record)
-    if len(matches) != 1:
+            if match is not None:
+                _fail("exactly one completed promoted evaluation record is required")
+            match = record
+    if match is None:
         _fail("exactly one completed promoted evaluation record is required")
-    return matches[0]
+    return match
 
 
 def _validate_progression_evaluation_authority(
