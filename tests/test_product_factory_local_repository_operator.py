@@ -113,6 +113,59 @@ def test_snapshot_lists_only_plan_repositories_without_root_path(
     assert "root" not in repr(snapshot).casefold()
 
 
+def test_snapshot_rejects_project_change_during_projection(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    operator = PackagedLocalRepositoryOperator(
+        bindings=bindings,
+        resolve_plan=lambda project_id: plan
+        if project_id == plan.project_id
+        else (_ for _ in ()).throw(KeyError(project_id)),
+    )
+    projects = ProductProjectRepository(store)
+    original_current_binding_version = bindings.current_binding_version
+    advanced = False
+
+    def version_then_advance(project_id: str, repository_id: str) -> int | None:
+        nonlocal advanced
+        version = original_current_binding_version(project_id, repository_id)
+        if not advanced:
+            projects.update_spec(
+                project.project_id,
+                ProductProjectSpec(
+                    goal="Changed while repository projection was being built",
+                    desired_outcome=project.spec.desired_outcome,
+                    repository_refs=project.spec.repository_refs,
+                ),
+                expected_row_version=project.row_version,
+                change_reason="operator snapshot TOCTOU regression",
+                idempotency_key="update:product-1:snapshot-toctou",
+            )
+            advanced = True
+        return version
+
+    monkeypatch.setattr(
+        bindings,
+        "current_binding_version",
+        version_then_advance,
+    )
+
+    snapshot = operator.snapshot(project.project_id)
+
+    assert snapshot == {
+        "status": "invalid",
+        "project_id": None,
+        "repositories": [],
+        "message": "Стан локальних прив’язок Product Factory недоступний.",
+    }
+
+
 def test_explicit_bind_and_version_fenced_unbind_round_trip(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -162,55 +215,37 @@ def test_explicit_bind_and_version_fenced_unbind_round_trip(
     assert operator.snapshot(project.project_id)["repositories"][0]["bound"] is False
 
 
-def test_unbind_rejects_product_project_change_after_plan_validation(
+def test_unbind_rejects_plan_repository_identity_substitution_without_mutation(
     tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
     repository = _repository()
     project = _project(store, repository)
-    plan = _plan(project, repository)
     bindings = ProductFactoryLocalRepositoryBindings(store)
+    plan_box = {"plan": _plan(project, repository)}
     operator = PackagedLocalRepositoryOperator(
         bindings=bindings,
-        resolve_plan=lambda project_id: plan
-        if project_id == plan.project_id
+        resolve_plan=lambda project_id: plan_box["plan"]
+        if project_id == project.project_id
         else (_ for _ in ()).throw(KeyError(project_id)),
     )
     root = _root(tmp_path)
-    bound = operator.bind(
+    assert operator.bind(
         {
             "project_id": project.project_id,
             "repository_id": repository.repository_id,
             "root_path": str(root),
             "expected_binding_version": None,
         }
+    ).status == "completed"
+
+    substituted = RepositoryRef(
+        repository_id=repository.repository_id,
+        provider="git",
+        locator=repository.locator,
+        default_branch=repository.default_branch,
     )
-    assert bound.status == "completed"
-
-    projects = ProductProjectRepository(store)
-    original_validate = bindings.validate_plan
-    advanced = False
-
-    def validate_then_advance(candidate: PackagedProductFactoryExecutionPlan) -> None:
-        nonlocal advanced
-        original_validate(candidate)
-        if advanced:
-            return
-        projects.update_spec(
-            project.project_id,
-            ProductProjectSpec(
-                goal="Changed after adapter plan validation",
-                desired_outcome=project.spec.desired_outcome,
-                repository_refs=project.spec.repository_refs,
-            ),
-            expected_row_version=project.row_version,
-            change_reason="operator unbind TOCTOU regression",
-            idempotency_key="update:product-1:unbind-toctou",
-        )
-        advanced = True
-
-    monkeypatch.setattr(bindings, "validate_plan", validate_then_advance)
+    plan_box["plan"] = _plan(project, substituted)
 
     result = operator.unbind(
         {
@@ -225,6 +260,52 @@ def test_unbind_rejects_product_project_change_after_plan_validation(
         project.project_id,
         repository.repository_id,
     ) == 1
+
+
+def test_unbind_rejects_stale_execution_plan_without_removing_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository()
+    project = _project(store, repository)
+    plan = _plan(project, repository)
+    operator = _operator(store, plan)
+    root = _root(tmp_path)
+    assert operator.bind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "root_path": str(root),
+            "expected_binding_version": None,
+        }
+    ).status == "completed"
+
+    ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed before stale unbind",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale unbind regression",
+        idempotency_key="update:product-1:stale-unbind",
+    )
+
+    result = operator.unbind(
+        {
+            "project_id": project.project_id,
+            "repository_id": repository.repository_id,
+            "expected_binding_version": 1,
+        }
+    )
+
+    assert result.status == "rejected"
+    assert ProductFactoryLocalRepositoryBindings(store).current_binding_version(
+        project.project_id,
+        repository.repository_id,
+    ) == 1
+
 
 def test_binding_projection_survives_restart_without_exposing_root(
     tmp_path: pathlib.Path,

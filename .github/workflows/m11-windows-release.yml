@@ -59,6 +59,7 @@ on:
       - "tests/test_product_factory_local_repository_binding.py"
       - "tests/test_product_factory_local_repository_operator.py"
       - "tests/test_product_factory_local_repository_operator_ui.py"
+      - "tests/test_packaged_product_factory_execution_plan_file.py"
       - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_product_factory_openhands_runtime_api.py"
       - "tests/test_product_factory_openhands_runtime_program.py"
@@ -167,6 +168,7 @@ on:
       - "tests/test_product_factory_local_repository_binding.py"
       - "tests/test_product_factory_local_repository_operator.py"
       - "tests/test_product_factory_local_repository_operator_ui.py"
+      - "tests/test_packaged_product_factory_execution_plan_file.py"
       - "tests/test_packaged_product_factory_preparation.py"
       - "tests/test_product_factory_openhands_runtime_api.py"
       - "tests/test_product_factory_openhands_runtime_program.py"
@@ -292,6 +294,7 @@ jobs:
           tests/test_product_factory_local_repository_binding.py
           tests/test_product_factory_local_repository_operator.py
           tests/test_product_factory_local_repository_operator_ui.py
+          tests/test_packaged_product_factory_execution_plan_file.py
           tests/test_packaged_product_factory_preparation.py
           tests/test_product_factory_openhands_runtime_api.py
           tests/test_product_factory_openhands_runtime_program.py

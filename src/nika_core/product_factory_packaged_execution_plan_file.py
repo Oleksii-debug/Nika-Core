@@ -49,8 +49,16 @@ class PackagedProductFactoryExecutionPlanFileSource:
         self._plan: PackagedProductFactoryExecutionPlan | None = None
         self._load_generation = 0
 
-    def load(self, payload: Mapping[str, Any]) -> UIResult:
+    def load(
+        self,
+        payload: Mapping[str, Any],
+        *,
+        expected_project_id: str | None = None,
+    ) -> UIResult:
         """Replace the in-memory plan with one explicitly selected safe file."""
+
+        if expected_project_id is not None:
+            expected_project_id = _expected_project_id(expected_project_id)
 
         with self._lock:
             self._load_generation += 1
@@ -82,6 +90,17 @@ class PackagedProductFactoryExecutionPlanFileSource:
             return _result(
                 "rejected",
                 "Вибраний файл не є допустимим JSON-планом Product Factory.",
+            )
+        if (
+            expected_project_id is not None
+            and plan.project_id != expected_project_id
+        ):
+            return _result(
+                "rejected",
+                (
+                    "Вибраний JSON-план належить іншому ProductProject. "
+                    "Виберіть план для поточного ProductProject."
+                ),
             )
 
         with self._lock:
@@ -134,6 +153,19 @@ class PackagedProductFactoryExecutionPlanFileSource:
                 f"{plan.project_id}."
             ),
         }
+
+
+def _expected_project_id(value: object) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise PackagedExecutionPlanFileError(
+            "expected ProductProject identity must be canonical text"
+        )
+    return value
 
 
 def _selected_path(payload: Mapping[str, Any]) -> Path:
