@@ -114,6 +114,9 @@ def test_installer_contract_reuses_manifest_and_never_elevates() -> None:
     assert "$item.PSIsContainer" in payload
     assert "function Assert-NikaNoReparsePathChain" in payload
     assert "function Assert-NikaDataMutationSeparation" in payload
+    assert "$normalized = $Path.Replace([char]'/', [char]'\\')" in payload
+    assert "$relative.Split([char]'\\')" in payload
+    assert "$root.TrimEnd([char]'\\')" in payload
     assert 'Assert-NikaNoReparsePathChain -Path $canonicalDataRoot' in payload
     assert 'MutationPaths @($destinationPath, $rollbackPath)' in payload
     assert 'Assert-NikaNoReparsePathChain -Path $BundleRoot' in payload
@@ -495,6 +498,35 @@ def test_conflicting_database_environment_aliases_fail_before_install_mutation(
 
     assert rejected.returncode != 0, rejected.stdout
     assert "Conflicting Nika Core database path environment aliases." in rejected.stderr
+    assert not destination.exists()
+    assert not destination.parent.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real PowerShell filesystem proof is Windows-only")
+@pytest.mark.parametrize("alias", ["NIKA_DB_PATH", "NIKA_DATABASE_PATH"])
+@pytest.mark.parametrize("value", ["", "   "])
+def test_present_empty_database_environment_alias_fails_before_install_mutation(
+    tmp_path: Path,
+    alias: str,
+    value: str,
+) -> None:
+    shell = _powershell()
+    if shell is None:
+        pytest.skip("PowerShell is unavailable")
+
+    bundle = _bundle(tmp_path / "bundle", "v1")
+    destination = tmp_path / "install" / "Nika Core"
+
+    rejected = _run(
+        shell,
+        mode="Install",
+        destination=destination,
+        bundle=bundle,
+        env_overrides={alias: value},
+    )
+
+    assert rejected.returncode != 0, rejected.stdout
+    assert "Configured Nika Core database path must be fully qualified." in rejected.stderr
     assert not destination.exists()
     assert not destination.parent.exists()
 
