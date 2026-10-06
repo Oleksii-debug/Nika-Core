@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -28,6 +28,63 @@ class _QueryOnlyTrackingStore(SQLiteStore):
             row = conn.execute("PRAGMA query_only").fetchone()
             assert row is not None
             self.observed_query_only = int(row[0])
+
+
+class _AuditMutationConnection:
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        after_grouped_audit_read: Callable[[], None],
+    ) -> None:
+        self._conn = conn
+        self._after_grouped_audit_read = after_grouped_audit_read
+        self._fired = False
+
+    def execute(self, sql: str, parameters=()):
+        cursor = self._conn.execute(sql, parameters)
+        if (
+            not self._fired
+            and "FROM audit_events WHERE created_at" in sql
+            and "GROUP BY event_type" in sql
+        ):
+            self._fired = True
+            self._after_grouped_audit_read()
+        return cursor
+
+
+class _ConcurrentAuditMutationStore(SQLiteStore):
+    def __init__(self, path: Path, *, created_at: str) -> None:
+        super().__init__(path)
+        self._created_at = created_at
+        self.writer_committed = False
+
+    @contextmanager
+    def connection(self) -> Iterator[_AuditMutationConnection]:
+        with super().connection() as conn:
+            yield _AuditMutationConnection(
+                conn,
+                after_grouped_audit_read=self._commit_memory_event,
+            )
+
+    def _commit_memory_event(self) -> None:
+        writer = sqlite3.connect(self.path, timeout=2.0)
+        try:
+            writer.execute(
+                "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (
+                    "memory.upserted",
+                    "memory",
+                    "concurrent-memory",
+                    "{}",
+                    self._created_at,
+                ),
+            )
+            writer.commit()
+            self.writer_committed = True
+        finally:
+            writer.close()
 
 
 class _ResourceObserver:
@@ -307,6 +364,32 @@ def test_report_rejects_non_text_grouped_durable_label(tmp_path) -> None:
         )
 
 
+def test_report_uses_one_read_snapshot_across_all_projections(tmp_path) -> None:
+    base_store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+    with base_store.connection() as conn:
+        journal_mode = conn.execute("PRAGMA journal_mode = WAL").fetchone()
+        assert journal_mode is not None
+        assert str(journal_mode[0]).casefold() == "wal"
+
+    store = _ConcurrentAuditMutationStore(base_store.path, created_at=inside)
+    report = DailyActivityReportService(store).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert store.writer_committed is True
+    assert report.memory_update_events == 0
+    assert ActivityCount("memory.upserted", 1) not in report.audit_events
+    with base_store.connection() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS count FROM audit_events WHERE event_type = ?",
+            ("memory.upserted",),
+        ).fetchone()
+    assert row is not None
+    assert int(row["count"]) == 1
+
+
 def test_report_counts_repeated_memory_upserts_from_durable_audit_history(tmp_path) -> None:
     store = _prepared_store(tmp_path)
     memory = MemoryService(store, AuditLog(store))
@@ -449,3 +532,165 @@ def test_report_rejects_ambiguous_or_empty_windows(start, end, message, tmp_path
 
     with pytest.raises(ValueError, match=message):
         service.build_window(start=start, end=end)
+
+
+@pytest.mark.parametrize("section", ["task", "audit", "experiment"])
+def test_report_rejects_oversized_group_label_before_projection(
+    tmp_path, section: str
+) -> None:
+    store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+    oversized = "x" * 4097
+
+    with store.connection() as conn:
+        if section == "task":
+            conn.execute(
+                "INSERT INTO tasks(task_id, workspace_id, agent_id, state, payload_json, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "task-oversized-label",
+                    "workspace-1",
+                    "agent-1",
+                    "RUNNING",
+                    "{}",
+                    inside,
+                    inside,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO task_events(task_id, previous_state, new_state, created_at) "
+                "VALUES (?, ?, ?, ?)",
+                ("task-oversized-label", "QUEUED", oversized, inside),
+            )
+        elif section == "audit":
+            conn.execute(
+                "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+                "created_at) VALUES (?, ?, ?, ?, ?)",
+                (oversized, "test", "entity-oversized-label", "{}", inside),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO experiments(experiment_id, definition_json, status, "
+                "selected_candidate_id, previous_champion_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "experiment-oversized-label",
+                    "{}",
+                    "running",
+                    None,
+                    None,
+                    inside,
+                    inside,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO experiment_events(experiment_id, previous_status, new_status, "
+                "selected_candidate_id, previous_champion_id, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    "experiment-oversized-label",
+                    "queued",
+                    oversized,
+                    None,
+                    None,
+                    inside,
+                ),
+            )
+
+    with pytest.raises(ValueError, match="exceeds safe UTF-8 storage bound"):
+        DailyActivityReportService(store).build_window(
+            start=datetime(2026, 9, 12, tzinfo=UTC),
+            end=datetime(2026, 9, 13, tzinfo=UTC),
+        )
+
+
+def test_report_accepts_group_label_at_utf8_byte_bound(tmp_path) -> None:
+    store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+    boundary_label = "я" * 2048
+    assert len(boundary_label.encode("utf-8")) == 4096
+
+    with store.connection() as conn:
+        conn.execute(
+            "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+            "created_at) VALUES (?, ?, ?, ?, ?)",
+            (boundary_label, "test", "entity-boundary-label", "{}", inside),
+        )
+
+    report = DailyActivityReportService(store).build_window(
+        start=datetime(2026, 9, 12, tzinfo=UTC),
+        end=datetime(2026, 9, 13, tzinfo=UTC),
+    )
+
+    assert report.audit_events == (ActivityCount(boundary_label, 1),)
+    rendered = report.render_text()
+    assert boundary_label not in rendered
+    assert "..." in rendered
+
+@pytest.mark.parametrize("section", ["task", "audit", "experiment"])
+def test_report_rejects_invalid_utf8_group_label_without_raw_sqlite_decode(
+    tmp_path, section: str
+) -> None:
+    store = _prepared_store(tmp_path)
+    inside = "2026-09-12T10:00:00+00:00"
+
+    with store.connection() as conn:
+        if section == "task":
+            conn.execute(
+                "INSERT INTO tasks(task_id, workspace_id, agent_id, state, payload_json, "
+                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "task-invalid-utf8-label",
+                    "workspace-1",
+                    "agent-1",
+                    "RUNNING",
+                    "{}",
+                    inside,
+                    inside,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO task_events(task_id, previous_state, new_state, created_at) "
+                "VALUES (?, ?, CAST(X'80' AS TEXT), ?)",
+                ("task-invalid-utf8-label", "QUEUED", inside),
+            )
+        elif section == "audit":
+            conn.execute(
+                "INSERT INTO audit_events(event_type, entity_type, entity_id, payload_json, "
+                "created_at) VALUES (CAST(X'80' AS TEXT), ?, ?, ?, ?)",
+                ("test", "entity-invalid-utf8-label", "{}", inside),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO experiments(experiment_id, definition_json, status, "
+                "selected_candidate_id, previous_champion_id, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "experiment-invalid-utf8-label",
+                    "{}",
+                    "running",
+                    None,
+                    None,
+                    inside,
+                    inside,
+                ),
+            )
+            conn.execute(
+                "INSERT INTO experiment_events(experiment_id, previous_status, new_status, "
+                "selected_candidate_id, previous_champion_id, created_at) "
+                "VALUES (?, ?, CAST(X'80' AS TEXT), ?, ?, ?)",
+                (
+                    "experiment-invalid-utf8-label",
+                    "queued",
+                    None,
+                    None,
+                    inside,
+                ),
+            )
+
+    with pytest.raises(ValueError, match="must contain valid UTF-8"):
+        DailyActivityReportService(store).build_window(
+            start=datetime(2026, 9, 12, tzinfo=UTC),
+            end=datetime(2026, 9, 13, tzinfo=UTC),
+        )
+
