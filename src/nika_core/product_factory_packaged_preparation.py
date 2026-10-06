@@ -565,6 +565,12 @@ def _text_mapping(value: Mapping[str, str], label: str) -> dict[str, str]:
 
 def _identity_text(value: object, label: str) -> str:
     text = _plain_text(value, label)
+    try:
+        text.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise PackagedProductFactoryPreparationError(
+            f"{label} must be valid UTF-8 identity text"
+        ) from exc
     if any(ord(character) < 32 or ord(character) == 127 for character in text):
         raise PackagedProductFactoryPreparationError(
             f"{label} must be opaque single-line identity text"
