@@ -192,6 +192,71 @@ def test_bounded_reader_accepts_exact_limit(tmp_path: Path) -> None:
     assert driver._read_bounded_file(path, max_bytes=8, name="test input") == b"x" * 8
 
 
+def test_bounded_reader_rejects_linked_authority_file(tmp_path: Path) -> None:
+    target = tmp_path / "authority.bin"
+    target.write_bytes(b"trusted")
+    path = tmp_path / "authority-link.bin"
+    try:
+        path.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlink creation is unavailable on this runner")
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="canonical non-linked regular file",
+    ):
+        driver._read_bounded_file(path, max_bytes=32, name="test input")
+
+
+def test_bounded_reader_rejects_path_mutation_during_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "authority.bin"
+    path.write_bytes(b"trusted")
+    real_lstat = driver.os.lstat
+    matching_calls = 0
+
+    def changing_lstat(target: object) -> object:
+        nonlocal matching_calls
+        value = real_lstat(target)
+        if Path(target) == path:
+            matching_calls += 1
+            if matching_calls == 2:
+                path.write_bytes(b"replacement")
+                value = real_lstat(target)
+        return value
+
+    monkeypatch.setattr(driver.os, "lstat", changing_lstat)
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="changed while"):
+        driver._read_bounded_file(path, max_bytes=32, name="test input")
+
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_bounded_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    path = tmp_path / "authority.bin"
+    path.write_bytes(b"trusted")
+
+    with path.open("r+b"):
+        with pytest.raises(
+            driver.PhysicalPilotDriverError,
+            match="could not be read",
+        ):
+            driver._read_bounded_file(path, max_bytes=32, name="test input")
+
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_bounded_reader_releases_share_fence_after_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "authority.bin"
+    path.write_bytes(b"trusted")
+
+    assert driver._read_bounded_file(path, max_bytes=32, name="test input") == b"trusted"
+
+    path.write_bytes(b"replacement")
+    assert path.read_bytes() == b"replacement"
+
+
 def test_config_file_rejects_oversized_bytes(tmp_path: Path) -> None:
     path = tmp_path / "physical-pilot.json"
     path.write_bytes(b"x" * (driver._CONFIG_MAX_BYTES + 1))
@@ -800,6 +865,36 @@ def test_stable_file_sha256_rejects_mutation_during_read(
     ):
         driver._stable_file_sha256(path, name="candidate")
 
+
+def test_stable_file_sha256_rejects_linked_authority_file(tmp_path: Path) -> None:
+    target = tmp_path / "candidate.safetensors"
+    target.write_bytes(b"trusted")
+    path = tmp_path / "candidate-link.safetensors"
+    try:
+        path.symlink_to(target)
+    except (NotImplementedError, OSError):
+        pytest.skip("symlink creation is unavailable on this runner")
+
+    with pytest.raises(
+        driver.PhysicalPilotDriverError,
+        match="canonical non-linked regular file",
+    ):
+        driver._stable_file_sha256(path, name="initial_adapter_path")
+
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_stable_file_sha256_refuses_preexisting_writer(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.safetensors"
+    path.write_bytes(b"trusted")
+
+    with path.open("r+b"):
+        with pytest.raises(
+            driver.PhysicalPilotDriverError,
+            match="could not be snapshotted",
+        ):
+            driver._stable_file_sha256(path, name="candidate")
+
+
 def test_config_rejects_unknown_top_level_field(tmp_path: Path) -> None:
     payload = _payload(tmp_path)
     payload["unexpected"] = True
@@ -927,6 +1022,44 @@ def test_invalid_trainer_pe_fails_before_durable_output(
         driver.run_physical_pilot_from_config(config)
 
     assert not config.output_root.exists()
+
+
+def test_trainer_pe_reader_rejects_path_mutation_during_header_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "trainer.exe"
+    _write_minimal_pe(path)
+    real_lstat = driver.os.lstat
+    matching_calls = 0
+
+    def changing_lstat(target: object) -> object:
+        nonlocal matching_calls
+        value = real_lstat(target)
+        if Path(target) == path:
+            matching_calls += 1
+            if matching_calls == 2:
+                path.write_bytes(b"replacement")
+                value = real_lstat(target)
+        return value
+
+    monkeypatch.setattr(driver.os, "lstat", changing_lstat)
+
+    with pytest.raises(driver.PhysicalPilotDriverError, match="changed while"):
+        driver._require_windows_pe_executable(path)
+
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_trainer_pe_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    path = tmp_path / "trainer.exe"
+    _write_minimal_pe(path)
+
+    with path.open("r+b"):
+        with pytest.raises(
+            driver.PhysicalPilotDriverError,
+            match="Windows PE header could not be read",
+        ):
+            driver._require_windows_pe_executable(path)
 
 
 def test_non_windows_gate_precedes_filesystem_effects(

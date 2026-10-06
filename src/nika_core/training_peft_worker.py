@@ -30,11 +30,14 @@ _READ_CHUNK_BYTES = 1024 * 1024
 _HEX_RE = re.compile(r"^[0-9a-f]{64}$")
 _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
 _MATERIAL_DOMAIN = b"nika-training-consumed-materials-v1\x00"
+_STEP_ID_DOMAIN = b"nika-training-step-v2\x00"
 _CHECKPOINT_PAYLOAD_DOMAIN = b"nika-peft-checkpoint-payload-v1\x00"
 _CHECKPOINT_MARKER = "nika_checkpoint.json"
+_CHECKPOINT_MARKER_SCHEMA_VERSION = 2
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
+_MAX_CHECKPOINT_MARKER_BYTES = 64 * 1024
 _MAX_RUNTIME_VERSION_BYTES = 256
 _RUNTIME_MANIFEST_DOMAIN = b"nika-peft-runtime-manifest-v1\x00"
 _TRAINING_RUNTIME_DISTRIBUTIONS = (
@@ -52,6 +55,11 @@ _TRAINING_RUNTIME_METADATA_KEYS = {
 _MAX_MODEL_DIR_FILES = 10_000
 _MAX_MODEL_DIR_BYTES = 16 * 1024 * 1024 * 1024
 _MODEL_SNAPSHOT_DIR = "model-snapshot"
+_WINDOWS_GENERIC_READ = 0x80000000
+_WINDOWS_FILE_SHARE_READ = 0x00000001
+_WINDOWS_OPEN_EXISTING = 3
+_WINDOWS_FILE_ATTRIBUTE_NORMAL = 0x00000080
+_WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000
 
 
 class PeftTrainerError(RuntimeError):
@@ -69,6 +77,7 @@ class MaterialRequest:
 @dataclass(frozen=True, slots=True)
 class ParsedRequest:
     step_id: str
+    previous_step_id: str | None
     step_index: int
     job_fingerprint: str
     trainer_artifact_id: str
@@ -121,18 +130,61 @@ def _fail(code: str) -> NoReturn:
     raise PeftTrainerError(code)
 
 
+def _open_readonly_snapshot(path: Path) -> int:
+    """Open one file for authority reads while denying Windows write/delete sharing."""
+
+    if os.name == "nt":
+        try:
+            import ctypes
+            import msvcrt
+        except ImportError as exc:
+            raise OSError("Windows authority snapshot support is unavailable") from exc
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        create_file.restype = ctypes.c_void_p
+        handle = create_file(
+            os.fspath(path),
+            _WINDOWS_GENERIC_READ,
+            _WINDOWS_FILE_SHARE_READ,
+            None,
+            _WINDOWS_OPEN_EXISTING,
+            _WINDOWS_FILE_ATTRIBUTE_NORMAL | _WINDOWS_FILE_FLAG_OPEN_REPARSE_POINT,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle is None or handle == invalid_handle:
+            raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+        try:
+            return msvcrt.open_osfhandle(
+                int(handle),
+                os.O_RDONLY | int(getattr(os, "O_BINARY", 0)),
+            )
+        except (OSError, OverflowError, ValueError):
+            close_handle = kernel32.CloseHandle
+            close_handle.argtypes = [ctypes.c_void_p]
+            close_handle.restype = ctypes.c_int
+            close_handle(ctypes.c_void_p(handle))
+            raise
+
+    flags = os.O_RDONLY | int(getattr(os, "O_BINARY", 0))
+    flags |= int(getattr(os, "O_NOFOLLOW", 0))
+    flags |= int(getattr(os, "O_NONBLOCK", 0))
+    return os.open(path, flags)
+
+
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(_READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                digest.update(chunk)
-    except OSError:
-        _fail("file_read_failed")
-    return digest.hexdigest()
+    digest, _ = _hash_regular_snapshot(path, code="file_read_failed")
+    return digest
 
 
 def trainer_implementation_sha256() -> str:
@@ -243,6 +295,22 @@ def _parse_material(value: object) -> MaterialRequest:
     )
 
 
+def _expected_step_id(
+    job_fingerprint: str,
+    trainer_sha256: str,
+    step_index: int,
+) -> str:
+    material = (
+        _STEP_ID_DOMAIN
+        + job_fingerprint.encode("ascii")
+        + b"\x00"
+        + trainer_sha256.encode("ascii")
+        + b"\x00"
+        + str(step_index).encode("ascii")
+    )
+    return hashlib.sha256(material).hexdigest()
+
+
 def _parse_request(value: dict[str, object]) -> ParsedRequest:
     expected = {
         "command_artifacts",
@@ -277,6 +345,30 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
     step_index = value["step_index"]
     if type(step_index) is not int or step_index < 0:
         _fail("step_index_invalid")
+    expected_step_id = _expected_step_id(
+        job_fingerprint,
+        trainer_sha256,
+        step_index,
+    )
+    if not hmac.compare_digest(step_id, expected_step_id):
+        _fail("step_id_mismatch")
+    previous_step_id_value = value["previous_step_id"]
+    if step_index == 0:
+        if previous_step_id_value is not None:
+            _fail("previous_step_id_invalid")
+        previous_step_id: str | None = None
+    else:
+        previous_step_id = _require_sha256(
+            previous_step_id_value,
+            field="previous_step_id",
+        )
+        expected_previous_step_id = _expected_step_id(
+            job_fingerprint,
+            trainer_sha256,
+            step_index - 1,
+        )
+        if not hmac.compare_digest(previous_step_id, expected_previous_step_id):
+            _fail("previous_step_id_mismatch")
     job = value["job"]
     if type(job) is not dict:
         _fail("job_invalid")
@@ -368,6 +460,7 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
 
     return ParsedRequest(
         step_id=step_id,
+        previous_step_id=previous_step_id,
         step_index=step_index,
         job_fingerprint=job_fingerprint,
         trainer_artifact_id=trainer_artifact_id,
@@ -412,9 +505,8 @@ def _hash_model_directory_file(
     if expected is not None and _stable_stat_identity(before) != _stable_stat_identity(expected):
         raise ValueError("model_dir entry changed before hashing")
 
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = _open_readonly_snapshot(path)
     except OSError as exc:
         raise ValueError("model_dir entry changed before hashing") from exc
 
@@ -855,9 +947,8 @@ def _copy_model_snapshot_file(
     before = _require_regular_unlinked(source, code="model_dir_source_changed")
     if before.st_size != expected_size:
         _fail("model_dir_source_changed")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(source, flags)
+        fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("model_dir_source_changed")
     total = 0
@@ -1006,9 +1097,8 @@ def _require_directory_unlinked(path: Path, *, code: str) -> os.stat_result:
 
 def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     before = _require_regular_unlinked(path, code=code)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(path, flags)
+        fd = _open_readonly_snapshot(path)
     except OSError:
         _fail(code)
     digest = hashlib.sha256()
@@ -1053,6 +1143,129 @@ def _hash_regular_snapshot(path: Path, *, code: str) -> tuple[str, int]:
     return digest.hexdigest(), total
 
 
+def _read_regular_snapshot(
+    path: Path,
+    *,
+    max_bytes: int,
+    code: str,
+) -> bytes:
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ValueError("max_bytes must be a positive exact integer")
+    before = _require_regular_unlinked(path, code=code)
+    try:
+        fd = _open_readonly_snapshot(path)
+    except OSError:
+        _fail(code)
+    chunks: list[bytes] = []
+    total = 0
+    try:
+        opened = os.fstat(fd)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _is_reparse(opened)
+            or (opened.st_dev, opened.st_ino) != (before.st_dev, before.st_ino)
+        ):
+            _fail(code)
+        while True:
+            remaining = max_bytes + 1 - total
+            if remaining <= 0:
+                _fail(code)
+            chunk = os.read(fd, min(_READ_CHUNK_BYTES, remaining))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                _fail(code)
+            chunks.append(chunk)
+        after = os.fstat(fd)
+    except PeftTrainerError:
+        raise
+    except OSError:
+        _fail(code)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+    try:
+        current = os.lstat(path)
+    except OSError:
+        _fail(code)
+    identity = (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns)
+    if (
+        total != opened.st_size
+        or identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        or identity != (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns)
+        or stat.S_ISLNK(current.st_mode)
+        or _is_reparse(current)
+    ):
+        _fail(code)
+    return b"".join(chunks)
+
+
+def _normalize_checkpoint_marker_links(path: Path, *, code: str) -> None:
+    current = _require_regular_unlinked(path, code=code)
+    temporary = path.with_name(f".{path.name}.tmp")
+    if current.st_nlink == 1:
+        try:
+            temporary_stat = os.lstat(temporary)
+        except FileNotFoundError:
+            return
+        except OSError:
+            _fail(code)
+        if (
+            stat.S_ISLNK(temporary_stat.st_mode)
+            or _is_reparse(temporary_stat)
+            or not stat.S_ISREG(temporary_stat.st_mode)
+            or temporary_stat.st_nlink != 1
+        ):
+            _fail(code)
+        marker_bytes = _read_regular_snapshot(
+            path,
+            max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+            code=code,
+        )
+        temporary_bytes = _read_regular_snapshot(
+            temporary,
+            max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+            code=code,
+        )
+        if not hmac.compare_digest(marker_bytes, temporary_bytes):
+            _fail(code)
+        try:
+            os.unlink(temporary)
+        except OSError:
+            _fail(code)
+        recovered = _require_regular_unlinked(path, code=code)
+        if (
+            recovered.st_nlink != 1
+            or (recovered.st_dev, recovered.st_ino)
+            != (current.st_dev, current.st_ino)
+        ):
+            _fail(code)
+        return
+    if current.st_nlink != 2:
+        _fail(code)
+    linked_temporary = _require_regular_unlinked(temporary, code=code)
+    if (
+        linked_temporary.st_nlink != 2
+        or (linked_temporary.st_dev, linked_temporary.st_ino)
+        != (current.st_dev, current.st_ino)
+    ):
+        _fail(code)
+    try:
+        os.unlink(temporary)
+    except OSError:
+        _fail(code)
+    recovered = _require_regular_unlinked(path, code=code)
+    if (
+        recovered.st_nlink != 1
+        or (recovered.st_dev, recovered.st_ino)
+        != (current.st_dev, current.st_ino)
+    ):
+        _fail(code)
+
+
 def _parse_jsonl_record(raw_line: bytes) -> TrainingExample:
     if not raw_line or len(raw_line) > _MAX_LINE_BYTES:
         _fail("dataset_record_size_invalid")
@@ -1080,9 +1293,8 @@ def _consume_material(
     before = _require_regular_unlinked(material.path, code="material_not_regular")
     if before.st_size != material.byte_count:
         _fail("material_size_mismatch")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(material.path, flags)
+        fd = _open_readonly_snapshot(material.path)
     except OSError:
         _fail("material_open_failed")
     digest = hashlib.sha256()
@@ -1214,7 +1426,7 @@ def _env_float(name: str, default: float, minimum: float, maximum: float) -> flo
     return value
 
 
-def _absolute_env_path(name: str, *, file: bool) -> Path:
+def _absolute_env_location(name: str) -> Path:
     raw = os.environ.get(name)
     if raw is None:
         _fail(f"{name.lower()}_missing")
@@ -1222,15 +1434,6 @@ def _absolute_env_path(name: str, *, file: bool) -> Path:
     path = Path(text)
     if not path.is_absolute():
         _fail(f"{name.lower()}_not_absolute")
-    if file:
-        _require_regular_unlinked(path, code=f"{name.lower()}_invalid")
-    else:
-        try:
-            value = os.lstat(path)
-        except OSError:
-            _fail(f"{name.lower()}_invalid")
-        if stat.S_ISLNK(value.st_mode) or _is_reparse(value) or not stat.S_ISDIR(value.st_mode):
-            _fail(f"{name.lower()}_invalid")
     return path
 
 
@@ -1242,19 +1445,13 @@ def _read_config() -> TrainerConfig:
     )
     if trainer_implementation_sha256() != expected_implementation_sha256:
         _fail("nika_trainer_implementation_mismatch")
-    base_gguf = _absolute_env_path("NIKA_TRAINER_BASE_GGUF", file=True)
+    base_gguf = _absolute_env_location("NIKA_TRAINER_BASE_GGUF")
     if base_gguf.suffix.casefold() != ".gguf":
         _fail("nika_trainer_base_gguf_invalid")
     base_gguf_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_BASE_GGUF_SHA256"),
         field="nika_trainer_base_gguf_sha256",
     )
-    observed_base_gguf_sha256, _ = _hash_regular_snapshot(
-        base_gguf,
-        code="nika_trainer_base_gguf_changed",
-    )
-    if observed_base_gguf_sha256 != base_gguf_sha256:
-        _fail("nika_trainer_base_gguf_digest_mismatch")
     initial_adapter_raw = os.environ.get("NIKA_TRAINER_INITIAL_ADAPTER_PATH")
     initial_adapter_sha256_raw = os.environ.get(
         "NIKA_TRAINER_INITIAL_ADAPTER_SHA256"
@@ -1264,9 +1461,8 @@ def _read_config() -> TrainerConfig:
     initial_adapter: Path | None = None
     initial_adapter_sha256: str | None = None
     if initial_adapter_raw is not None:
-        initial_adapter = _absolute_env_path(
-            "NIKA_TRAINER_INITIAL_ADAPTER_PATH",
-            file=True,
+        initial_adapter = _absolute_env_location(
+            "NIKA_TRAINER_INITIAL_ADAPTER_PATH"
         )
         if initial_adapter.suffix.casefold() != ".safetensors":
             _fail("nika_trainer_initial_adapter_invalid")
@@ -1274,23 +1470,11 @@ def _read_config() -> TrainerConfig:
             initial_adapter_sha256_raw,
             field="nika_trainer_initial_adapter_sha256",
         )
-        observed_initial_adapter_sha256, _ = _hash_regular_snapshot(
-            initial_adapter,
-            code="nika_trainer_initial_adapter_changed",
-        )
-        if observed_initial_adapter_sha256 != initial_adapter_sha256:
-            _fail("nika_trainer_initial_adapter_digest_mismatch")
-    model_dir = _absolute_env_path("NIKA_TRAINER_MODEL_DIR", file=False)
+    model_dir = _absolute_env_location("NIKA_TRAINER_MODEL_DIR")
     model_dir_manifest_sha256 = _require_sha256(
         os.environ.get("NIKA_TRAINER_MODEL_DIR_MANIFEST_SHA256"),
         field="nika_trainer_model_dir_manifest_sha256",
     )
-    try:
-        live_model_dir_manifest = model_directory_manifest_sha256(model_dir)
-    except ValueError:
-        _fail("nika_trainer_model_dir_manifest_invalid")
-    if live_model_dir_manifest != model_dir_manifest_sha256:
-        _fail("nika_trainer_model_dir_manifest_mismatch")
     output_root_raw = os.environ.get("NIKA_TRAINER_OUTPUT_ROOT")
     if output_root_raw is None:
         _fail("nika_trainer_output_root_missing")
@@ -1414,9 +1598,8 @@ def _copy_initial_adapter_snapshot(
         source,
         code="initial_adapter_source_changed",
     )
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        source_fd = os.open(source, flags)
+        source_fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("initial_adapter_source_changed")
     temporary: Path | None = None
@@ -1749,6 +1932,28 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
         or request.base_artifact_sha256 != logical_base_sha256
     ):
         _fail("logical_base_digest_mismatch")
+    target_dir = job_root / "base"
+    target = target_dir / "base.gguf"
+    try:
+        os.lstat(target)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        _fail("staged_base_invalid")
+    else:
+        _ensure_child_directory(
+            job_root,
+            "base",
+            code="staged_base_directory_invalid",
+        )
+        target_sha256, _ = _hash_regular_snapshot(
+            target,
+            code="staged_base_invalid",
+        )
+        if target_sha256 != config.base_gguf_sha256:
+            _fail("staged_base_digest_mismatch")
+        return target
+
     source_sha256, _ = _hash_regular_snapshot(
         source,
         code="base_gguf_digest_mismatch",
@@ -1761,14 +1966,6 @@ def _copy_verified_base(config: TrainerConfig, request: ParsedRequest, job_root:
         code="staged_base_directory_invalid",
     )
     target = target_dir / "base.gguf"
-    if target.exists():
-        target_sha256, _ = _hash_regular_snapshot(
-            target,
-            code="staged_base_invalid",
-        )
-        if target_sha256 != config.base_gguf_sha256:
-            _fail("staged_base_digest_mismatch")
-        return target
     temporary = target_dir / ".base.gguf.tmp"
     try:
         source_stat = _require_regular_unlinked(
@@ -1882,30 +2079,68 @@ def _write_checkpoint_marker(
         "checkpoint_payload_sha256": checkpoint_payload_sha256,
         "consumed_materials_sha256": consumed_sha256,
         "job_fingerprint": request.job_fingerprint,
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": _CHECKPOINT_MARKER_SCHEMA_VERSION,
+        "step_id": request.step_id,
         "step_number": request.step_index + 1,
     }
     encoded = _canonical_json_bytes(marker)
+    if len(encoded) > _MAX_CHECKPOINT_MARKER_BYTES:
+        _fail("checkpoint_marker_too_large")
+    expected_sha256 = hashlib.sha256(encoded).hexdigest()
     path = checkpoint / _CHECKPOINT_MARKER
     temporary = checkpoint / f".{_CHECKPOINT_MARKER}.tmp"
+    temporary_identity: tuple[int, int] | None = None
+    published = False
     try:
         checkpoint.mkdir(parents=True, exist_ok=True)
         with temporary.open("xb") as handle:
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        temporary_stat = _require_regular_unlinked(
+            temporary,
+            code="checkpoint_marker_write_failed",
+        )
+        temporary_identity = (temporary_stat.st_dev, temporary_stat.st_ino)
+        os.link(temporary, path)
+        os.unlink(temporary)
+        published = True
     except FileExistsError:
         _fail("checkpoint_marker_conflict")
+    except PeftTrainerError:
+        raise
     except OSError:
         _fail("checkpoint_marker_write_failed")
     finally:
-        try:
-            if temporary.exists():
-                temporary.unlink()
-        except OSError:
-            pass
-    return hashlib.sha256(encoded).hexdigest()
+        if not published and temporary_identity is not None:
+            _best_effort_unlink_identity(path, temporary_identity)
+        if not published:
+            try:
+                if temporary.exists():
+                    temporary.unlink()
+            except OSError:
+                pass
+    if temporary_identity is None:
+        _fail("checkpoint_marker_write_failed")
+    published_stat = _require_regular_unlinked(
+        path,
+        code="checkpoint_marker_write_failed",
+    )
+    if (
+        (published_stat.st_dev, published_stat.st_ino) != temporary_identity
+        or published_stat.st_nlink != 1
+    ):
+        _best_effort_unlink_identity(path, temporary_identity)
+        _fail("checkpoint_marker_write_failed")
+    observed = _read_regular_snapshot(
+        path,
+        max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+        code="checkpoint_marker_write_failed",
+    )
+    if not hmac.compare_digest(hashlib.sha256(observed).hexdigest(), expected_sha256):
+        _best_effort_unlink_identity(path, temporary_identity)
+        _fail("checkpoint_marker_write_failed")
+    return expected_sha256
 
 
 def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
@@ -1941,8 +2176,25 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     if candidate != expected_resolved:
         _fail("resume_path_mismatch")
     marker_path = candidate / _CHECKPOINT_MARKER
-    _require_regular_unlinked(marker_path, code="resume_marker_missing")
-    marker_digest = _sha256_file(marker_path)
+    try:
+        _normalize_checkpoint_marker_links(
+            marker_path,
+            code="resume_marker_invalid",
+        )
+        marker_bytes = _read_regular_snapshot(
+            marker_path,
+            max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+            code="resume_marker_invalid",
+        )
+    except PeftTrainerError:
+        try:
+            os.lstat(marker_path)
+        except FileNotFoundError:
+            _fail("resume_marker_missing")
+        except OSError:
+            pass
+        _fail("resume_marker_invalid")
+    marker_digest = hashlib.sha256(marker_bytes).hexdigest()
     if marker_digest != state.get("checkpoint_marker_sha256"):
         _fail("resume_marker_digest_mismatch")
     expected_payload_sha256 = _require_sha256(
@@ -1951,24 +2203,36 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     )
     try:
         marker = json.loads(
-            marker_path.read_text(encoding="utf-8"),
+            marker_bytes.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_object,
             parse_constant=_reject_constant,
         )
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
         _fail("resume_marker_invalid")
-    expected_marker_keys = {
+    legacy_marker_keys = {
         "checkpoint_payload_sha256",
         "consumed_materials_sha256",
         "job_fingerprint",
         "schema_version",
         "step_number",
     }
+    current_marker_keys = legacy_marker_keys | {"step_id"}
+    if type(marker) is not dict:
+        _fail("resume_marker_identity_mismatch")
+    marker_keys = set(marker)
+    if marker_keys == legacy_marker_keys:
+        if marker.get("schema_version") != _SCHEMA_VERSION:
+            _fail("resume_marker_identity_mismatch")
+    elif marker_keys == current_marker_keys:
+        if (
+            marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
+            or marker.get("step_id") != request.previous_step_id
+        ):
+            _fail("resume_marker_identity_mismatch")
+    else:
+        _fail("resume_marker_identity_mismatch")
     if (
-        type(marker) is not dict
-        or set(marker) != expected_marker_keys
-        or marker.get("schema_version") != _SCHEMA_VERSION
-        or marker.get("job_fingerprint") != request.job_fingerprint
+        marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index
         or marker.get("consumed_materials_sha256")
         != request.required_consumed_materials_sha256
@@ -1980,6 +2244,88 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
     return candidate
 
 
+def _completed_step_checkpoint(
+    job_root: Path,
+    request: ParsedRequest,
+    *,
+    consumed_sha256: str,
+) -> tuple[Path, str, str] | None:
+    checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
+    try:
+        root = os.lstat(checkpoint)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _fail("step_checkpoint_invalid")
+    if (
+        stat.S_ISLNK(root.st_mode)
+        or _is_reparse(root)
+        or not stat.S_ISDIR(root.st_mode)
+    ):
+        _fail("step_checkpoint_invalid")
+
+    marker_path = checkpoint / _CHECKPOINT_MARKER
+    try:
+        os.lstat(marker_path)
+    except FileNotFoundError:
+        _fail("step_checkpoint_incomplete")
+    except OSError:
+        _fail("step_checkpoint_marker_invalid")
+    _normalize_checkpoint_marker_links(
+        marker_path,
+        code="step_checkpoint_marker_invalid",
+    )
+    marker_bytes = _read_regular_snapshot(
+        marker_path,
+        max_bytes=_MAX_CHECKPOINT_MARKER_BYTES,
+        code="step_checkpoint_marker_invalid",
+    )
+    marker_sha256 = hashlib.sha256(marker_bytes).hexdigest()
+    try:
+        marker = json.loads(
+            marker_bytes.decode("utf-8", errors="strict"),
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+        _fail("step_checkpoint_marker_invalid")
+    legacy_keys = {
+        "checkpoint_payload_sha256",
+        "consumed_materials_sha256",
+        "job_fingerprint",
+        "schema_version",
+        "step_number",
+    }
+    current_keys = legacy_keys | {"step_id"}
+    if type(marker) is not dict:
+        _fail("step_checkpoint_marker_identity_mismatch")
+    marker_keys = set(marker)
+    if marker_keys == legacy_keys:
+        if marker.get("schema_version") != _SCHEMA_VERSION:
+            _fail("step_checkpoint_marker_identity_mismatch")
+    elif marker_keys == current_keys:
+        if (
+            marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
+            or marker.get("step_id") != request.step_id
+        ):
+            _fail("step_checkpoint_marker_identity_mismatch")
+    else:
+        _fail("step_checkpoint_marker_identity_mismatch")
+    if (
+        marker.get("job_fingerprint") != request.job_fingerprint
+        or marker.get("step_number") != request.step_index + 1
+        or marker.get("consumed_materials_sha256") != consumed_sha256
+    ):
+        _fail("step_checkpoint_marker_identity_mismatch")
+    payload_sha256 = _require_sha256(
+        marker.get("checkpoint_payload_sha256"),
+        field="step_checkpoint_payload_sha256",
+    )
+    if _checkpoint_payload_manifest_sha256(checkpoint) != payload_sha256:
+        _fail("step_checkpoint_payload_mismatch")
+    return checkpoint, marker_sha256, payload_sha256
+
+
 def _copy_checkpoint_snapshot_file(
     source: Path,
     destination: Path,
@@ -1989,9 +2335,8 @@ def _copy_checkpoint_snapshot_file(
     before = _require_regular_unlinked(source, code="resume_checkpoint_changed")
     if before.st_size != expected_size:
         _fail("resume_checkpoint_changed")
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        fd = os.open(source, flags)
+        fd = _open_readonly_snapshot(source)
     except OSError:
         _fail("resume_checkpoint_changed")
     total = 0
@@ -2141,29 +2486,20 @@ class _TokenizedDataset:
         self._items: list[dict[str, object]] = []
         eos = tokenizer.eos_token or ""
         for example in examples:
-            prompt_prefix = f"{example.prompt}\n"
-            text = f"{prompt_prefix}{example.response}{eos}"
-            prompt_encoded = tokenizer(
-                prompt_prefix,
-                truncation=True,
-                max_length=max_length,
-                add_special_tokens=True,
-            )
+            text = f"{example.prompt}\n{example.response}{eos}"
             encoded = tokenizer(
                 text,
                 truncation=True,
-                max_length=max_length,
+                max_length=max_length + 1,
                 add_special_tokens=True,
             )
-            prompt_ids = prompt_encoded.get("input_ids")
             input_ids = encoded.get("input_ids")
             attention_mask = encoded.get("attention_mask")
             if (
-                type(prompt_ids) is not list
-                or type(input_ids) is not list
+                type(input_ids) is not list
                 or type(attention_mask) is not list
-                or len(prompt_ids) >= max_length
-                or len(input_ids) <= len(prompt_ids)
+                or not input_ids
+                or len(input_ids) > max_length
                 or len(input_ids) != len(attention_mask)
             ):
                 _fail("response_tokens_truncated")
@@ -2308,6 +2644,7 @@ def _adapter_tensor_sha256(
     )
 
 
+
 def _snapshot_adapter_weights_sha256(
     model: object,
     job_root: Path,
@@ -2317,7 +2654,6 @@ def _snapshot_adapter_weights_sha256(
     torch: Any,
 ) -> tuple[str, str]:
     """Bind exact bytes and canonical tensors from one loaded-model adapter snapshot."""
-
     try:
         with tempfile.TemporaryDirectory(
             prefix=".adapter-weight-snapshot-",
@@ -2355,6 +2691,51 @@ def _snapshot_adapter_weights_sha256(
     if size <= 0:
         _fail("adapter_weight_snapshot_failed")
     return digest, tensor_sha256
+
+
+def _existing_candidate_sha256(
+    candidate: Path,
+    *,
+    expected_manifest: dict[str, object],
+) -> str | None:
+    try:
+        before = os.lstat(candidate)
+    except FileNotFoundError:
+        return None
+    except OSError:
+        _fail("candidate_replay_invalid")
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or _is_reparse(before)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_nlink != 1
+    ):
+        _fail("candidate_replay_invalid")
+    try:
+        observed_manifest = candidate_adapter_manifest(candidate)
+    except (PeftTrainerError, OSError, RuntimeError, TypeError, ValueError):
+        _fail("candidate_replay_invalid")
+    if observed_manifest != expected_manifest:
+        _fail("candidate_replay_identity_mismatch")
+    middle = _require_regular_unlinked(candidate, code="candidate_replay_changed")
+    if (
+        (middle.st_dev, middle.st_ino) != (before.st_dev, before.st_ino)
+        or middle.st_nlink != 1
+    ):
+        _fail("candidate_replay_changed")
+    digest, size = _hash_regular_snapshot(
+        candidate,
+        code="candidate_replay_changed",
+    )
+    after = _require_regular_unlinked(candidate, code="candidate_replay_changed")
+    if (
+        size <= 0
+        or (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino)
+        or after.st_nlink != 1
+    ):
+        _fail("candidate_replay_changed")
+    return digest
+
 
 def _train_one_step(
     request: ParsedRequest,
@@ -2470,68 +2851,79 @@ def _train_one_step(
             torch=torch,
         )
 
-        training_dataset = _TokenizedDataset(
-            consumed.training,
-            tokenizer,
-            config.max_sequence_length,
-        )
-        validation_dataset = _TokenizedDataset(
-            consumed.validation,
-            tokenizer,
-            config.max_sequence_length,
-        )
-        collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
-        trainer_root = _ensure_child_directory(
+        completed_step = _completed_step_checkpoint(
             job_root,
-            "trainer",
-            code="trainer_output_directory_invalid",
+            request,
+            consumed_sha256=consumed.attestation_sha256,
         )
-        _ensure_child_directory(
-            trainer_root,
-            f"checkpoint-{request.step_index + 1}",
-            code="trainer_checkpoint_directory_invalid",
-        )
-        arguments = TrainingArguments(
-            output_dir=os.fspath(trainer_root),
-            per_device_train_batch_size=1,
-            per_device_eval_batch_size=1,
-            learning_rate=config.learning_rate,
-            max_steps=request.step_index + 1,
-            save_strategy="steps",
-            save_steps=1,
-            save_total_limit=None,
-            eval_strategy="no",
-            logging_strategy="no",
-            report_to=[],
-            seed=config.seed,
-            data_seed=config.seed,
-            use_cpu=True,
-            full_determinism=True,
-            dataloader_num_workers=0,
-            dataloader_pin_memory=False,
-            optim="adamw_torch",
-            remove_unused_columns=False,
-        )
-        trainer = Trainer(
-            model=model,
-            args=arguments,
-            train_dataset=training_dataset,
-            eval_dataset=validation_dataset,
-            data_collator=collator,
-            processing_class=tokenizer,
-        )
-        trainer.train(
-            resume_from_checkpoint=(
-                False if resume_checkpoint is None else os.fspath(resume_checkpoint)
+        replay_marker_sha256: str | None = None
+        replay_payload_sha256: str | None = None
+        if completed_step is not None:
+            checkpoint, replay_marker_sha256, replay_payload_sha256 = completed_step
+            adapter_dir = checkpoint / "adapter"
+        else:
+            training_dataset = _TokenizedDataset(
+                consumed.training,
+                tokenizer,
+                config.max_sequence_length,
             )
-        )
-        checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
-        adapter_dir = checkpoint / "adapter"
-        adapter_dir.mkdir(parents=True, exist_ok=True)
-        trainer.model.save_pretrained(
-            os.fspath(adapter_dir),
-            safe_serialization=True,
-        )
+            validation_dataset = _TokenizedDataset(
+                consumed.validation,
+                tokenizer,
+                config.max_sequence_length,
+            )
+            collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
+            trainer_root = _ensure_child_directory(
+                job_root,
+                "trainer",
+                code="trainer_output_directory_invalid",
+            )
+            _ensure_child_directory(
+                trainer_root,
+                f"checkpoint-{request.step_index + 1}",
+                code="trainer_checkpoint_directory_invalid",
+            )
+            arguments = TrainingArguments(
+                output_dir=os.fspath(trainer_root),
+                per_device_train_batch_size=1,
+                per_device_eval_batch_size=1,
+                learning_rate=config.learning_rate,
+                max_steps=request.step_index + 1,
+                save_strategy="steps",
+                save_steps=1,
+                save_total_limit=None,
+                eval_strategy="no",
+                logging_strategy="no",
+                report_to=[],
+                seed=config.seed,
+                data_seed=config.seed,
+                use_cpu=True,
+                full_determinism=True,
+                dataloader_num_workers=0,
+                dataloader_pin_memory=False,
+                optim="adamw_torch",
+                remove_unused_columns=False,
+            )
+            trainer = Trainer(
+                model=model,
+                args=arguments,
+                train_dataset=training_dataset,
+                eval_dataset=validation_dataset,
+                data_collator=collator,
+                processing_class=tokenizer,
+            )
+            trainer.train(
+                resume_from_checkpoint=(
+                    False if resume_checkpoint is None else os.fspath(resume_checkpoint)
+                )
+            )
+            checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
+            adapter_dir = checkpoint / "adapter"
+            adapter_dir.mkdir(parents=True, exist_ok=True)
+            trainer.model.save_pretrained(
+                os.fspath(adapter_dir),
+                safe_serialization=True,
+            )
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
@@ -2575,12 +2967,20 @@ def _train_one_step(
         else None
     )
     checkpoint_payload_sha256 = _checkpoint_payload_manifest_sha256(checkpoint)
-    marker_sha256 = _write_checkpoint_marker(
-        checkpoint,
-        request=request,
-        consumed_sha256=consumed.attestation_sha256,
-        checkpoint_payload_sha256=checkpoint_payload_sha256,
-    )
+    if replay_payload_sha256 is None:
+        marker_sha256 = _write_checkpoint_marker(
+            checkpoint,
+            request=request,
+            consumed_sha256=consumed.attestation_sha256,
+            checkpoint_payload_sha256=checkpoint_payload_sha256,
+        )
+    else:
+        if (
+            replay_marker_sha256 is None
+            or checkpoint_payload_sha256 != replay_payload_sha256
+        ):
+            _fail("step_checkpoint_replay_mismatch")
+        marker_sha256 = replay_marker_sha256
     resume_state: dict[str, object] = {
         "checkpoint_marker_sha256": marker_sha256,
         "checkpoint_payload_sha256": checkpoint_payload_sha256,
@@ -2603,7 +3003,6 @@ def _train_one_step(
         _fail("candidate_publish_failed")
     if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
         _fail("checkpoint_payload_changed_before_candidate")
-    temporary = _reserve_candidate_temporary(candidate)
     adapter_config = _adapter_config_snapshot(adapter_dir, request, config)
     manifest_json = _candidate_manifest_json(
         request=request,
@@ -2613,6 +3012,26 @@ def _train_one_step(
         previous_adapter_tensors_sha256=previous_adapter_tensors_sha256,
         trained_adapter_tensors_sha256=trained_adapter_tensors_sha256,
     )
+    try:
+        expected_manifest = json.loads(
+            manifest_json,
+            object_pairs_hook=_strict_object,
+            parse_constant=_reject_constant,
+        )
+    except (json.JSONDecodeError, ValueError):
+        _fail("candidate_manifest_invalid")
+    if type(expected_manifest) is not dict:
+        _fail("candidate_manifest_invalid")
+    existing_candidate_sha256 = _existing_candidate_sha256(
+        candidate,
+        expected_manifest=expected_manifest,
+    )
+    if existing_candidate_sha256 is not None:
+        if _checkpoint_payload_manifest_sha256(checkpoint) != checkpoint_payload_sha256:
+            _fail("checkpoint_payload_changed_after_candidate_replay")
+        return resume_state, existing_candidate_sha256
+
+    temporary = _reserve_candidate_temporary(candidate)
     temporary_sha256: str | None = None
     temporary_identity: tuple[int, int] | None = None
     published = False
@@ -2621,6 +3040,18 @@ def _train_one_step(
             tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
         if not tensors:
             _fail("adapter_candidate_empty")
+        materialized_tensor_sha256 = _canonical_adapter_tensor_sha256(
+            tensors,
+            safe_serialize=safe_serialize,
+            torch=torch,
+            invalid_code="adapter_candidate_invalid",
+            non_finite_code="adapter_candidate_non_finite",
+        )
+        if not hmac.compare_digest(
+            materialized_tensor_sha256,
+            trained_adapter_tensors_sha256,
+        ):
+            _fail("candidate_tensor_source_mismatch")
         safe_save_file(
             tensors,
             os.fspath(temporary),
@@ -2723,14 +3154,17 @@ def _adapter_config_snapshot(
     config: TrainerConfig,
 ) -> dict[str, object]:
     config_path = path / "adapter_config.json"
-    _require_regular_unlinked(config_path, code="adapter_config_missing")
-    try:
-        with config_path.open("rb") as handle:
-            raw = handle.read(256 * 1024 + 1)
-    except OSError:
-        _fail("adapter_config_read_failed")
-    if len(raw) > 256 * 1024:
+    config_stat = _require_regular_unlinked(
+        config_path,
+        code="adapter_config_missing",
+    )
+    if config_stat.st_size > 256 * 1024:
         _fail("adapter_config_too_large")
+    raw = _read_regular_snapshot(
+        config_path,
+        max_bytes=256 * 1024,
+        code="adapter_config_read_failed",
+    )
     try:
         value = json.loads(
             raw.decode("utf-8", errors="strict"),
@@ -3052,6 +3486,7 @@ def candidate_adapter_manifest(candidate_path: Path) -> dict[str, object]:
     ):
         _fail("candidate_tensor_state_mismatch")
     return manifest
+
 
 def _response(
     request: ParsedRequest,
