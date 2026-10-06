@@ -32,6 +32,9 @@ from nika_core.packaged_agent_builder import (
 from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
+from nika_core.product_factory_local_repository_binding import (
+    ProductFactoryLocalRepositoryBindings,
+)
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_packaged_execution import (
     PackagedProductFactoryExecutionController,
@@ -312,6 +315,7 @@ def build_windows_bridge(
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
+    local_product_factory_repository_bindings = ProductFactoryLocalRepositoryBindings(store)
     local_product_factory_settings = PackagedLocalProductFactorySettings(store)
     local_product_factory_environment_override = (
         config.product_factory_local_startup_json is not None
@@ -349,6 +353,7 @@ def build_windows_bridge(
         )
 
     local_product_factory_runtime_active = False
+    local_product_factory_execution_roots: Mapping[str, Path] | None = None
     local_product_factory_launch_model_revision: int | None = None
     local_product_factory_launch_settings_revision: int | None = None
     if (
@@ -428,6 +433,12 @@ def build_windows_bridge(
                     )
                     local_product_factory_settings_invalid = True
                 else:
+                    local_product_factory_program.ports.repository_authority = (
+                        local_product_factory_repository_bindings
+                    )
+                    local_product_factory_execution_roots = (
+                        local_product_factory_program.worker.repositories
+                    )
                     product_factory_execution_host = (
                         local_product_factory_program.multi_repository_host
                     )
@@ -563,7 +574,19 @@ def build_windows_bridge(
         execution_plan_resolver = product_factory_execution_plan_resolver
         if execution_plan_resolver is None:
             assert product_factory_execution_plan_files is not None
-            execution_plan_resolver = product_factory_execution_plan_files.resolve
+            if local_product_factory_runtime_active:
+                assert local_product_factory_execution_roots is not None
+
+                def resolve_local_product_factory_plan(project_id: str):
+                    plan = product_factory_execution_plan_files.resolve(project_id)
+                    return local_product_factory_repository_bindings.require_plan_within_roots(
+                        plan,
+                        local_product_factory_execution_roots,
+                    )
+
+                execution_plan_resolver = resolve_local_product_factory_plan
+            else:
+                execution_plan_resolver = product_factory_execution_plan_files.resolve
         product_factory_execution = PackagedProductFactoryExecutionController(
             preparation=PackagedProductFactoryPreparationService(
                 repository=product_repository,

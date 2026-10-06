@@ -77,6 +77,20 @@ class _Planner:
         return LocalCodingPlan((LocalFileEdit("src/core.py", b"VALUE = 2\n"),))
 
 
+class _RepositoryAuthority:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, pathlib.Path]] = []
+
+    def require_component_root(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        root: pathlib.Path,
+    ) -> None:
+        self.calls.append((project_id, repository_id, root))
+
+
 def _graph(base_command: tuple[str, ...]) -> ProductRepositoryGraph:
     return ProductRepositoryGraph(
         project_id="project-1",
@@ -208,6 +222,8 @@ def test_contained_local_multi_repository_host_drives_packaged_prepare_and_dispa
             resource_budget=ResourceBudget(20, 1024 * 1024, 10),
         ),
     )
+    repository_authority = _RepositoryAuthority()
+    program.ports.repository_authority = repository_authority
 
     projects = ProductProjectRepository(store)
     locator = "org/repo"
@@ -277,6 +293,10 @@ def test_contained_local_multi_repository_host_drives_packaged_prepare_and_dispa
     assert len(outcomes) == 1
     assert outcomes[0].disposition is ProgramWorkDisposition.REVIEW_REQUIRED
     assert planner.calls == 1
+    assert repository_authority.calls == [
+        (project.project_id, "repo-1", repository),
+        (project.project_id, "repo-1", repository),
+    ]
     assert (repository / "src" / "core.py").read_text(encoding="utf-8") == "VALUE = 1\n"
     work_id = prepared.state.coordinator.snapshot().records[0].request.work_id
     candidate = program.worker.candidate_worktree(work_id)

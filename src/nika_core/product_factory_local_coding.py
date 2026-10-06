@@ -4,7 +4,7 @@ import os
 import pathlib
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Mapping
+from typing import Mapping, Protocol
 
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_coding_program import (
@@ -35,6 +35,18 @@ from nika_core.toolsmith.local_worker import (
     ContainedLocalCodingWorker,
     LocalCodingPlanPort,
 )
+
+
+class ContainedLocalRepositoryAuthorityPort(Protocol):
+    """Revalidate ProductProject-scoped local repository authority around worker effects."""
+
+    def require_component_root(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        root: pathlib.Path,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,12 +100,14 @@ class ContainedLocalProductFactoryPorts:
 
     worker: ContainedLocalCodingWorker
     policy: ContainedLocalCodingPolicy
+    repository_authority: ContainedLocalRepositoryAuthorityPort | None = None
 
     async def context_for(
         self,
         request: ComponentWorkRequest,
     ) -> CodingWorkerDispatchContext:
         self.policy.__post_init__()
+        self._require_repository_authority(request)
         tree_digest = self.worker.repository_tree_digest(
             request.repository_id,
             request.base_sha,
@@ -138,6 +152,7 @@ class ContainedLocalProductFactoryPorts:
         job,
         result,
     ) -> CodingWorkerExecutionEvidence:
+        self._require_repository_authority(request)
         evidence = self.worker.execution_evidence(job.job_id)
         if result.job_id != job.job_id:
             raise ValueError(
@@ -149,6 +164,20 @@ class ContainedLocalProductFactoryPorts:
             base_sha=evidence.base_sha,
             result_sha=evidence.result_sha,
             diff_digest=evidence.diff_digest,
+        )
+
+    def _require_repository_authority(self, request: ComponentWorkRequest) -> None:
+        authority = self.repository_authority
+        if authority is None:
+            return
+        try:
+            repository_root = pathlib.Path(self.worker.repositories[request.repository_id])
+        except KeyError as exc:
+            raise ValueError("local repository identity is not configured") from exc
+        authority.require_component_root(
+            project_id=request.project_id,
+            repository_id=request.repository_id,
+            root=repository_root,
         )
 
 

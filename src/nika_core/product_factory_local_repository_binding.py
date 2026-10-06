@@ -4,6 +4,7 @@ import hashlib
 import json
 import pathlib
 import stat
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from types import MappingProxyType
@@ -294,6 +295,35 @@ class ProductFactoryLocalRepositoryBindings:
             )
         return binding
 
+    def require_component_root(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        root: pathlib.Path,
+    ) -> None:
+        """Revalidate one worker root immediately around contained-local effects."""
+
+        binding = self.require(project_id, repository_id)
+        try:
+            current_project = self._projects.get(project_id)
+        except KeyError as exc:
+            raise ProductFactoryLocalRepositoryBindingError(
+                "ProductProject local repository authority is unavailable"
+            ) from exc
+        if (
+            current_project.status != "active"
+            or binding.locator not in current_project.spec.repository_refs
+        ):
+            raise ProductFactoryLocalRepositoryBindingError(
+                "local repository binding is not authorized by the current ProductProject"
+            )
+        candidate = pathlib.Path(root)
+        if not candidate.is_absolute() or candidate != binding.root:
+            raise ProductFactoryLocalRepositoryBindingError(
+                "contained-local repository root does not match the durable ProductProject binding"
+            )
+
     def resolve_for_plan(
         self,
         plan: PackagedProductFactoryExecutionPlan,
@@ -322,6 +352,29 @@ class ProductFactoryLocalRepositoryBindings:
         project_after = self._projects.get(plan.project_id)
         _require_plan_project(plan, project_after)
         return MappingProxyType(resolved)
+
+    def require_plan_within_roots(
+        self,
+        plan: PackagedProductFactoryExecutionPlan,
+        allowed_roots: Mapping[str, pathlib.Path],
+    ) -> PackagedProductFactoryExecutionPlan:
+        """Bind an admitted plan to the contained worker's exact startup root ceiling."""
+
+        if not isinstance(allowed_roots, Mapping):
+            raise TypeError("allowed_roots must be a mapping")
+        resolved = self.resolve_for_plan(plan)
+        for repository_id, durable_root in resolved.items():
+            try:
+                contained_root = pathlib.Path(allowed_roots[repository_id])
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "execution-plan repository is outside the contained-local startup root ceiling"
+                ) from exc
+            if not contained_root.is_absolute() or contained_root != durable_root:
+                raise ProductFactoryLocalRepositoryBindingError(
+                    "contained-local startup root does not match the durable ProductProject binding"
+                )
+        return plan
 
     def _require_project_repository(
         self,

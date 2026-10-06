@@ -545,3 +545,71 @@ def test_unbind_is_version_fenced_and_removes_authority(
     )
     with pytest.raises(KeyError):
         bindings.require(project.project_id, repository.repository_id)
+
+
+def test_component_root_guard_requires_exact_durable_binding(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bound_root = _root(tmp_path, "bound repository")
+    other_root = _root(tmp_path, "other repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=bound_root,
+        expected_binding_version=None,
+    )
+
+    bindings.require_component_root(
+        project_id=project.project_id,
+        repository_id=repository.repository_id,
+        root=bound_root.resolve(strict=True),
+    )
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="does not match the durable ProductProject binding",
+    ):
+        bindings.require_component_root(
+            project_id=project.project_id,
+            repository_id=repository.repository_id,
+            root=other_root.resolve(strict=True),
+        )
+
+
+def test_execution_plan_root_ceiling_requires_durable_root_agreement(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    bound_root = _root(tmp_path, "bound repository")
+    other_root = _root(tmp_path, "other repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=bound_root,
+        expected_binding_version=None,
+    )
+    plan = _plan(project, repository)
+
+    assert bindings.require_plan_within_roots(
+        plan,
+        {repository.repository_id: bound_root.resolve(strict=True)},
+    ) is plan
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="startup root does not match",
+    ):
+        bindings.require_plan_within_roots(
+            plan,
+            {repository.repository_id: other_root.resolve(strict=True)},
+        )
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="outside the contained-local startup root ceiling",
+    ):
+        bindings.require_plan_within_roots(plan, {})

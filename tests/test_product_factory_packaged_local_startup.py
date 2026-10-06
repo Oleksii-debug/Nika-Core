@@ -879,3 +879,66 @@ def test_packaged_local_startup_js_preserves_revision_dirty_and_fail_closed_stat
     )
     dispatch = javascript.index("globalThis.pywebview.api.dispatch", config_payload)
     assert configure_payload < revision_payload < config_payload < dispatch
+
+
+def test_windows_bridge_routes_default_local_plan_through_durable_root_authority(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = shutil.which("git")
+    if executable is None:
+        pytest.skip("Git CLI unavailable")
+    repository = _repository(tmp_path)
+    database = (tmp_path / "binding-gate.db").resolve()
+    raw = _startup_json(
+        tmp_path,
+        repository,
+        executable=str(pathlib.Path(executable).resolve()),
+    )
+    seed_store = SQLiteStore(database)
+    seed_store.initialize()
+    _configure_ollama(V01ModelSettings(seed_store))
+    observed: list[dict[str, pathlib.Path]] = []
+
+    monkeypatch.setattr(
+        nika_windows.PackagedProductFactoryExecutionPlanFileSource,
+        "resolve",
+        lambda _self, _project_id: object(),
+    )
+
+    def reject_unbound_plan(_self: object, _plan: object, allowed_roots: object) -> object:
+        observed.append(dict(allowed_roots))
+        raise RuntimeError("durable binding sentinel")
+
+    monkeypatch.setattr(
+        nika_windows.ProductFactoryLocalRepositoryBindings,
+        "require_plan_within_roots",
+        reject_unbound_plan,
+    )
+    cleanup: list[object] = []
+    try:
+        bridge, _products = nika_windows.build_windows_bridge(
+            AppConfig(
+                database_path=database,
+                product_factory_local_startup_json=raw,
+            ),
+            start_startup_recovery=False,
+            register_cleanup=cleanup.append,
+        )
+        created = _bridge_command(
+            bridge,
+            request_id="create-binding-gate-product",
+            command="Створи застосунок для доступного каталогу",
+        )
+        assert created["status"] == "completed"
+
+        run = _bridge_command(
+            bridge,
+            request_id="run-binding-gate-product",
+            command="Run current Product Factory",
+        )
+        assert run["status"] == "failed"
+        assert observed == [{"repo-1": repository}]
+    finally:
+        for callback in reversed(cleanup):
+            callback()
