@@ -3040,6 +3040,18 @@ def _train_one_step(
             tensors = {name: source.get_tensor(name) for name in sorted(source.keys())}
         if not tensors:
             _fail("adapter_candidate_empty")
+        materialized_tensor_sha256 = _canonical_adapter_tensor_sha256(
+            tensors,
+            safe_serialize=safe_serialize,
+            torch=torch,
+            invalid_code="adapter_candidate_invalid",
+            non_finite_code="adapter_candidate_non_finite",
+        )
+        if not hmac.compare_digest(
+            materialized_tensor_sha256,
+            trained_adapter_tensors_sha256,
+        ):
+            _fail("candidate_tensor_source_mismatch")
         safe_save_file(
             tensors,
             os.fspath(temporary),
@@ -3142,14 +3154,17 @@ def _adapter_config_snapshot(
     config: TrainerConfig,
 ) -> dict[str, object]:
     config_path = path / "adapter_config.json"
-    _require_regular_unlinked(config_path, code="adapter_config_missing")
-    try:
-        with config_path.open("rb") as handle:
-            raw = handle.read(256 * 1024 + 1)
-    except OSError:
-        _fail("adapter_config_read_failed")
-    if len(raw) > 256 * 1024:
+    config_stat = _require_regular_unlinked(
+        config_path,
+        code="adapter_config_missing",
+    )
+    if config_stat.st_size > 256 * 1024:
         _fail("adapter_config_too_large")
+    raw = _read_regular_snapshot(
+        config_path,
+        max_bytes=256 * 1024,
+        code="adapter_config_read_failed",
+    )
     try:
         value = json.loads(
             raw.decode("utf-8", errors="strict"),
