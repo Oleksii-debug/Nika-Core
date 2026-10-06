@@ -32,6 +32,7 @@ _TOKEN_RE = re.compile(r"^[A-Za-z0-9._:+/-]{1,256}$")
 _MATERIAL_DOMAIN = b"nika-training-consumed-materials-v1\x00"
 _CHECKPOINT_PAYLOAD_DOMAIN = b"nika-peft-checkpoint-payload-v1\x00"
 _CHECKPOINT_MARKER = "nika_checkpoint.json"
+_CHECKPOINT_MARKER_SCHEMA_VERSION = 2
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
@@ -70,6 +71,7 @@ class MaterialRequest:
 @dataclass(frozen=True, slots=True)
 class ParsedRequest:
     step_id: str
+    previous_step_id: str | None
     step_index: int
     job_fingerprint: str
     trainer_artifact_id: str
@@ -278,6 +280,18 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
     step_index = value["step_index"]
     if type(step_index) is not int or step_index < 0:
         _fail("step_index_invalid")
+    previous_step_id_value = value["previous_step_id"]
+    if step_index == 0:
+        if previous_step_id_value is not None:
+            _fail("previous_step_id_invalid")
+        previous_step_id: str | None = None
+    else:
+        previous_step_id = _require_sha256(
+            previous_step_id_value,
+            field="previous_step_id",
+        )
+        if hmac.compare_digest(previous_step_id, step_id):
+            _fail("previous_step_id_invalid")
     job = value["job"]
     if type(job) is not dict:
         _fail("job_invalid")
@@ -369,6 +383,7 @@ def _parse_request(value: dict[str, object]) -> ParsedRequest:
 
     return ParsedRequest(
         step_id=step_id,
+        previous_step_id=previous_step_id,
         step_index=step_index,
         job_fingerprint=job_fingerprint,
         trainer_artifact_id=trainer_artifact_id,
@@ -1838,7 +1853,8 @@ def _write_checkpoint_marker(
         "checkpoint_payload_sha256": checkpoint_payload_sha256,
         "consumed_materials_sha256": consumed_sha256,
         "job_fingerprint": request.job_fingerprint,
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": _CHECKPOINT_MARKER_SCHEMA_VERSION,
+        "step_id": request.step_id,
         "step_number": request.step_index + 1,
     }
     encoded = _canonical_json_bytes(marker)
@@ -1968,13 +1984,15 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         "consumed_materials_sha256",
         "job_fingerprint",
         "schema_version",
+        "step_id",
         "step_number",
     }
     if (
         type(marker) is not dict
         or set(marker) != expected_marker_keys
-        or marker.get("schema_version") != _SCHEMA_VERSION
+        or marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
         or marker.get("job_fingerprint") != request.job_fingerprint
+        or marker.get("step_id") != request.previous_step_id
         or marker.get("step_number") != request.step_index
         or marker.get("consumed_materials_sha256")
         != request.required_consumed_materials_sha256
@@ -2032,13 +2050,15 @@ def _completed_step_checkpoint(
         "consumed_materials_sha256",
         "job_fingerprint",
         "schema_version",
+        "step_id",
         "step_number",
     }
     if (
         type(marker) is not dict
         or set(marker) != expected_keys
-        or marker.get("schema_version") != _SCHEMA_VERSION
+        or marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
         or marker.get("job_fingerprint") != request.job_fingerprint
+        or marker.get("step_id") != request.step_id
         or marker.get("step_number") != request.step_index + 1
         or marker.get("consumed_materials_sha256") != consumed_sha256
     ):
