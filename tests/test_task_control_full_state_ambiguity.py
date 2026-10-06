@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -150,3 +151,36 @@ def test_state_filter_validates_state_values_and_limit(tmp_path: Path) -> None:
         queue.list_by_states((TaskState.READY,), limit=0)
 
     _backend_instance.close()
+
+
+@pytest.mark.parametrize(
+    ("stored_state", "expected_fragment"),
+    (
+        ("UNKNOWN_STATE", "UNKNOWN_STATE"),
+        (sqlite3.Binary(b"READY"), "b'READY'"),
+    ),
+)
+def test_state_filter_fails_closed_on_noncanonical_persisted_state(
+    tmp_path: Path,
+    stored_state: object,
+    expected_fragment: str,
+) -> None:
+    backend, queue, store = _backend(tmp_path)
+    corrupted = _ready(queue, "corrupted state")
+    _age_task(store, corrupted)
+    _terminal_churn(queue)
+    visible = _ready(queue, "visible ready")
+
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE tasks SET state = ? WHERE task_id = ?",
+            (stored_state, corrupted),
+        )
+
+    with pytest.raises(ValueError, match=expected_fragment):
+        queue.list_by_states((TaskState.READY,), limit=2)
+    with pytest.raises(ValueError, match=expected_fragment):
+        backend.pause_task({})
+
+    assert queue.get(visible).state is TaskState.READY
+    backend.close()

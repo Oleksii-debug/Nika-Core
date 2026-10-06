@@ -151,13 +151,27 @@ class TaskQueue:
         unique_states = tuple(dict.fromkeys(states))
         if not unique_states:
             return ()
-        placeholders = ", ".join("?" for _ in unique_states)
+        requested_placeholders = ", ".join("?" for _ in unique_states)
+        canonical_states = tuple(state.value for state in TaskState)
+        canonical_placeholders = ", ".join("?" for _ in canonical_states)
         statement = (
             "SELECT task_id, workspace_id, agent_id, state, payload_json "
-            f"FROM tasks WHERE state IN ({placeholders}) "
-            "ORDER BY updated_at DESC, created_at DESC LIMIT ?"
+            "FROM tasks WHERE "
+            f"state IN ({requested_placeholders}) "
+            "OR typeof(state) != 'text' "
+            f"OR state NOT IN ({canonical_placeholders}) "
+            "ORDER BY CASE WHEN "
+            "typeof(state) != 'text' "
+            f"OR state NOT IN ({canonical_placeholders}) "
+            "THEN 0 ELSE 1 END, "
+            "updated_at DESC, created_at DESC LIMIT ?"
         )
-        parameters = (*tuple(state.value for state in unique_states), limit)
+        parameters = (
+            *tuple(state.value for state in unique_states),
+            *canonical_states,
+            *canonical_states,
+            limit,
+        )
         with self.store.connection() as conn:
             rows = conn.execute(statement, parameters).fetchall()
         return tuple(self._record_from_row(row) for row in rows)
