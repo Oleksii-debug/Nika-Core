@@ -129,6 +129,31 @@ def test_unconfigured_session_stays_optional(tmp_path):
     assert session.post_dispatch_enabled is False
 
 
+def test_corrupt_saved_pf5_authority_always_blocks_execution_focus(tmp_path):
+    store, settings, _raw = _configured_settings(tmp_path)
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE product_factory_build_runtime_settings "
+            "SET config_json = ? WHERE singleton = 1",
+            ("{",),
+        )
+
+    session = build_packaged_build_runtime_session(
+        store,
+        settings=settings,
+        startup=_startup(tmp_path),
+        product_factory_active=True,
+    )
+
+    snapshot = session.snapshot()
+    assert snapshot["status"] == "invalid"
+    assert snapshot["configured"] is False
+    assert snapshot["config_json"] is None
+    assert snapshot["runtime_status"] == "invalid"
+    assert session.execution_focus() == "product-factory-build-authority-json"
+    assert session.post_dispatch_enabled is False
+
+
 def test_configured_session_requires_active_packaged_pf4(tmp_path):
     store, settings, _raw = _configured_settings(tmp_path)
 
