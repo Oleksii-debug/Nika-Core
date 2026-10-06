@@ -287,24 +287,26 @@ def test_shell_preflight_imports_pywebview_after_complete_assets(
     assert imported == ["webview"]
 
 
-def test_shell_deferred_startup_waits_for_native_shown_before_recovery(
+def test_shell_deferred_startup_waits_for_loaded_webview_before_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
     create_kwargs: dict[str, object] = {}
 
+    class LoadedEvent:
+        @staticmethod
+        def wait(timeout: int) -> bool:
+            assert timeout == 20
+            events.append("loaded")
+            return True
+
     class ShownEvent:
-        callback = None
-
-        def __iadd__(self, callback):
-            self.callback = callback
-            return self
-
-        def fire(self) -> None:
-            assert self.callback is not None
-            self.callback()
+        @staticmethod
+        def is_set() -> bool:
+            return True
 
     class Events:
+        loaded = LoadedEvent()
         shown = ShownEvent()
 
     class Window:
@@ -325,10 +327,10 @@ def test_shell_deferred_startup_waits_for_native_shown_before_recovery(
             return window
 
         @staticmethod
-        def start(*, gui: str) -> None:
+        def start(func=None, *, gui: str) -> None:
             assert gui == "edgechromium"
-            events.append("native-shown")
-            window.events.shown.fire()
+            assert func is not None
+            func()
 
     monkeypatch.setattr(ui_shell, "preflight_windows_shell", lambda: None)
     monkeypatch.setattr(ui_shell, "import_module", lambda _name: WebView)
@@ -340,26 +342,28 @@ def test_shell_deferred_startup_waits_for_native_shown_before_recovery(
 
     assert result is window
     assert create_kwargs["hidden"] is True
-    assert events == ["native-shown", "recovery", "show"]
+    assert events == ["loaded", "recovery", "show"]
 
 
-def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
+def test_shell_loaded_timeout_never_runs_recovery_and_destroys_hidden_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
 
+    class LoadedEvent:
+        @staticmethod
+        def wait(timeout: int) -> bool:
+            assert timeout == 20
+            events.append("loaded-timeout")
+            return False
+
     class ShownEvent:
-        callback = None
-
-        def __iadd__(self, callback):
-            self.callback = callback
-            return self
-
-        def fire(self) -> None:
-            assert self.callback is not None
-            self.callback()
+        @staticmethod
+        def is_set() -> bool:
+            return True
 
     class Events:
+        loaded = LoadedEvent()
         shown = ShownEvent()
 
     class Window:
@@ -379,10 +383,65 @@ def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
             return window
 
         @staticmethod
-        def start(*, gui: str) -> None:
+        def start(func=None, *, gui: str) -> None:
             assert gui == "edgechromium"
-            events.append("native-shown")
-            window.events.shown.fire()
+            assert func is not None
+            func()
+
+    monkeypatch.setattr(ui_shell, "preflight_windows_shell", lambda: None)
+    monkeypatch.setattr(ui_shell, "import_module", lambda _name: WebView)
+
+    with pytest.raises(RuntimeError, match="did not reach loaded state"):
+        ui_shell.launch_windows_shell(
+            object(),
+            on_gui_started=lambda: events.append("recovery"),
+        )
+
+    assert events == ["loaded-timeout", "destroy"]
+
+
+def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    class LoadedEvent:
+        @staticmethod
+        def wait(timeout: int) -> bool:
+            assert timeout == 20
+            events.append("loaded")
+            return True
+
+    class ShownEvent:
+        @staticmethod
+        def is_set() -> bool:
+            return True
+
+    class Events:
+        loaded = LoadedEvent()
+        shown = ShownEvent()
+
+    class Window:
+        events = Events()
+
+        def show(self) -> None:
+            events.append("show")
+
+        def destroy(self) -> None:
+            events.append("destroy")
+
+    window = Window()
+
+    class WebView:
+        @staticmethod
+        def create_window(_title: str, _url: str, **_kwargs: object) -> Window:
+            return window
+
+        @staticmethod
+        def start(func=None, *, gui: str) -> None:
+            assert gui == "edgechromium"
+            assert func is not None
+            func()
 
     def fail_recovery() -> None:
         events.append("recovery")
@@ -397,7 +456,7 @@ def test_shell_deferred_startup_failure_destroys_hidden_window_and_is_rethrown(
             on_gui_started=fail_recovery,
         )
 
-    assert events == ["native-shown", "recovery", "destroy"]
+    assert events == ["loaded", "recovery", "destroy"]
 
 
 @pytest.mark.parametrize(
