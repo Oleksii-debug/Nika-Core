@@ -11,7 +11,11 @@ from uuid import UUID
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.packaged_intelligence_mode import is_packaged_intelligence_mode_command
 from nika_core.product_command.command_center import ProductCommandCenter
-from nika_core.product_command.contracts import CommandRouteKind, ProductProjectDetail
+from nika_core.product_command.contracts import (
+    CommandRouteKind,
+    ProductProjectDetail,
+    ProductUserDecision,
+)
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectPresentationConsistencyError,
@@ -636,7 +640,9 @@ def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
     }
 
 
-def _safe_product_decision(decision) -> dict[str, Any] | None:
+def _safe_product_decision(
+    decision: ProductUserDecision | None,
+) -> dict[str, Any] | None:
     if decision is None:
         return None
     return {
