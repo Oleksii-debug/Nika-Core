@@ -143,6 +143,22 @@ def test_windows_bridge_exposes_durable_pf5_settings_with_restart_semantics(
     }
 
 
+def test_windows_uia_release_proof_covers_pf5_build_settings_controls() -> None:
+    proof = (ROOT / "scripts/m5_uia_proof.ps1").read_text(encoding="utf-8")
+
+    for fragment in (
+        "JSON конфігурації packaged PF5 build runtime",
+        "Зберегти PF5 build runtime",
+        "Перечитати PF5 build runtime",
+        "[System.Windows.Automation.ControlType]::Edit",
+        "[System.Windows.Automation.ControlType]::Button",
+        "Set-BoundControlFocus $factoryBuildRuntimeControl",
+        "Wait-FocusName $factoryBuildRuntimeControl",
+        "no build effect was invoked",
+    ):
+        assert fragment in proof
+
+
 def test_windows_bridge_registers_pf5_settings_and_post_dispatch_wiring() -> None:
     windows = (ROOT / "scripts/nika_windows.py").read_text(encoding="utf-8")
     actions = (ROOT / "src/nika_core/kernel/default_actions.py").read_text(
