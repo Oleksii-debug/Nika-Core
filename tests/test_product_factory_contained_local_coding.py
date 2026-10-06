@@ -241,7 +241,7 @@ def test_contained_local_multi_repository_host_drives_packaged_prepare_and_dispa
                         python,
                         "-c",
                         "from pathlib import Path; "
-                        "assert Path('src/core.py').read_text() == 'VALUE = 2\\\\n'",
+                        "assert Path('src/core.py').read_text() == 'VALUE = 2\\n'",
                     ),
                 ),
             ),
