@@ -75,8 +75,10 @@ def launch_windows_shell(
             window.show()
         except BaseException as exc:  # noqa: BLE001 - relay control-flow to main thread
             callback_failure.append(exc)
-            if window.events.shown.is_set():
-                window.destroy()
+            # The host is intentionally hidden until startup recovery completes.
+            # A failure before the first show must still close the native WebView;
+            # gating destroy() on the shown event strands an invisible process.
+            window.destroy()
 
     if on_gui_started is None:
         webview.start(gui="edgechromium")
