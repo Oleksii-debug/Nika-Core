@@ -247,11 +247,11 @@ class MultiRepositoryProductFactoryHost:
             raise MultiRepositoryExecutionError(
                 "Product Factory program worker changed after composition"
             )
-        if self.team_plan != self._composition_team_plan:
+        if self.team_plan is not self._composition_team_plan:
             raise MultiRepositoryExecutionError(
                 "Product Factory TeamPlan changed after composition"
             )
-        if self.reviewer_principals != self._composition_reviewer_principals:
+        if self.reviewer_principals is not self._composition_reviewer_principals:
             raise MultiRepositoryExecutionError(
                 "Product Factory reviewer principals changed after composition"
             )
