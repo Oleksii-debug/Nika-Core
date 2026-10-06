@@ -15,8 +15,11 @@ from nika_core.product_factory_local_repository_binding import (
 from nika_core.product_factory_multi_repository import MultiRepositoryExecutionState
 from nika_core.product_factory_orchestration import ProductRepositoryGraph
 from nika_core.product_factory_packaged_local_startup import (
+    PackagedLocalProductFactoryModelAuthority,
     PackagedLocalProductFactoryStartup,
+    PackagedLocalProductFactoryStartupError,
     build_repository_bound_packaged_local_product_factory_program,
+    capture_packaged_local_product_factory_model_authority,
 )
 from nika_core.product_factory_packaged_preparation import (
     PackagedProductFactoryExecutionPlan,
@@ -119,6 +122,7 @@ class PackagedBoundLocalProductFactoryHost:
         settings: V01ModelSettings,
         startup: PackagedLocalProductFactoryStartup,
         bindings: ProductFactoryLocalRepositoryBindings | None = None,
+        model_authority: PackagedLocalProductFactoryModelAuthority | None = None,
     ) -> None:
         if type(store) is not SQLiteStore:
             raise TypeError("store must be SQLiteStore")
@@ -126,9 +130,17 @@ class PackagedBoundLocalProductFactoryHost:
             raise TypeError("settings must be V01ModelSettings")
         if type(startup) is not PackagedLocalProductFactoryStartup:
             raise TypeError("startup carrier is invalid")
+        if model_authority is None:
+            model_authority = capture_packaged_local_product_factory_model_authority(
+                store,
+                settings,
+            )
+        elif type(model_authority) is not PackagedLocalProductFactoryModelAuthority:
+            raise TypeError("model_authority carrier is invalid")
         self.store = store
         self._settings = settings
         self._startup = startup
+        self._model_authority = model_authority
         self._bindings = bindings or ProductFactoryLocalRepositoryBindings(store)
         self._projects = ProductProjectRepository(store)
         self._entries: dict[str, _ProgramEntry] = {}
@@ -394,11 +406,13 @@ class PackagedBoundLocalProductFactoryHost:
             repository_id: snapshot.root
             for repository_id, snapshot in snapshots.items()
         }
+        self._require_model_authority_current()
         program = build_repository_bound_packaged_local_product_factory_program(
             self.store,
             settings=self._settings,
             startup=self._startup,
             repositories=repositories,
+            model_authority=self._model_authority,
         )
         program.ports.repository_authority = _EntryRepositoryAuthority(
             bindings=self._bindings,
@@ -411,6 +425,22 @@ class PackagedBoundLocalProductFactoryHost:
             program=program,
             bindings=snapshots,
         )
+
+    def _require_model_authority_current(self) -> None:
+        try:
+            current = capture_packaged_local_product_factory_model_authority(
+                self.store,
+                self._settings,
+            )
+        except PackagedLocalProductFactoryStartupError as exc:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "local Product Factory model authority is unavailable; "
+                "restart is required"
+            ) from exc
+        if current != self._model_authority:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "local Product Factory model authority changed; restart is required"
+            )
 
     def _require_state_bindings(
         self,
