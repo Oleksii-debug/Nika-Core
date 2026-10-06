@@ -206,6 +206,59 @@ def test_dynamic_host_builds_worker_only_from_durable_repository_binding(
     }
 
 
+@pytest.mark.parametrize("resolver", ("graph", "project"))
+def test_binding_snapshot_resolution_holds_writer_fence(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolver: str,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    durable_root = _repository(tmp_path, "durable repository")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bound = bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=durable_root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    original_require = bindings.require
+    observations: list[str] = []
+
+    def require_under_snapshot_fence(
+        project_id: str,
+        repository_id: str,
+    ):
+        contender = sqlite3.connect(store.path, timeout=0)
+        try:
+            with pytest.raises(sqlite3.OperationalError, match="locked"):
+                contender.execute("BEGIN IMMEDIATE")
+            observations.append(repository_id)
+        finally:
+            contender.close()
+        return original_require(project_id, repository_id)
+
+    monkeypatch.setattr(bindings, "require", require_under_snapshot_fence)
+
+    if resolver == "graph":
+        resolved = host._bindings_for_graph(
+            project,
+            _graph(project.project_id, repository),
+        )
+    else:
+        resolved = host._bindings_for_project(project)
+
+    assert resolved == {repository.repository_id: bound}
+    assert observations == [repository.repository_id]
+
+
 @pytest.mark.parametrize("next_model", ("qwen3:8b", "qwen3:8b-next"))
 def test_delayed_entry_rejects_any_model_revision_change_before_worker_build(
     tmp_path: pathlib.Path,

@@ -181,10 +181,15 @@ class SQLiteStore:
             "CREATE TABLE IF NOT EXISTS product_project_schema_migrations ("
             "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
         )
-        row = conn.execute(
-            "SELECT MAX(version) AS version FROM product_project_schema_migrations"
-        ).fetchone()
-        current = int(row["version"] or 0)
+        rows = conn.execute(
+            "SELECT version FROM product_project_schema_migrations ORDER BY version"
+        ).fetchall()
+        versions = tuple(int(row["version"]) for row in rows)
+        current = versions[-1] if versions else 0
+        if versions != tuple(range(1, current + 1)):
+            raise RuntimeError(
+                "product project schema migration ledger is non-contiguous"
+            )
         if current > PRODUCT_PROJECT_SCHEMA_VERSION:
             raise RuntimeError(
                 "product project database schema "
