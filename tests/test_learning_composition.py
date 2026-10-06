@@ -19,12 +19,15 @@ from nika_core.learning_comparison import (
     MemoryRelation,
 )
 from nika_core.learning_composition import (
+    build_learning_semantic_update_executor,
     build_learning_semantic_update_router,
     cognition_candidate_from_comparisons,
     cognition_evidence_from_comparison,
 )
+from nika_core.learning_semantic_execution import LearningSemanticUpdateExecutor
 from nika_core.learning_semantic_update import LearningSemanticUpdateRouter
 from nika_core.memory.service import MemoryService
+from nika_core.runtime.idempotency import IdempotencyLedger
 
 _COMPARATOR = "a" * 64
 _POLICY = "b" * 64
@@ -375,3 +378,48 @@ def test_semantic_router_factory_rejects_noncanonical_memory_service(
     with pytest.raises(TypeError, match="canonical MemoryService"):
         build_learning_semantic_update_router(DerivedMemoryService(store))
 
+
+
+def test_semantic_executor_factory_reuses_canonical_authorities_without_new_schema(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "semantic-executor-composition.db")
+    store.initialize()
+    with store.connection() as conn:
+        before = tuple(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+        )
+
+    executor = build_learning_semantic_update_executor(
+        MemoryService(store),
+        IdempotencyLedger(store),
+    )
+
+    with store.connection() as conn:
+        after = tuple(
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name"
+            ).fetchall()
+        )
+    assert type(executor) is LearningSemanticUpdateExecutor
+    assert after == before
+
+
+def test_semantic_executor_factory_rejects_noncanonical_idempotency(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "semantic-executor-composition-type.db")
+    store.initialize()
+
+    class DerivedIdempotencyLedger(IdempotencyLedger):
+        pass
+
+    with pytest.raises(TypeError, match="canonical IdempotencyLedger"):
+        build_learning_semantic_update_executor(
+            MemoryService(store),
+            DerivedIdempotencyLedger(store),
+        )
