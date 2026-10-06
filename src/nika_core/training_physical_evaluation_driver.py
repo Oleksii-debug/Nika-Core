@@ -56,7 +56,11 @@ from nika_core.training_evaluation_comparison import (
 from nika_core.training_evaluation_execution import run_attested_challenger_benchmark
 from nika_core.training_evaluation_subprocess import RegistrySubprocessLoadedModelAttestor
 from nika_core.training_physical_pilot import PhysicalTrainingPilotReport
-from nika_core.training_scale import TrainingScaleError, TrainingScalePlan
+from nika_core.training_scale import (
+    TrainingScaleError,
+    TrainingScalePlan,
+    restore_scale_progression_proof_from_trusted_digest,
+)
 from nika_core.training_runtime import (
     ArtifactIdentity,
     TrainingJobSpec,
@@ -811,11 +815,23 @@ def _matches_physical_training_task_payload(
     proof_payload = payload.get("progression_proof")
     if kind == "physical_peft_pilot":
         return matching[0] == 0 and proof_sha256 is None and proof_payload is None
+    if (
+        matching[0] == 0
+        or type(proof_sha256) is not str
+        or _SHA256_RE.fullmatch(proof_sha256) is None
+        or type(proof_payload) is not dict
+    ):
+        return False
+    try:
+        proof = restore_scale_progression_proof_from_trusted_digest(
+            proof_payload,
+            trusted_proof_sha256=proof_sha256,
+        )
+    except (TrainingScaleError, TypeError, ValueError):
+        return False
     return (
-        matching[0] > 0
-        and type(proof_sha256) is str
-        and _SHA256_RE.fullmatch(proof_sha256) is not None
-        and type(proof_payload) is dict
+        proof.plan_sha256 == plan_sha256
+        and proof.tier_index == matching[0] - 1
     )
 
 
