@@ -122,6 +122,16 @@ def build_release_attestation_evidence(
     if attestation_url != expected_url:
         raise ValueError("attestation URL does not match repository and attestation id")
 
+    # Anchor the exact distributable before the first pre-human gate. A coherent
+    # archive + matching-evidence replacement must not move the artifact identity
+    # that the gate, provenance verification, and final attestation are binding.
+    artifact_identity = _stable_release_file_identity(artifact_path)
+    if artifact_identity is None:
+        raise ValueError("attestation artifact changed during evidence binding")
+    artifact_size, artifact_sha256 = artifact_identity
+    if not _SHA256_RE.fullmatch(artifact_sha256):
+        raise ValueError("artifact SHA-256 calculation failed")
+
     distributable_findings = verify_distributable_evidence(
         artifact_path,
         prehuman_evidence_path,
@@ -133,13 +143,8 @@ def build_release_attestation_evidence(
         raise ValueError(
             "pre-human distributable evidence mismatch: " + ", ".join(distributable_findings)
         )
-
-    artifact_identity = _stable_release_file_identity(artifact_path)
-    if artifact_identity is None:
+    if _stable_release_file_identity(artifact_path) != artifact_identity:
         raise ValueError("attestation artifact changed during evidence binding")
-    artifact_size, artifact_sha256 = artifact_identity
-    if not _SHA256_RE.fullmatch(artifact_sha256):
-        raise ValueError("artifact SHA-256 calculation failed")
 
     verification = _read_verification(verification_path)
     if not _has_matching_slsa_subject(verification, artifact_sha256=artifact_sha256):
