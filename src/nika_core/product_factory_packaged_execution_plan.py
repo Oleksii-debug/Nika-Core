@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import NoReturn
-from urllib.parse import urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 from nika_core.product_factory_orchestration import (
     ProductComponent,
@@ -28,6 +28,19 @@ _MAX_COMMANDS_PER_COMPONENT = 128
 _MAX_ARGV_ITEMS = 128
 _MAX_PERMISSIONS = 256
 _MAX_SIGNED_64 = (1 << 63) - 1
+_MAX_LOCATOR_DECODE_ROUNDS = 64
+_SENSITIVE_LOCATOR_MARKERS = (
+    "access_token",
+    "refresh_token",
+    "api_key",
+    "api-key",
+    "apikey",
+    "client_secret",
+    "password",
+    "passwd",
+    "secret=",
+    "token=",
+)
 
 _TOP_LEVEL_FIELDS = frozenset(
     {
@@ -128,7 +141,7 @@ def decode_packaged_product_factory_execution_plan(
 
     try:
         graph = ProductRepositoryGraph(
-            project_id=_canonical_text(root["project_id"], "project_id"),
+            project_id=_identity_text(root["project_id"], "project_id"),
             repositories=repositories,
             components=components,
         )
@@ -180,13 +193,13 @@ def _decode_repository(value: object, index: int) -> RepositoryRef:
 
     try:
         return RepositoryRef(
-            repository_id=_canonical_text(
+            repository_id=_identity_text(
                 item["repository_id"],
                 f"{label}.repository_id",
             ),
-            provider=_canonical_text(item["provider"], f"{label}.provider"),
+            provider=_identity_text(item["provider"], f"{label}.provider"),
             locator=_repository_locator(item["locator"], f"{label}.locator"),
-            default_branch=_canonical_text(
+            default_branch=_identity_text(
                 item["default_branch"],
                 f"{label}.default_branch",
             ),
@@ -200,11 +213,28 @@ def _decode_repository(value: object, index: int) -> RepositoryRef:
 
 
 def _repository_locator(value: object, label: str) -> str:
-    locator = _canonical_text(value, label)
-    if "://" not in locator:
-        return locator
+    locator = _identity_text(value, label, kind="locator")
+    normalized = locator.casefold()
+    for _round in range(_MAX_LOCATOR_DECODE_ROUNDS):
+        _require_safe_repository_locator_view(normalized, label)
+        decoded = unquote(unquote_plus(normalized)).casefold()
+        if decoded == normalized:
+            return locator
+        normalized = decoded
+    raise PackagedExecutionPlanAdmissionError(
+        f"{label} decoding exceeds the bounded limit"
+    )
+
+
+def _require_safe_repository_locator_view(value: str, label: str) -> None:
+    if any(marker in value for marker in _SENSITIVE_LOCATOR_MARKERS):
+        raise PackagedExecutionPlanAdmissionError(
+            f"{label} must not contain credential material"
+        )
+    if "://" not in value and not value.startswith("//"):
+        return
     try:
-        parsed = urlsplit(locator)
+        parsed = urlsplit(value)
     except ValueError as exc:
         raise PackagedExecutionPlanAdmissionError(
             f"{label} URL authority is invalid"
@@ -217,7 +247,6 @@ def _repository_locator(value: object, label: str) -> str:
         raise PackagedExecutionPlanAdmissionError(
             f"{label} must not contain URL query or fragment data"
         )
-    return locator
 
 
 def _credential_ref(value: object, label: str) -> str:
@@ -245,11 +274,11 @@ def _decode_component(value: object, index: int) -> ProductComponent:
     )
     try:
         return ProductComponent(
-            component_id=_canonical_text(
+            component_id=_identity_text(
                 item["component_id"],
                 f"{label}.component_id",
             ),
-            repository_id=_canonical_text(
+            repository_id=_identity_text(
                 item["repository_id"],
                 f"{label}.repository_id",
             ),
@@ -487,6 +516,20 @@ def _canonical_text(value: object, label: str) -> str:
             f"{label} exceeds the text byte limit"
         )
     return value
+
+
+def _identity_text(
+    value: object,
+    label: str,
+    *,
+    kind: str = "identity",
+) -> str:
+    text = _canonical_text(value, label)
+    if any(ord(character) < 32 or ord(character) == 127 for character in text):
+        raise PackagedExecutionPlanAdmissionError(
+            f"{label} must be opaque single-line {kind} text"
+        )
+    return text
 
 
 def _positive_int(value: object, label: str) -> int:
