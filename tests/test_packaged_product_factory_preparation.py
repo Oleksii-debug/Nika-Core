@@ -442,6 +442,81 @@ def test_prepare_rejects_structurally_deleted_execution_plan_before_effect(
     assert _task_count(store) == 0
 
 
+
+@pytest.mark.parametrize(
+    ("target", "field", "value", "message"),
+    (
+        ("repository", "case_sensitive_paths", "false", "case_sensitive_paths"),
+        ("component", "paths", ["src/nika_core"], "component paths"),
+        (
+            "component",
+            "build_commands",
+            (["python", "-m", "pytest"],),
+            "component build_commands",
+        ),
+        ("component", "release_identity", 7, "release_identity"),
+    ),
+)
+def test_prepare_revalidates_tampered_nested_graph_carriers_before_effect(
+    tmp_path: Path,
+    target: str,
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    carrier = (
+        plan.graph.repositories[0]
+        if target == "repository"
+        else plan.graph.components[0]
+    )
+    object.__setattr__(carrier, field, value)
+
+    with pytest.raises(PackagedProductFactoryPreparationError, match=message):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
+def test_prepare_normalizes_tampered_graph_invariant_failure_before_effect(
+    tmp_path: Path,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    object.__setattr__(
+        plan.graph.components[0],
+        "repository_id",
+        "missing-repository",
+    )
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="repository graph is structurally invalid",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
+
+def test_prepare_rejects_structurally_deleted_nested_graph_field_before_effect(
+    tmp_path: Path,
+) -> None:
+    store, _repository, _tasks, service, _project, _graph, plan, _bases, _goals = (
+        _fixture(tmp_path)
+    )
+    object.__delattr__(plan.graph.repositories[0], "locator")
+
+    with pytest.raises(
+        PackagedProductFactoryPreparationError,
+        match="repository entry is structurally invalid",
+    ):
+        service.prepare(plan)
+
+    assert _task_count(store) == 0
+
 def test_prepare_uses_detached_snapshot_if_original_plan_mutates_mid_call(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

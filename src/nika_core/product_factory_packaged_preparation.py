@@ -16,6 +16,7 @@ from nika_core.product_factory_multi_repository import (
 from nika_core.product_factory_orchestration import (
     ProductComponent,
     ProductRepositoryGraph,
+    RepositoryGraphError,
     RepositoryRef,
 )
 from nika_core.product_project import ProductProject, ProductProjectRepository
@@ -364,35 +365,164 @@ def _snapshot_execution_plan(
 def _snapshot_graph(graph: ProductRepositoryGraph) -> ProductRepositoryGraph:
     if type(graph) is not ProductRepositoryGraph:
         raise TypeError("graph must be ProductRepositoryGraph")
-    repositories = tuple(
-        RepositoryRef(
-            repository_id=item.repository_id,
-            provider=item.provider,
-            locator=item.locator,
-            default_branch=item.default_branch,
-            credential_ref=item.credential_ref,
-            case_sensitive_paths=item.case_sensitive_paths,
+    try:
+        project_id = graph.project_id
+        repositories_value = graph.repositories
+        components_value = graph.components
+    except AttributeError as exc:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph is structurally invalid"
+        ) from exc
+    if type(project_id) is not str:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph project_id must be text"
         )
-        for item in graph.repositories
+    if type(repositories_value) is not tuple or type(components_value) is not tuple:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph collections must be exact tuples"
+        )
+    repositories = tuple(
+        _snapshot_repository_ref(item) for item in repositories_value
     )
     components = tuple(
-        ProductComponent(
-            component_id=item.component_id,
-            repository_id=item.repository_id,
-            paths=tuple(item.paths),
-            dependencies=tuple(item.dependencies),
-            build_commands=tuple(tuple(command) for command in item.build_commands),
-            test_commands=tuple(tuple(command) for command in item.test_commands),
-            release_identity=item.release_identity,
+        _snapshot_product_component(item) for item in components_value
+    )
+    try:
+        return ProductRepositoryGraph(
+            project_id=project_id,
+            repositories=repositories,
+            components=components,
         )
-        for item in graph.components
-    )
-    return ProductRepositoryGraph(
-        project_id=graph.project_id,
-        repositories=repositories,
-        components=components,
-    )
+    except (AttributeError, TypeError, RepositoryGraphError) as exc:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph is structurally invalid"
+        ) from exc
 
+
+def _snapshot_repository_ref(value: object) -> RepositoryRef:
+    if type(value) is not RepositoryRef:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph entries must be exact RepositoryRef values"
+        )
+    try:
+        repository_id = value.repository_id
+        provider = value.provider
+        locator = value.locator
+        default_branch = value.default_branch
+        credential_ref = value.credential_ref
+        case_sensitive_paths = value.case_sensitive_paths
+    except AttributeError as exc:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph repository entry is structurally invalid"
+        ) from exc
+    if any(
+        type(item) is not str
+        for item in (repository_id, provider, locator, default_branch)
+    ):
+        raise PackagedProductFactoryPreparationError(
+            "repository graph repository identity fields must be text"
+        )
+    if credential_ref is not None and type(credential_ref) is not str:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph credential_ref must be text or None"
+        )
+    if type(case_sensitive_paths) is not bool:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph case_sensitive_paths must be bool"
+        )
+    try:
+        return RepositoryRef(
+            repository_id=repository_id,
+            provider=provider,
+            locator=locator,
+            default_branch=default_branch,
+            credential_ref=credential_ref,
+            case_sensitive_paths=case_sensitive_paths,
+        )
+    except (AttributeError, TypeError, RepositoryGraphError) as exc:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph repository entry is invalid"
+        ) from exc
+
+
+def _snapshot_product_component(value: object) -> ProductComponent:
+    if type(value) is not ProductComponent:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph components must be exact ProductComponent values"
+        )
+    try:
+        component_id = value.component_id
+        repository_id = value.repository_id
+        paths = value.paths
+        dependencies = value.dependencies
+        build_commands = value.build_commands
+        test_commands = value.test_commands
+        release_identity = value.release_identity
+    except AttributeError as exc:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph component is structurally invalid"
+        ) from exc
+    if type(component_id) is not str or type(repository_id) is not str:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph component identity fields must be text"
+        )
+    paths_snapshot = _exact_text_tuple(paths, "component paths")
+    dependencies_snapshot = _exact_text_tuple(
+        dependencies,
+        "component dependencies",
+    )
+    build_snapshot = _exact_command_tuple(
+        build_commands,
+        "component build_commands",
+    )
+    test_snapshot = _exact_command_tuple(
+        test_commands,
+        "component test_commands",
+    )
+    if release_identity is not None and type(release_identity) is not str:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph release_identity must be text or None"
+        )
+    try:
+        return ProductComponent(
+            component_id=component_id,
+            repository_id=repository_id,
+            paths=paths_snapshot,
+            dependencies=dependencies_snapshot,
+            build_commands=build_snapshot,
+            test_commands=test_snapshot,
+            release_identity=release_identity,
+        )
+    except (AttributeError, TypeError, RepositoryGraphError) as exc:
+        raise PackagedProductFactoryPreparationError(
+            "repository graph component is invalid"
+        ) from exc
+
+
+def _exact_text_tuple(value: object, label: str) -> tuple[str, ...]:
+    if type(value) is not tuple or any(type(item) is not str for item in value):
+        raise PackagedProductFactoryPreparationError(
+            f"{label} must be an exact tuple of text"
+        )
+    return value
+
+
+def _exact_command_tuple(
+    value: object,
+    label: str,
+) -> tuple[tuple[str, ...], ...]:
+    if type(value) is not tuple:
+        raise PackagedProductFactoryPreparationError(
+            f"{label} must be an exact tuple of argv tuples"
+        )
+    for command in value:
+        if type(command) is not tuple or any(
+            type(part) is not str for part in command
+        ):
+            raise PackagedProductFactoryPreparationError(
+                f"{label} must be an exact tuple of argv tuples"
+            )
+    return value
 
 def _text_mapping(value: Mapping[str, str], label: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
