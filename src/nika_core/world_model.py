@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
@@ -121,6 +122,11 @@ class WorldModelService:
             raise TypeError("memory must be the canonical MemoryService")
         self._memory = memory
 
+    @property
+    def sqlite_store(self):
+        """Return the canonical SQLite authority backing this world model."""
+        return self._memory.sqlite_store
+
     def get(self, *, workspace_id: str, topic: str) -> WorldModelSnapshot | None:
         canonical_workspace = _require_token(workspace_id, field="workspace_id")
         canonical_topic = _require_token(topic, field="topic")
@@ -146,6 +152,43 @@ class WorldModelService:
         value: object,
         expected_revision_sha256: str | None,
     ) -> WorldModelSnapshot:
+        return self._compare_and_put(
+            None,
+            workspace_id=workspace_id,
+            topic=topic,
+            value=value,
+            expected_revision_sha256=expected_revision_sha256,
+        )
+
+    def compare_and_put_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        workspace_id: str,
+        topic: str,
+        value: object,
+        expected_revision_sha256: str | None,
+    ) -> WorldModelSnapshot:
+        """Update world state inside a caller-owned canonical SQLite transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        return self._compare_and_put(
+            conn,
+            workspace_id=workspace_id,
+            topic=topic,
+            value=value,
+            expected_revision_sha256=expected_revision_sha256,
+        )
+
+    def _compare_and_put(
+        self,
+        conn: sqlite3.Connection | None,
+        *,
+        workspace_id: str,
+        topic: str,
+        value: object,
+        expected_revision_sha256: str | None,
+    ) -> WorldModelSnapshot:
         canonical_workspace = _require_token(workspace_id, field="workspace_id")
         canonical_topic = _require_token(topic, field="topic")
         expected_updated_at: datetime | None
@@ -157,12 +200,21 @@ class WorldModelService:
                 expected_revision_sha256,
                 field="expected_revision_sha256",
             )
-            current = self._memory.get(
-                scope=MemoryScope.WORKSPACE,
-                owner_id=canonical_workspace,
-                namespace=WORLD_MODEL_NAMESPACE,
-                key=canonical_topic,
-            )
+            if conn is None:
+                current = self._memory.get(
+                    scope=MemoryScope.WORKSPACE,
+                    owner_id=canonical_workspace,
+                    namespace=WORLD_MODEL_NAMESPACE,
+                    key=canonical_topic,
+                )
+            else:
+                current = self._memory.get_with_connection(
+                    conn,
+                    scope=MemoryScope.WORKSPACE,
+                    owner_id=canonical_workspace,
+                    namespace=WORLD_MODEL_NAMESPACE,
+                    key=canonical_topic,
+                )
             if current is None:
                 raise MemoryConflictError("world-model target no longer exists")
             actual_revision = _world_model_revision_sha256(
@@ -174,15 +226,27 @@ class WorldModelService:
                 raise MemoryConflictError("world-model revision changed")
             expected_updated_at = current.updated_at
 
-        committed = self._memory.compare_and_put(
-            scope=MemoryScope.WORKSPACE,
-            owner_id=canonical_workspace,
-            namespace=WORLD_MODEL_NAMESPACE,
-            key=canonical_topic,
-            value=value,
-            expected_updated_at=expected_updated_at,
-            user_approved=False,
-        )
+        if conn is None:
+            committed = self._memory.compare_and_put(
+                scope=MemoryScope.WORKSPACE,
+                owner_id=canonical_workspace,
+                namespace=WORLD_MODEL_NAMESPACE,
+                key=canonical_topic,
+                value=value,
+                expected_updated_at=expected_updated_at,
+                user_approved=False,
+            )
+        else:
+            committed = self._memory.compare_and_put_with_connection(
+                conn,
+                scope=MemoryScope.WORKSPACE,
+                owner_id=canonical_workspace,
+                namespace=WORLD_MODEL_NAMESPACE,
+                key=canonical_topic,
+                value=value,
+                expected_updated_at=expected_updated_at,
+                user_approved=False,
+            )
         return self._snapshot(
             committed,
             workspace_id=canonical_workspace,
