@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import pathlib
 import shutil
@@ -384,6 +385,8 @@ def test_host_task_persists_secret_free_model_authority_snapshot(
     assert persisted["base_url"] == "http://localhost:11434"
     assert len(persisted["selection_sha256"]) == 64
     assert persisted["artifact_pin_sha256"] is None
+    assert persisted["private_data_allowed"] is False
+    assert len(persisted["authority_sha256"]) == 64
     assert "credential" not in json.dumps(persisted).casefold()
 
 
@@ -459,6 +462,96 @@ def test_restart_restores_original_model_authority_after_settings_change(
     assert restarted._model_authority.model == "qwen3:8b-next"
     assert entry.model_authority.model == "qwen3:8b"
     assert entry.program.worker.planner.model == "qwen3:8b"
+
+
+def test_restart_rejects_route_tamper_even_with_recomputed_snapshot_checksum(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _project(store, repository)
+    root = _repository(tmp_path, "durable repository")
+    base_sha = _git(root, "rev-parse", "HEAD")
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+    bindings.bind(
+        project_id=project.project_id,
+        repository=repository,
+        root=root,
+        expected_binding_version=None,
+    )
+    host = PackagedBoundLocalProductFactoryHost(
+        store,
+        settings=_settings(store),
+        startup=_startup(tmp_path),
+        bindings=bindings,
+    )
+    host.initialize(
+        host_task_id="host-task",
+        project=project,
+        graph=_graph(project.project_id, repository),
+        graph_version=1,
+        base_shas={repository.repository_id: base_sha},
+        component_goals={"core": "Implement core"},
+        permission_ceiling=frozenset(
+            {"read_source", "write_source", "run_tests"}
+        ),
+    )
+
+    with store.connection() as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT payload_json FROM tasks WHERE task_id = ?",
+            ("host-task",),
+        ).fetchone()
+        payload = json.loads(row["payload_json"])
+        authority = dict(
+            payload[packaged_bound_local_host._MODEL_AUTHORITY_KEY]
+        )
+        authority["model"] = "tampered-model"
+        checksum_payload = dict(authority)
+        checksum_payload.pop("authority_sha256")
+        authority["authority_sha256"] = hashlib.sha256(
+            json.dumps(
+                checksum_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        payload[packaged_bound_local_host._MODEL_AUTHORITY_KEY] = authority
+        conn.execute(
+            "UPDATE tasks SET payload_json = ? WHERE task_id = ?",
+            (
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                "host-task",
+            ),
+        )
+
+    reopened_store = SQLiteStore(store.path)
+    reopened_store.initialize()
+    restarted = PackagedBoundLocalProductFactoryHost(
+        reopened_store,
+        settings=V01ModelSettings(reopened_store),
+        startup=_startup(tmp_path),
+    )
+    reopened_project = ProductProjectRepository(reopened_store).get(
+        project.project_id
+    )
+
+    with pytest.raises(
+        PackagedBoundLocalProductFactoryHostError,
+        match="model selection digest mismatch",
+    ):
+        restarted.restore(
+            host_task_id="host-task",
+            project=reopened_project,
+        )
 
 
 def test_restart_fails_closed_for_legacy_checkpoint_without_model_authority(
