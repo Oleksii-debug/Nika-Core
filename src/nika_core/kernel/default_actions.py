@@ -26,6 +26,12 @@ def build_default_action_registry() -> ActionRegistry:
         ActionDefinition("speech.cancel", "Скасувати озвучення", "Голос", None),
         ActionDefinition("team.sources.configure", "Зберегти джерела команди", "Джерела", None),
         ActionDefinition(
+            "product.factory.execution_plan.load",
+            "Завантажити план виконання Product Factory",
+            "Product Factory",
+            None,
+        ),
+        ActionDefinition(
             "settings.model.configure", "Зберегти модель", "Налаштування", None
         ),
         ActionDefinition(
