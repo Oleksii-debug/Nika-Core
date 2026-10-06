@@ -176,6 +176,221 @@ def test_scale_plan_expands_only_full_step_budget(
     }
 
 
+def _tier_configs() -> tuple[dict[str, object], dict[str, object]]:
+    tier0: dict[str, object] = {
+        "schema_version": 2,
+        "workspace_id": "workspace",
+        "project_id": "project",
+        "owner_id": "owner",
+        "job_id": "tier0-job",
+        "blob_store_root": "C:/proof/blobs",
+        "frozen_package_path": "C:/proof/frozen-package.json",
+        "frozen_package_sha256": _sha(b"tier0-package"),
+        "trainer_executable": "C:/proof/nika-peft-trainer.exe",
+        "base_artifact_ref": "models/base",
+        "base_gguf_path": "C:/proof/base.gguf",
+        "model_dir": "C:/proof/model",
+        "output_root": "C:/proof/run",
+        "candidate_artifact_ref": "models/tier0",
+        "candidate_descriptor": {"model_id": "tier0"},
+        "runtime_versions": {"torch": "2.14.0", "transformers": "5.18.0"},
+        "resource_budget": {"max_cpu_percent": 100, "max_memory_percent": 95},
+        "trainer_parameters": {"seed": 1729, "learning_rate": 0.001},
+        "scale_plan": {"plan_id": "plan", "tiers": []},
+    }
+    tier1 = dict(tier0)
+    tier1.update(
+        {
+            "schema_version": 3,
+            "job_id": "tier1-job",
+            "frozen_package_path": "C:/proof/tier1-frozen-package.json",
+            "frozen_package_sha256": _sha(b"tier1-package"),
+            "base_artifact_ref": "models/tier0",
+            "output_root": "C:/proof/tier1-run",
+            "candidate_artifact_ref": "models/tier1",
+            "candidate_descriptor": {"model_id": "tier1"},
+            "scale_tier_id": "scale-1",
+            "initial_adapter_path": "C:/proof/tier0.safetensors",
+            "progression_proof": {"proof": "canonical"},
+        }
+    )
+    return tier0, tier1
+
+
+def test_tier1_config_continuity_allows_only_declared_scale_transition(
+    proof: ModuleType,
+) -> None:
+    tier0, tier1 = _tier_configs()
+
+    proof._require_tier1_config_continuity(tier0, tier1)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["trainer_parameters", "runtime_versions", "resource_budget", "model_dir"],
+)
+def test_tier1_config_continuity_rejects_preserved_field_drift(
+    proof: ModuleType,
+    field: str,
+) -> None:
+    tier0, tier1 = _tier_configs()
+    tier1[field] = {"changed": True} if field != "model_dir" else "C:/other/model"
+
+    with pytest.raises(
+        proof.ProofError,
+        match=f"tier-1 config changed preserved field: {field}",
+    ):
+        proof._require_tier1_config_continuity(tier0, tier1)
+
+
+def test_tier1_config_continuity_rejects_unexpected_field(
+    proof: ModuleType,
+) -> None:
+    tier0, tier1 = _tier_configs()
+    tier1["unbound_override"] = True
+
+    with pytest.raises(
+        proof.ProofError,
+        match="fields changed outside the scale transition",
+    ):
+        proof._require_tier1_config_continuity(tier0, tier1)
+
+
+def _runtime_report(**patch: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "model_dir_manifest_sha256": _sha(b"model-dir"),
+        "trainer_artifact_id": _sha(b"trainer-artifact"),
+        "trainer_deployment_sha256": _sha(b"trainer-deployment"),
+        "trainer_implementation_sha256": _sha(b"trainer-implementation"),
+        "training_runtime_manifest_sha256": _sha(b"runtime"),
+    }
+    values.update(patch)
+    return SimpleNamespace(**values)
+
+
+def test_cross_tier_runtime_authority_requires_exact_continuity(
+    proof: ModuleType,
+) -> None:
+    tier0 = _runtime_report()
+    tier1 = _runtime_report()
+
+    authority = proof._cross_tier_runtime_authority(tier0, tier1)
+
+    assert authority == {
+        field: getattr(tier0, field)
+        for field in proof._CROSS_TIER_RUNTIME_FIELDS
+    }
+
+
+@pytest.mark.parametrize("field", [
+    "model_dir_manifest_sha256",
+    "trainer_artifact_id",
+    "trainer_deployment_sha256",
+    "trainer_implementation_sha256",
+    "training_runtime_manifest_sha256",
+])
+def test_cross_tier_runtime_authority_rejects_identity_drift(
+    proof: ModuleType,
+    field: str,
+) -> None:
+    tier0 = _runtime_report()
+    tier1 = _runtime_report(**{field: _sha(("changed-" + field).encode("utf-8"))})
+
+    with pytest.raises(
+        proof.ProofError,
+        match=f"cross-tier runtime authority changed: {field}",
+    ):
+        proof._cross_tier_runtime_authority(tier0, tier1)
+
+
+def test_evaluation_binding_requires_exact_tier0_and_progression_authority(
+    proof: ModuleType,
+) -> None:
+    evaluation_set_sha256 = _sha(b"evaluation-set")
+    tier0 = SimpleNamespace(
+        candidate_artifact_ref="models/tier0",
+        candidate_sha256=_sha(b"candidate"),
+        execution_plan_sha256=_sha(b"execution-plan"),
+        evidence_sha256=_sha(b"pilot-evidence"),
+    )
+    progression = SimpleNamespace(
+        candidate_artifact_ref=tier0.candidate_artifact_ref,
+        candidate_sha256=tier0.candidate_sha256,
+        execution_plan_sha256=tier0.execution_plan_sha256,
+        evaluation_set_sha256=evaluation_set_sha256,
+        comparison_evidence_sha256=_sha(b"comparison"),
+    )
+    evaluation = {
+        "requested_experiment_id": proof._EXPERIMENT_ID,
+        "experiment_status": "promoted",
+        "selected_candidate_id": tier0.candidate_artifact_ref,
+        "previous_champion_id": "models/base",
+        "physical_pilot_evidence_sha256": tier0.evidence_sha256,
+        "evaluation_set_sha256": evaluation_set_sha256,
+        "comparison_evidence_sha256": progression.comparison_evidence_sha256,
+    }
+
+    proof._require_evaluation_binding(
+        evaluation,
+        tier0=tier0,
+        proof=progression,
+        evaluation_set_sha256=evaluation_set_sha256,
+        previous_champion_id="models/base",
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("requested_experiment_id", "wrong-experiment"),
+        ("physical_pilot_evidence_sha256", _sha(b"other-pilot")),
+        ("evaluation_set_sha256", _sha(b"other-evaluation")),
+        ("comparison_evidence_sha256", _sha(b"other-comparison")),
+    ],
+)
+def test_evaluation_binding_rejects_report_drift(
+    proof: ModuleType,
+    field: str,
+    replacement: str,
+) -> None:
+    evaluation_set_sha256 = _sha(b"evaluation-set")
+    tier0 = SimpleNamespace(
+        candidate_artifact_ref="models/tier0",
+        candidate_sha256=_sha(b"candidate"),
+        execution_plan_sha256=_sha(b"execution-plan"),
+        evidence_sha256=_sha(b"pilot-evidence"),
+    )
+    progression = SimpleNamespace(
+        candidate_artifact_ref=tier0.candidate_artifact_ref,
+        candidate_sha256=tier0.candidate_sha256,
+        execution_plan_sha256=tier0.execution_plan_sha256,
+        evaluation_set_sha256=evaluation_set_sha256,
+        comparison_evidence_sha256=_sha(b"comparison"),
+    )
+    evaluation = {
+        "requested_experiment_id": proof._EXPERIMENT_ID,
+        "experiment_status": "promoted",
+        "selected_candidate_id": tier0.candidate_artifact_ref,
+        "previous_champion_id": "models/base",
+        "physical_pilot_evidence_sha256": tier0.evidence_sha256,
+        "evaluation_set_sha256": evaluation_set_sha256,
+        "comparison_evidence_sha256": progression.comparison_evidence_sha256,
+    }
+    evaluation[field] = replacement
+
+    with pytest.raises(
+        proof.ProofError,
+        match="does not bind exact tier-0 authority",
+    ):
+        proof._require_evaluation_binding(
+            evaluation,
+            tier0=tier0,
+            proof=progression,
+            evaluation_set_sha256=evaluation_set_sha256,
+            previous_champion_id="models/base",
+        )
+
+
 def test_prepare_tier0_upgrades_canonical_preparation_once(
     proof: ModuleType,
     tmp_path: Path,
@@ -299,15 +514,33 @@ def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
     candidate.write_bytes(b"promoted-adapter")
     candidate_sha256 = _sha(candidate.read_bytes())
     report = SimpleNamespace(
+        job_id="physical-proof-job",
         candidate_artifact_ref="models/tier0-adapter",
         candidate_sha256=candidate_sha256,
         candidate_byte_count=candidate.stat().st_size,
+        evidence_sha256=_sha(b"tier0-pilot-evidence"),
+        execution_plan_sha256=_sha(b"tier0-execution-plan"),
+    )
+    comparison_sha256 = _sha(b"tier0-comparison")
+    (tmp_path / "physical-evaluation.json").write_text(
+        json.dumps(
+            {
+                "experiment_id": proof._EXPERIMENT_ID,
+                "policy": proof._evaluation_policy(minimum_improvement=0.0),
+            }
+        ),
+        encoding="utf-8",
     )
     (tier0_root / "physical-old-new-evaluation-report.json").write_text(
         json.dumps(
             {
+                "requested_experiment_id": proof._EXPERIMENT_ID,
                 "experiment_status": "promoted",
                 "selected_candidate_id": report.candidate_artifact_ref,
+                "previous_champion_id": tier0_config["base_artifact_ref"],
+                "physical_pilot_evidence_sha256": report.evidence_sha256,
+                "evaluation_set_sha256": package.evaluation_set_sha256,
+                "comparison_evidence_sha256": comparison_sha256,
             }
         ),
         encoding="utf-8",
@@ -317,18 +550,24 @@ def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
         "tier_index": 0,
         "candidate_artifact_ref": report.candidate_artifact_ref,
         "candidate_sha256": report.candidate_sha256,
+        "execution_plan_sha256": report.execution_plan_sha256,
+        "comparison_evidence_sha256": comparison_sha256,
+        "evaluation_set_sha256": package.evaluation_set_sha256,
     }
     progression = SimpleNamespace(
         tier_index=0,
         candidate_artifact_ref=report.candidate_artifact_ref,
         candidate_sha256=report.candidate_sha256,
+        execution_plan_sha256=report.execution_plan_sha256,
+        comparison_evidence_sha256=comparison_sha256,
+        evaluation_set_sha256=package.evaluation_set_sha256,
         canonical_payload=lambda: claim,
     )
     monkeypatch.setattr(proof, "_pilot_report", lambda _root: report)
     monkeypatch.setattr(
         proof,
         "_trusted_progression",
-        lambda _root, workspace_id: progression,
+        lambda _root, workspace_id, job_id: progression,
     )
     monkeypatch.setattr(
         proof,
@@ -350,6 +589,7 @@ def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
         )
     )
     assert tier1["schema_version"] == 3
+    assert tier1["job_id"] == proof._TIER1_JOB_ID
     assert tier1["base_artifact_ref"] == report.candidate_artifact_ref
     assert tier1["frozen_package_sha256"] == tier1_package.manifest_sha256
     assert tier1["scale_tier_id"] == "scale-1"
@@ -358,6 +598,95 @@ def test_prepare_tier1_binds_promoted_candidate_as_logical_base(
     assert tier1["candidate_artifact_ref"] == (
         "models/nika-physical-scale-tier1-adapter"
     )
+    assert tier1["candidate_descriptor"] == proof._tier1_candidate_descriptor()
+
+
+def _exact_transition_fixture(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, object], object, SimpleNamespace, Path]:
+    root = tmp_path.resolve()
+    output_root = root / "tier1-run"
+    output_root.mkdir()
+    adapter = root / "tier0-adapter.safetensors"
+    adapter.write_bytes(b"tier0")
+    tier0 = SimpleNamespace(candidate_artifact_ref="models/tier0")
+    claim = {"proof": "canonical"}
+    progression = SimpleNamespace(canonical_payload=lambda: claim)
+    monkeypatch.setattr(
+        proof,
+        "candidate_artifact_path",
+        lambda _root, _ref: adapter,
+    )
+    config: dict[str, object] = {
+        "schema_version": 3,
+        "job_id": proof._TIER1_JOB_ID,
+        "base_artifact_ref": tier0.candidate_artifact_ref,
+        "output_root": str(output_root.resolve()),
+        "candidate_artifact_ref": proof._TIER1_CANDIDATE_REF,
+        "candidate_descriptor": proof._tier1_candidate_descriptor(),
+        "scale_tier_id": proof._TIER1_ID,
+        "progression_proof": claim,
+        "initial_adapter_path": str(adapter.resolve()),
+    }
+    return config, progression, tier0, adapter
+
+
+def test_tier1_transition_requires_exact_proof_values(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config, progression, tier0, adapter = _exact_transition_fixture(
+        proof,
+        tmp_path,
+        monkeypatch,
+    )
+
+    observed = proof._require_tier1_transition_values(
+        tmp_path.resolve(),
+        config,
+        tier0=tier0,
+        proof=progression,
+    )
+
+    assert observed == adapter.resolve()
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("job_id", "other-job"),
+        ("candidate_artifact_ref", "models/other"),
+        ("scale_tier_id", "other-tier"),
+        ("candidate_descriptor", {"model_id": "other"}),
+    ],
+)
+def test_tier1_transition_rejects_value_drift(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    config, progression, tier0, _adapter = _exact_transition_fixture(
+        proof,
+        tmp_path,
+        monkeypatch,
+    )
+    config[field] = value
+
+    with pytest.raises(
+        proof.ProofError,
+        match="does not encode the exact scale transition",
+    ):
+        proof._require_tier1_transition_values(
+            tmp_path.resolve(),
+            config,
+            tier0=tier0,
+            proof=progression,
+        )
 
 
 def test_configure_promotion_uses_explicit_non_regression_policy(
@@ -401,6 +730,9 @@ def test_configure_promotion_uses_explicit_non_regression_policy(
         ({"primary_metric": "wrong"}, "canonical real-proof policy"),
         ({"minimum_replays": 2}, "canonical real-proof policy"),
         ({"primary_higher_is_better": False}, "canonical real-proof policy"),
+        ({"minimum_improvement": 0.0}, "canonical real-proof policy"),
+        ({"guardrails": []}, "canonical real-proof policy"),
+        ({"unexpected": "field"}, "canonical real-proof policy"),
     ],
 )
 def test_configure_promotion_rejects_noncanonical_policy(
@@ -414,7 +746,13 @@ def test_configure_promotion_rejects_noncanonical_policy(
         "minimum_improvement": 0.000001,
         "minimum_replays": 1,
         "primary_higher_is_better": True,
-        "guardrails": [],
+        "guardrails": [
+            {
+                "metric": "model_task_pass",
+                "higher_is_better": True,
+                "max_regression": 1.0,
+            }
+        ],
     }
     policy.update(policy_patch)
     (tmp_path / "physical-evaluation.json").write_text(
@@ -488,9 +826,7 @@ def _progression_discovery_fixture(
         operation_key="scale-progression-one",
         claim=claim,
     )
-    report = SimpleNamespace(job_id="pilot-job")
     restored = SimpleNamespace(canonical_payload=lambda: dict(claim))
-    monkeypatch.setattr(proof, "_pilot_report", lambda _root: report)
     monkeypatch.setattr(
         proof,
         "load_trusted_scale_progression_proof",
@@ -527,6 +863,7 @@ def test_trusted_progression_discovery_streams_durable_history(
     restored = proof._trusted_progression(
         root,
         workspace_id="physical-proof-workspace",
+        job_id="pilot-job",
     )
 
     assert restored.canonical_payload() == claim
@@ -553,6 +890,7 @@ def test_trusted_progression_discovery_ignores_other_completed_operations(
     restored = proof._trusted_progression(
         root,
         workspace_id="physical-proof-workspace",
+        job_id="pilot-job",
     )
 
     assert restored.canonical_payload() == claim
@@ -589,5 +927,6 @@ def test_trusted_progression_discovery_rejects_duplicate_durable_claims(
         proof._trusted_progression(
             root,
             workspace_id="physical-proof-workspace",
+            job_id="pilot-job",
         )
 
