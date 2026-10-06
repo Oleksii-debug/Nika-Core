@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PRODUCT_PROJECT_SCHEMA_VERSION = 6
+PRODUCT_PROJECT_SCHEMA_VERSION = 7
 
 PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -163,5 +163,25 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
             "CREATE INDEX IF NOT EXISTS idx_pf_local_repository_bindings_project "
             "ON product_factory_local_repository_bindings(project_id, repository_id)"
         ),
+    ),
+    7: (
+        """CREATE TABLE IF NOT EXISTS product_factory_local_repository_binding_generations (
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            last_binding_version INTEGER NOT NULL CHECK(last_binding_version > 0),
+            PRIMARY KEY(project_id, repository_id),
+            FOREIGN KEY(project_id) REFERENCES product_projects(project_id) ON DELETE CASCADE
+        )""",
+        """INSERT INTO product_factory_local_repository_binding_generations(
+            project_id, repository_id, last_binding_version
+        )
+        SELECT project_id, repository_id, binding_version
+        FROM product_factory_local_repository_bindings
+        WHERE 1
+        ON CONFLICT(project_id, repository_id) DO UPDATE SET
+            last_binding_version = excluded.last_binding_version
+        WHERE excluded.last_binding_version >
+              product_factory_local_repository_binding_generations.last_binding_version
+        """,
     ),
 }
