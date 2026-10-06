@@ -509,6 +509,34 @@ def test_model_directory_snapshot_detects_persisted_tamper(tmp_path: Path) -> No
         peft._model_directory_snapshot(config, job_root)
 
 
+def test_foundation_load_authority_bounds_open_file_set(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    staged_base = peft._copy_verified_base(config, request, job_root)
+    model_dir = tmp_path / "large-model-snapshot"
+    model_dir.mkdir()
+    for index in range(peft._MAX_MODEL_LOAD_AUTHORITY_FILES + 1):
+        (model_dir / f"entry-{index:03d}.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+    manifest = peft.model_directory_manifest_sha256(model_dir)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="foundation_load_authority_file_limit",
+    ):
+        peft._open_foundation_load_authority(
+            model_dir,
+            staged_base,
+            expected_model_manifest_sha256=manifest,
+            expected_base_sha256=config.base_gguf_sha256,
+        )
+
+
 def test_candidate_path_is_stable_and_reference_specific(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     first = peft.candidate_artifact_path(root, "models/candidate/a")
@@ -906,6 +934,55 @@ def test_complete_sequence_at_budget_is_accepted_without_partial_response() -> N
     assert len(item["attention_mask"]) == 8
 
 
+def test_tokenization_dataset_snapshots_reused_tokenizer_buffers() -> None:
+    class ReusedBufferTokenizer(_FakeTokenizer):
+        def __init__(self) -> None:
+            self.input_ids: list[int] = []
+            self.attention_mask: list[int] = []
+
+        def __call__(
+            self,
+            text: str,
+            *,
+            truncation: bool,
+            max_length: int,
+            add_special_tokens: bool,
+        ) -> dict[str, list[int]]:
+            encoded = super().__call__(
+                text,
+                truncation=truncation,
+                max_length=max_length,
+                add_special_tokens=add_special_tokens,
+            )
+            self.input_ids[:] = encoded["input_ids"]
+            self.attention_mask[:] = encoded["attention_mask"]
+            return {
+                "attention_mask": self.attention_mask,
+                "input_ids": self.input_ids,
+            }
+
+    dataset = peft._TokenizedDataset(
+        (
+            peft.TrainingExample("first", "one"),
+            peft.TrainingExample("second", "two"),
+        ),
+        ReusedBufferTokenizer(),
+        64,
+    )
+
+    first = dataset[0]
+    second = dataset[1]
+    assert first["input_ids"] != second["input_ids"]
+
+    evidence_sha256 = dataset.evidence_sha256
+    first["input_ids"].append(999)
+    first["attention_mask"].append(0)
+
+    assert dataset[0]["input_ids"][-1] != 999
+    assert len(dataset[0]["input_ids"]) == len(dataset[0]["attention_mask"])
+    assert dataset.evidence_sha256 == evidence_sha256
+
+
 class _FakeTokenizerFactory:
     @staticmethod
     def from_pretrained(*args: object, **kwargs: object) -> _FakeTokenizer:
@@ -1118,6 +1195,63 @@ def _fake_stack() -> tuple[object, ...]:
         _FakeTrainingArguments,
         lambda seed: None,
     )
+
+
+@pytest.mark.parametrize("target_kind", ["model-file", "gguf"])
+def test_foundation_load_authority_rejects_transient_load_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    observed = {"blocked": False, "mutated": False}
+
+    class MutatingTokenizerFactory:
+        @staticmethod
+        def from_pretrained(
+            *args: object,
+            **kwargs: object,
+        ) -> _FakeTokenizer:
+            model_dir = Path(str(args[0]))
+            target = (
+                model_dir / "tokenizer.json"
+                if target_kind == "model-file"
+                else Path(str(kwargs["gguf_file"]))
+            )
+            original = target.read_bytes()
+            try:
+                target.write_bytes(original + b"transient")
+                target.write_bytes(original)
+                observed["mutated"] = True
+            except OSError:
+                observed["blocked"] = True
+            return _FakeTokenizerFactory.from_pretrained(*args, **kwargs)
+
+    stack = list(_fake_stack())
+    stack[9] = MutatingTokenizerFactory
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            request,
+            config,
+            consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="foundation_changed_during_load",
+        ):
+            peft._train_one_step(
+                request,
+                config,
+                consumed,
+            )
+        assert observed == {"blocked": False, "mutated": True}
 
 
 class _NoMutationFakeTrainer(_FakeTrainer):
@@ -1362,6 +1496,109 @@ def test_completed_final_step_replays_existing_candidate_without_overwrite(
     assert candidate.read_bytes() == candidate_bytes
 
 
+def test_existing_candidate_replay_holds_authority_during_manifest_and_hash(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    _, expected_sha256 = peft._train_one_step(request, config, consumed)
+    assert expected_sha256 is not None
+
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    carrier = json.loads(candidate.read_bytes())
+    expected_manifest = json.loads(
+        carrier["metadata"]["nika_adapter_manifest"]
+    )
+    real_open = peft._open_readonly_snapshot
+    events: list[str] = []
+
+    def tracked_open(path: Path) -> int:
+        if path == candidate:
+            events.append("open")
+        return real_open(path)
+
+    def manifest_from_fake_candidate(path: Path) -> dict[str, object]:
+        assert path == candidate
+        events.append("manifest")
+        current = json.loads(path.read_bytes())
+        return json.loads(current["metadata"]["nika_adapter_manifest"])
+
+    monkeypatch.setattr(peft, "_open_readonly_snapshot", tracked_open)
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        manifest_from_fake_candidate,
+    )
+
+    observed_sha256 = peft._existing_candidate_sha256(
+        candidate,
+        expected_manifest=expected_manifest,
+    )
+
+    assert observed_sha256 == expected_sha256
+    assert events == ["open", "manifest", "open"]
+
+
+def test_existing_candidate_replay_rejects_manifest_to_digest_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    _, expected_sha256 = peft._train_one_step(request, config, consumed)
+    assert expected_sha256 is not None
+
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    carrier = json.loads(candidate.read_bytes())
+    expected_manifest = json.loads(
+        carrier["metadata"]["nika_adapter_manifest"]
+    )
+    def mutate_after_manifest(path: Path) -> dict[str, object]:
+        current = json.loads(path.read_bytes())
+        observed = json.loads(
+            current["metadata"]["nika_adapter_manifest"]
+        )
+        try:
+            with path.open("ab") as handle:
+                handle.write(b"mutation")
+        except OSError:
+            pass
+        return observed
+
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        mutate_after_manifest,
+    )
+
+    if peft.os.name == "nt":
+        observed_sha256 = peft._existing_candidate_sha256(
+            candidate,
+            expected_manifest=expected_manifest,
+        )
+        assert observed_sha256 == expected_sha256
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="candidate_replay_changed",
+        ):
+            peft._existing_candidate_sha256(
+                candidate,
+                expected_manifest=expected_manifest,
+            )
+
+
 def test_incomplete_target_checkpoint_fails_closed_before_retry_training(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1531,6 +1768,177 @@ def test_resumed_training_loads_from_verified_checkpoint_snapshot(
     assert manifest["previous_adapter_tensors_sha256"] != forged_previous_sha256
 
 
+def test_resume_load_authority_rejects_transient_adapter_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    first_state, first_candidate = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+    assert first_candidate is None
+    observed = {"blocked": False, "mutated": False}
+
+    class _TransientResumeAdapterMutation:
+        @staticmethod
+        def from_pretrained(
+            model: _FakeModel,
+            path: str,
+            *,
+            is_trainable: bool,
+            local_files_only: bool,
+        ) -> _FakeModel:
+            target = Path(path) / peft._CANDIDATE_FILE
+            original = target.read_bytes()
+            try:
+                target.write_bytes(original + b"-transient")
+                target.write_bytes(original)
+                observed["mutated"] = True
+            except OSError:
+                observed["blocked"] = True
+            return _FakePeftModel.from_pretrained(
+                model,
+                path,
+                is_trainable=is_trainable,
+                local_files_only=local_files_only,
+            )
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = _step_id(1)
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    stack = list(_fake_stack())
+    stack[2] = _TransientResumeAdapterMutation
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            second,
+            config,
+            second_consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="resume_checkpoint_changed_during_load",
+        ):
+            peft._train_one_step(
+                second,
+                config,
+                second_consumed,
+            )
+        assert observed == {"blocked": False, "mutated": True}
+
+
+def test_resume_load_authority_pins_non_adapter_checkpoint_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _StatefulCheckpointTrainer(_FakeTrainer):
+        def train(self, *, resume_from_checkpoint: str | bool) -> None:
+            super().train(resume_from_checkpoint=resume_from_checkpoint)
+            checkpoint = (
+                Path(self.args.output_dir)
+                / f"checkpoint-{self.args.max_steps}"
+            )
+            (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    first_stack = list(_fake_stack())
+    first_stack[11] = _StatefulCheckpointTrainer
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        lambda: tuple(first_stack),
+    )
+    first_state, first_candidate = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+    assert first_candidate is None
+    observed = {"blocked": False, "mutated": False}
+
+    class _TransientResumeStateMutationTrainer(_FakeTrainer):
+        def train(self, *, resume_from_checkpoint: str | bool) -> None:
+            target = Path(str(resume_from_checkpoint)) / "optimizer.pt"
+            original = target.read_bytes()
+            try:
+                target.write_bytes(original + b"-transient")
+                target.write_bytes(original)
+                observed["mutated"] = True
+            except OSError:
+                observed["blocked"] = True
+            super().train(resume_from_checkpoint=resume_from_checkpoint)
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = _step_id(1)
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    second_stack = list(_fake_stack())
+    second_stack[11] = _TransientResumeStateMutationTrainer
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        lambda: tuple(second_stack),
+    )
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            second,
+            config,
+            second_consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="resume_checkpoint_changed_during_load",
+        ):
+            peft._train_one_step(
+                second,
+                config,
+                second_consumed,
+            )
+        assert observed == {"blocked": False, "mutated": True}
+
+
+def test_resume_load_authority_bounds_open_file_count(
+    tmp_path: Path,
+) -> None:
+    checkpoint = tmp_path / "checkpoint-1"
+    checkpoint.mkdir()
+    for index in range(peft._MAX_RESUME_LOAD_AUTHORITY_FILES + 1):
+        (checkpoint / f"state-{index:03d}.bin").write_bytes(b"state")
+    expected_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="resume_load_authority_file_limit",
+    ):
+        peft._open_resume_checkpoint_load_authority(
+            checkpoint,
+            expected_payload_sha256=expected_sha256,
+        )
+
+
 def test_initial_adapter_config_publish_recovers_partial_prelink_temp(
     tmp_path: Path,
 ) -> None:
@@ -1639,6 +2047,152 @@ def test_checkpoint_snapshot_revalidates_nested_source_changes(
         child.name.startswith(".resume-checkpoint-snapshot-")
         for child in job_root.iterdir()
     )
+
+
+@pytest.mark.parametrize(
+    "relative_name",
+    [peft._CANDIDATE_FILE, "adapter_config.json"],
+)
+def test_initial_adapter_load_authority_pins_staged_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_name: str,
+) -> None:
+    raw_request, foundation = _request(tmp_path, max_steps=1)
+    promoted_bytes = b"promoted-tier-zero-adapter"
+    promoted_sha256 = _sha256(promoted_bytes)
+    raw_request["job"]["base_artifact"] = {
+        "artifact_ref": "models/candidate/pilot",
+        "sha256": promoted_sha256,
+    }
+    raw_request["training_materials"]["base_artifact_sha256"] = promoted_sha256
+    request = peft._parse_request(raw_request)
+    base_config = _config(tmp_path, request, foundation)
+    promoted = tmp_path / "promoted.safetensors"
+    promoted.write_bytes(promoted_bytes)
+    config = replace(
+        base_config,
+        initial_adapter=promoted.resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    adapter_dir = tmp_path / "staged-adapter"
+    adapter_dir.mkdir()
+    candidate = adapter_dir / peft._CANDIDATE_FILE
+    candidate.write_bytes(promoted_bytes)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    config_path = adapter_dir / "adapter_config.json"
+    config_path.write_bytes(peft._canonical_json_bytes(adapter_config))
+    manifest = {
+        "adapter_config": adapter_config,
+        "base_artifact_sha256": config.base_gguf_sha256,
+        "candidate_artifact_ref": request.base_artifact_ref,
+        "schema": "nika-peft-candidate-v2",
+    }
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        lambda _: manifest,
+    )
+
+    authority = peft._open_initial_adapter_load_authority(
+        adapter_dir,
+        config=config,
+        request=request,
+    )
+    changed_path = adapter_dir / relative_name
+    try:
+        if peft.os.name == "nt":
+            with pytest.raises(OSError):
+                with changed_path.open("ab") as handle:
+                    handle.write(b"mutation")
+            peft._verify_initial_adapter_load_authority(
+                authority,
+                adapter_dir=adapter_dir,
+            )
+        else:
+            with changed_path.open("ab") as handle:
+                handle.write(b"mutation")
+            with pytest.raises(
+                peft.PeftTrainerError,
+                match="initial_adapter_changed_during_load",
+            ):
+                peft._verify_initial_adapter_load_authority(
+                    authority,
+                    adapter_dir=adapter_dir,
+                )
+    finally:
+        peft._close_initial_adapter_load_authority(authority)
+
+
+def test_initial_adapter_load_authority_rejects_extra_load_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_request, foundation = _request(tmp_path, max_steps=1)
+    promoted_bytes = b"promoted-tier-zero-adapter"
+    promoted_sha256 = _sha256(promoted_bytes)
+    raw_request["job"]["base_artifact"] = {
+        "artifact_ref": "models/candidate/pilot",
+        "sha256": promoted_sha256,
+    }
+    raw_request["training_materials"]["base_artifact_sha256"] = promoted_sha256
+    request = peft._parse_request(raw_request)
+    base_config = _config(tmp_path, request, foundation)
+    config = replace(
+        base_config,
+        initial_adapter=(tmp_path / "promoted.safetensors").resolve(),
+        initial_adapter_sha256=promoted_sha256,
+    )
+    adapter_dir = tmp_path / "staged-adapter"
+    adapter_dir.mkdir()
+    (adapter_dir / peft._CANDIDATE_FILE).write_bytes(promoted_bytes)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+    (adapter_dir / "adapter_config.json").write_bytes(
+        peft._canonical_json_bytes(adapter_config)
+    )
+    monkeypatch.setattr(
+        peft,
+        "candidate_adapter_manifest",
+        lambda _: {
+            "adapter_config": adapter_config,
+            "base_artifact_sha256": config.base_gguf_sha256,
+            "candidate_artifact_ref": request.base_artifact_ref,
+            "schema": "nika-peft-candidate-v2",
+        },
+    )
+    authority = peft._open_initial_adapter_load_authority(
+        adapter_dir,
+        config=config,
+        request=request,
+    )
+    try:
+        (adapter_dir / "adapter_model.bin").write_bytes(b"alternate")
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="initial_adapter_changed_during_load",
+        ):
+            peft._verify_initial_adapter_load_authority(
+                authority,
+                adapter_dir=adapter_dir,
+            )
+    finally:
+        peft._close_initial_adapter_load_authority(authority)
 
 
 def test_new_job_can_warm_start_from_promoted_candidate(
@@ -3381,6 +3935,104 @@ def test_final_candidate_rejects_transient_tensor_source_substitution(
     assert not candidate.exists()
 
 
+@pytest.mark.parametrize(
+    "relative_name",
+    [peft._CANDIDATE_FILE, "adapter_config.json"],
+)
+def test_trained_adapter_source_authority_pins_post_step_reads(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    relative_name: str,
+) -> None:
+    raw_request, base = _request(tmp_path, max_steps=1)
+    request = peft._parse_request(raw_request)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    checkpoint = peft._checkpoint_dir(peft._job_root(config, request), 1)
+    target = checkpoint / "adapter" / relative_name
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    observed = {"blocked": False, "mutated": False}
+    attempted = False
+
+    def _mutate_then_restore() -> None:
+        nonlocal attempted
+        if attempted:
+            return
+        attempted = True
+        original = target.read_bytes()
+        try:
+            target.write_bytes(original + b"-transient-source-mutation")
+            target.write_bytes(original)
+            observed["mutated"] = True
+        except OSError:
+            observed["blocked"] = True
+
+    if relative_name == peft._CANDIDATE_FILE:
+        def _mutating_safe_open(
+            path: str,
+            *,
+            framework: str,
+            device: str,
+        ) -> _FakeSafeTensorReader:
+            if Path(path) == target:
+                _mutate_then_restore()
+            return _fake_safe_open(
+                path,
+                framework=framework,
+                device=device,
+            )
+
+        def _mutating_stack() -> tuple[object, ...]:
+            values = list(_fake_stack())
+            values[5] = _mutating_safe_open
+            return tuple(values)
+
+        monkeypatch.setattr(peft, "_import_training_stack", _mutating_stack)
+    else:
+        real_snapshot = peft._adapter_config_snapshot
+
+        def _mutating_config_snapshot(
+            path: Path,
+            parsed: peft.ParsedRequest,
+            trainer_config: peft.TrainerConfig,
+        ) -> dict[str, object]:
+            _mutate_then_restore()
+            return real_snapshot(path, parsed, trainer_config)
+
+        monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+        monkeypatch.setattr(
+            peft,
+            "_adapter_config_snapshot",
+            _mutating_config_snapshot,
+        )
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            request,
+            config,
+            consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="trained_adapter_source_changed",
+        ):
+            peft._train_one_step(
+                request,
+                config,
+                consumed,
+            )
+        marker = checkpoint / peft._CHECKPOINT_MARKER
+        assert observed == {"blocked": False, "mutated": True}
+        assert not marker.exists()
+        assert not candidate.exists()
+
+
 def test_final_candidate_rejects_checkpoint_change_during_materialization(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3462,3 +4114,226 @@ def test_final_candidate_rejects_checkpoint_change_after_publish(
     assert mutated is True
     assert not candidate.exists()
 
+
+
+
+def test_peft_tokenization_evidence_binds_checkpoint_and_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+
+    resume_state, candidate_sha256 = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+
+    assert candidate_sha256 is not None
+    tokenization_sha256 = resume_state["tokenization_sha256"]
+    assert isinstance(tokenization_sha256, str)
+    assert len(tokenization_sha256) == 64
+    assert resume_state["schema_version"] == peft._RESUME_STATE_SCHEMA_VERSION
+
+    job_root = config.output_root / peft._candidate_key(
+        request.candidate_artifact_ref
+    )
+    marker_path = (
+        job_root / "trainer" / "checkpoint-1" / peft._CHECKPOINT_MARKER
+    )
+    checkpoint_marker = json.loads(marker_path.read_bytes())
+    assert (
+        checkpoint_marker["schema_version"]
+        == peft._CHECKPOINT_MARKER_SCHEMA_VERSION
+    )
+    assert checkpoint_marker["tokenization_sha256"] == tokenization_sha256
+
+    candidate = peft.candidate_artifact_path(
+        config.output_root,
+        request.candidate_artifact_ref,
+    )
+    carrier = json.loads(candidate.read_bytes())
+    manifest = json.loads(carrier["metadata"]["nika_adapter_manifest"])
+    assert manifest["tokenization_sha256"] == tokenization_sha256
+
+
+def test_resumed_training_rejects_tokenization_drift_before_new_effect(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    first_state, first_candidate = peft._train_one_step(
+        request,
+        config,
+        consumed,
+    )
+    assert first_candidate is None
+
+    class DriftTokenizer(_FakeTokenizer):
+        def __call__(
+            self,
+            text: str,
+            *,
+            truncation: bool,
+            max_length: int,
+            add_special_tokens: bool,
+        ) -> dict[str, list[int]]:
+            encoded = super().__call__(
+                text,
+                truncation=truncation,
+                max_length=max_length,
+                add_special_tokens=add_special_tokens,
+            )
+            encoded["input_ids"] = [
+                (token + 1) % 256 for token in encoded["input_ids"]
+            ]
+            return encoded
+
+    class DriftTokenizerFactory:
+        @staticmethod
+        def from_pretrained(
+            *args: object,
+            **kwargs: object,
+        ) -> DriftTokenizer:
+            _FakeTokenizerFactory.from_pretrained(*args, **kwargs)
+            return DriftTokenizer()
+
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["previous_step_id"] = request.step_id
+    raw_second["step_id"] = _step_id(1)
+    raw_second["resume_state"] = first_state
+    second = peft._parse_request(raw_second)
+    second_consumed = peft._consume_materials(second, max_records=10)
+    stack = list(_fake_stack())
+    stack[9] = DriftTokenizerFactory
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="resume_tokenization_evidence_mismatch",
+    ):
+        peft._train_one_step(second, config, second_consumed)
+
+    job_root = config.output_root / peft._candidate_key(
+        request.candidate_artifact_ref
+    )
+    assert not (job_root / "trainer" / "checkpoint-2").exists()
+    assert not any(
+        child.name.startswith(".resume-checkpoint-snapshot-")
+        for child in job_root.iterdir()
+    )
+
+
+def test_completed_checkpoint_replay_rejects_tokenization_evidence_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    _, candidate_sha256 = peft._train_one_step(request, config, consumed)
+    assert candidate_sha256 is not None
+
+    job_root = config.output_root / peft._candidate_key(
+        request.candidate_artifact_ref
+    )
+    marker_path = (
+        job_root / "trainer" / "checkpoint-1" / peft._CHECKPOINT_MARKER
+    )
+    checkpoint_marker = json.loads(marker_path.read_bytes())
+    checkpoint_marker["tokenization_sha256"] = "0" * 64
+    marker_path.write_bytes(peft._canonical_json_bytes(checkpoint_marker))
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="step_checkpoint_tokenization_mismatch",
+    ):
+        peft._train_one_step(request, config, consumed)
+
+
+def test_candidate_manifest_accepts_legacy_and_tokenization_bound_contracts(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    adapter_config = {
+        "base_model_name_or_path": request.base_artifact_ref,
+        "bias": "none",
+        "lora_alpha": config.lora_alpha,
+        "lora_dropout": config.lora_dropout,
+        "r": config.lora_r,
+        "target_modules": list(config.lora_target_modules),
+        "task_type": "CAUSAL_LM",
+    }
+
+    legacy = json.loads(
+        peft._candidate_manifest_json(
+            request=request,
+            config=config,
+            consumed=consumed,
+            adapter_config=adapter_config,
+            previous_adapter_tensors_sha256=None,
+            trained_adapter_tensors_sha256="9" * 64,
+        )
+    )
+    current = json.loads(
+        peft._candidate_manifest_json(
+            request=request,
+            config=config,
+            consumed=consumed,
+            adapter_config=adapter_config,
+            previous_adapter_tensors_sha256=None,
+            trained_adapter_tensors_sha256="9" * 64,
+            tokenization_sha256="8" * 64,
+        )
+    )
+
+    assert "tokenization_sha256" not in legacy
+    assert current["tokenization_sha256"] == "8" * 64
+    assert peft._validate_candidate_manifest_payload(legacy) == legacy
+    assert peft._validate_candidate_manifest_payload(current) == current
+
+    malformed = dict(current)
+    malformed["tokenization_sha256"] = "not-a-digest"
+    with pytest.raises(peft.PeftTrainerError, match="candidate_manifest_invalid"):
+        peft._validate_candidate_manifest_payload(malformed)
+
+
+def test_tokenization_evidence_rejects_noncanonical_token_ids() -> None:
+    class BoolTokenTokenizer(_FakeTokenizer):
+        def __call__(
+            self,
+            text: str,
+            *,
+            truncation: bool,
+            max_length: int,
+            add_special_tokens: bool,
+        ) -> dict[str, list[int]]:
+            super().__call__(
+                text,
+                truncation=truncation,
+                max_length=max_length,
+                add_special_tokens=add_special_tokens,
+            )
+            return {"attention_mask": [1], "input_ids": [True]}
+
+    with pytest.raises(peft.PeftTrainerError, match="response_tokens_truncated"):
+        peft._TokenizedDataset(
+            (peft.TrainingExample("prompt", "response"),),
+            BoolTokenTokenizer(),
+            32,
+        )
