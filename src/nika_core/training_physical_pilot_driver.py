@@ -1175,9 +1175,13 @@ def run_physical_pilot_from_config(
                 if tier_index == 0
                 else "physical_peft_scale_tier"
             ),
+            "progression_proof": (
+                None if progression_proof is None else progression_proof.canonical_payload()
+            ),
             "progression_proof_sha256": (
                 None if progression_proof is None else progression_proof.proof_sha256
             ),
+            "scale_plan": scale_plan.canonical_payload(),
             "scale_plan_sha256": scale_plan.plan_sha256,
             "scale_tier_id": scale_tier.tier_id,
         },
