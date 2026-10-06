@@ -168,6 +168,7 @@ class MultiRepositoryProductFactoryHost:
         repr=False,
     )
     reviewer_principals: ReviewerPrincipalBindings = field(default=(), repr=False)
+    program_host: ProductFactoryProgramHost | None = field(default=None, repr=False)
     _program: ProductFactoryProgramHost = field(init=False, repr=False)
     _coordinator_checkpoints: ProductFactoryCheckpointHost = field(
         init=False,
@@ -175,11 +176,31 @@ class MultiRepositoryProductFactoryHost:
     )
 
     def __post_init__(self) -> None:
-        self._program = ProductFactoryProgramHost(
-            self.store,
-            self.worker,
-            review_evidence_authority=self.review_evidence_authority,
-        )
+        if self.program_host is None:
+            program = ProductFactoryProgramHost(
+                self.store,
+                self.worker,
+                review_evidence_authority=self.review_evidence_authority,
+            )
+        else:
+            program = self.program_host
+            if not isinstance(program, ProductFactoryProgramHost):
+                raise MultiRepositoryExecutionError(
+                    "reused Product Factory program host has an invalid carrier"
+                )
+            if program.store is not self.store:
+                raise MultiRepositoryExecutionError(
+                    "reused Product Factory program host must share the exact SQLiteStore"
+                )
+            if program.worker is not self.worker:
+                raise MultiRepositoryExecutionError(
+                    "reused Product Factory program host must share the exact worker adapter"
+                )
+            if program.review_evidence_authority is not self.review_evidence_authority:
+                raise MultiRepositoryExecutionError(
+                    "reused Product Factory program host review authority changed"
+                )
+        self._program = program
         self._coordinator_checkpoints = ProductFactoryCheckpointHost(self.store)
 
     def initialize(
