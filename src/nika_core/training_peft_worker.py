@@ -183,17 +183,8 @@ def _open_readonly_snapshot(path: Path) -> int:
 
 
 def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as handle:
-            while True:
-                chunk = handle.read(_READ_CHUNK_BYTES)
-                if not chunk:
-                    break
-                digest.update(chunk)
-    except OSError:
-        _fail("file_read_failed")
-    return digest.hexdigest()
+    digest, _ = _hash_regular_snapshot(path, code="file_read_failed")
+    return digest
 
 
 def trainer_implementation_sha256() -> str:
