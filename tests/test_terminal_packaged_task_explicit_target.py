@@ -163,6 +163,13 @@ def test_targeted_direct_parser_rejects_noncanonical_task_id(command: str) -> No
         packaged_task_direct_target(command)
 
 
+def test_targeted_direct_parser_does_not_capture_multword_general_request() -> None:
+    assert packaged_task_direct_target("pause task execution safely") is None
+    assert packaged_task_direct_target(
+        "продовж завдання після перевірки користувачем"
+    ) is None
+
+
 def test_router_forwards_only_canonical_target_id(tmp_path: Path) -> None:
     store = SQLiteStore(tmp_path / "router.db")
     store.initialize()
