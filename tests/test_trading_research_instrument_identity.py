@@ -192,7 +192,7 @@ def test_replay_never_executes_against_other_venue_market_data() -> None:
             1,
             _NOW,
             (
-                _quote(_INSTRUMENT_A, ask="50"),
+                _quote(_INSTRUMENT_A, bid="49", ask="50"),
                 _quote(_INSTRUMENT_B, ask="101"),
             ),
         ),
