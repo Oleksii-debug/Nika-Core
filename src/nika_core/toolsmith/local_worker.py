@@ -1050,6 +1050,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
     async def recover(self, job: CodingJob, state: RecoveryState) -> CodingResult:
         try:
             exact = _snapshot_job(job)
+            self._require_repository_authority(exact.repository.repository_id)
             self._validate_job(exact, allow_expired=True)
         except (ValueError, WorkspaceSecurityError, ContainedLocalWorkerError) as exc:
             return self._failure(
@@ -1075,6 +1076,7 @@ class ContainedLocalCodingWorker(CodingWorkerPort):
             return self._manual_reconcile(exact.job_id)
         if durable["phase"] != "terminal":
             return self._manual_reconcile(exact.job_id)
+        self._require_repository_authority(exact.repository.repository_id)
         return self._existing_result(exact, durable)
 
     def _execute_sync(
