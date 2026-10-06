@@ -67,16 +67,21 @@ class PackagedLocalBuildNodeAvailability:
         if type(node_id) is not str or node_id != self.node_id:
             return False
         try:
+            self.startup.__post_init__()
             ensure_real_directory_root(
                 self.startup.workspace_parent,
                 label="PF5 local build workspace parent",
             )
         except (OSError, TypeError, ValueError, WorkspaceSecurityError):
             return False
-        return _is_real_regular_file(self.startup.git_executable) and os.access(
-        self.startup.git_executable,
-        os.X_OK,
-    )
+        executable_paths = (
+            self.startup.git_executable,
+            *(Path(value) for value in self.startup.policy.allowed_executables),
+        )
+        return all(
+            _is_real_regular_file(path) and os.access(path, os.X_OK)
+            for path in executable_paths
+        )
 
 
 def build_packaged_local_durable_build_host(
