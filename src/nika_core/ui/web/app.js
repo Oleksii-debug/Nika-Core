@@ -115,6 +115,15 @@
   const workspacesEmpty = document.getElementById("workspaces-empty");
   const productProjectEmpty = document.getElementById("product-project-empty");
   const productProjectSummary = document.getElementById("product-project-summary");
+  const productFactoryExecutionPlanPath = document.getElementById(
+    "product-factory-execution-plan-path",
+  );
+  const productFactoryExecutionPlanStatus = document.getElementById(
+    "product-factory-execution-plan-status",
+  );
+  const productFactoryExecutionPlanLoad = document.getElementById(
+    "product-factory-execution-plan-load",
+  );
   const productProjectStatuses = document.getElementById("product-project-statuses");
   const productProjectStatusesList = document.getElementById("product-project-statuses-list");
   const productProjectStatusesEmpty = document.getElementById("product-project-statuses-empty");
@@ -622,6 +631,7 @@
   function reportStateUnavailable() {
     renderStartupRecovery(null);
     renderModelSettings(null);
+    renderProductFactoryExecutionPlan(null);
     clearTaskSelection();
     renderTaskPage(null);
     renderProductProjectUnavailable(productProjectUnavailableMessage);
@@ -660,6 +670,46 @@
       productProjectOperatorFields[field].textContent = operator[field];
     }
     productProjectOperator.hidden = false;
+  }
+
+  function renderProductFactoryExecutionPlan(snapshot) {
+    const failClosed = (
+      message = "Стан JSON-плану виконання Product Factory недоступний або несумісний."
+    ) => {
+      if (productFactoryExecutionPlanStatus) {
+        productFactoryExecutionPlanStatus.textContent = message;
+      }
+      if (productFactoryExecutionPlanPath) productFactoryExecutionPlanPath.disabled = true;
+      if (productFactoryExecutionPlanLoad) productFactoryExecutionPlanLoad.disabled = true;
+      return false;
+    };
+    if (
+      !snapshot
+      || !["missing", "loaded"].includes(snapshot.status)
+      || typeof snapshot.loaded !== "boolean"
+      || typeof snapshot.message !== "string"
+      || snapshot.message.length === 0
+      || !(
+        snapshot.project_id === null
+        || (typeof snapshot.project_id === "string" && snapshot.project_id.length > 0)
+      )
+    ) {
+      return failClosed();
+    }
+    if (
+      (snapshot.status === "missing"
+        && (snapshot.loaded || snapshot.project_id !== null))
+      || (snapshot.status === "loaded"
+        && (!snapshot.loaded || typeof snapshot.project_id !== "string"))
+    ) {
+      return failClosed();
+    }
+    if (productFactoryExecutionPlanStatus) {
+      productFactoryExecutionPlanStatus.textContent = snapshot.message;
+    }
+    if (productFactoryExecutionPlanPath) productFactoryExecutionPlanPath.disabled = false;
+    if (productFactoryExecutionPlanLoad) productFactoryExecutionPlanLoad.disabled = false;
+    return true;
   }
 
   function renderProductProject(project) {
@@ -1892,6 +1942,9 @@
     renderVoiceModelSetup(state.voice_model_setup ?? null);
     renderSpeech(state.speech ?? null);
     renderVoice(state.voice ?? null);
+    const productFactoryExecutionPlanReady = renderProductFactoryExecutionPlan(
+      state.product_factory_execution_plan ?? null,
+    );
     const taskPageReady = renderTaskPage(state.task_page ?? null);
     renderTasks(state.tasks || []);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
@@ -1913,7 +1966,7 @@
       announce(teamTaskUnavailableMessage, true);
       return false;
     }
-    if (!productReady) {
+    if (!productFactoryExecutionPlanReady || !productReady) {
       lastStateReady = false;
       return false;
     }
@@ -2002,6 +2055,9 @@
       }
       if (actionId === "task.create") payload.command = commandInput.value.trim();
       if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
+      if (actionId === "product.factory.execution_plan.load") {
+        payload.path = productFactoryExecutionPlanPath?.value ?? "";
+      }
       if (actionId === "speech.start") payload.text = speechText?.value ?? "";
       if (actionId === "team.sources.configure") {
         payload.revision = sourceRevision;
