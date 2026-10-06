@@ -33,7 +33,10 @@ _MATERIAL_DOMAIN = b"nika-training-consumed-materials-v1\x00"
 _STEP_ID_DOMAIN = b"nika-training-step-v2\x00"
 _CHECKPOINT_PAYLOAD_DOMAIN = b"nika-peft-checkpoint-payload-v1\x00"
 _CHECKPOINT_MARKER = "nika_checkpoint.json"
-_CHECKPOINT_MARKER_SCHEMA_VERSION = 2
+_LEGACY_CHECKPOINT_MARKER_SCHEMA_VERSION = 2
+_CHECKPOINT_MARKER_SCHEMA_VERSION = 3
+_RESUME_STATE_SCHEMA_VERSION = 2
+_TOKENIZATION_DOMAIN = b"nika-peft-tokenization-v1\x00"
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
@@ -2073,16 +2076,23 @@ def _write_checkpoint_marker(
     request: ParsedRequest,
     consumed_sha256: str,
     checkpoint_payload_sha256: str,
+    tokenization_sha256: str | None = None,
 ) -> str:
     _require_sha256(checkpoint_payload_sha256, field="checkpoint_payload_sha256")
     marker = {
         "checkpoint_payload_sha256": checkpoint_payload_sha256,
         "consumed_materials_sha256": consumed_sha256,
         "job_fingerprint": request.job_fingerprint,
-        "schema_version": _CHECKPOINT_MARKER_SCHEMA_VERSION,
+        "schema_version": _LEGACY_CHECKPOINT_MARKER_SCHEMA_VERSION,
         "step_id": request.step_id,
         "step_number": request.step_index + 1,
     }
+    if tokenization_sha256 is not None:
+        marker["schema_version"] = _CHECKPOINT_MARKER_SCHEMA_VERSION
+        marker["tokenization_sha256"] = _require_sha256(
+            tokenization_sha256,
+            field="checkpoint_tokenization_sha256",
+        )
     encoded = _canonical_json_bytes(marker)
     if len(encoded) > _MAX_CHECKPOINT_MARKER_BYTES:
         _fail("checkpoint_marker_too_large")
@@ -2149,7 +2159,7 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         if state:
             _fail("initial_resume_state_invalid")
         return None
-    expected = {
+    legacy_expected = {
         "checkpoint_marker_sha256",
         "checkpoint_payload_sha256",
         "checkpoint_step",
@@ -2157,7 +2167,20 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         "relative_path",
         "schema_version",
     }
-    if set(state) != expected or state.get("schema_version") != _SCHEMA_VERSION:
+    current_expected = legacy_expected | {"tokenization_sha256"}
+    state_keys = set(state)
+    state_version = state.get("schema_version")
+    if state_keys == legacy_expected and state_version == _SCHEMA_VERSION:
+        pass
+    elif (
+        state_keys == current_expected
+        and state_version == _RESUME_STATE_SCHEMA_VERSION
+    ):
+        _require_sha256(
+            state.get("tokenization_sha256"),
+            field="resume_tokenization_sha256",
+        )
+    else:
         _fail("resume_state_invalid")
     if state.get("job_fingerprint") != request.job_fingerprint:
         _fail("resume_job_mismatch")
@@ -2217,6 +2240,7 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
         "step_number",
     }
     current_marker_keys = legacy_marker_keys | {"step_id"}
+    tokenization_marker_keys = current_marker_keys | {"tokenization_sha256"}
     if type(marker) is not dict:
         _fail("resume_marker_identity_mismatch")
     marker_keys = set(marker)
@@ -2225,12 +2249,23 @@ def _resume_checkpoint(job_root: Path, request: ParsedRequest) -> Path | None:
             _fail("resume_marker_identity_mismatch")
     elif marker_keys == current_marker_keys:
         if (
+            marker.get("schema_version")
+            != _LEGACY_CHECKPOINT_MARKER_SCHEMA_VERSION
+            or marker.get("step_id") != request.previous_step_id
+        ):
+            _fail("resume_marker_identity_mismatch")
+    elif marker_keys == tokenization_marker_keys:
+        if (
             marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
             or marker.get("step_id") != request.previous_step_id
+            or marker.get("tokenization_sha256")
+            != state.get("tokenization_sha256")
         ):
             _fail("resume_marker_identity_mismatch")
     else:
         _fail("resume_marker_identity_mismatch")
+    if state_version == _RESUME_STATE_SCHEMA_VERSION and marker_keys != tokenization_marker_keys:
+        _fail("resume_tokenization_evidence_mismatch")
     if (
         marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index
@@ -2249,6 +2284,7 @@ def _completed_step_checkpoint(
     request: ParsedRequest,
     *,
     consumed_sha256: str,
+    tokenization_sha256: str | None = None,
 ) -> tuple[Path, str, str] | None:
     checkpoint = _checkpoint_dir(job_root, request.step_index + 1)
     try:
@@ -2297,6 +2333,7 @@ def _completed_step_checkpoint(
         "step_number",
     }
     current_keys = legacy_keys | {"step_id"}
+    tokenization_keys = current_keys | {"tokenization_sha256"}
     if type(marker) is not dict:
         _fail("step_checkpoint_marker_identity_mismatch")
     marker_keys = set(marker)
@@ -2305,12 +2342,29 @@ def _completed_step_checkpoint(
             _fail("step_checkpoint_marker_identity_mismatch")
     elif marker_keys == current_keys:
         if (
+            marker.get("schema_version")
+            != _LEGACY_CHECKPOINT_MARKER_SCHEMA_VERSION
+            or marker.get("step_id") != request.step_id
+        ):
+            _fail("step_checkpoint_marker_identity_mismatch")
+    elif marker_keys == tokenization_keys:
+        if (
             marker.get("schema_version") != _CHECKPOINT_MARKER_SCHEMA_VERSION
             or marker.get("step_id") != request.step_id
         ):
             _fail("step_checkpoint_marker_identity_mismatch")
     else:
         _fail("step_checkpoint_marker_identity_mismatch")
+    if tokenization_sha256 is not None:
+        expected_tokenization_sha256 = _require_sha256(
+            tokenization_sha256,
+            field="step_tokenization_sha256",
+        )
+        if (
+            marker_keys != tokenization_keys
+            or marker.get("tokenization_sha256") != expected_tokenization_sha256
+        ):
+            _fail("step_checkpoint_tokenization_mismatch")
     if (
         marker.get("job_fingerprint") != request.job_fingerprint
         or marker.get("step_number") != request.step_index + 1
@@ -2484,8 +2538,11 @@ class _TokenizedDataset:
         max_length: int,
     ) -> None:
         self._items: list[dict[str, object]] = []
+        digest = hashlib.sha256()
+        digest.update(_TOKENIZATION_DOMAIN)
+        digest.update(_canonical_json_bytes({"max_length": max_length}))
         eos = tokenizer.eos_token or ""
-        for example in examples:
+        for index, example in enumerate(examples):
             text = f"{example.prompt}\n{example.response}{eos}"
             encoded = tokenizer(
                 text,
@@ -2501,17 +2558,51 @@ class _TokenizedDataset:
                 or not input_ids
                 or len(input_ids) > max_length
                 or len(input_ids) != len(attention_mask)
+                or any(
+                    type(token) is not int or not 0 <= token <= (1 << 63) - 1
+                    for token in input_ids
+                )
+                or any(type(mask) is not int or mask not in (0, 1) for mask in attention_mask)
             ):
                 _fail("response_tokens_truncated")
-            self._items.append(
-                {"attention_mask": attention_mask, "input_ids": input_ids}
+            item = {"attention_mask": attention_mask, "input_ids": input_ids}
+            self._items.append(item)
+            digest.update(
+                _canonical_json_bytes(
+                    {
+                        "index": index,
+                        "item": item,
+                    }
+                )
             )
+        digest.update(_canonical_json_bytes({"record_count": len(self._items)}))
+        self.evidence_sha256 = digest.hexdigest()
 
     def __len__(self) -> int:
         return len(self._items)
 
     def __getitem__(self, index: int) -> dict[str, object]:
         return self._items[index]
+
+
+def _tokenization_evidence_sha256(
+    training: _TokenizedDataset,
+    validation: _TokenizedDataset,
+) -> str:
+    payload = {
+        "schema": "nika-peft-tokenization-v1",
+        "training_sha256": _require_sha256(
+            training.evidence_sha256,
+            field="training_tokenization_sha256",
+        ),
+        "validation_sha256": _require_sha256(
+            validation.evidence_sha256,
+            field="validation_tokenization_sha256",
+        ),
+    }
+    return hashlib.sha256(
+        _TOKENIZATION_DOMAIN + _canonical_json_bytes(payload)
+    ).hexdigest()
 
 
 def _import_training_stack() -> tuple[Any, ...]:
@@ -2811,6 +2902,31 @@ def _train_one_step(
             _fail("model_dir_changed_during_load")
         if after_load_manifest != config.model_dir_manifest_sha256:
             _fail("model_dir_changed_during_load")
+        training_dataset = _TokenizedDataset(
+            consumed.training,
+            tokenizer,
+            config.max_sequence_length,
+        )
+        validation_dataset = _TokenizedDataset(
+            consumed.validation,
+            tokenizer,
+            config.max_sequence_length,
+        )
+        tokenization_sha256 = _tokenization_evidence_sha256(
+            training_dataset,
+            validation_dataset,
+        )
+        if request.step_index > 0:
+            resume_tokenization = request.resume_state.get("tokenization_sha256")
+            if (
+                type(resume_tokenization) is not str
+                or not hmac.compare_digest(
+                    resume_tokenization,
+                    tokenization_sha256,
+                )
+            ):
+                _fail("resume_tokenization_evidence_mismatch")
+
         if previous_checkpoint is None and initial_adapter_dir is None:
             lora = LoraConfig(
                 r=config.lora_r,
@@ -2855,6 +2971,7 @@ def _train_one_step(
             job_root,
             request,
             consumed_sha256=consumed.attestation_sha256,
+            tokenization_sha256=tokenization_sha256,
         )
         replay_marker_sha256: str | None = None
         replay_payload_sha256: str | None = None
@@ -2862,16 +2979,6 @@ def _train_one_step(
             checkpoint, replay_marker_sha256, replay_payload_sha256 = completed_step
             adapter_dir = checkpoint / "adapter"
         else:
-            training_dataset = _TokenizedDataset(
-                consumed.training,
-                tokenizer,
-                config.max_sequence_length,
-            )
-            validation_dataset = _TokenizedDataset(
-                consumed.validation,
-                tokenizer,
-                config.max_sequence_length,
-            )
             collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
             trainer_root = _ensure_child_directory(
                 job_root,
@@ -2973,6 +3080,7 @@ def _train_one_step(
             request=request,
             consumed_sha256=consumed.attestation_sha256,
             checkpoint_payload_sha256=checkpoint_payload_sha256,
+            tokenization_sha256=tokenization_sha256,
         )
     else:
         if (
@@ -2987,7 +3095,8 @@ def _train_one_step(
         "checkpoint_step": request.step_index + 1,
         "job_fingerprint": request.job_fingerprint,
         "relative_path": checkpoint.relative_to(job_root).as_posix(),
-        "schema_version": _SCHEMA_VERSION,
+        "schema_version": _RESUME_STATE_SCHEMA_VERSION,
+        "tokenization_sha256": tokenization_sha256,
     }
 
     if request.step_index + 1 < request.max_steps:
@@ -3011,6 +3120,7 @@ def _train_one_step(
         adapter_config=adapter_config,
         previous_adapter_tensors_sha256=previous_adapter_tensors_sha256,
         trained_adapter_tensors_sha256=trained_adapter_tensors_sha256,
+        tokenization_sha256=tokenization_sha256,
     )
     try:
         expected_manifest = json.loads(
@@ -3204,6 +3314,7 @@ def _candidate_manifest_json(
     adapter_config: dict[str, object],
     previous_adapter_tensors_sha256: str | None,
     trained_adapter_tensors_sha256: str,
+    tokenization_sha256: str | None = None,
 ) -> str:
     payload = {
         "adapter_config": adapter_config,
@@ -3236,6 +3347,11 @@ def _candidate_manifest_json(
             "seed": config.seed,
         },
     }
+    if tokenization_sha256 is not None:
+        payload["tokenization_sha256"] = _require_sha256(
+            tokenization_sha256,
+            field="candidate_tokenization_sha256",
+        )
     if config.initial_adapter is not None:
         payload["foundation_model_sha256"] = config.base_gguf_sha256
         payload["schema"] = "nika-peft-candidate-v3"
@@ -3272,7 +3388,8 @@ def _validate_candidate_manifest_payload(
         expected = tensor_expected | {"foundation_model_sha256"}
     else:
         _fail("candidate_manifest_invalid")
-    if set(value) != expected:
+    manifest_keys = set(value)
+    if manifest_keys not in (expected, expected | {"tokenization_sha256"}):
         _fail("candidate_manifest_invalid")
 
     base_ref = value["base_artifact_ref"]
@@ -3310,6 +3427,8 @@ def _validate_candidate_manifest_payload(
     ]
     if schema == "nika-peft-candidate-v3":
         digest_fields.append("foundation_model_sha256")
+    if "tokenization_sha256" in value:
+        digest_fields.append("tokenization_sha256")
     for field in digest_fields:
         if type(value[field]) is not str or _HEX_RE.fullmatch(value[field]) is None:
             _fail("candidate_manifest_invalid")
