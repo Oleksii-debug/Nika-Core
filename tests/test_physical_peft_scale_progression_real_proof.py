@@ -221,6 +221,47 @@ def test_candidate_file_authority_rejects_manifest_time_mutation(
         proof._candidate_file_authority(candidate, name="candidate")
 
 
+def test_candidate_file_authority_rejects_hardlink_alias(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    alias = tmp_path / "candidate-alias.safetensors"
+    candidate.write_bytes(b"candidate-authority-bytes")
+    proof.os.link(candidate, alias)
+
+    def unexpected_manifest_parse(_path: Path) -> dict[str, object]:
+        raise AssertionError("hardlinked candidate must fail before manifest parse")
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", unexpected_manifest_parse)
+
+    with pytest.raises(proof.ProofError, match="size or file type is invalid"):
+        proof._candidate_file_authority(candidate, name="candidate")
+
+
+def test_candidate_file_authority_rejects_private_snapshot_mutate_restore(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    candidate = tmp_path / "candidate.safetensors"
+    payload = b"candidate-authority-bytes"
+    candidate.write_bytes(payload)
+
+    def aba_manifest(path: Path) -> dict[str, object]:
+        snapshot = Path(path)
+        original = snapshot.read_bytes()
+        snapshot.write_bytes(b"temporary-mutation")
+        snapshot.write_bytes(original)
+        return {"schema": "candidate-test"}
+
+    monkeypatch.setattr(proof, "candidate_adapter_manifest", aba_manifest)
+
+    with pytest.raises(proof.ProofError, match="private manifest snapshot"):
+        proof._candidate_file_authority(candidate, name="candidate")
+
+
 def test_candidate_file_authority_parses_private_byte_snapshot(
     proof: ModuleType,
     tmp_path: Path,

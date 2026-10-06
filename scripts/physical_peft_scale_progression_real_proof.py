@@ -182,6 +182,17 @@ def _is_reparse(value: os.stat_result) -> bool:
     return bool(attributes & flag)
 
 
+def _snapshot_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        int(value.st_dev),
+        int(value.st_ino),
+        int(value.st_size),
+        int(value.st_mtime_ns),
+        int(getattr(value, "st_ctime_ns", 0)),
+        int(getattr(value, "st_nlink", 1)),
+    )
+
+
 def _open_readonly_snapshot(path: Path) -> int:
     if os.name == "nt":
         try:
@@ -240,9 +251,11 @@ def _require_open_snapshot_identity(path: Path, descriptor: int, *, name: str) -
         raise ProofError(f"{name} identity could not be verified") from exc
     if (
         not stat.S_ISREG(opened.st_mode)
+        or int(getattr(opened, "st_nlink", 1)) != 1
         or stat.S_ISLNK(current.st_mode)
         or _is_reparse(current)
         or not stat.S_ISREG(current.st_mode)
+        or int(getattr(current, "st_nlink", 1)) != 1
         or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
     ):
         _fail(f"{name} identity changed")
@@ -288,6 +301,7 @@ def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
             stat.S_ISLNK(before.st_mode)
             or _is_reparse(before)
             or not stat.S_ISREG(before.st_mode)
+            or int(getattr(before, "st_nlink", 1)) != 1
             or before.st_size <= 0
             or before.st_size > max_bytes
         ):
@@ -313,11 +327,9 @@ def _stable_file_bytes(path: Path, *, max_bytes: int, name: str) -> bytes:
             except OSError:
                 pass
 
-    identities = (
-        (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
-        (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
-        (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
-        (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+    identities = tuple(
+        _snapshot_identity(value)
+        for value in (before, opened, after, current)
     )
     if len(set(identities)) != 1 or len(payload) != before.st_size:
         _fail(f"{name} changed while it was being snapshotted")
@@ -357,12 +369,14 @@ def _candidate_manifest_from_payload(
         with tempfile.TemporaryDirectory(prefix=".nika-peft-scale-candidate-") as snapshot_root:
             snapshot_path = Path(snapshot_root) / "adapter_model.safetensors"
             _write_new(snapshot_path, payload)
+            before = os.lstat(snapshot_path)
             descriptor = _open_readonly_snapshot(snapshot_path)
             _require_open_snapshot_identity(
                 snapshot_path,
                 descriptor,
                 name=f"{name} private manifest snapshot",
             )
+            opened = os.fstat(descriptor)
             if (
                 _read_held_bytes(
                     descriptor,
@@ -378,6 +392,8 @@ def _candidate_manifest_from_payload(
                 descriptor,
                 name=f"{name} private manifest snapshot",
             )
+            after = os.fstat(descriptor)
+            current = os.lstat(snapshot_path)
             if (
                 _read_held_bytes(
                     descriptor,
@@ -387,6 +403,12 @@ def _candidate_manifest_from_payload(
                 != payload
             ):
                 _fail(f"{name} private manifest snapshot changed during parse")
+            identities = tuple(
+                _snapshot_identity(value)
+                for value in (before, opened, after, current)
+            )
+            if len(set(identities)) != 1:
+                _fail(f"{name} private manifest snapshot metadata changed during parse")
             return manifest
     except ProofError:
         raise
@@ -414,6 +436,7 @@ def _candidate_file_authority(
             stat.S_ISLNK(before.st_mode)
             or _is_reparse(before)
             or not stat.S_ISREG(before.st_mode)
+            or int(getattr(before, "st_nlink", 1)) != 1
             or before.st_size <= 0
             or before.st_size > _MAX_CANDIDATE_BYTES
         ):
@@ -443,11 +466,9 @@ def _candidate_file_authority(
             != payload
         ):
             _fail(f"{name} changed during manifest verification")
-        identities = (
-            (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns),
-            (opened.st_dev, opened.st_ino, opened.st_size, opened.st_mtime_ns),
-            (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns),
-            (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns),
+        identities = tuple(
+            _snapshot_identity(value)
+            for value in (before, opened, after, current)
         )
         if len(set(identities)) != 1:
             _fail(f"{name} identity changed during manifest verification")
