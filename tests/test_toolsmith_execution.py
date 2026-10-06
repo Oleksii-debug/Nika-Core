@@ -162,7 +162,7 @@ def test_windows_executable_launch_guard_denies_replace_until_release(
         assert replacement.read_bytes() == b"replacement executable bytes"
 
     os.replace(replacement, executable)
-    assert executable.read_bytes() == b"replacement executable bytes"
+    assert executable.read_text(encoding="utf-8").endswith("replacement\\n'\\n")
 
 
 def test_typed_runner_rejects_final_executable_identity_change(
@@ -234,20 +234,25 @@ def test_executable_launch_guard_rejects_same_path_byte_replacement(
 def test_posix_launch_guard_keeps_exact_descriptor_through_exec(
     tmp_path: pathlib.Path,
 ) -> None:
-    executable = tmp_path / pathlib.Path(sys.executable).name
+    executable = tmp_path / "runner"
     replacement = tmp_path / "replacement"
-    shutil.copy2(pathlib.Path(sys.executable).resolve(strict=True), executable)
-    replacement.write_bytes(b"replacement executable bytes")
-
-    guard = execution_module._PinnedExecutableLaunchGuard(
-        executable,
-        ("-c", "print('descriptor-bound')"),
+    executable.write_text(
+        "#!/bin/sh\nprintf 'descriptor-bound\\n'\n",
+        encoding="utf-8",
     )
+    executable.chmod(0o700)
+    replacement.write_text(
+        "#!/bin/sh\nprintf 'replacement\\n'\n",
+        encoding="utf-8",
+    )
+    replacement.chmod(0o700)
+
+    guard = execution_module._PinnedExecutableLaunchGuard(executable, ())
     with guard as launch_executable:
         assert guard.pass_fds
         os.replace(replacement, executable)
         result = subprocess.run(
-            (str(executable), "-c", "print('descriptor-bound')"),
+            (str(executable),),
             executable=str(launch_executable),
             pass_fds=guard.pass_fds,
             cwd=tmp_path,
@@ -263,7 +268,7 @@ def test_posix_launch_guard_keeps_exact_descriptor_through_exec(
 
     assert result.returncode == 0
     assert result.stdout.strip() == "descriptor-bound"
-    assert executable.read_bytes() == b"replacement executable bytes"
+    assert executable.read_text(encoding="utf-8").endswith("replacement\\n'\\n")
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor launch only")
@@ -271,10 +276,18 @@ def test_posix_typed_runner_survives_path_swap_at_popen(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executable = tmp_path / pathlib.Path(sys.executable).name
+    executable = tmp_path / "runner"
     replacement = tmp_path / "replacement"
-    shutil.copy2(pathlib.Path(sys.executable).resolve(strict=True), executable)
-    replacement.write_bytes(b"replacement executable bytes")
+    executable.write_text(
+        "#!/bin/sh\nprintf 'trusted-executable\\n'\n",
+        encoding="utf-8",
+    )
+    executable.chmod(0o700)
+    replacement.write_text(
+        "#!/bin/sh\nprintf 'replacement\\n'\n",
+        encoding="utf-8",
+    )
+    replacement.chmod(0o700)
     original_popen = execution_module.subprocess.Popen
     swapped = False
 
@@ -288,7 +301,7 @@ def test_posix_typed_runner_survives_path_swap_at_popen(
     monkeypatch.setattr(execution_module.subprocess, "Popen", swapping_popen)
 
     result = run_typed_process(
-        (str(executable), "-c", "print('trusted-executable')"),
+        (str(executable),),
         process_policy=ProcessPolicy((str(executable),)),
         resource_budget=ResourceBudget(
             timeout_seconds=5,
