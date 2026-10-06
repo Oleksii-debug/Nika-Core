@@ -330,3 +330,17 @@ def test_builder_handler_rejects_hidden_or_invalid_unicode(
     with store.connection() as conn:
         count = conn.execute("SELECT COUNT(*) FROM agent_definitions").fetchone()[0]
     assert count == 0
+
+
+def test_state_projection_fails_closed_on_persisted_risk_corruption(
+    tmp_path: Path,
+) -> None:
+    handler, repository, store = _builder(tmp_path / "corrupt-risk.db")
+    handler({"command": "Create an agent for accessible report triage"})
+    projector = PackagedAgentBuilderStateProjector(repository)
+
+    with store.connection() as conn:
+        conn.execute("UPDATE agent_definitions SET highest_risk = 4")
+
+    with pytest.raises(PermissionError, match="risk metadata"):
+        projector.decorate({"agents": []})
