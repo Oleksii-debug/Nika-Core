@@ -312,14 +312,28 @@ def test_stable_session_runs_canonical_continuation(tmp_path, monkeypatch):
         product_factory_active=True,
     )
     calls = []
+    guards = []
 
     class Continuation:
-        def __init__(self, store_value, startup_value, activation_value):
+        def __init__(
+            self,
+            store_value,
+            startup_value,
+            activation_value,
+            *,
+            effect_admission_guard,
+        ):
             assert store_value is store
             assert startup_value is session.startup
             assert activation_value is activated
+            guards.append(effect_admission_guard)
 
         async def __call__(self, prepared):
+            assert guards[0]() is True
+            assert settings.configure(
+                {"revision": 1, "config_json": _config_json()}
+            ).status == "completed"
+            assert guards[0]() is False
             calls.append(prepared)
 
     monkeypatch.setattr(
@@ -332,3 +346,5 @@ def test_stable_session_runs_canonical_continuation(tmp_path, monkeypatch):
     asyncio.run(session.post_dispatch(prepared))
 
     assert calls == [prepared]
+    assert len(guards) == 1
+    assert session.snapshot()["runtime_status"] == "restart_required"

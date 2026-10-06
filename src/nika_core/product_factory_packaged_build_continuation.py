@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from nika_core.data.sqlite import SQLiteStore
@@ -35,6 +36,7 @@ class PackagedReviewedBuildContinuation:
     startup: PackagedLocalProductFactoryStartup
     activated: ActivatedPackagedBuildRuntime
     max_components: int = 128
+    effect_admission_guard: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         if type(self.store) is not SQLiteStore:
@@ -53,6 +55,10 @@ class PackagedReviewedBuildContinuation:
             or not 1 <= self.max_components <= 128
         ):
             raise ValueError("PF5 continuation max_components must be an exact 1..128 integer")
+        if self.effect_admission_guard is not None and not callable(
+            self.effect_admission_guard
+        ):
+            raise TypeError("PF5 continuation effect admission guard must be callable")
 
     async def __call__(self, prepared: PreparedProductFactory) -> None:
         if type(prepared) is not PreparedProductFactory:
@@ -112,6 +118,7 @@ class PackagedReviewedBuildContinuation:
 
         if stop_requested is not None and stop_requested.is_set():
             return
+        self._require_effect_admission()
         controller = build_configured_packaged_reviewed_build_controller(
             self.store,
             host_task_id=prepared.host_task_id,
@@ -122,6 +129,7 @@ class PackagedReviewedBuildContinuation:
         for record in accepted:
             if stop_requested is not None and stop_requested.is_set():
                 return
+            self._require_effect_admission()
             advanced = controller.advance_component(
                 state=state,
                 component_id=record.request.component_id,
@@ -137,3 +145,16 @@ class PackagedReviewedBuildContinuation:
                 raise PackagedBuildContinuationError(
                     "PF5 continuation returned work for a different ProductProject"
                 )
+
+    def _require_effect_admission(self) -> None:
+        guard = self.effect_admission_guard
+        if guard is None:
+            return
+        try:
+            allowed = guard()
+        except Exception:  # noqa: BLE001 - host authority guard must fail closed
+            allowed = False
+        if allowed is not True:
+            raise PackagedBuildContinuationError(
+                "packaged PF5 effect authority changed during continuation"
+            )
