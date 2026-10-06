@@ -217,25 +217,62 @@ def test_attestation_refuses_archive_swapped_after_prehuman_check(
         artifact,
         digest=hashlib.sha256(changed_bytes).hexdigest(),
     )
-    original_identity = attestation_module._stable_release_file_identity
-    swapped = False
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
 
-    def swap_before_provenance_identity(path: Path) -> tuple[int, str] | None:
-        nonlocal swapped
-        if not swapped:
-            path.write_bytes(changed_bytes)
-            swapped = True
-        return original_identity(path)
+    def swap_after_first_gate(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 1 and not findings:
+            artifact.write_bytes(changed_bytes)
+        return findings
 
     monkeypatch.setattr(
         attestation_module,
-        "_stable_release_file_identity",
-        swap_before_provenance_identity,
+        "verify_distributable_evidence",
+        swap_after_first_gate,
     )
-    with pytest.raises(ValueError, match="pre-human distributable evidence changed"):
-        build_release_attestation_evidence(artifact, prehuman, verification, **_kwargs())
-    assert swapped
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(
+            artifact, prehuman, verification, **_kwargs()
+        )
+    assert calls == 1
 
+
+def test_attestation_refuses_coherent_archive_and_prehuman_swap_after_first_gate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact, prehuman, _ = _build(tmp_path)
+    changed_bytes = b"z" * artifact.stat().st_size
+    verification = _verification(
+        tmp_path,
+        artifact,
+        digest=hashlib.sha256(changed_bytes).hexdigest(),
+    )
+    original_verify = attestation_module.verify_distributable_evidence
+    calls = 0
+
+    def swap_pair_after_first_gate(*args: object, **kwargs: object) -> tuple[str, ...]:
+        nonlocal calls
+        findings = original_verify(*args, **kwargs)
+        calls += 1
+        if calls == 1 and not findings:
+            artifact.write_bytes(changed_bytes)
+            assert _prehuman_evidence(tmp_path, artifact) == prehuman
+        return findings
+
+    monkeypatch.setattr(
+        attestation_module,
+        "verify_distributable_evidence",
+        swap_pair_after_first_gate,
+    )
+    with pytest.raises(ValueError, match="attestation artifact changed"):
+        build_release_attestation_evidence(
+            artifact, prehuman, verification, **_kwargs()
+        )
+    assert calls == 1
 
 def test_attestation_refuses_archive_changed_after_second_check(
     tmp_path: Path,
