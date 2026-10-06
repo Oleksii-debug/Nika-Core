@@ -39,6 +39,11 @@ from nika_core.product_factory_packaged_journey import (
     PackagedProductStateProvider,
     product_project_identity,
 )
+from nika_core.product_factory_packaged_planning import (
+    TEAM_PLAN_REF_PREFIX,
+    PackagedProductFactoryTeamPlanner,
+    PackagedTeamPlanResult,
+)
 from nika_core.product_project import ProductProjectRepository
 from nika_core.security import ApprovalAuthority
 from nika_core.ui.bridge import UIActionBridge
@@ -322,8 +327,9 @@ def build_windows_bridge(
     if register_cleanup is not None:
         register_cleanup(speech.close)
     decision_approval_authority = ApprovalAuthority(audit_sink=audit_log)
+    product_repository = ProductProjectRepository(store)
     products = ProductProjectCommandService(
-        ProductProjectRepository(store),
+        product_repository,
         approval_verifier=decision_approval_authority.verifier(),
     )
     agent_definitions = AgentDefinitionRepository(store)
@@ -372,6 +378,7 @@ def build_windows_bridge(
         intelligence_mode_handler=intelligence_mode_commands.execute,
         selection_store=PackagedProductSelectionStore(store),
         decision_approval_authority=decision_approval_authority,
+        team_planner=PackagedProductFactoryTeamPlanner(product_repository),
     )
     agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
     command_center = ProductCommandCenter(products)
@@ -478,6 +485,7 @@ def _require_product_state(
     response: Mapping[str, Any],
     *,
     project_id: str,
+    spec_version: int = 1,
 ) -> Mapping[str, Any]:
     if response.get("ok") is not True:
         raise RuntimeError(f"PF11 packaged bridge state failed: {response}")
@@ -489,7 +497,7 @@ def _require_product_state(
         raise TypeError("PF11 packaged bridge did not expose ProductCommandCenter state")
     if (
         product_state.get("project_id") != project_id
-        or product_state.get("spec_version") != 1
+        or product_state.get("spec_version") != spec_version
         or not isinstance(product_state.get("status_count"), int)
         or isinstance(product_state.get("status_count"), bool)
         or not isinstance(product_state.get("decision_count"), int)
@@ -528,6 +536,29 @@ def _require_current_product_result(
     ):
         raise RuntimeError(
             "PF11 packaged Current ProductProject command returned inconsistent identity/focus"
+        )
+
+
+def _require_team_plan_result(
+    response: Mapping[str, Any],
+    *,
+    plan_result: PackagedTeamPlanResult,
+) -> None:
+    permission_ceiling = ", ".join(sorted(plan_result.plan.permission_ceiling)) or "none"
+    expected_message = (
+        f"План Product Factory: {plan_result.plan.plan_id}; "
+        f"ProductProject: {plan_result.project_id}; spec version {plan_result.spec_version}; "
+        f"state {plan_result.state}; scale medium; roles {len(plan_result.plan.roles)}; "
+        f"independent review roles {plan_result.independent_review_count}; "
+        f"permission ceiling: {permission_ceiling}; worker dispatch: not started."
+    )
+    if (
+        response.get("status") != "completed"
+        or response.get("message") != expected_message
+        or response.get("focus_id") != "tasks-heading"
+    ):
+        raise RuntimeError(
+            "PF11 packaged Product Factory plan returned inconsistent identity/focus"
         )
 
 
@@ -601,6 +632,128 @@ def _run_pf11_proof(
     return 0
 
 
+def _run_pf11_team_plan_proof(
+    config: AppConfig,
+    *,
+    command: str,
+    output_path: Path | None,
+) -> int:
+    bridge, products = build_windows_bridge(config, start_startup_recovery=False)
+    decision = route_command(command)
+    if decision.normalized_goal is None:
+        raise RuntimeError(
+            "PF11 team-plan proof command did not produce a normalized ProductProject goal"
+        )
+    project_id = product_project_identity(decision.normalized_goal)
+    recovered_before_command = bridge.get_state()
+    recovered_project = recovered_before_command.get("state", {}).get("product_project")
+    if isinstance(recovered_project, Mapping) and recovered_project.get("project_id") != project_id:
+        raise RuntimeError("PF11 team-plan restart restored a different ProductProject selection")
+
+    created = bridge.dispatch(
+        {
+            "request_id": "pf11-team-plan-create",
+            "action_id": "task.create",
+            "payload": {"command": command},
+        }
+    )
+    if created.get("status") != "completed":
+        raise RuntimeError(f"PF11 team-plan ProductProject route failed: {created}")
+
+    plan_response = bridge.dispatch(
+        {
+            "request_id": "pf11-team-plan-create-plan",
+            "action_id": "task.create",
+            "payload": {"command": "Plan current ProductProject"},
+        }
+    )
+    if plan_response.get("status") != "completed":
+        raise RuntimeError(f"PF11 packaged Product Factory planning failed: {plan_response}")
+
+    detail = products.inspect_project(project_id)
+    if detail.summary.project_id != project_id or detail.summary.version != 2:
+        raise RuntimeError("PF11 packaged team plan did not persist as ProductProject spec v2")
+
+    proof_store = SQLiteStore(config.database_path)
+    proof_store.initialize()
+    proof_repository = ProductProjectRepository(proof_store)
+    team_plan = PackagedProductFactoryTeamPlanner(proof_repository).inspect(project_id)
+    persisted_project = proof_repository.get(project_id)
+    owned_refs = tuple(
+        ref
+        for ref in persisted_project.spec.team_refs
+        if ref.startswith(TEAM_PLAN_REF_PREFIX)
+    )
+    if owned_refs != (team_plan.binding_ref,):
+        raise RuntimeError("PF11 packaged team plan binding is not canonical ProductProject state")
+    if team_plan.plan.permission_ceiling != frozenset({"read_project"}):
+        raise RuntimeError("PF11 packaged team plan exceeded planning-only permission ceiling")
+    if any(role.permissions - frozenset({"read_project"}) for role in team_plan.plan.roles):
+        raise RuntimeError("PF11 packaged team role exceeded planning-only permissions")
+
+    _require_team_plan_result(plan_response, plan_result=team_plan)
+    show_plan_response = bridge.dispatch(
+        {
+            "request_id": "pf11-team-plan-show",
+            "action_id": "task.create",
+            "payload": {"command": "Show current Product Factory plan"},
+        }
+    )
+    _require_team_plan_result(show_plan_response, plan_result=team_plan)
+
+    product_state = _require_product_state(
+        bridge.get_state(),
+        project_id=project_id,
+        spec_version=2,
+    )
+    current_result = bridge.dispatch(
+        {
+            "request_id": "pf11-team-plan-current",
+            "action_id": "task.create",
+            "payload": {"command": "Show current ProductProject"},
+        }
+    )
+    _require_current_product_result(
+        current_result,
+        project_id=project_id,
+        spec_version=2,
+        state=detail.summary.state,
+        goal=detail.summary.goal,
+    )
+
+    payload = {
+        "route": decision.route.value,
+        "project_id": project_id,
+        "spec_version": 2,
+        "state": detail.summary.state,
+        "team_plan_id": team_plan.plan.plan_id,
+        "team_plan_binding_ref": team_plan.binding_ref,
+        "team_plan_role_count": len(team_plan.plan.roles),
+        "team_plan_independent_review_count": team_plan.independent_review_count,
+        "team_plan_permission_ceiling": sorted(team_plan.plan.permission_ceiling),
+        "team_plan_persisted_proven": True,
+        "team_plan_worker_dispatch_started": False,
+        "command_center_state_proven": True,
+        "current_command_proven": True,
+        "current_command_focus_proven": True,
+        "bridge_state_project_id": product_state["project_id"],
+        "bridge_state_spec_version": product_state["spec_version"],
+        "bridge_state_status_count": product_state["status_count"],
+        "bridge_state_decision_count": product_state["decision_count"],
+        "restart_selection_integrity_proven": True,
+        "bounded_projection_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    if output_path is None:
+        print(serialized)
+    else:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(serialized + "\n", encoding="utf-8")
+    return 0
+
 
 def _run_voice_runtime_proof(output_path: Path | None) -> int:
     """Prove frozen local-voice imports without opening a microphone or model."""
@@ -671,6 +824,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--pf11-proof", action="store_true")
     parser.add_argument("--pf11-proof-output", type=Path)
+    parser.add_argument("--pf11-team-plan-proof", action="store_true")
+    parser.add_argument("--pf11-team-plan-proof-output", type=Path)
     parser.add_argument("--voice-runtime-proof", action="store_true")
     parser.add_argument("--voice-runtime-proof-output", type=Path)
     parser.add_argument(
@@ -678,6 +833,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         default=("Створи застосунок для керування витратами малого бізнесу"),
     )
     args = parser.parse_args(argv)
+    if args.pf11_team_plan_proof and (args.pf11_proof or args.voice_runtime_proof):
+        parser.error("--pf11-team-plan-proof cannot be combined with another proof mode")
     if args.voice_runtime_proof:
         return _run_voice_runtime_proof(args.voice_runtime_proof_output)
     from nika_core.reliability.legacy_database import LegacyDatabaseConflict
@@ -704,6 +861,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             "перевірте конфігурацію та повторіть запуск."
         )
         return 1
+    if args.pf11_team_plan_proof:
+        return _run_pf11_team_plan_proof(
+            config,
+            command=args.pf11_proof_command,
+            output_path=args.pf11_team_plan_proof_output,
+        )
     if args.pf11_proof:
         return _run_pf11_proof(
             config,
