@@ -24,6 +24,7 @@ from nika_core.product_command.product_project_adapter import (
     ProductProjectPresentationConsistencyError,
 )
 from nika_core.product_command.routing import route_command
+from nika_core.product_decisions import ProductDecisionSetSummary
 from nika_core.product_factory_packaged_planning import (
     PackagedProductFactoryPlanningError,
     PackagedProductFactoryTeamPlanner,
@@ -559,7 +560,7 @@ class PackagedProductCommandRouter:
 
     def _select_existing_project(self, project_id: str) -> UIResult:
         try:
-            detail = self._products.inspect_project(project_id)
+            detail = self._products.inspect_project_metadata(project_id)
         except KeyError as exc:
             raise PackagedProductJourneyError(
                 f"ProductProject не знайдено: {project_id}. Поточний вибір не змінено."
@@ -588,7 +589,9 @@ class PackagedProductCommandRouter:
                 "Поточний ProductProject не вибрано. Спочатку створіть або відкрийте його."
             )
         try:
-            detail = self._products.inspect_project(project_id)
+            detail, _credential_refs, decision_summary = (
+                self._products.inspect_project_presentation_context(project_id)
+            )
         except KeyError as exc:
             self.clear_stale_selection()
             raise PackagedProductJourneyError(
@@ -602,8 +605,7 @@ class PackagedProductCommandRouter:
 
         decision = detail.summary.current_decision
         if decision is None:
-            pending_count = sum(item.state == "pending" for item in detail.decisions)
-            if pending_count > 1:
+            if decision_summary.pending_count > 1:
                 raise PackagedProductJourneyError(
                     "Кілька рішень ProductProject очікують власника; "
                     "жодне не вибрано автоматично."
@@ -767,7 +769,7 @@ class PackagedProductCommandRouter:
         # The canonical repository returns an already-committed matching effect without
         # demanding a second ApprovalEvidence.
         try:
-            self._products.record_decision(
+            self._products.record_decision_for_presentation(
                 project_id,
                 decision,
                 expected_row_version=row_version,
@@ -873,7 +875,7 @@ class PackagedProductCommandRouter:
 
         self._pending_decision_approvals.pop(request_id, None)
         try:
-            self._products.record_decision(
+            self._products.record_decision_for_presentation(
                 pending.project_id,
                 pending.decision,
                 expected_row_version=pending.expected_row_version,
@@ -901,7 +903,7 @@ class PackagedProductCommandRouter:
             ProductDecisionState.REJECTED,
         )
         try:
-            self._products.record_decision(
+            self._products.record_decision_for_presentation(
                 project_id,
                 decision,
                 expected_row_version=row_version,
@@ -926,7 +928,7 @@ class PackagedProductCommandRouter:
                 "Поточний ProductProject не вибрано. Створіть продукт або відкрийте його за ID."
             )
         try:
-            detail = self._products.inspect_project(project_id)
+            detail = self._products.inspect_project_metadata(project_id)
         except KeyError as exc:
             self.clear_stale_selection()
             raise PackagedProductJourneyError(
@@ -1160,7 +1162,9 @@ class PackagedProductStateProvider:
         if project_id is None:
             return state
         try:
-            detail = self._command_center.inspect_project(project_id)
+            detail, decision_summary = self._command_center.inspect_packaged_project(
+                project_id
+            )
         except KeyError:
             self._router.clear_stale_selection()
             return state
@@ -1168,7 +1172,10 @@ class PackagedProductStateProvider:
             raise PackagedProductJourneyError(
                 "ProductProject changed while packaged state was composed; refresh required."
             ) from exc
-        state["product_project"] = _safe_product_project_state(detail)
+        state["product_project"] = _safe_product_project_state(
+            detail,
+            decision_summary,
+        )
         return state
 
 
@@ -1188,9 +1195,19 @@ def _team_plan_ui_result(result: PackagedTeamPlanResult) -> UIResult:
     )
 
 
-def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
+def _safe_product_project_state(
+    detail: ProductProjectDetail,
+    decision_summary: ProductDecisionSetSummary,
+) -> dict[str, Any]:
     status_counts = Counter(item.kind.value for item in detail.statuses)
-    decision_counts = Counter(item.state for item in detail.decisions)
+    decision_counts = {
+        "pending": decision_summary.pending_count,
+        "approved": decision_summary.approved_count,
+        "rejected": decision_summary.rejected_count,
+    }
+    decision_counts = {
+        state: count for state, count in decision_counts.items() if count > 0
+    }
     status_items = _safe_product_status_items(detail)
     return {
         "project_id": detail.summary.project_id,
@@ -1203,7 +1220,7 @@ def _safe_product_project_state(detail: ProductProjectDetail) -> dict[str, Any]:
         "status_counts": dict(sorted(status_counts.items())),
         "status_items": status_items,
         "status_items_truncated": len(status_items) < len(detail.statuses),
-        "decision_count": len(detail.decisions),
+        "decision_count": decision_summary.total_count,
         "decision_state_counts": dict(sorted(decision_counts.items())),
         "current_decision": _safe_product_decision(detail.summary.current_decision),
     }

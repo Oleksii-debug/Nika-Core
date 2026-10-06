@@ -30,7 +30,6 @@ from nika_core.packaged_agent_builder import (
     PackagedAgentBuilderStateProjector,
 )
 from nika_core.packaged_intelligence_mode import PackagedIntelligenceModeCommandAdapter
-from nika_core.product_command.command_center import ProductCommandCenter
 from nika_core.product_command.product_project_adapter import ProductProjectCommandService
 from nika_core.product_command.routing import route_command
 from nika_core.product_factory_packaged_journey import (
@@ -38,6 +37,10 @@ from nika_core.product_factory_packaged_journey import (
     PackagedProductSelectionStore,
     PackagedProductStateProvider,
     product_project_identity,
+)
+from nika_core.product_factory_packaged_status import (
+    PackagedProductCommandCenter,
+    PackagedProductFactoryStatusReader,
 )
 from nika_core.product_factory_packaged_planning import (
     TEAM_PLAN_REF_PREFIX,
@@ -381,7 +384,10 @@ def build_windows_bridge(
         team_planner=PackagedProductFactoryTeamPlanner(product_repository),
     )
     agent_builder_state = PackagedAgentBuilderStateProjector(agent_definitions)
-    command_center = ProductCommandCenter(products)
+    command_center = PackagedProductCommandCenter(
+        products=products,
+        status_reader=PackagedProductFactoryStatusReader(store),
+    )
     product_state = PackagedProductStateProvider(
         base_state=backend.snapshot,
         router=product_router,
