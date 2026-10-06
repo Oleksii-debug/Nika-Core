@@ -22,7 +22,7 @@ from nika_core.ui.bridge_models import UIResult
 OrdinaryCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 AgentBuilderCommandHandler = Callable[[Mapping[str, Any]], UIResult]
 TaskControlHandler = Callable[[Mapping[str, Any]], UIResult]
-TaskStatusHandler = Callable[[], UIResult]
+TaskStatusHandler = Callable[[str | None], UIResult]
 ActivityReportHandler = Callable[[], UIResult]
 TrainingStatusHandler = Callable[[str], UIResult]
 DesktopStateProvider = Callable[[], Mapping[str, Any]]
@@ -196,20 +196,47 @@ def packaged_training_status_target(command: str) -> str | None:
     return task_id
 
 
-def packaged_task_direct_action(command: str) -> str | None:
-    """Recognize exact long-task control commands without broad natural-language capture."""
+def packaged_task_direct_target(command: str) -> tuple[str, str | None] | None:
+    """Recognize exact long-task controls and an optional canonical task UUID."""
     if type(command) is not str:
         raise PackagedProductJourneyError("Команда має бути звичайним текстом.")
-    normalized = " ".join(command.split()).casefold().strip(" :.!?")
+    normalized = " ".join(command.split()).strip(" :.!?")
+    lowered = normalized.casefold()
     for action, commands in (
         ("pause", _TASK_PAUSE_COMMANDS),
         ("resume", _TASK_RESUME_COMMANDS),
         ("stop", _TASK_STOP_COMMANDS),
         ("status", _TASK_STATUS_COMMANDS),
     ):
-        if normalized in commands:
-            return action
+        if lowered in commands:
+            return action, None
+        prefixes = tuple(
+            item for item in commands if lowered.startswith(item + " ")
+        )
+        if not prefixes:
+            continue
+        prefix = max(prefixes, key=len)
+        task_id = normalized[len(prefix) :].strip(" :#")
+        if len(task_id.split()) != 1:
+            return None
+        try:
+            parsed = UUID(task_id)
+        except (ValueError, AttributeError) as exc:
+            raise PackagedProductJourneyError(
+                "Вкажіть task_id у канонічному UUID-форматі після команди керування."
+            ) from exc
+        if str(parsed) != task_id:
+            raise PackagedProductJourneyError(
+                "Вкажіть task_id у канонічному UUID-форматі після команди керування."
+            )
+        return action, task_id
     return None
+
+
+def packaged_task_direct_action(command: str) -> str | None:
+    """Return the action part of an exact direct task command."""
+    target = packaged_task_direct_target(command)
+    return target[0] if target is not None else None
 
 
 def _valid_selection_id(value: object) -> bool:
@@ -405,14 +432,15 @@ class PackagedProductCommandRouter:
                 )
             return self._training_status_handler(training_task_id)
 
-        task_action = packaged_task_direct_action(command)
-        if task_action == "status":
-            if self._task_status_handler is None:
-                raise PackagedProductJourneyError(
-                    "Статус поточного завдання недоступний у цьому запуску."
-                )
-            return self._task_status_handler()
-        if task_action is not None:
+        task_direct = packaged_task_direct_target(command)
+        if task_direct is not None:
+            task_action, task_id = task_direct
+            if task_action == "status":
+                if self._task_status_handler is None:
+                    raise PackagedProductJourneyError(
+                        "Статус поточного завдання недоступний у цьому запуску."
+                    )
+                return self._task_status_handler(task_id)
             handler = {
                 "pause": self._task_pause_handler,
                 "resume": self._task_resume_handler,
@@ -422,9 +450,9 @@ class PackagedProductCommandRouter:
                 raise PackagedProductJourneyError(
                     f"Керування завданням «{task_action}» недоступне у цьому запуску."
                 )
-            # Direct command text and unrelated UI payload fields are classification input only.
-            # The incumbent task-control authority selects/validates the actual target.
-            return handler({})
+            # Direct command text and unrelated UI fields are classification input only.
+            # Only the canonical target identity crosses into incumbent task-control authority.
+            return handler({"task_id": task_id} if task_id is not None else {})
 
         if packaged_current_product_command(command):
             return self._describe_current_project()

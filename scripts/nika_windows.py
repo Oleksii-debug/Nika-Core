@@ -180,12 +180,30 @@ def _training_status_result(
     )
 
 
-def _current_task_status_result(queue: TaskQueue) -> UIResult:
+def _current_task_status_result(
+    queue: TaskQueue,
+    task_id: str | None = None,
+) -> UIResult:
     try:
+        if task_id is not None:
+            record = queue.get(task_id)
+            return UIResult(
+                request_id="desktop-handler",
+                status="completed",
+                message=f"Завдання: {record.task_id}; state {record.state.value}.",
+                focus_id="tasks-heading",
+            )
         unfinished = tuple(
             record
             for record in queue.list_recent(limit=50)
             if record.state not in _TERMINAL_TASK_STATES
+        )
+    except KeyError:
+        return UIResult(
+            request_id="desktop-handler",
+            status="rejected",
+            message=f"Завдання не знайдено: {task_id}.",
+            focus_id="tasks-heading",
         )
     except Exception as exc:  # noqa: BLE001 - packaged boundary must fail closed
         logging.getLogger(__name__).error(
@@ -311,7 +329,10 @@ def build_windows_bridge(
         task_pause_handler=backend.pause_task,
         task_resume_handler=resume_ordinary_task,
         task_stop_handler=backend.stop_agent,
-        task_status_handler=lambda: _current_task_status_result(task_queue),
+        task_status_handler=lambda task_id: _current_task_status_result(
+            task_queue,
+            task_id,
+        ),
         activity_report_handler=lambda: _daily_activity_report_result(
             activity_reports,
             day_provider=activity_report_day,
