@@ -122,7 +122,7 @@ class _RuntimeApi:
                     "url": self.agent_url,
                     "session_api_key": _SESSION_SECRET,
                     "status": self.status,
-                    "pod_status": "running" if self.status == "running" else self.status,
+                    "pod_status": "ready" if self.status == "running" else self.status,
                 },
             )
 
