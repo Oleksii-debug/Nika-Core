@@ -199,6 +199,7 @@ def build_configured_packaged_reviewed_build_controller(
         startup=startup,
         trusted_authority=activation.runtime.trusted_execution,
         output_policies=activation.runtime.output_policies,
+        recovery_authority=activation.runtime.recovery_execution,
     )
     controller = PackagedReviewedBuildLoopController(
         authorities=activation.runtime,
