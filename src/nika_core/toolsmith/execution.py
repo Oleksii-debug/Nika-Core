@@ -150,6 +150,13 @@ def _open_posix_executable_snapshot() -> tuple[int, bool]:
 
 
 def _reopen_posix_snapshot_read_only(descriptor: int) -> int:
+    try:
+        import fcntl
+    except ImportError as exc:
+        raise ProcessExecutionError(
+            "runtime executable snapshot access-mode verification is unavailable"
+        ) from exc
+
     source_stat = os.fstat(descriptor)
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
     for descriptor_root in (
@@ -163,9 +170,11 @@ def _reopen_posix_snapshot_read_only(descriptor: int) -> int:
             continue
         try:
             reopened_stat = os.fstat(reopened)
+            reopened_flags = fcntl.fcntl(reopened, fcntl.F_GETFL)
             if (
                 reopened_stat.st_dev == source_stat.st_dev
                 and reopened_stat.st_ino == source_stat.st_ino
+                and (reopened_flags & os.O_ACCMODE) == os.O_RDONLY
             ):
                 return reopened
         except OSError:

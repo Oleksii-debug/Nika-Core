@@ -519,6 +519,49 @@ def test_posix_execute_permission_check_stays_on_held_inode(
     assert executable.stat().st_ino != original_inode
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX executable snapshot only")
+def test_posix_snapshot_reopen_rejects_writable_dup_semantics(
+    tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = tmp_path / "snapshot"
+    descriptor = os.open(
+        snapshot,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    duplicated: list[int] = []
+    original_open = execution_module.os.open
+
+    def duplicating_open(
+        path: object,
+        flags: int,
+        *args: object,
+        **kwargs: object,
+    ) -> int:
+        value = os.fspath(path)
+        if value.startswith("/proc/self/fd/") or value.startswith("/dev/fd/"):
+            duplicate = os.dup(descriptor)
+            duplicated.append(duplicate)
+            return duplicate
+        return original_open(path, flags, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(execution_module.os, "open", duplicating_open)
+    try:
+        with pytest.raises(
+            execution_module.ProcessExecutionError,
+            match="read-only runtime executable snapshot descriptor is unavailable",
+        ):
+            execution_module._reopen_posix_snapshot_read_only(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert duplicated
+    for duplicate in duplicated:
+        with pytest.raises(OSError):
+            os.fstat(duplicate)
+
+
 def test_typed_runner_rejects_same_path_replacement_after_runtime_admission(
     tmp_path: pathlib.Path,
     monkeypatch: pytest.MonkeyPatch,
