@@ -140,3 +140,25 @@ def test_m11_requalifies_legacy_adoption_before_windows_package() -> None:
     regressions = regressions.split("- name: Build standalone", 1)[0]
     assert "tests/test_v01_legacy_database_adoption.py" in regressions
 
+
+
+def test_m11_requalifies_backup_recovery_before_windows_package() -> None:
+    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    paths = (
+        "src/nika_core/reliability/backup.py",
+        "src/nika_core/reliability/recovery_lease.py",
+        "tests/test_backup_restore_wal_stale_preview.py",
+        "tests/test_backup_restore_recovery_process_loss.py",
+        "tests/test_backup_restore_recovery_lease.py",
+        "tests/test_backup_restore_recovery_lease_adversarial.py",
+        "tests/test_backup_restore_guardrails.py",
+        "tests/test_backup_restore_recovery.py",
+        "tests/test_backup_restore_metadata_safety.py",
+    )
+    for path in paths:
+        assert workflow.count(f'      - "{path}"') == 2, path
+
+    regressions = workflow.split("- name: Run M11 M12 source regressions", 1)[1]
+    regressions = regressions.split("- name: Build standalone", 1)[0]
+    for path in paths[2:]:
+        assert f"          {path}" in regressions, path
