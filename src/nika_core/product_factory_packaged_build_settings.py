@@ -17,8 +17,14 @@ from nika_core.product_factory_deployment import (
     ResourceEnvelope,
 )
 from nika_core.product_factory_packaged_build_authority import (
-    PackagedBuildAuthorityTemplate,
     PackagedBuildAuthorityError,
+    PackagedBuildAuthorityRuntime,
+    PackagedBuildAuthorityStore,
+    PackagedBuildAuthorityTemplate,
+)
+from nika_core.product_factory_packaged_build_pass import PackagedReviewedBuildPass
+from nika_core.product_factory_packaged_local_startup import (
+    PackagedLocalProductFactoryStartup,
 )
 from nika_core.ui.bridge_models import UIResult
 
@@ -71,6 +77,73 @@ class PackagedBuildRuntimeConfig:
             raise PackagedBuildRuntimeSettingsError(
                 "build runtime template platform must match the configured node"
             )
+
+
+def activate_packaged_build_runtime(
+    store: SQLiteStore,
+    *,
+    startup: PackagedLocalProductFactoryStartup,
+    config: PackagedBuildRuntimeConfig,
+) -> PackagedReviewedBuildPass:
+    """Activate one launch-frozen PF5 authority set without candidate-derived policy."""
+
+    if type(store) is not SQLiteStore:
+        raise TypeError("store must be exact SQLiteStore")
+    if type(startup) is not PackagedLocalProductFactoryStartup:
+        raise TypeError("startup must be exact PackagedLocalProductFactoryStartup")
+    if type(config) is not PackagedBuildRuntimeConfig:
+        raise TypeError("config must be exact PackagedBuildRuntimeConfig")
+
+    authorities = PackagedBuildAuthorityStore(
+        store,
+        node=config.node,
+        startup=startup,
+    )
+    active_keys: set[tuple[str, str, str]] = set()
+    for template in config.templates:
+        key = (
+            template.project_id,
+            template.repository_id,
+            template.component_id,
+        )
+        active_keys.add(key)
+        try:
+            current = authorities.snapshot(
+                project_id=template.project_id,
+                repository_id=template.repository_id,
+                component_id=template.component_id,
+            )
+        except PackagedBuildAuthorityError as exc:
+            if str(exc) != "no packaged build authority is configured for this component":
+                raise PackagedBuildRuntimeSettingsError(
+                    "Збережену PF5 authority не вдалося безпечно перевірити."
+                ) from exc
+            try:
+                authorities.configure(template, expected_revision=0)
+            except PackagedBuildAuthorityError as configure_exc:
+                raise PackagedBuildRuntimeSettingsError(
+                    "Не вдалося активувати нову PF5 authority."
+                ) from configure_exc
+        else:
+            if current.template != template:
+                try:
+                    authorities.configure(
+                        template,
+                        expected_revision=current.revision,
+                    )
+                except PackagedBuildAuthorityError as exc:
+                    raise PackagedBuildRuntimeSettingsError(
+                        "PF5 authority змінилася під час startup activation."
+                    ) from exc
+
+    runtime = PackagedBuildAuthorityRuntime(authorities)
+    return PackagedReviewedBuildPass(
+        store=store,
+        node=config.node,
+        startup=startup,
+        authority=runtime,
+        configured_components=frozenset(active_keys),
+    )
 
 
 def decode_packaged_build_runtime_config(raw: str) -> PackagedBuildRuntimeConfig:
