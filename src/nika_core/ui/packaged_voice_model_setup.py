@@ -252,7 +252,10 @@ class PackagedVoiceModelSetup:
             self._active = False
             self._cancelling = False
             self._cancel_event = None
-            self._restart_required = False
+            # A cancelled/failed host Future can race with the worker after the
+            # atomic target rename. Keep restart truth latent: snapshot() only
+            # exposes it if a complete canonical model actually exists.
+            self._restart_required = True
             self._last_status = "failed"
             self._last_message = "Фоновий імпорт голосової моделі було перервано."
 
