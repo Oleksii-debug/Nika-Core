@@ -8,6 +8,7 @@ from nika_core.product_factory_build_execution import (
     BuildExecutionDispatch,
     BuildExecutionRecord,
     BuildExecutionScopeRequest,
+    ExecutionGrant,
     BuildExecutionSpec,
     BuildExecutionState,
 )
@@ -203,6 +204,8 @@ def _snapshot_succeeded_build(
         raise BuildDeploymentHandoffError("PF5 execution request carrier is invalid")
     if type(spec.scope) is not BuildExecutionScopeRequest:
         raise BuildDeploymentHandoffError("PF5 execution scope carrier is invalid")
+    if type(record.grant) is not ExecutionGrant:
+        raise BuildDeploymentHandoffError("PF5 execution grant carrier is invalid")
     if type(record.dispatch) is not BuildExecutionDispatch:
         raise BuildDeploymentHandoffError(
             "successful PF5 build lacks exact dispatch identity"
@@ -220,13 +223,29 @@ def _snapshot_succeeded_build(
     if work_id != expected_work_id:
         raise BuildDeploymentHandoffError("PF5 build work identity changed during handoff")
 
+    grant = record.grant
+    if (
+        _single_line_text(grant.project_id, "PF5 grant project_id") != project_id
+        or _single_line_text(grant.repository_id, "PF5 grant repository_id") != repository_id
+        or _single_line_text(grant.work_id, "PF5 grant work_id") != work_id
+        or node_id not in grant.allowed_node_ids
+    ):
+        raise BuildDeploymentHandoffError(
+            "PF5 successful build grant does not match exact durable specification"
+        )
+
     evidence = _snapshot_build_evidence(record.evidence)
     dispatch = record.dispatch
+    dispatch_project_id = _single_line_text(dispatch.project_id, "PF5 dispatch project_id")
+    dispatch_work_id = _single_line_text(dispatch.work_id, "PF5 dispatch work_id")
+    dispatch_node_id = _single_line_text(dispatch.node_id, "PF5 dispatch node_id")
+    dispatch_source_sha = _single_line_text(dispatch.source_sha, "PF5 dispatch source_sha")
     if (
-        dispatch.project_id != project_id
-        or dispatch.work_id != work_id
-        or dispatch.node_id != node_id
-        or dispatch.source_sha != source_sha
+        dispatch_project_id != project_id
+        or dispatch_work_id != work_id
+        or dispatch_node_id != node_id
+        or dispatch_source_sha != source_sha
+        or dispatch.grant != grant
         or evidence.work_id != work_id
         or evidence.node_id != node_id
         or evidence.release_sha != source_sha
