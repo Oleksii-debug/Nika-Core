@@ -97,3 +97,18 @@ def test_development_intent_with_toolsmith_request_fails_closed_as_ambiguous(com
 
     assert decision.route is CommandRouteKind.AMBIGUOUS
     assert decision.requires_user_decision is True
+
+def test_development_intent_with_agent_builder_request_fails_closed_as_ambiguous() -> None:
+    decision = route_command(
+        "develop issue #654 in repository Oleksii-debug/Nika-Core and create agent assistant"
+    )
+
+    assert decision.route is CommandRouteKind.AMBIGUOUS
+    assert decision.requires_user_decision is True
+
+
+def test_agent_builder_route_remains_available_after_development_router_adaptation() -> None:
+    decision = route_command("create agent assistant for release triage")
+
+    assert decision.route is CommandRouteKind.AGENT_BUILDER
+    assert decision.requires_user_decision is False
