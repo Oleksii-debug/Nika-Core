@@ -203,6 +203,24 @@ def test_protocol_v3_materials_are_rehashed_and_parsed(tmp_path: Path) -> None:
     assert consumed.validation == (peft.TrainingExample("validate", "answer"),)
 
 
+def test_request_enforces_previous_step_identity_shape(tmp_path: Path) -> None:
+    initial, _ = _request(tmp_path)
+    initial["previous_step_id"] = "9" * 64
+    with pytest.raises(peft.PeftTrainerError, match="previous_step_id_invalid"):
+        peft._parse_request(initial)
+
+    resumed, _ = _request(tmp_path, max_steps=2)
+    resumed["step_index"] = 1
+    resumed["step_id"] = "3" * 64
+    resumed["previous_step_id"] = None
+    with pytest.raises(peft.PeftTrainerError, match="previous_step_id"):
+        peft._parse_request(resumed)
+
+    resumed["previous_step_id"] = resumed["step_id"]
+    with pytest.raises(peft.PeftTrainerError, match="previous_step_id_invalid"):
+        peft._parse_request(resumed)
+
+
 def test_material_tamper_fails_before_training(tmp_path: Path) -> None:
     request, _ = _parsed(tmp_path)
     request.materials[0].path.write_bytes(_body("other", "bytes"))
@@ -451,6 +469,39 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
     tampered = peft._parse_request(raw_request)
     with pytest.raises(peft.PeftTrainerError, match="resume_marker_digest_mismatch"):
         peft._resume_checkpoint(job_root, tampered)
+
+
+def test_resume_marker_binds_exact_previous_step_id(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha = peft._checkpoint_payload_manifest_sha256(checkpoint)
+    marker_sha = peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha,
+    )
+    resume = {
+        "checkpoint_marker_sha256": marker_sha,
+        "checkpoint_payload_sha256": payload_sha,
+        "checkpoint_step": 1,
+        "job_fingerprint": request.job_fingerprint,
+        "relative_path": checkpoint.relative_to(job_root).as_posix(),
+        "schema_version": 1,
+    }
+    raw_second, _ = _request(tmp_path, max_steps=2)
+    raw_second["step_index"] = 1
+    raw_second["step_id"] = "3" * 64
+    raw_second["previous_step_id"] = "4" * 64
+    raw_second["resume_state"] = resume
+    second = peft._parse_request(raw_second)
+
+    with pytest.raises(peft.PeftTrainerError, match="resume_marker_identity_mismatch"):
+        peft._resume_checkpoint(job_root, second)
 
 
 def test_checkpoint_marker_publication_is_create_only(tmp_path: Path) -> None:
@@ -919,6 +970,39 @@ def test_completed_intermediate_checkpoint_replays_without_optimizer_effect(
     assert replay_state == first_state
     assert replay_candidate is None
     assert after == before
+
+
+def test_completed_checkpoint_replay_rejects_step_id_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=2)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    monkeypatch.setattr(peft, "_import_training_stack", _fake_stack)
+    first_state, first_candidate = peft._train_one_step(request, config, consumed)
+    assert first_candidate is None
+    assert first_state["checkpoint_step"] == 1
+
+    drifted_raw, _ = _request(tmp_path, max_steps=2)
+    drifted_raw["step_id"] = "9" * 64
+    drifted = peft._parse_request(drifted_raw)
+    drifted_consumed = peft._consume_materials(drifted, max_records=10)
+    monkeypatch.setattr(
+        peft,
+        "_import_training_stack",
+        _must_not_train_fake_stack,
+    )
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="step_checkpoint_marker_identity_mismatch",
+    ):
+        peft._train_one_step(
+            drifted,
+            config,
+            drifted_consumed,
+        )
 
 
 def test_completed_final_step_replays_existing_candidate_without_overwrite(
