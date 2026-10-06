@@ -141,7 +141,9 @@ class ModelGateway:
             cancelled = False
             try:
                 async with asyncio.timeout(remaining):
-                    provider_task = asyncio.create_task(provider.complete(attempt_request))
+                    provider_task = asyncio.create_task(
+                        self._invoke_provider_complete(provider, attempt_request)
+                    )
                     response = await provider_task
             except TimeoutError:
                 error = ModelGatewayError(
@@ -246,6 +248,13 @@ class ModelGateway:
             "model fallback route was exhausted",
             retryable=True,
         )
+
+    @staticmethod
+    async def _invoke_provider_complete(
+        provider: ModelProvider,
+        request: ModelRequest,
+    ) -> ModelResponse:
+        return await provider.complete(request)
 
     def _authorize_cloud_effect(
         self,
