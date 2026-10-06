@@ -317,6 +317,44 @@ def test_durable_graph_authority_project_mismatch_fails_closed() -> None:
         )
 
 
+def test_forged_review_evidence_is_reverified_and_rejected_before_pf5() -> None:
+    graph = _graph()
+    coordinator = _coordinator(graph)
+    record = coordinator.snapshot().records[0]
+    assert record.review is not None
+    coordinator._records[COMPONENT_ID] = WorkRecord(
+        request=record.request,
+        state=WorkState.ACCEPTED,
+        result=record.result,
+        review=replace(
+            record.review,
+            evidence_refs=("review://forged",),
+        ),
+    )
+
+    with pytest.raises(ReviewedBuildAdmissionError, match="rejected build admission"):
+        _spec(coordinator, graph)
+
+
+def test_coordinator_graph_drift_is_rejected_before_pf5_policy_resolution() -> None:
+    graph = _graph()
+    coordinator = _coordinator(graph)
+    drifted_graph = ProductRepositoryGraph(
+        project_id=PROJECT_ID,
+        repositories=graph.repositories,
+        components=(
+            replace(
+                graph.components[0],
+                release_identity="different-release",
+            ),
+        ),
+    )
+    coordinator.graph = drifted_graph
+
+    with pytest.raises(ReviewedBuildAdmissionError, match="coordinator graph"):
+        _spec(coordinator, graph)
+
+
 def test_build_work_identity_is_bound_to_independent_review_evidence() -> None:
     graph = _graph()
     first = _coordinator(graph)
