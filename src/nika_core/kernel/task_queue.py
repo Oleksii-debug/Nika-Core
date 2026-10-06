@@ -85,13 +85,66 @@ class TaskQueue:
         agent_id: str,
         payload: dict[str, object] | None = None,
     ) -> TaskRecord:
-        task_id = str(uuid.uuid4())
+        return self._create_exact(
+            task_id=str(uuid.uuid4()),
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            payload=dict(payload or {}),
+            replay_allowed=False,
+        )
+
+    def create_exact(
+        self,
+        *,
+        task_id: str,
+        workspace_id: str,
+        agent_id: str,
+        payload: dict[str, object] | None = None,
+    ) -> TaskRecord:
+        """Create or replay one host-owned exact task identity.
+
+        Exact replay is allowed only when immutable workspace/agent ownership and the
+        caller-owned payload are identical. Existing state transitions are preserved.
+        """
+
+        if type(task_id) is not str or not task_id.strip() or task_id != task_id.strip():
+            raise ValueError("exact task_id must be normalized and non-empty")
+        if (
+            type(workspace_id) is not str
+            or type(agent_id) is not str
+            or not workspace_id.strip()
+            or not agent_id.strip()
+        ):
+            raise ValueError("exact task workspace and agent identity must not be empty")
+        return self._create_exact(
+            task_id=task_id,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            payload=dict(payload or {}),
+            replay_allowed=True,
+        )
+
+    def _create_exact(
+        self,
+        *,
+        task_id: str,
+        workspace_id: str,
+        agent_id: str,
+        payload: dict[str, object],
+        replay_allowed: bool,
+    ) -> TaskRecord:
         now = datetime.now(UTC).isoformat()
-        payload = dict(payload or {})
+        payload_json = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            allow_nan=False,
+        )
         with self.store.connection() as conn:
-            conn.execute(
-                """
-                INSERT INTO tasks(
+            verb = "INSERT OR IGNORE" if replay_allowed else "INSERT"
+            cursor = conn.execute(
+                f"""
+                {verb} INTO tasks(
                     task_id, workspace_id, agent_id, state, payload_json, created_at, updated_at
                 )
                 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -101,19 +154,34 @@ class TaskQueue:
                     workspace_id,
                     agent_id,
                     TaskState.CREATED.value,
-                    json.dumps(payload, ensure_ascii=False, sort_keys=True, allow_nan=False),
+                    payload_json,
                     now,
                     now,
                 ),
             )
-            conn.execute(
-                """
-                INSERT INTO task_events(task_id, previous_state, new_state, created_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                (task_id, None, TaskState.CREATED.value, now),
-            )
-        return TaskRecord(task_id, workspace_id, agent_id, TaskState.CREATED, payload)
+            if cursor.rowcount == 1:
+                conn.execute(
+                    """
+                    INSERT INTO task_events(task_id, previous_state, new_state, created_at)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (task_id, None, TaskState.CREATED.value, now),
+                )
+            row = conn.execute(
+                "SELECT task_id, workspace_id, agent_id, state, payload_json "
+                "FROM tasks WHERE task_id = ?",
+                (task_id,),
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("exact task insertion did not produce a durable task")
+            record = self._record_from_row(row)
+            if replay_allowed and (
+                record.workspace_id != workspace_id
+                or record.agent_id != agent_id
+                or record.payload != payload
+            ):
+                raise ValueError("exact task_id conflicts with existing task identity")
+            return record
 
     def get(self, task_id: str) -> TaskRecord:
         with self.store.connection() as conn:
