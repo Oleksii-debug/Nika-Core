@@ -311,6 +311,7 @@ def test_admitted_entry_keeps_frozen_model_if_revision_changes_after_recheck(
     assert getattr(frozen, "model") == "qwen3:8b"
     assert settings.snapshot()["revision"] == 2
     assert entry.program.worker.repositories
+    assert host._entry_for("admitted-host-task", project, resolved) is entry
 
     with pytest.raises(
         PackagedBoundLocalProductFactoryHostError,
