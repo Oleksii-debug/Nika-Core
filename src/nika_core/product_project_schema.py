@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-PRODUCT_PROJECT_SCHEMA_VERSION = 5
+PRODUCT_PROJECT_SCHEMA_VERSION = 6
 
 PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
     1: (
@@ -138,6 +138,30 @@ PRODUCT_PROJECT_MIGRATIONS: dict[int, tuple[str, ...]] = {
         (
             "CREATE INDEX IF NOT EXISTS idx_product_project_spec_idempotency_result "
             "ON product_project_spec_idempotency(project_id, result_row_version)"
+        ),
+    ),
+    6: (
+        """CREATE TABLE IF NOT EXISTS product_factory_local_repository_bindings (
+            project_id TEXT NOT NULL,
+            repository_id TEXT NOT NULL,
+            provider TEXT NOT NULL,
+            locator TEXT NOT NULL,
+            root_path TEXT NOT NULL,
+            root_device TEXT NOT NULL,
+            root_inode TEXT NOT NULL,
+            git_metadata_kind TEXT NOT NULL
+                CHECK(git_metadata_kind IN ('directory', 'file')),
+            git_metadata_device TEXT NOT NULL,
+            git_metadata_inode TEXT NOT NULL,
+            gitfile_sha256 TEXT,
+            binding_version INTEGER NOT NULL CHECK(binding_version > 0),
+            updated_at TEXT NOT NULL,
+            PRIMARY KEY(project_id, repository_id),
+            FOREIGN KEY(project_id) REFERENCES product_projects(project_id)
+        )""",
+        (
+            "CREATE INDEX IF NOT EXISTS idx_pf_local_repository_bindings_project "
+            "ON product_factory_local_repository_bindings(project_id, repository_id)"
         ),
     ),
 }
