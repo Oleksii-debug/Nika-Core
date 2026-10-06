@@ -10,6 +10,11 @@ from nika_core.product_factory_build_admission import (
     reviewed_candidate_fingerprint,
     reviewed_component_build_spec,
 )
+from nika_core.product_factory_build_execution import (
+    ApprovedBuildCommand,
+    BuildExecutionCoordinator,
+    ProjectExecutionAuthority,
+)
 from nika_core.product_factory_coordinator import (
     ProductFactoryCoordinator,
     ReviewDecision,
@@ -17,7 +22,11 @@ from nika_core.product_factory_coordinator import (
     WorkState,
     WorkerResultEnvelope,
 )
-from nika_core.product_factory_deployment import Platform, ResourceEnvelope
+from nika_core.product_factory_deployment import (
+    ExecutionNodeRegistry,
+    Platform,
+    ResourceEnvelope,
+)
 from nika_core.product_factory_multi_repository import RepositoryGraphAuthority
 from nika_core.product_factory_orchestration import (
     ProductComponent,
@@ -49,6 +58,31 @@ class AllowReviewAuthority:
             and evidence_refs
             == ("review://independent/accepted",)
         )
+
+
+class AlwaysAvailable:
+    def is_available(self, node_id: str) -> bool:
+        return True
+
+
+@dataclass
+class ExactPF5Authority:
+    authority: ProjectExecutionAuthority
+
+    def resolve(
+        self,
+        *,
+        project_id: str,
+        repository_id: str,
+        work_id: str,
+    ) -> ProjectExecutionAuthority:
+        if (
+            project_id != self.authority.project_id
+            or repository_id != self.authority.repository_id
+            or work_id != self.authority.work_id
+        ):
+            raise AssertionError("unexpected PF5 trusted-authority identity")
+        return self.authority
 
 
 @dataclass
@@ -226,6 +260,61 @@ def test_reviewed_candidate_becomes_bounded_pf5_spec_without_plan_argv_authority
         record=record,
         trusted_plan_fingerprint=coordinator.trusted_plan_fingerprint,
     ) in spec.request.work_id
+
+
+def test_reviewed_spec_submits_to_pf5_using_only_host_approved_argv() -> None:
+    graph = _graph(dangerous_plan_command=True)
+    coordinator = _coordinator(graph)
+    spec = _spec(coordinator, graph)
+    authority = ProjectExecutionAuthority(
+        project_id=PROJECT_ID,
+        repository_id=REPOSITORY_ID,
+        work_id=spec.request.work_id,
+        permissions=frozenset({"build_release"}),
+        allowed_node_ids=("windows-builder-1",),
+        allowed_workspace_paths=("products/desktop",),
+        network_scopes=("pypi.org:443",),
+        credential_refs=("credref:package-index",),
+        commands=(
+            ApprovedBuildCommand(
+                "build",
+                ("python", "-m", "build", "--wheel"),
+            ),
+        ),
+        evidence_refs=("authority://pf5/reviewed-build",),
+    )
+    pf5 = BuildExecutionCoordinator(
+        nodes=ExecutionNodeRegistry(),
+        node_availability=AlwaysAvailable(),
+        trusted_authority=ExactPF5Authority(authority),
+    )
+
+    submitted = pf5.submit(spec)
+
+    assert submitted.grant.argv == ("python", "-m", "build", "--wheel")
+    assert submitted.grant.argv != graph.components[0].build_commands[0]
+    assert submitted.grant.authority_evidence_refs == (
+        "authority://pf5/reviewed-build",
+    )
+
+
+def test_restored_pf4_snapshot_preserves_exact_build_admission_identity() -> None:
+    graph = _graph()
+    original = _coordinator(graph)
+    original_spec = _spec(original, graph)
+    snapshot = original.snapshot()
+
+    restored = ProductFactoryCoordinator(
+        graph,
+        review_authority=AllowReviewAuthority(),
+    )
+    restored.restore(
+        snapshot,
+        trusted_plan_fingerprint=original.trusted_plan_fingerprint,
+    )
+    restored_spec = _spec(restored, graph)
+
+    assert restored_spec == original_spec
 
 
 def test_review_required_candidate_cannot_enter_pf5() -> None:
