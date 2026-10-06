@@ -164,8 +164,9 @@ def route_command(text: str, *, active_project_id: str | None = None) -> Command
     """Classify command intent without an LLM or hidden project mutation.
 
     The router deliberately recognizes only high-confidence English and Ukrainian Product
-    Factory, repository-development, Toolsmith, or Agent Builder wording. Everything else remains an ordinary AgentTask.
-    Mixed high-confidence specialized intents require an explicit user decision instead of
+    Factory, repository-development, Toolsmith, or Agent Builder wording. Everything else
+    remains an ordinary AgentTask. Mixed high-confidence specialized intents require an explicit
+    user decision instead of
     silently choosing a long-lived, capability-building, or agent-definition path.
     """
     if type(text) is not str:
