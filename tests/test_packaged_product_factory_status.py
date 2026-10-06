@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -8,11 +9,24 @@ import pytest
 from nika_core.data.sqlite import SQLiteStore
 from nika_core.kernel.task_queue import TaskQueue
 from nika_core.product_command.contracts import ProductStatusKind
+from nika_core.product_factory_build_execution import (
+    BuildExecutionRecord,
+    BuildExecutionScopeRequest,
+    BuildExecutionSnapshot,
+    BuildExecutionSpec,
+    BuildExecutionState,
+    ExecutionGrant,
+)
+from nika_core.product_factory_build_execution_persistence import (
+    DurableBuildExecutionSnapshot,
+    SQLiteBuildExecutionCheckpointStore,
+)
 from nika_core.product_command.product_project_adapter import (
     ProductProjectCommandService,
     ProductProjectPresentationConsistencyError,
 )
 from nika_core.product_decisions import ProductDecisionRepository
+from nika_core.product_factory_deployment import ExecutionRequest, Platform, ResourceEnvelope
 from nika_core.product_factory_multi_repository import MultiRepositoryProductFactoryHost
 from nika_core.product_factory_orchestration import (
     ProductComponent,
@@ -108,6 +122,104 @@ def _fixture(tmp_path: Path):
     return store, repository, project, plan, preparation, center
 
 
+_PF5_WORK_ID = "pf5-build:" + "1" * 64
+_PF5_NOW = datetime(2026, 10, 6, 20, 0, tzinfo=UTC)
+
+
+def _pf5_record(
+    project_id: str,
+    *,
+    state: BuildExecutionState = BuildExecutionState.PENDING,
+    updated_at: datetime = _PF5_NOW,
+) -> BuildExecutionRecord:
+    spec = BuildExecutionSpec(
+        request=ExecutionRequest(
+            project_id=project_id,
+            work_id=_PF5_WORK_ID,
+            platform=Platform.WINDOWS,
+            required_features=frozenset({"build"}),
+            required_toolchains=frozenset({"python"}),
+            resources=ResourceEnvelope(2, 2048, 4096),
+        ),
+        source_sha="b" * 40,
+        scope=BuildExecutionScopeRequest(
+            repository_id="repo-core",
+            workspace_relpath="src/nika_core",
+            requested_node_ids=("windows-build-1",),
+            command_id="build",
+        ),
+        lease_seconds=120,
+    )
+    grant = ExecutionGrant(
+        project_id=project_id,
+        repository_id="repo-core",
+        work_id=_PF5_WORK_ID,
+        workspace_relpath="src/nika_core",
+        allowed_node_ids=("windows-build-1",),
+        network_scopes=(),
+        credential_refs=(),
+        command_id="build",
+        argv=("python", "-m", "build"),
+        authority_evidence_refs=("authority://packaged-pf5/test",),
+    )
+    return BuildExecutionRecord(
+        spec=spec,
+        grant=grant,
+        state=state,
+        block_reason=(
+            "trusted execution authority changed"
+            if state is BuildExecutionState.WAITING_FOR_AUTHORITY
+            else None
+        ),
+        updated_at=updated_at,
+    )
+
+
+def _save_pf5_status(
+    store: SQLiteStore,
+    *,
+    host_task_id: str,
+    project_id: str,
+    state: BuildExecutionState,
+) -> None:
+    checkpoints = SQLiteBuildExecutionCheckpointStore(
+        store,
+        host_task_id,
+        project_id,
+    )
+    pending = _pf5_record(project_id)
+    checkpoints.save(
+        DurableBuildExecutionSnapshot(
+            sequence=1,
+            coordinator=BuildExecutionSnapshot((pending,)),
+            leases=(),
+            registry_next_lease=1,
+            file_evidence=(),
+        )
+    )
+    if state is BuildExecutionState.PENDING:
+        return
+    current = replace(
+        pending,
+        state=state,
+        block_reason=(
+            "trusted execution authority changed"
+            if state is BuildExecutionState.WAITING_FOR_AUTHORITY
+            else None
+        ),
+        updated_at=_PF5_NOW + timedelta(seconds=1),
+    )
+    checkpoints.save(
+        DurableBuildExecutionSnapshot(
+            sequence=2,
+            coordinator=BuildExecutionSnapshot((current,)),
+            leases=(),
+            registry_next_lease=1,
+            file_evidence=(),
+        )
+    )
+
+
 def test_unprepared_current_project_keeps_existing_pf5_projection(tmp_path: Path) -> None:
     _store, _repository, project, _plan, _preparation, center = _fixture(tmp_path)
 
@@ -186,6 +298,10 @@ def test_status_change_during_pf5_composition_fails_closed(tmp_path: Path) -> No
             self.calls += 1
             return stable if self.calls == 1 else None
 
+        def read_build_execution(self, project_id: str):
+            assert project_id == project.project_id
+            return None
+
     reader = ChangingStatusReader()
     center = PackagedProductCommandCenter(
         products=ProductProjectCommandService(repository),
@@ -199,6 +315,106 @@ def test_status_change_during_pf5_composition_fails_closed(tmp_path: Path) -> No
         center.inspect_packaged_project(project.project_id)
 
     assert reader.calls == 2
+
+
+def test_durable_pf5_build_status_survives_restart_and_reaches_command(
+    tmp_path: Path,
+) -> None:
+    store, repository, project, plan, preparation, center = _fixture(tmp_path)
+    prepared = preparation.prepare(plan)
+    _save_pf5_status(
+        store,
+        host_task_id=prepared.host_task_id,
+        project_id=project.project_id,
+        state=BuildExecutionState.PENDING,
+    )
+
+    detail = center.inspect_project(project.project_id)
+    builds = tuple(
+        item for item in detail.statuses if item.item_id.startswith("pf5-build:")
+    )
+    assert len(builds) == 1
+    assert builds[0].kind is ProductStatusKind.BUILD
+    assert builds[0].state == "pending"
+    assert builds[0].label == "PF5 build: repo-core"
+    assert "credential" not in builds[0].detail.casefold()
+    assert "authority://" not in builds[0].detail
+    assert detail.summary.blocker_count == 0
+
+    router = _status_router(
+        store=store,
+        repository=repository,
+        project_id=project.project_id,
+        center=center,
+    )
+    before = router.create({"command": "Show current Product Factory status"})
+    assert "PF5 buildів 1" in before.message
+    assert "стани PF5: pending=1" in before.message
+
+    restarted_store = SQLiteStore(store.path)
+    restarted_store.initialize()
+    restarted_repository = ProductProjectRepository(restarted_store)
+    restarted_center = PackagedProductCommandCenter(
+        products=ProductProjectCommandService(restarted_repository),
+        status_reader=PackagedProductFactoryStatusReader(restarted_store),
+    )
+    restarted_router = _status_router(
+        store=restarted_store,
+        repository=restarted_repository,
+        project_id=project.project_id,
+        center=restarted_center,
+    )
+
+    assert restarted_router.create({"command": "Show current Product Factory status"}) == before
+
+
+def test_waiting_for_authority_pf5_build_is_visible_product_blocker(tmp_path: Path) -> None:
+    store, repository, project, plan, preparation, center = _fixture(tmp_path)
+    prepared = preparation.prepare(plan)
+    _save_pf5_status(
+        store,
+        host_task_id=prepared.host_task_id,
+        project_id=project.project_id,
+        state=BuildExecutionState.WAITING_FOR_AUTHORITY,
+    )
+
+    detail = center.inspect_project(project.project_id)
+    blocker = next(item for item in detail.statuses if item.item_id == _PF5_WORK_ID)
+    assert blocker.kind is ProductStatusKind.BLOCKER
+    assert blocker.state == "waiting_for_authority"
+    assert detail.summary.blocker_count == 1
+
+    result = _status_router(
+        store=store,
+        repository=repository,
+        project_id=project.project_id,
+        center=center,
+    ).create({"command": "Покажи поточний статус Product Factory"})
+    assert "блокерів 1" in result.message
+    assert "стани PF5: waiting_for_authority=1" in result.message
+
+
+def test_corrupt_pf5_checkpoint_never_becomes_product_status(tmp_path: Path) -> None:
+    store, _repository, project, plan, preparation, center = _fixture(tmp_path)
+    prepared = preparation.prepare(plan)
+    _save_pf5_status(
+        store,
+        host_task_id=prepared.host_task_id,
+        project_id=project.project_id,
+        state=BuildExecutionState.PENDING,
+    )
+    with store.connection() as conn:
+        conn.execute(
+            "UPDATE checkpoints SET checksum_sha256 = ? WHERE task_id = ? "
+            "AND stage = 'product_factory.build_execution.v1'",
+            ("0" * 64, prepared.host_task_id),
+        )
+
+    with pytest.raises(
+        ProductProjectPresentationConsistencyError,
+        match="trusted projection",
+    ):
+        center.inspect_project(project.project_id)
 
 
 def test_existing_host_without_checkpoint_fails_closed(tmp_path: Path) -> None:
