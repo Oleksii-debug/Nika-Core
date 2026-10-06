@@ -388,7 +388,17 @@ class TrainingScaleProgressionProof:
         }
 
     @classmethod
-    def from_canonical_payload(cls, value: object) -> TrainingScaleProgressionProof:
+    def from_canonical_payload(
+        cls,
+        value: object,
+        *,
+        plan: TrainingScalePlan,
+        authorization: TrainingScaleAuthorization,
+        run: TrainingRunEvidence,
+        comparison: AttestedTrainingComparisonResult,
+    ) -> TrainingScaleProgressionProof:
+        """Restore a persisted proof only through independently trusted authorities."""
+
         del cls
         if type(value) is not dict:
             raise TrainingScaleError(
@@ -414,22 +424,44 @@ class TrainingScaleProgressionProof:
             raise TrainingScaleError(
                 "training progression proof fields do not match the strict schema"
             )
-        return _build_progression_proof(
-            plan_sha256=value["plan_sha256"],
-            tier_index=value["tier_index"],
-            authorization_sha256=value["authorization_sha256"],
-            job_id=value["job_id"],
-            job_fingerprint=value["job_fingerprint"],
-            base_artifact_ref=value["base_artifact_ref"],
-            base_sha256=value["base_sha256"],
-            candidate_artifact_ref=value["candidate_artifact_ref"],
-            candidate_sha256=value["candidate_sha256"],
-            frozen_package_sha256=value["frozen_package_sha256"],
-            training_material_sha256=value["training_material_sha256"],
-            execution_plan_sha256=value["execution_plan_sha256"],
-            comparison_evidence_sha256=value["comparison_evidence_sha256"],
-            evaluation_set_sha256=value["evaluation_set_sha256"],
+        for field in (
+            "authorization_sha256",
+            "base_sha256",
+            "candidate_sha256",
+            "comparison_evidence_sha256",
+            "evaluation_set_sha256",
+            "execution_plan_sha256",
+            "frozen_package_sha256",
+            "job_fingerprint",
+            "plan_sha256",
+            "training_material_sha256",
+        ):
+            _require_sha256(value[field], name=field)
+        tier_index = value["tier_index"]
+        if type(tier_index) is not int or tier_index < 0:
+            raise TrainingScaleError("tier_index must be a non-negative integer")
+        for field in (
+            "job_id",
+            "base_artifact_ref",
+            "candidate_artifact_ref",
+        ):
+            _require_text(value[field], name=field)
+        if value["base_artifact_ref"] == value["candidate_artifact_ref"]:
+            raise TrainingScaleError(
+                "progression proof cannot overwrite the base artifact"
+            )
+
+        trusted = build_scale_progression_proof(
+            plan=plan,
+            authorization=authorization,
+            run=run,
+            comparison=comparison,
         )
+        if value != trusted.canonical_payload():
+            raise TrainingScaleError(
+                "training progression proof payload does not match trusted prior-run authority"
+            )
+        return trusted
 
     @property
     def proof_sha256(self) -> str:
