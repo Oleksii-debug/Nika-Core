@@ -129,6 +129,61 @@ def test_packaged_data_adoption_proof_is_limited_to_hosted_windows(
     assert _hosted_windows_proof_enabled() is (os.name == "nt")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows file-share semantics")
+def test_pf11_evidence_reader_refuses_preexisting_writer_and_recovers(
+    tmp_path: Path,
+) -> None:
+    evidence = tmp_path / "pf11.json"
+    project_id = "product-" + ("a" * 64)
+    payload = {
+        "route": "product_project",
+        "project_id": project_id,
+        "spec_version": 1,
+        "state": "active",
+        "command_center_state_proven": True,
+        "current_command_proven": True,
+        "current_command_focus_proven": True,
+        "bridge_state_project_id": project_id,
+        "bridge_state_spec_version": 1,
+        "bridge_state_status_count": 1,
+        "bridge_state_decision_count": 1,
+        "restart_selection_integrity_proven": True,
+        "bounded_projection_proven": True,
+        "human_tested": False,
+        "nvda_verified": False,
+        "production_release_ready": False,
+    }
+    evidence.write_text(json.dumps(payload), encoding="utf-8")
+
+    with evidence.open("r+b"):
+        with pytest.raises(RuntimeError, match="could not be read safely"):
+            m11_release._read_pf11_evidence(evidence)
+
+    assert m11_release._read_pf11_evidence(evidence) == payload
+
+
+def test_pf11_evidence_reader_rejects_swap_between_lstat_and_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    evidence = tmp_path / "pf11.json"
+    evidence.write_text("{}", encoding="utf-8")
+    real_open = m11_release._open_readonly_nofollow_snapshot
+    swapped = False
+
+    def swapping_open(path: Path) -> int:
+        nonlocal swapped
+        if path == evidence and not swapped:
+            swapped = True
+            evidence.write_text('{"replacement":true}', encoding="utf-8")
+        return real_open(path)
+
+    monkeypatch.setattr(m11_release, "_open_readonly_nofollow_snapshot", swapping_open)
+
+    with pytest.raises(RuntimeError, match="changed before it was read"):
+        m11_release._read_pf11_evidence(evidence)
+
+
 def test_packaged_data_adoption_task_reader_closes_sqlite_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
