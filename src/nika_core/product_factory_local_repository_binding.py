@@ -241,12 +241,25 @@ class ProductFactoryLocalRepositoryBindings:
         project_id: str,
         repository_id: str,
         expected_binding_version: int,
+        expected_repository: RepositoryRef | None = None,
         expected_project_spec_version: int | None = None,
         expected_project_row_version: int | None = None,
     ) -> None:
         project_id = _canonical_text(project_id, "project_id")
         repository_id = _canonical_text(repository_id, "repository_id")
         expected = _positive_int(expected_binding_version, "expected_binding_version")
+        expected_repository_snapshot = (
+            None
+            if expected_repository is None
+            else _snapshot_repository(expected_repository)
+        )
+        if (
+            expected_repository_snapshot is not None
+            and expected_repository_snapshot.repository_id != repository_id
+        ):
+            raise ProductFactoryLocalRepositoryBindingError(
+                "expected repository identity does not match repository_id"
+            )
         expected_spec_version = (
             None
             if expected_project_spec_version is None
@@ -281,7 +294,8 @@ class ProductFactoryLocalRepositoryBindings:
                     expected_row_version=expected_row_version,
                 )
             row = conn.execute(
-                "SELECT binding_version FROM product_factory_local_repository_bindings "
+                "SELECT binding_version,provider,locator "
+                "FROM product_factory_local_repository_bindings "
                 "WHERE project_id=? AND repository_id=?",
                 (project_id, repository_id),
             ).fetchone()
@@ -292,6 +306,18 @@ class ProductFactoryLocalRepositoryBindings:
                 raise ProductFactoryLocalRepositoryBindingError(
                     "local repository binding version changed"
                 )
+            if expected_repository_snapshot is not None:
+                stored_provider = _stored_text(row["provider"], "provider")
+                stored_locator = _safe_locator(
+                    _stored_text(row["locator"], "locator")
+                )
+                if (
+                    stored_provider != expected_repository_snapshot.provider
+                    or stored_locator != expected_repository_snapshot.locator
+                ):
+                    raise ProductFactoryLocalRepositoryBindingError(
+                        "local repository binding does not match execution-plan repository"
+                    )
             conn.execute(
                 "DELETE FROM product_factory_local_repository_bindings "
                 "WHERE project_id=? AND repository_id=? AND binding_version=?",
