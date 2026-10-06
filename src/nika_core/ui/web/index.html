@@ -185,7 +185,7 @@
       <p id="command-intelligence-help">Режим інтелекту можна перевірити командою «режим інтелекту» або змінити для нових завдань: «режим інтелекту deterministic», «режим інтелекту foundry &lt;model&gt;», «режим інтелекту ollama &lt;model&gt; &lt;loopback-url&gt;», «режим інтелекту api &lt;provider&gt; &lt;model&gt; &lt;https-url&gt; &lt;env:REF&gt; &lt;public|private&gt;». Уже прийняті завдання не перемикаються.</p>
       <p id="task-control-help">Для кількох завдань можна вибрати потрібне радіокнопкою у списку «Завдання» й скористатися кнопками керування вибраним завданням. Точні команди з task_id залишаються доступними: «pause task &lt;task_id&gt;», «resume task &lt;task_id&gt;», «stop task &lt;task_id&gt;» або «task status &lt;task_id&gt;». Українські відповідники: «призупини завдання &lt;task_id&gt;», «продовж завдання &lt;task_id&gt;», «зупини завдання &lt;task_id&gt;», «статус завдання &lt;task_id&gt;».</p>
       <p id="product-decision-help">Якщо ProductProject очікує рішення власника, спочатку введіть «покажи поточне рішення ProductProject» або «show current product decision». Якщо очікують кілька рішень, команда «list pending product decisions» покаже до восьми decision_id на сторінку; наступні сторінки відкриваються командою «list pending product decisions page &lt;номер&gt;», а повне питання конкретного рішення — «show product decision &lt;decision_id&gt;». Щоб відхилити точно вибране рішення, введіть «reject product decision &lt;decision_id&gt;». Щоб схвалити його, введіть «approve product decision &lt;decision_id&gt;»: Nika покаже одноразовий approval request_id. Лише після окремої команди «confirm product decision approval &lt;approval-request-id&gt;» trusted host запише схвалення. Українські відповідники: «відхили рішення ProductProject &lt;decision_id&gt;», «схвали рішення ProductProject &lt;decision_id&gt;» і «підтвердь схвалення рішення ProductProject &lt;approval-request-id&gt;».</p>
-      <p id="product-factory-help">Для поточного ProductProject доступні точні команди Product Factory: «сплануй поточний ProductProject», «покажи поточний план Product Factory» і «покажи поточний статус Product Factory». Команда статусу лише читає перевірений durable execution state, не запускає воркерів і показує не більш як вісім компонентів за один раз.</p>
+      <p id="product-factory-help">Для поточного ProductProject доступні точні команди Product Factory: «сплануй поточний ProductProject», «покажи поточний план Product Factory» і «покажи поточний статус Product Factory». Також підтримується «покажи поточний стан Product Factory». Команда статусу лише читає перевірений durable execution state, не запускає воркерів, показує не більш як вісім компонентів у текстовому повідомленні та переводить фокус до семантичного операторського стану.</p>
       <div class="actions">
         <button type="button" data-action-id="task.create" data-error-focus-target="command-input">Створити завдання</button>
         <button type="button" data-action-id="task.pause">Призупинити</button>
@@ -284,6 +284,31 @@
         <p id="product-project-statuses-empty">Статусних записів немає.</p>
         <ul id="product-project-statuses-list" aria-label="Статусні записи ProductProject"></ul>
         <p id="product-project-statuses-truncated" hidden></p>
+      </div>
+      <div id="product-project-operator" hidden>
+        <h3 id="product-project-operator-heading" tabindex="-1">Оператор Product Factory</h3>
+        <dl aria-label="Поточний операторський стан Product Factory">
+          <dt>Проєкт</dt>
+          <dd id="product-project-operator-project">—</dd>
+          <dt>Поточна робота</dt>
+          <dd id="product-project-operator-work">—</dd>
+          <dt>Власник</dt>
+          <dd id="product-project-operator-owner">—</dd>
+          <dt>Стан</dt>
+          <dd id="product-project-operator-state">—</dd>
+          <dt>Блокер</dt>
+          <dd id="product-project-operator-blocker">—</dd>
+          <dt>Кандидат</dt>
+          <dd id="product-project-operator-candidate">—</dd>
+          <dt>Тести</dt>
+          <dd id="product-project-operator-test">—</dd>
+          <dt>QA</dt>
+          <dd id="product-project-operator-qa">—</dd>
+          <dt>Інтеграція</dt>
+          <dd id="product-project-operator-integration">—</dd>
+          <dt>Наступна дія</dt>
+          <dd id="product-project-operator-next">—</dd>
+        </dl>
       </div>
       <div id="product-project-decision" hidden>
         <h3 id="product-project-decision-heading" tabindex="-1">
