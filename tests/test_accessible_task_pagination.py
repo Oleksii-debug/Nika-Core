@@ -195,6 +195,47 @@ def test_bridge_and_html_expose_keyboard_reachable_task_page_controls(tmp_path: 
     assert 'state.task_page ?? null' in script
 
 
+def test_bridge_exact_task_selection_mutates_only_selected_task(tmp_path: Path) -> None:
+    database = (tmp_path / "selected-task-control.db").resolve()
+    bridge, _products = nika_windows.build_windows_bridge(
+        AppConfig(database_path=database),
+        start_startup_recovery=False,
+    )
+    store = SQLiteStore(database)
+    store.initialize()
+    queue = TaskQueue(store)
+    first = _ready(queue, 1)
+    second = _ready(queue, 2)
+
+    result = bridge.dispatch(
+        {
+            "request_id": "selected-pause",
+            "action_id": "task.pause",
+            "payload": {"task_id": first},
+        }
+    )
+
+    assert result["status"] == "completed"
+    assert result["focus_id"] == "tasks-heading"
+    assert queue.get(first).state is TaskState.PAUSED
+    assert queue.get(second).state is TaskState.READY
+
+
+def test_html_and_script_expose_single_selection_task_controls() -> None:
+    root = Path(__file__).resolve().parents[1]
+    html = (root / "src/nika_core/ui/web/index.html").read_text(encoding="utf-8")
+    script = (root / "src/nika_core/ui/web/app.js").read_text(encoding="utf-8")
+
+    assert 'name = "selected-task"' in script
+    assert 'data-selected-task-control="true"' in html
+    assert 'id="tasks-selected-pause"' in html
+    assert 'id="tasks-selected-resume"' in html
+    assert 'id="tasks-selected-stop"' in html
+    assert 'payload.task_id = selectedTaskId' in script
+    assert "function renderTasks(items)" in script
+    assert "setSelectedTaskControlsDisabled(selectedTaskId === null)" in script
+
+
 def test_task_page_actions_reject_payload_authority(tmp_path: Path) -> None:
     backend, _queue = _backend(tmp_path)
 

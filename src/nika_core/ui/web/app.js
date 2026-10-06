@@ -104,6 +104,10 @@
   const tasksPageStatus = document.getElementById("tasks-page-status");
   const tasksPagePrevious = document.getElementById("tasks-page-previous");
   const tasksPageNext = document.getElementById("tasks-page-next");
+  const tasksSelectedPause = document.getElementById("tasks-selected-pause");
+  const tasksSelectedResume = document.getElementById("tasks-selected-resume");
+  const tasksSelectedStop = document.getElementById("tasks-selected-stop");
+  let selectedTaskId = null;
   const agentsList = document.getElementById("agents-list");
   const workspacesList = document.getElementById("workspaces-list");
   const tasksEmpty = document.getElementById("tasks-empty");
@@ -369,6 +373,65 @@
       row.textContent = formatter(item);
       list.appendChild(row);
     }
+  }
+
+  const selectableTaskStates = new Set([
+    "CREATED",
+    "READY",
+    "RUNNING",
+    "WAITING_TOOL",
+    "WAITING_APPROVAL",
+    "PAUSED",
+    "RETRYING",
+    "BLOCKED",
+  ]);
+
+  function setSelectedTaskControlsDisabled(disabled) {
+    for (const control of [tasksSelectedPause, tasksSelectedResume, tasksSelectedStop]) {
+      if (control) control.disabled = disabled;
+    }
+  }
+
+  function renderTasks(items) {
+    const safeItems = Array.isArray(items) ? items : [];
+    tasksList.replaceChildren();
+    tasksEmpty.hidden = safeItems.length > 0;
+    let selectionVisible = false;
+
+    for (const item of safeItems) {
+      const row = document.createElement("li");
+      const description = (
+        `ID: ${item.task_id} — ${presentState(taskStateLabels, item.state)} — `
+        + (item.command || "Без назви")
+      );
+      if (selectableTaskStates.has(item.state)) {
+        const input = document.createElement("input");
+        const label = document.createElement("label");
+        input.type = "radio";
+        input.name = "selected-task";
+        input.value = String(item.task_id ?? "");
+        input.id = `task-select-${String(item.task_id ?? "")}`;
+        label.htmlFor = input.id;
+        label.textContent = description;
+        if (selectedTaskId === item.task_id) {
+          input.checked = true;
+          selectionVisible = true;
+        }
+        input.addEventListener("change", () => {
+          if (!input.checked) return;
+          selectedTaskId = String(item.task_id);
+          setSelectedTaskControlsDisabled(false);
+          announce(`Вибрано завдання ${selectedTaskId}.`);
+        });
+        row.append(input, label);
+      } else {
+        row.textContent = description;
+      }
+      tasksList.appendChild(row);
+    }
+
+    if (!selectionVisible) selectedTaskId = null;
+    setSelectedTaskControlsDisabled(selectedTaskId === null);
   }
 
   function renderTaskPage(snapshot) {
@@ -1665,15 +1728,7 @@
     renderSpeech(state.speech ?? null);
     renderVoice(state.voice ?? null);
     const taskPageReady = renderTaskPage(state.task_page ?? null);
-    renderItems(
-      tasksList,
-      tasksEmpty,
-      state.tasks || [],
-      (item) => (
-        `ID: ${item.task_id} — ${presentState(taskStateLabels, item.state)} — `
-        + (item.command || "Без назви")
-      ),
-    );
+    renderTasks(state.tasks || []);
     renderItems(agentsList, agentsEmpty, state.agents || [], (item) => `${item.name} — ${item.goal}`);
     renderItems(workspacesList, workspacesEmpty, state.workspaces || [], (item) => `${item.name} — ${item.description || "Без опису"}`);
     const productReady = renderProductProject(state.product_project ?? null);
@@ -1729,6 +1784,12 @@
       await dispatchModel(actionId, trigger);
       return;
     }
+    const selectedTaskControl = trigger?.dataset?.selectedTaskControl === "true";
+    if (selectedTaskControl && !selectedTaskId) {
+      announce("Спочатку виберіть незавершене завдання у списку «Завдання».", true);
+      trigger?.focus?.();
+      return;
+    }
     // Group task controls: pause/resume/stop must not race an unacknowledged task creation.
     const durableMutation = taskMutationActions.has(actionId) || actionId === "team.sources.configure";
     const lockKey = taskMutationActions.has(actionId) ? "task-control" : actionId;
@@ -1768,6 +1829,12 @@
     foregroundStateRefreshPending += 1;
     try {
       const payload = {};
+      if (
+        selectedTaskControl
+        && ["task.pause", "task.resume", "agent.stop"].includes(actionId)
+      ) {
+        payload.task_id = selectedTaskId;
+      }
       if (actionId === "task.create") payload.command = commandInput.value.trim();
       if (actionId === "voice.model.import") payload.source_root = voiceModelSource?.value ?? "";
       if (actionId === "speech.start") payload.text = speechText?.value ?? "";
