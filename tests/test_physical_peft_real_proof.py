@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -184,7 +185,7 @@ def test_candidate_evidence_snapshot_rejects_tensor_path_mutation(
     candidate.write_bytes(candidate_bytes)
     monkeypatch.setattr(proof, "candidate_adapter_manifest", lambda _path: {})
 
-    import safetensors
+    fake_safetensors = ModuleType("safetensors")
 
     class MutatingSafeOpen:
         def __enter__(self):
@@ -197,11 +198,8 @@ def test_candidate_evidence_snapshot_rejects_tensor_path_mutation(
         def __exit__(self, exc_type, exc, traceback) -> None:
             return None
 
-    monkeypatch.setattr(
-        safetensors,
-        "safe_open",
-        lambda *_args, **_kwargs: MutatingSafeOpen(),
-    )
+    fake_safetensors.safe_open = lambda *_args, **_kwargs: MutatingSafeOpen()
+    monkeypatch.setitem(sys.modules, "safetensors", fake_safetensors)
 
     with pytest.raises(proof.ProofError):
         proof._verified_candidate_evidence_from_snapshot(
