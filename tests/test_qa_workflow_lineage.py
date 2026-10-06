@@ -179,3 +179,49 @@ def test_m11_requalifies_backup_recovery_before_windows_package() -> None:
     regressions = regressions.split("- name: Build standalone", 1)[0]
     for path in paths[2:]:
         assert f"          {path}" in regressions, path
+
+
+def test_m11_requalifies_packaged_voice_before_windows_package() -> None:
+    workflow = WORKFLOWS[1].read_text(encoding="utf-8")
+    source_paths = (
+        "src/nika_core/microphone_capture.py",
+        "src/nika_core/sherpa_onnx_stt.py",
+        "src/nika_core/speech_to_text.py",
+        "src/nika_core/voice_turn.py",
+        "src/nika_core/wake_activation.py",
+        "src/nika_core/windows_microphone_capture.py",
+    )
+    tests = (
+        "tests/test_packaged_voice_entrypoint.py",
+        "tests/test_packaged_voice_model_setup.py",
+        "tests/test_packaged_startup_cleanup.py",
+        "tests/test_desktop_voice.py",
+        "tests/test_microphone_capture.py",
+        "tests/test_microphone_capture_timeout_truth.py",
+        "tests/test_sherpa_onnx_stt.py",
+        "tests/test_speech_to_text.py",
+        "tests/test_voice_turn.py",
+        "tests/test_wake_activation.py",
+        "tests/test_windows_microphone_capture.py",
+    )
+    for path in (*source_paths, *tests):
+        assert workflow.count(f'      - "{path}"') == 2, path
+
+    regressions = workflow.split("- name: Run M11 M12 source regressions", 1)[1]
+    regressions = regressions.split("- name: Build standalone", 1)[0]
+    for path in tests:
+        assert f"          {path}" in regressions, path
+
+
+def test_packaged_release_provenance_resolves_voice_runtime_extra() -> None:
+    m11 = WORKFLOWS[1].read_text(encoding="utf-8")
+    m12 = M12_WORKFLOW.read_text(encoding="utf-8")
+
+    assert (
+        '--report ./build/m11/pip-runtime-report.json ".[gui,voice]"'
+        in m11
+    )
+    assert (
+        '--report ./build/m12/pip-runtime-report.json ".[gui,voice]"'
+        in m12
+    )
