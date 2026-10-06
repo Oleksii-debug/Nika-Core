@@ -9,6 +9,7 @@ from nika_core.data.sqlite import SQLiteStore
 from nika_core.product_factory_local_coding import ContainedLocalCodingProgram
 from nika_core.product_factory_local_repository_binding import (
     ProductFactoryLocalRepositoryBinding,
+    ProductFactoryLocalRepositoryBindingError,
     ProductFactoryLocalRepositoryBindings,
 )
 from nika_core.product_factory_multi_repository import MultiRepositoryExecutionState
@@ -62,13 +63,23 @@ class _EntryRepositoryAuthority:
             raise PackagedBoundLocalProductFactoryHostError(
                 "component repository is outside the prepared binding snapshot"
             )
-        current = self.bindings.require(project_id, repository_id)
+        try:
+            current = self.bindings.require(project_id, repository_id)
+        except (KeyError, ProductFactoryLocalRepositoryBindingError) as exc:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "local repository binding is unavailable during contained-local execution"
+            ) from exc
         actual = _binding_snapshot(current)
         if actual != expected:
             raise PackagedBoundLocalProductFactoryHostError(
                 "local repository binding changed during contained-local execution"
             )
-        project = self.projects.get(project_id)
+        try:
+            project = self.projects.get(project_id)
+        except KeyError as exc:
+            raise PackagedBoundLocalProductFactoryHostError(
+                "ProductProject is unavailable during contained-local execution"
+            ) from exc
         if (
             project.status != "active"
             or expected.locator not in project.spec.repository_refs
