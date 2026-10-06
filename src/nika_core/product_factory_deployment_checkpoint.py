@@ -211,7 +211,6 @@ class DurableDeploymentFabric(DeploymentFabric):
             record.previous_release is None or callable(rollback_exact)
         )
         if exact_unhealthy and rollback_can_dispatch:
-            self._rollback_health_by_intent[intent.intent_id] = health
             record = self._save(
                 DeploymentRecord(
                     intent,
