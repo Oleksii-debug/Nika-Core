@@ -77,7 +77,6 @@ def test_storage_startup_failure_is_accessible_private_and_does_not_launch_shell
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: Exception,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
@@ -136,6 +135,7 @@ def test_shell_launch_failure_is_accessible_private_and_returns_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     failure: Exception,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     config = AppConfig(database_path=tmp_path / "Ніка дані" / "nika.db")
     monkeypatch.setattr(AppConfig, "from_environment", classmethod(lambda _cls: config))
