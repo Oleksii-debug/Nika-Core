@@ -453,6 +453,59 @@ def test_resume_marker_binds_job_step_and_consumed_materials(tmp_path: Path) -> 
         peft._resume_checkpoint(job_root, tampered)
 
 
+def test_checkpoint_marker_publication_is_create_only(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    payload_sha256 = peft._checkpoint_payload_manifest_sha256(checkpoint)
+
+    marker_sha256 = peft._write_checkpoint_marker(
+        checkpoint,
+        request=request,
+        consumed_sha256=request.required_consumed_materials_sha256,
+        checkpoint_payload_sha256=payload_sha256,
+    )
+    marker = checkpoint / peft._CHECKPOINT_MARKER
+    marker_bytes = marker.read_bytes()
+    assert marker_sha256 == _sha256(marker_bytes)
+
+    with pytest.raises(peft.PeftTrainerError, match="checkpoint_marker_conflict"):
+        peft._write_checkpoint_marker(
+            checkpoint,
+            request=request,
+            consumed_sha256=request.required_consumed_materials_sha256,
+            checkpoint_payload_sha256=payload_sha256,
+        )
+
+    assert marker.read_bytes() == marker_bytes
+    assert not (checkpoint / f".{peft._CHECKPOINT_MARKER}.tmp").exists()
+
+
+def test_completed_step_checkpoint_rejects_oversized_marker(tmp_path: Path) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    checkpoint = peft._checkpoint_dir(job_root, 1)
+    checkpoint.mkdir(parents=True)
+    (checkpoint / "optimizer.pt").write_bytes(b"optimizer-state")
+    (checkpoint / peft._CHECKPOINT_MARKER).write_bytes(
+        b"x" * (peft._MAX_CHECKPOINT_MARKER_BYTES + 1)
+    )
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="step_checkpoint_marker_invalid",
+    ):
+        peft._completed_step_checkpoint(
+            job_root,
+            request,
+            consumed_sha256=request.required_consumed_materials_sha256,
+        )
+
+
 def test_resume_rejects_tampered_checkpoint_payload(tmp_path: Path) -> None:
     request, base = _parsed(tmp_path)
     config = _config(tmp_path, request, base)
