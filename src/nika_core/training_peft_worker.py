@@ -39,6 +39,7 @@ _RESUME_STATE_SCHEMA_VERSION = 2
 _TOKENIZATION_DOMAIN = b"nika-peft-tokenization-v1\x00"
 _CANDIDATE_FILE = "adapter_model.safetensors"
 _MAX_CHECKPOINT_FILES = 4096
+_MAX_RESUME_LOAD_AUTHORITY_FILES = 128
 _MAX_CHECKPOINT_BYTES = 64 * 1024 * 1024 * 1024
 _MAX_CHECKPOINT_MARKER_BYTES = 64 * 1024
 _MAX_RUNTIME_VERSION_BYTES = 256
@@ -128,6 +129,20 @@ class ConsumedMaterials:
     training: tuple[TrainingExample, ...]
     validation: tuple[TrainingExample, ...]
     attestation_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _ResumeCheckpointLoadAuthority:
+    checkpoint: Path
+    root_identity: tuple[int, int, int, int, int]
+    directories: tuple[
+        tuple[Path, tuple[int, int, int, int, int]],
+        ...,
+    ]
+    files: tuple[
+        tuple[Path, int, tuple[int, int, int, int, int]],
+        ...,
+    ]
 
 
 def _fail(code: str) -> NoReturn:
@@ -2797,6 +2812,197 @@ def _snapshot_resume_checkpoint(
         _fail("resume_checkpoint_snapshot_failed")
 
 
+def _resume_checkpoint_load_entries(
+    checkpoint: Path,
+    *,
+    code: str,
+    file_limit_code: str | None = None,
+) -> tuple[tuple[Path, ...], tuple[Path, ...]]:
+    try:
+        paths = sorted(
+            checkpoint.rglob("*"),
+            key=lambda item: item.relative_to(checkpoint).as_posix(),
+        )
+    except OSError:
+        _fail(code)
+
+    directories: list[Path] = []
+    files: list[Path] = []
+    seen_paths: set[str] = set()
+    total_bytes = 0
+    for path in paths:
+        relative = path.relative_to(checkpoint).as_posix()
+        if relative in {_CHECKPOINT_MARKER, f".{_CHECKPOINT_MARKER}.tmp"}:
+            _fail(code)
+        folded = relative.casefold()
+        if folded in seen_paths:
+            _fail(code)
+        seen_paths.add(folded)
+        try:
+            value = os.lstat(path)
+        except OSError:
+            _fail(code)
+        if stat.S_ISLNK(value.st_mode) or _is_reparse(value):
+            _fail(code)
+        if stat.S_ISDIR(value.st_mode):
+            directories.append(path)
+            continue
+        if not stat.S_ISREG(value.st_mode) or value.st_nlink != 1:
+            _fail(code)
+        files.append(path)
+        total_bytes += value.st_size
+        if len(files) > _MAX_RESUME_LOAD_AUTHORITY_FILES:
+            _fail(file_limit_code or code)
+        if total_bytes > _MAX_CHECKPOINT_BYTES:
+            _fail(code)
+    if not files:
+        _fail(code)
+    return tuple(directories), tuple(files)
+
+
+def _close_resume_checkpoint_load_authority(
+    authority: _ResumeCheckpointLoadAuthority,
+) -> None:
+    for _path, descriptor, _identity in authority.files:
+        try:
+            os.close(descriptor)
+        except OSError:
+            pass
+
+
+def _verify_resume_checkpoint_load_authority(
+    authority: _ResumeCheckpointLoadAuthority,
+    *,
+    expected_payload_sha256: str,
+    code: str = "resume_checkpoint_changed_during_load",
+) -> None:
+    expected_digest = _require_sha256(
+        expected_payload_sha256,
+        field="resume_checkpoint_payload_sha256",
+    )
+    root = _require_directory_unlinked(authority.checkpoint, code=code)
+    directories, files = _resume_checkpoint_load_entries(
+        authority.checkpoint,
+        code=code,
+    )
+    if _stable_stat_identity(root) != authority.root_identity:
+        _fail(code)
+    if directories != tuple(path for path, _identity in authority.directories):
+        _fail(code)
+    if files != tuple(path for path, _descriptor, _identity in authority.files):
+        _fail(code)
+
+    for path, identity in authority.directories:
+        current = _require_directory_unlinked(path, code=code)
+        if _stable_stat_identity(current) != identity:
+            _fail(code)
+    for path, descriptor, identity in authority.files:
+        try:
+            opened = os.fstat(descriptor)
+        except OSError:
+            _fail(code)
+        current = _require_regular_unlinked(path, code=code)
+        if (
+            opened.st_nlink != 1
+            or current.st_nlink != 1
+            or _stable_stat_identity(opened) != identity
+            or _stable_stat_identity(current) != identity
+        ):
+            _fail(code)
+    try:
+        observed_digest = _checkpoint_payload_manifest_sha256(
+            authority.checkpoint
+        )
+    except PeftTrainerError:
+        _fail(code)
+    if not hmac.compare_digest(observed_digest, expected_digest):
+        _fail(code)
+
+
+def _open_resume_checkpoint_load_authority(
+    checkpoint: Path,
+    *,
+    expected_payload_sha256: str,
+) -> _ResumeCheckpointLoadAuthority:
+    expected_digest = _require_sha256(
+        expected_payload_sha256,
+        field="resume_checkpoint_payload_sha256",
+    )
+    root = _require_directory_unlinked(
+        checkpoint,
+        code="resume_load_authority_invalid",
+    )
+    directories, files = _resume_checkpoint_load_entries(
+        checkpoint,
+        code="resume_load_authority_invalid",
+        file_limit_code="resume_load_authority_file_limit",
+    )
+    directory_authority = tuple(
+        (
+            path,
+            _stable_stat_identity(
+                _require_directory_unlinked(
+                    path,
+                    code="resume_load_authority_invalid",
+                )
+            ),
+        )
+        for path in directories
+    )
+    opened: list[
+        tuple[Path, int, tuple[int, int, int, int, int]]
+    ] = []
+    try:
+        for path in files:
+            before = _require_regular_unlinked(
+                path,
+                code="resume_load_authority_invalid",
+            )
+            descriptor = _open_readonly_snapshot(path)
+            opened_stat = os.fstat(descriptor)
+            identity = _stable_stat_identity(before)
+            if (
+                before.st_nlink != 1
+                or opened_stat.st_nlink != 1
+                or not stat.S_ISREG(opened_stat.st_mode)
+                or _is_reparse(opened_stat)
+                or _stable_stat_identity(opened_stat) != identity
+            ):
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+                _fail("resume_load_authority_invalid")
+            opened.append((path, descriptor, identity))
+
+        authority = _ResumeCheckpointLoadAuthority(
+            checkpoint=checkpoint,
+            root_identity=_stable_stat_identity(root),
+            directories=directory_authority,
+            files=tuple(opened),
+        )
+        _verify_resume_checkpoint_load_authority(
+            authority,
+            expected_payload_sha256=expected_digest,
+            code="resume_load_authority_invalid",
+        )
+        return authority
+    except PeftTrainerError:
+        for _path, descriptor, _identity in opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        raise
+    except OSError:
+        for _path, descriptor, _identity in opened:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        _fail("resume_load_authority_invalid")
+
+
 class _TokenizedDataset:
     def __init__(
         self,
@@ -3170,13 +3376,15 @@ def _train_one_step(
     previous_checkpoint = _resume_checkpoint(job_root, request)
     resume_checkpoint = previous_checkpoint
     resume_snapshot_root: Path | None = None
+    resume_payload_sha256: str | None = None
     if previous_checkpoint is not None:
+        resume_payload_sha256 = _require_sha256(
+            request.resume_state.get("checkpoint_payload_sha256"),
+            field="resume_checkpoint_payload_sha256",
+        )
         resume_checkpoint = _snapshot_resume_checkpoint(
             previous_checkpoint,
-            expected_payload_sha256=_require_sha256(
-                request.resume_state.get("checkpoint_payload_sha256"),
-                field="resume_checkpoint_payload_sha256",
-            ),
+            expected_payload_sha256=resume_payload_sha256,
             job_root=job_root,
         )
         resume_snapshot_root = resume_checkpoint.parent
@@ -3191,6 +3399,7 @@ def _train_one_step(
     initial_adapter_load_authority: tuple[
         tuple[Path, int, tuple[int, int, int, int, int]], ...
     ] = ()
+    resume_load_authority: _ResumeCheckpointLoadAuthority | None = None
 
     try:
         foundation_load_authority = _open_foundation_load_authority(
@@ -3282,6 +3491,15 @@ def _train_one_step(
             )
             if adapter_dir is None:
                 _fail("training_adapter_state_missing")
+            if previous_checkpoint is not None:
+                if resume_checkpoint is None or resume_payload_sha256 is None:
+                    _fail("resume_load_authority_invalid")
+                resume_load_authority = (
+                    _open_resume_checkpoint_load_authority(
+                        resume_checkpoint,
+                        expected_payload_sha256=resume_payload_sha256,
+                    )
+                )
             model = PeftModel.from_pretrained(
                 model,
                 os.fspath(adapter_dir),
@@ -3375,11 +3593,26 @@ def _train_one_step(
                 os.fspath(adapter_dir),
                 safe_serialization=True,
             )
+        if resume_load_authority is not None:
+            if resume_payload_sha256 is None:
+                _fail("resume_load_authority_invalid")
+            _verify_resume_checkpoint_load_authority(
+                resume_load_authority,
+                expected_payload_sha256=resume_payload_sha256,
+            )
+            _close_resume_checkpoint_load_authority(
+                resume_load_authority
+            )
+            resume_load_authority = None
     except PeftTrainerError:
         raise
     except (OSError, RuntimeError, TypeError, ValueError):
         _fail("training_step_failed")
     finally:
+        if resume_load_authority is not None:
+            _close_resume_checkpoint_load_authority(
+                resume_load_authority
+            )
         if foundation_load_authority:
             _close_foundation_load_authority(foundation_load_authority)
         if initial_adapter_load_authority:
