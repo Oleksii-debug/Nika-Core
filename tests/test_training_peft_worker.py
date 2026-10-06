@@ -509,6 +509,34 @@ def test_model_directory_snapshot_detects_persisted_tamper(tmp_path: Path) -> No
         peft._model_directory_snapshot(config, job_root)
 
 
+def test_foundation_load_authority_bounds_open_file_set(
+    tmp_path: Path,
+) -> None:
+    request, base = _parsed(tmp_path)
+    config = _config(tmp_path, request, base)
+    job_root = peft._ensure_job_root(config, request)
+    staged_base = peft._copy_verified_base(config, request, job_root)
+    model_dir = tmp_path / "large-model-snapshot"
+    model_dir.mkdir()
+    for index in range(peft._MAX_MODEL_LOAD_AUTHORITY_FILES + 1):
+        (model_dir / f"entry-{index:03d}.json").write_text(
+            "{}",
+            encoding="utf-8",
+        )
+    manifest = peft.model_directory_manifest_sha256(model_dir)
+
+    with pytest.raises(
+        peft.PeftTrainerError,
+        match="foundation_load_authority_file_limit",
+    ):
+        peft._open_foundation_load_authority(
+            model_dir,
+            staged_base,
+            expected_model_manifest_sha256=manifest,
+            expected_base_sha256=config.base_gguf_sha256,
+        )
+
+
 def test_candidate_path_is_stable_and_reference_specific(tmp_path: Path) -> None:
     root = tmp_path.resolve()
     first = peft.candidate_artifact_path(root, "models/candidate/a")
@@ -1167,6 +1195,63 @@ def _fake_stack() -> tuple[object, ...]:
         _FakeTrainingArguments,
         lambda seed: None,
     )
+
+
+@pytest.mark.parametrize("target_kind", ["model-file", "gguf"])
+def test_foundation_load_authority_rejects_transient_load_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+) -> None:
+    request, base = _parsed(tmp_path, max_steps=1)
+    config = _config(tmp_path, request, base)
+    consumed = peft._consume_materials(request, max_records=10)
+    observed = {"blocked": False, "mutated": False}
+
+    class MutatingTokenizerFactory:
+        @staticmethod
+        def from_pretrained(
+            *args: object,
+            **kwargs: object,
+        ) -> _FakeTokenizer:
+            model_dir = Path(str(args[0]))
+            target = (
+                model_dir / "tokenizer.json"
+                if target_kind == "model-file"
+                else Path(str(kwargs["gguf_file"]))
+            )
+            original = target.read_bytes()
+            try:
+                target.write_bytes(original + b"transient")
+                target.write_bytes(original)
+                observed["mutated"] = True
+            except OSError:
+                observed["blocked"] = True
+            return _FakeTokenizerFactory.from_pretrained(*args, **kwargs)
+
+    stack = list(_fake_stack())
+    stack[9] = MutatingTokenizerFactory
+    monkeypatch.setattr(peft, "_import_training_stack", lambda: tuple(stack))
+
+    if peft.os.name == "nt":
+        _, candidate_sha256 = peft._train_one_step(
+            request,
+            config,
+            consumed,
+        )
+        assert candidate_sha256 is not None
+        assert observed == {"blocked": True, "mutated": False}
+    else:
+        with pytest.raises(
+            peft.PeftTrainerError,
+            match="foundation_changed_during_load",
+        ):
+            peft._train_one_step(
+                request,
+                config,
+                consumed,
+            )
+        assert observed == {"blocked": False, "mutated": True}
 
 
 class _NoMutationFakeTrainer(_FakeTrainer):
