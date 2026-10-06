@@ -125,6 +125,41 @@ def test_private_git_plan_separates_production_metadata(tmp_path: Path) -> None:
     assert "GITHUB_TOKEN" not in plan.environment
 
 
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_sterile_git_plan_rejects_unicode_branch_line_boundaries(
+    tmp_path: Path,
+    separator: str,
+) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-line-boundary"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    with pytest.raises(WorkspaceSecurityError, match="control data"):
+        make_sterile_git_plan(
+            repository_root=production,
+            job_root=job_root,
+            branch_name=f"toolsmith{separator}branch",
+            base_sha="a" * 40,
+        )
+
+
+def test_sterile_git_plan_preserves_safe_unicode_branch_name(tmp_path: Path) -> None:
+    production = tmp_path / "production"
+    job_root = tmp_path / "jobs" / "job-unicode"
+    production.mkdir()
+    job_root.mkdir(parents=True)
+
+    plan = make_sterile_git_plan(
+        repository_root=production,
+        job_root=job_root,
+        branch_name="toolsmith/гілка",
+        base_sha="a" * 40,
+    )
+
+    assert plan.branch_name == "toolsmith/гілка"
+
+
 def test_job_workspace_cannot_live_inside_production_repository(tmp_path: Path) -> None:
     production = tmp_path / "production"
     production.mkdir()
