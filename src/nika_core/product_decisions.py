@@ -578,6 +578,24 @@ class ProductDecisionRepository:
                 raise KeyError(decision_id)
             return decision
 
+    @staticmethod
+    def _latest_cursor_conn(conn: Any, project_id: str) -> Any:
+        if not conn.execute(
+            "SELECT 1 FROM product_projects WHERE project_id=?",
+            (project_id,),
+        ).fetchone():
+            raise KeyError(project_id)
+        return conn.execute(
+            "SELECT d.* FROM product_decisions d JOIN ("
+            "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
+            "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
+            ") latest ON latest.project_id=d.project_id "
+            "AND latest.decision_id=d.decision_id "
+            "AND latest.decision_version=d.decision_version "
+            "ORDER BY d.decision_id",
+            (project_id,),
+        )
+
     def list_latest_by_state(
         self,
         project_id: str,
@@ -601,21 +619,7 @@ class ProductDecisionRepository:
 
         with self.store.connection() as conn:
             conn.execute("BEGIN")
-            if not conn.execute(
-                "SELECT 1 FROM product_projects WHERE project_id=?",
-                (project_id,),
-            ).fetchone():
-                raise KeyError(project_id)
-            cursor = conn.execute(
-                "SELECT d.* FROM product_decisions d JOIN ("
-                "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
-                "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
-                ") latest ON latest.project_id=d.project_id "
-                "AND latest.decision_id=d.decision_id "
-                "AND latest.decision_version=d.decision_version "
-                "ORDER BY d.decision_id",
-                (project_id,),
-            )
+            cursor = self._latest_cursor_conn(conn, project_id)
             selected: list[StoredProductDecision] = []
             matching = 0
             while True:
@@ -641,21 +645,7 @@ class ProductDecisionRepository:
         project_id = _validated_text(project_id, label="project_id")
         with self.store.connection() as conn:
             conn.execute("BEGIN")
-            if not conn.execute(
-                "SELECT 1 FROM product_projects WHERE project_id=?",
-                (project_id,),
-            ).fetchone():
-                raise KeyError(project_id)
-            cursor = conn.execute(
-                "SELECT d.* FROM product_decisions d JOIN ("
-                "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
-                "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
-                ") latest ON latest.project_id=d.project_id "
-                "AND latest.decision_id=d.decision_id "
-                "AND latest.decision_version=d.decision_version "
-                "ORDER BY d.decision_id",
-                (project_id,),
-            )
+            cursor = self._latest_cursor_conn(conn, project_id)
             pending_count = 0
             approved_count = 0
             rejected_count = 0
@@ -689,21 +679,7 @@ class ProductDecisionRepository:
     def list(self, project_id: str) -> tuple[StoredProductDecision, ...]:
         project_id = _validated_text(project_id, label="project_id")
         with self.store.connection() as conn:
-            if not conn.execute(
-                "SELECT 1 FROM product_projects WHERE project_id=?",
-                (project_id,),
-            ).fetchone():
-                raise KeyError(project_id)
-            rows = conn.execute(
-                "SELECT d.* FROM product_decisions d JOIN ("
-                "SELECT project_id,decision_id,MAX(decision_version) AS decision_version "
-                "FROM product_decisions WHERE project_id=? GROUP BY project_id,decision_id"
-                ") latest ON latest.project_id=d.project_id "
-                "AND latest.decision_id=d.decision_id "
-                "AND latest.decision_version=d.decision_version "
-                "ORDER BY d.decision_id",
-                (project_id,),
-            ).fetchall()
+            rows = self._latest_cursor_conn(conn, project_id).fetchall()
             return tuple(self._from_row(row) for row in rows)
 
     def history(
