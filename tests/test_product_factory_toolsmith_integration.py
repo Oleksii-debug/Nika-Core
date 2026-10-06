@@ -121,12 +121,13 @@ class UnusedEvidence:
 class FakeEscalation:
     def __init__(self):
         self.begun = []
+        self.begin_result = (1, CandidateState.PROPOSED)
         self.resume = None
         self.resume_calls = []
 
     def begin(self, gap):
         self.begun.append(gap)
-        return 1, CandidateState.PROPOSED
+        return self.begin_result
 
     def reconcile_resume(self, *, task_id, capability_id):
         self.resume_calls.append((task_id, capability_id))
@@ -138,6 +139,29 @@ def _bridge(escalation):
         escalation,
         CodingWorkerComponentAdapter(UnusedWorker(), UnusedContexts(), UnusedEvidence()),
     )
+
+
+@pytest.mark.parametrize(
+    "begin_result",
+    (
+        (True, CandidateState.PROPOSED),
+        (1, "proposed"),
+        [1, CandidateState.PROPOSED],
+    ),
+)
+def test_malformed_toolsmith_begin_identity_fails_closed_before_product_change(
+    begin_result: object,
+) -> None:
+    coordinator, request = _coordinator()
+    escalation = FakeEscalation()
+    escalation.begin_result = begin_result
+    bridge = _bridge(escalation)
+    before = coordinator.snapshot()
+
+    with pytest.raises(ProductFactoryToolsmithError, match="invalid escalation identity"):
+        bridge.begin_gap(request, capability_id="toml-editor", reason="missing")
+
+    assert coordinator.snapshot() == before
 
 
 def test_gap_is_bound_to_one_component_task_and_original_permission_ceiling() -> None:
@@ -236,6 +260,51 @@ def test_wrong_toolsmith_resume_identity_is_rejected_before_product_state_change
     record = coordinator.snapshot().records[0]
     assert record.request.work_id == request.work_id
     assert record.state is WorkState.REPAIR_REQUIRED
+
+
+def test_non_dict_toolsmith_resume_identity_fails_closed_before_product_change() -> None:
+    coordinator, request = _coordinator()
+    escalation = FakeEscalation()
+    bridge = _bridge(escalation)
+    checkpoint = bridge.begin_gap(request, capability_id="toml-editor", reason="missing")
+    escalation.resume = ["task_id", "capability_id", "version", "digest"]
+    before = coordinator.snapshot()
+
+    with pytest.raises(ProductFactoryToolsmithError, match="exact dictionary"):
+        bridge.resume_registered_gap(coordinator, checkpoint)
+
+    assert coordinator.snapshot() == before
+
+
+@pytest.mark.parametrize(
+    ("field", "bad_value"),
+    (
+        ("version", 1),
+        ("digest", None),
+    ),
+)
+def test_malformed_toolsmith_resume_identity_fails_closed_before_product_change(
+    field: str,
+    bad_value: object,
+) -> None:
+    coordinator, request = _coordinator()
+    escalation = FakeEscalation()
+    bridge = _bridge(escalation)
+    checkpoint = bridge.begin_gap(request, capability_id="toml-editor", reason="missing")
+    resume_identity: dict[str, object] = {
+        "task_id": checkpoint.task_id,
+        "capability_id": checkpoint.capability_id,
+        "version": "1.0.0",
+        "digest": "f" * 64,
+    }
+    resume_identity[field] = bad_value
+    escalation.resume = resume_identity
+    before = coordinator.snapshot()
+
+    with pytest.raises(ProductFactoryToolsmithError, match="values must be text"):
+        bridge.resume_registered_gap(coordinator, checkpoint)
+
+    assert coordinator.snapshot() == before
 
 
 def test_policy_failure_cannot_be_laundered_into_toolsmith_auto_repair() -> None:
