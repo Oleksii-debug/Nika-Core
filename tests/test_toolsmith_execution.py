@@ -107,9 +107,24 @@ def test_private_git_workspace_uses_pinned_executable_launch_guard(
         source_environment={"PATH": os.environ.get("PATH", "")},
     )
     observed: list[pathlib.Path] = []
+    observed_expected_sha256: list[str | None] = []
     original_guard = execution_module._PinnedExecutableLaunchGuard
 
     class RecordingGuard(original_guard):
+        def __init__(
+            self,
+            executable: pathlib.Path,
+            arguments: tuple[str, ...],
+            *,
+            expected_sha256: str | None = None,
+        ) -> None:
+            observed_expected_sha256.append(expected_sha256)
+            super().__init__(
+                executable,
+                arguments,
+                expected_sha256=expected_sha256,
+            )
+
         def __enter__(self) -> pathlib.Path:
             resolved = super().__enter__()
             observed.append(resolved)
@@ -126,6 +141,9 @@ def test_private_git_workspace_uses_pinned_executable_launch_guard(
     assert prepared.head_sha == base_sha
     assert observed
     assert all(path.is_absolute() for path in observed)
+    assert observed_expected_sha256
+    assert all(value is not None for value in observed_expected_sha256)
+    assert len(set(observed_expected_sha256)) == 1
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows sharing semantics only")
