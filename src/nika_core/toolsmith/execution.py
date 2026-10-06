@@ -444,7 +444,27 @@ class _PinnedExecutableLaunchGuard:
                     raise ProcessExecutionError(
                         "pinned runtime executable changed before process launch"
                     )
-                if not os.access(readmitted, os.X_OK):
+                executable_authority_path: pathlib.Path | None = None
+                for descriptor_root in (
+                    pathlib.Path("/proc/self/fd"),
+                    pathlib.Path("/dev/fd"),
+                ):
+                    descriptor_path = descriptor_root / str(descriptor)
+                    try:
+                        authority_stat = descriptor_path.stat()
+                    except OSError:
+                        continue
+                    if (
+                        authority_stat.st_dev == descriptor_stat.st_dev
+                        and authority_stat.st_ino == descriptor_stat.st_ino
+                    ):
+                        executable_authority_path = descriptor_path
+                        break
+                if executable_authority_path is None:
+                    raise ProcessExecutionError(
+                        "descriptor-backed executable launch is unavailable"
+                    )
+                if not os.access(executable_authority_path, os.X_OK):
                     raise ProcessExecutionError(
                         "pinned runtime executable is not executable"
                     )
