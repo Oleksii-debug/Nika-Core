@@ -276,6 +276,13 @@ class ProductFactoryLocalRepositoryBindings:
                 "expected_project_row_version",
             )
         )
+        if expected_spec_version is not None or expected_row_version is not None:
+            project = self._projects.get(project_id)
+            _require_expected_project_versions(
+                project,
+                expected_spec_version=expected_spec_version,
+                expected_row_version=expected_row_version,
+            )
         now = datetime.now(UTC).isoformat()
         with self._store.connection() as conn:
             conn.execute("BEGIN IMMEDIATE")
@@ -454,6 +461,10 @@ def _require_plan_project(
         or project.spec_version != plan.expected_spec_version
         or project.row_version != plan.expected_row_version
         or project.status != "active"
+        or any(
+            repository.locator not in project.spec.repository_refs
+            for repository in plan.graph.repositories
+        )
     ):
         raise ProductFactoryLocalRepositoryBindingError(
             "execution plan is stale for the current ProductProject"

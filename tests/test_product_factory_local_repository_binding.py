@@ -262,6 +262,25 @@ def test_binding_allows_distinct_roots_for_distinct_repository_ids(
     assert second.root == second_root.resolve(strict=True)
 
 
+def test_validate_plan_rejects_repository_outside_current_product_project(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    repository = _repository_ref()
+    project = _create_project(store, repository)
+    injected = _repository_ref(
+        repository_id="repo-injected",
+        locator="Oleksii-debug/injected",
+    )
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="execution plan is stale",
+    ):
+        bindings.validate_plan(_plan(project, injected))
+
+
 def test_binding_rejects_locator_outside_current_product_project(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -564,6 +583,30 @@ def test_current_binding_version_survives_invalid_filesystem_identity(
         bindings.require(project.project_id, repository.repository_id)
 
 
+def test_binding_rejects_inline_repository_credentials(
+    tmp_path: pathlib.Path,
+) -> None:
+    store = _store(tmp_path)
+    locator = "https://user:secret@example.test/org/repo.git"
+    repository = _repository_ref(locator=locator)
+    project = _create_project(store, repository)
+    bindings = ProductFactoryLocalRepositoryBindings(store)
+
+    with pytest.raises(
+        ProductFactoryLocalRepositoryBindingError,
+        match="credential",
+    ):
+        bindings.bind(
+            project_id=project.project_id,
+            repository=repository,
+            root=_root(tmp_path),
+            expected_binding_version=None,
+        )
+
+    with pytest.raises(KeyError):
+        bindings.require(project.project_id, repository.repository_id)
+
+
 def test_unbind_expected_repository_identity_rejects_substitution_without_mutation(
     tmp_path: pathlib.Path,
 ) -> None:
@@ -599,13 +642,14 @@ def test_unbind_expected_repository_identity_rejects_substitution_without_mutati
         repository.repository_id,
     ) == bound.binding_version
 
-def test_unbind_expected_project_versions_reject_stale_plan_without_mutation(
+
+def test_unbind_rechecks_expected_project_version_after_concurrent_change(
     tmp_path: pathlib.Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
     repository = _repository_ref()
     project = _create_project(store, repository)
-    plan = _plan(project, repository)
     bindings = ProductFactoryLocalRepositoryBindings(store)
     bound = bindings.bind(
         project_id=project.project_id,
@@ -613,58 +657,75 @@ def test_unbind_expected_project_versions_reject_stale_plan_without_mutation(
         root=_root(tmp_path),
         expected_binding_version=None,
     )
+    validation_started = threading.Event()
+    validation_release = threading.Event()
+    original = binding_module._require_expected_project_versions
+    writer_calls = 0
+
+    def blocked_project_version_check(
+        current_project,
+        *,
+        expected_spec_version,
+        expected_row_version,
+    ) -> None:
+        nonlocal writer_calls
+        original(
+            current_project,
+            expected_spec_version=expected_spec_version,
+            expected_row_version=expected_row_version,
+        )
+        if threading.current_thread().name == "unbind-writer":
+            writer_calls += 1
+            if writer_calls == 1:
+                validation_started.set()
+                if not validation_release.wait(timeout=10):
+                    raise AssertionError("unbind validation release timed out")
+
+    monkeypatch.setattr(
+        binding_module,
+        "_require_expected_project_versions",
+        blocked_project_version_check,
+    )
+    errors: list[Exception] = []
+
+    def unbind_repository() -> None:
+        try:
+            bindings.unbind(
+                project_id=project.project_id,
+                repository_id=repository.repository_id,
+                expected_binding_version=bound.binding_version,
+                expected_project_spec_version=project.spec_version,
+                expected_project_row_version=project.row_version,
+            )
+        except Exception as exc:
+            errors.append(exc)
+
+    writer = threading.Thread(target=unbind_repository, name="unbind-writer")
+    writer.start()
+    assert validation_started.wait(timeout=10)
+
     ProductProjectRepository(store).update_spec(
         project.project_id,
         ProductProjectSpec(
-            goal="Changed after unbind plan admission",
+            goal="Changed while unbind was waiting",
             desired_outcome=project.spec.desired_outcome,
             repository_refs=project.spec.repository_refs,
         ),
         expected_row_version=project.row_version,
-        change_reason="stale local repository unbind plan",
-        idempotency_key="update:product-1:stale-unbind-plan",
+        change_reason="concurrent unbind regression",
+        idempotency_key="update:product-1:unbind-race",
     )
+    validation_release.set()
+    writer.join(timeout=10)
+    assert not writer.is_alive()
 
-    with pytest.raises(
-        ProductFactoryLocalRepositoryBindingError,
-        match="execution plan is stale",
-    ):
-        bindings.unbind(
-            project_id=project.project_id,
-            repository_id=repository.repository_id,
-            expected_binding_version=bound.binding_version,
-            expected_project_spec_version=plan.expected_spec_version,
-            expected_project_row_version=plan.expected_row_version,
-        )
-
+    assert len(errors) == 1
+    assert isinstance(errors[0], ProductFactoryLocalRepositoryBindingError)
+    assert "execution plan is stale" in str(errors[0])
     assert bindings.current_binding_version(
         project.project_id,
         repository.repository_id,
     ) == bound.binding_version
-
-
-def test_binding_rejects_inline_repository_credentials(
-    tmp_path: pathlib.Path,
-) -> None:
-    store = _store(tmp_path)
-    locator = "https://user:secret@example.test/org/repo.git"
-    repository = _repository_ref(locator=locator)
-    project = _create_project(store, repository)
-    bindings = ProductFactoryLocalRepositoryBindings(store)
-
-    with pytest.raises(
-        ProductFactoryLocalRepositoryBindingError,
-        match="credential",
-    ):
-        bindings.bind(
-            project_id=project.project_id,
-            repository=repository,
-            root=_root(tmp_path),
-            expected_binding_version=None,
-        )
-
-    with pytest.raises(KeyError):
-        bindings.require(project.project_id, repository.repository_id)
 
 
 def test_unbind_is_version_fenced_and_removes_authority(

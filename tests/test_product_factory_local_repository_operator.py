@@ -208,55 +208,36 @@ def test_unbind_rejects_plan_repository_identity_substitution_without_mutation(
         repository.repository_id,
     ) == 1
 
-def test_unbind_rejects_product_project_change_after_plan_validation(
+
+def test_unbind_rejects_stale_execution_plan_without_removing_binding(
     tmp_path: pathlib.Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = _store(tmp_path)
     repository = _repository()
     project = _project(store, repository)
     plan = _plan(project, repository)
-    bindings = ProductFactoryLocalRepositoryBindings(store)
-    operator = PackagedLocalRepositoryOperator(
-        bindings=bindings,
-        resolve_plan=lambda project_id: plan
-        if project_id == plan.project_id
-        else (_ for _ in ()).throw(KeyError(project_id)),
-    )
+    operator = _operator(store, plan)
     root = _root(tmp_path)
-    bound = operator.bind(
+    assert operator.bind(
         {
             "project_id": project.project_id,
             "repository_id": repository.repository_id,
             "root_path": str(root),
             "expected_binding_version": None,
         }
+    ).status == "completed"
+
+    ProductProjectRepository(store).update_spec(
+        project.project_id,
+        ProductProjectSpec(
+            goal="Changed before stale unbind",
+            desired_outcome=project.spec.desired_outcome,
+            repository_refs=project.spec.repository_refs,
+        ),
+        expected_row_version=project.row_version,
+        change_reason="stale unbind regression",
+        idempotency_key="update:product-1:stale-unbind",
     )
-    assert bound.status == "completed"
-
-    projects = ProductProjectRepository(store)
-    original_validate = bindings.validate_plan
-    advanced = False
-
-    def validate_then_advance(candidate: PackagedProductFactoryExecutionPlan) -> None:
-        nonlocal advanced
-        original_validate(candidate)
-        if advanced:
-            return
-        projects.update_spec(
-            project.project_id,
-            ProductProjectSpec(
-                goal="Changed after adapter plan validation",
-                desired_outcome=project.spec.desired_outcome,
-                repository_refs=project.spec.repository_refs,
-            ),
-            expected_row_version=project.row_version,
-            change_reason="operator unbind TOCTOU regression",
-            idempotency_key="update:product-1:unbind-toctou",
-        )
-        advanced = True
-
-    monkeypatch.setattr(bindings, "validate_plan", validate_then_advance)
 
     result = operator.unbind(
         {
@@ -267,7 +248,7 @@ def test_unbind_rejects_product_project_change_after_plan_validation(
     )
 
     assert result.status == "rejected"
-    assert bindings.current_binding_version(
+    assert ProductFactoryLocalRepositoryBindings(store).current_binding_version(
         project.project_id,
         repository.repository_id,
     ) == 1
