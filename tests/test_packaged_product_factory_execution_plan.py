@@ -200,6 +200,45 @@ def test_decode_rejects_inline_url_credentials_in_repository_locator() -> None:
         decode_packaged_product_factory_execution_plan(_encode(claim))
 
 
+@pytest.mark.parametrize(
+    "locator",
+    [
+        "https://github.com/example/repository?token=must-not-survive",
+        "https://github.com/example/repository#must-not-survive",
+    ],
+)
+def test_decode_rejects_url_query_or_fragment_in_repository_locator(
+    locator: str,
+) -> None:
+    claim = _claim()
+    repositories = claim["repositories"]
+    assert isinstance(repositories, list)
+    repository = repositories[0]
+    assert isinstance(repository, dict)
+    repository["locator"] = locator
+
+    with pytest.raises(
+        PackagedExecutionPlanAdmissionError,
+        match="URL query or fragment",
+    ):
+        decode_packaged_product_factory_execution_plan(_encode(claim))
+
+
+def test_decode_rejects_control_characters_in_credential_reference() -> None:
+    claim = _claim()
+    repositories = claim["repositories"]
+    assert isinstance(repositories, list)
+    repository = repositories[0]
+    assert isinstance(repository, dict)
+    repository["credential_ref"] = "credref:line\nbreak"
+
+    with pytest.raises(
+        PackagedExecutionPlanAdmissionError,
+        match="opaque single-line reference",
+    ):
+        decode_packaged_product_factory_execution_plan(_encode(claim))
+
+
 def test_decode_rejects_non_boolean_case_path_policy() -> None:
     claim = _claim()
     repositories = claim["repositories"]
