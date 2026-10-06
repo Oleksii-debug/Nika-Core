@@ -27,7 +27,11 @@ from nika_core.product_factory_packaged_local_startup import (
 )
 from nika_core.product_project import ProductProjectRepository, ProductProjectSpec
 from nika_core.toolsmith.contracts import RecoveryState
-from nika_core.toolsmith.local_worker import LocalCodingPlan, LocalFileEdit
+from nika_core.toolsmith.local_worker import (
+    ContainedLocalWorkerError,
+    LocalCodingPlan,
+    LocalFileEdit,
+)
 from nika_core.v01_model_settings import V01ModelSettings
 
 
@@ -908,14 +912,18 @@ async def test_worker_recovery_revalidates_binding_after_durable_state_read(
     entry = host._require_state_bindings("host-task", state)
     request = state.coordinator.snapshot().records[0].request
 
+    planned_jobs: list[object] = []
+
     class StaticPlanner:
         async def plan(self, job):
+            planned_jobs.append(job)
             return LocalCodingPlan(
                 (LocalFileEdit("src/new.py", b"print('candidate')\n"),)
             )
 
     entry.program.worker.planner = StaticPlanner()
     await entry.program.host.worker.dispatch(request)
+    assert len(planned_jobs) == 1
 
     original_load_state = entry.program.worker._load_state
     rebound = False
@@ -945,3 +953,28 @@ async def test_worker_recovery_revalidates_binding_after_durable_state_read(
         )
 
     assert rebound is True
+
+    entry.program.worker._load_state = original_load_state
+    terminal_storage_reads: list[str] = []
+
+    def unexpected_terminal_storage(evidence, result) -> None:
+        terminal_storage_reads.append(evidence.result_sha)
+        raise AssertionError("stale repository must not validate terminal storage")
+
+    entry.program.worker._validate_terminal_storage = unexpected_terminal_storage
+
+    replay = await entry.program.worker.execute(planned_jobs[0])
+    assert replay.failure is not None
+    assert replay.recovery_state is not None
+    assert replay.recovery_state.phase == "manual_reconcile_required"
+
+    with pytest.raises(
+        ContainedLocalWorkerError,
+        match="terminal execution evidence is invalid",
+    ):
+        entry.program.worker.execution_evidence(request.work_id)
+
+    inspected = await entry.program.worker.inspect(request.work_id)
+    assert inspected is not None
+    assert inspected.phase == "manual_reconcile_required"
+    assert terminal_storage_reads == []
