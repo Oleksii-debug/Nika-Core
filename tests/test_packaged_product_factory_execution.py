@@ -166,6 +166,56 @@ def test_controller_recovers_before_dispatch_through_packaged_submitter() -> Non
     ]
 
 
+def test_controller_runs_post_dispatch_only_after_canonical_pf4_pass() -> None:
+    plan = _plan()
+    preparation = _Preparation()
+    host = _Host()
+    events: list[tuple[str, object]] = []
+
+    class _OrderedHost(_Host):
+        async def recover_running(self, **kwargs):
+            events.append(("recover", kwargs["state"]))
+            return await super().recover_running(**kwargs)
+
+        async def dispatch_ready(self, **kwargs):
+            events.append(("dispatch", kwargs["state"]))
+            return await super().dispatch_ready(**kwargs)
+
+    ordered_host = _OrderedHost()
+
+    def post_dispatch(prepared: PreparedProductFactory) -> object:
+        events.append(("post_dispatch", prepared))
+        return object()
+
+    controller = PackagedProductFactoryExecutionController(
+        preparation=cast(Any, preparation),
+        host=cast(Any, ordered_host),
+        resolve_plan=lambda _project_id: plan,
+        submit=_ImmediateSubmitter(),
+        post_dispatch=post_dispatch,
+    )
+
+    result = controller.start(_PROJECT_ID)
+
+    assert result.status == "completed"
+    assert events == [
+        ("recover", preparation.prepared.state),
+        ("dispatch", preparation.prepared.state),
+        ("post_dispatch", preparation.prepared),
+    ]
+
+
+def test_controller_rejects_noncallable_post_dispatch_hook() -> None:
+    with pytest.raises(TypeError, match="post-dispatch"):
+        PackagedProductFactoryExecutionController(
+            preparation=cast(Any, _Preparation()),
+            host=cast(Any, _Host()),
+            resolve_plan=lambda _project_id: _plan(),
+            submit=_ImmediateSubmitter(),
+            post_dispatch=cast(Any, object()),
+        )
+
+
 def test_controller_rejects_concurrent_start_for_same_project() -> None:
     preparation = _Preparation()
     host = _Host()
