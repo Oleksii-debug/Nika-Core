@@ -52,8 +52,18 @@ from nika_core.toolsmith.contracts import AllowedPathPolicy, ResourceBudget
 @dataclass
 class RepositoryAuthority:
     root: pathlib.Path
+    drift_root: pathlib.Path | None = None
+    drift_after: int | None = None
+    calls: int = 0
 
     def resolve(self, dispatch: BuildExecutionDispatch) -> pathlib.Path:
+        self.calls += 1
+        if (
+            self.drift_root is not None
+            and self.drift_after is not None
+            and self.calls > self.drift_after
+        ):
+            return self.drift_root
         return self.root
 
 
@@ -538,6 +548,41 @@ def test_authority_drift_after_start_fails_without_launching_process(
     assert result.uncertain is False
     assert adapter.inspect(dispatch) == result
     assert adapter.collect(dispatch, result) == ()
+
+
+def test_repository_authority_drift_after_process_is_durable_uncertainty(
+    tmp_path,
+) -> None:
+    root, sha = _repository(tmp_path)
+    drift_root = tmp_path / "replacement-repository"
+    drift_root.mkdir()
+    store = _store(tmp_path)
+    command = _command()
+    repository_authority = RepositoryAuthority(
+        root,
+        drift_root=drift_root,
+        drift_after=2,
+    )
+    authority = Authority(_authority("work-repository-drift", command))
+    policies = Policies(_policy("work-repository-drift"))
+    adapter = PackagedLocalBuildExecutionNode(
+        store=store,
+        node_id="local-1",
+        startup=_startup(tmp_path),
+        repositories=repository_authority,
+        trusted_authority=authority,
+        output_policies=policies,
+    )
+    dispatch = _dispatch(sha, "work-repository-drift", command)
+
+    result = adapter.run(dispatch)
+
+    assert result.succeeded is False
+    assert result.uncertain is True
+    assert repository_authority.calls == 3
+    assert adapter.inspect(dispatch) == result
+    with pytest.raises(BuildExecutionPortError, match="cannot publish"):
+        adapter.collect(dispatch, result)
 
 
 def test_out_of_policy_private_workspace_mutation_is_failed_not_published(tmp_path) -> None:
