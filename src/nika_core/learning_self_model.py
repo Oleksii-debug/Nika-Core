@@ -140,17 +140,19 @@ class LearningSelfModelApplier:
         created = canonical.expected_revision_sha256 is None
         if conn is None:
             snapshot = self._self_model.compare_and_put(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            facet=facet,                value=value,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                facet=facet,
+                value=value,
                 expected_revision_sha256=canonical.expected_revision_sha256,
             )
         else:
             snapshot = self._self_model.compare_and_put_with_connection(
                 conn,
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            facet=facet,                value=value,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                facet=facet,
+                value=value,
                 expected_revision_sha256=canonical.expected_revision_sha256,
             )
         return LearningSelfModelApplyReceipt(
