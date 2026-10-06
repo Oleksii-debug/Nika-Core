@@ -246,6 +246,17 @@ def test_bounded_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
             driver._read_bounded_file(path, max_bytes=32, name="test input")
 
 
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_bounded_reader_releases_share_fence_after_snapshot(tmp_path: Path) -> None:
+    path = tmp_path / "authority.bin"
+    path.write_bytes(b"trusted")
+
+    assert driver._read_bounded_file(path, max_bytes=32, name="test input") == b"trusted"
+
+    path.write_bytes(b"replacement")
+    assert path.read_bytes() == b"replacement"
+
+
 def test_config_file_rejects_oversized_bytes(tmp_path: Path) -> None:
     path = tmp_path / "physical-pilot.json"
     path.write_bytes(b"x" * (driver._CONFIG_MAX_BYTES + 1))
@@ -651,6 +662,19 @@ def test_stable_file_sha256_rejects_linked_authority_file(tmp_path: Path) -> Non
         driver._stable_file_sha256(path, name="initial_adapter_path")
 
 
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_stable_file_sha256_refuses_preexisting_writer(tmp_path: Path) -> None:
+    path = tmp_path / "candidate.safetensors"
+    path.write_bytes(b"trusted")
+
+    with path.open("r+b"):
+        with pytest.raises(
+            driver.PhysicalPilotDriverError,
+            match="could not be snapshotted",
+        ):
+            driver._stable_file_sha256(path, name="candidate")
+
+
 def test_config_rejects_unknown_top_level_field(tmp_path: Path) -> None:
     payload = _payload(tmp_path)
     payload["unexpected"] = True
@@ -803,6 +827,19 @@ def test_trainer_pe_reader_rejects_path_mutation_during_header_read(
 
     with pytest.raises(driver.PhysicalPilotDriverError, match="changed while"):
         driver._require_windows_pe_executable(path)
+
+
+@pytest.mark.skipif(driver.os.name != "nt", reason="Windows file-share semantics")
+def test_trainer_pe_reader_refuses_preexisting_writer(tmp_path: Path) -> None:
+    path = tmp_path / "trainer.exe"
+    _write_minimal_pe(path)
+
+    with path.open("r+b"):
+        with pytest.raises(
+            driver.PhysicalPilotDriverError,
+            match="Windows PE header could not be read",
+        ):
+            driver._require_windows_pe_executable(path)
 
 
 def test_non_windows_gate_precedes_filesystem_effects(
