@@ -23,6 +23,7 @@
     <a href="#model-settings-heading">Модель</a>
     <a href="#source-setup-heading">Джерела команди</a>
     <a href="#speech-heading">Голос Nika</a>
+    <a href="#voice-heading">Голосовий ввід</a>
     <a href="#product-project-heading">ProductProject</a>
     <a href="#keyboard-heading">Клавіатура</a>
     <a href="#autostart-heading">Автозапуск Windows</a>
@@ -134,11 +135,55 @@
       </div>
     </section>
 
+    <section aria-labelledby="voice-heading">
+      <h2 id="voice-heading" tabindex="-1">Голосовий ввід</h2>
+      <p id="voice-help">
+        Запускає один явний локальний запис із мікрофона Windows, перевіряє голосову
+        активність, локально розпізнає мовлення та перевіряє активацію Nika.
+        Розпізнаний текст не створює завдання автоматично: спочатку перенесіть його
+        в поле команди та перевірте перед окремим натисканням «Створити завдання».
+      </p>
+      <div aria-labelledby="voice-model-heading">
+        <h3 id="voice-model-heading">Локальна модель розпізнавання</h3>
+        <p id="voice-model-help">
+          Якщо модель ще не встановлена, вкажіть повний шлях до локальної папки з
+          encoder.onnx, decoder.onnx і tokens.txt. Nika копіює лише ці три файли
+          у власну папку; мережа та автоматичне завантаження не використовуються.
+        </p>
+        <label for="voice-model-source">Папка локальної голосової моделі — повний шлях</label>
+        <input id="voice-model-source" type="text" spellcheck="false" autocomplete="off"
+               aria-describedby="voice-model-help voice-model-status" disabled>
+        <p id="voice-model-status">Перевірка встановлення локальної голосової моделі.</p>
+        <div class="actions">
+          <button type="button" id="voice-model-import" data-action-id="voice.model.import"
+                  aria-describedby="voice-model-help voice-model-status"
+                  data-error-focus-target="voice-model-source" disabled>Імпортувати голосову модель</button>
+          <button type="button" id="voice-model-cancel" data-action-id="voice.model.cancel"
+                  aria-describedby="voice-model-status"
+                  data-error-focus-target="voice-model-heading" disabled>Скасувати імпорт голосової моделі</button>
+        </div>
+      </div>
+      <p id="voice-status">Перевірка локального голосового вводу.</p>
+      <p>Розпізнаний текст: <span id="voice-transcript">Ще немає.</span></p>
+      <div class="actions">
+        <button type="button" id="voice-start" data-action-id="voice.start"
+                aria-describedby="voice-help voice-status"
+                data-error-focus-target="voice-heading" disabled>Почати один голосовий ввід</button>
+        <button type="button" id="voice-cancel" data-action-id="voice.cancel"
+                aria-describedby="voice-help voice-status"
+                data-error-focus-target="voice-heading" disabled>Скасувати голосовий ввід</button>
+        <button type="button" id="voice-use-command"
+                aria-describedby="voice-help voice-status" disabled>Перенести розпізнаний текст у поле команди</button>
+      </div>
+    </section>
+
     <section aria-labelledby="command-heading">
       <h2 id="command-heading" tabindex="-1">Команда</h2>
       <label for="command-input">Що має зробити Nika?</label>
-      <textarea id="command-input" rows="5"></textarea>
+      <textarea id="command-input" rows="5" aria-describedby="execution-mode command-intelligence-help task-control-help"></textarea>
       <p id="execution-mode">Нове завдання незмінно фіксує вибрану модель разом з іншими налаштуваннями. Поточний контрольований сценарій команди зберігає власні детерміновані кроки; інтерфейс не підміняє runtime-стан або маршрут моделі.</p>
+      <p id="command-intelligence-help">Режим інтелекту можна перевірити командою «режим інтелекту» або змінити для нових завдань: «режим інтелекту deterministic», «режим інтелекту foundry &lt;model&gt;», «режим інтелекту ollama &lt;model&gt; &lt;loopback-url&gt;», «режим інтелекту api &lt;provider&gt; &lt;model&gt; &lt;https-url&gt; &lt;env:REF&gt; &lt;public|private&gt;». Уже прийняті завдання не перемикаються.</p>
+      <p id="task-control-help">Якщо одночасно є кілька завдань, скопіюйте task_id зі списку «Завдання» й введіть точну команду: «pause task &lt;task_id&gt;», «resume task &lt;task_id&gt;», «stop task &lt;task_id&gt;» або «task status &lt;task_id&gt;». Українські відповідники: «призупини завдання &lt;task_id&gt;», «продовж завдання &lt;task_id&gt;», «зупини завдання &lt;task_id&gt;», «статус завдання &lt;task_id&gt;».</p>
       <div class="actions">
         <button type="button" data-action-id="task.create" data-error-focus-target="command-input">Створити завдання</button>
         <button type="button" data-action-id="task.pause">Призупинити</button>

@@ -69,7 +69,7 @@ def _router(
         task_pause_handler=control("pause"),
         task_resume_handler=control("resume"),
         task_stop_handler=control("stop"),
-        task_status_handler=(lambda: _result("status")) if include_status else None,
+        task_status_handler=(lambda _task_id: _result("status")) if include_status else None,
     )
     return router, ordinary
 
@@ -216,7 +216,7 @@ def test_current_task_status_rejects_ambiguous_multiple_unfinished_tasks(
     response = nika_windows._current_task_status_result(queue)
 
     assert response.status == "rejected"
-    assert "(2)" in response.message
+    assert "кілька незавершених завдань" in response.message
     assert first.task_id not in response.message
     assert second.task_id not in response.message
 

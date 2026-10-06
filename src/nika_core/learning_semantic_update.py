@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 from nika_core.learning_cognition import (
@@ -85,13 +86,74 @@ class LearningSemanticUpdateRouter:
             raise TypeError("self_model must be the canonical LearningSelfModelApplier")
         if type(skill) is not LearningSkillApplier:
             raise TypeError("skill must be the canonical LearningSkillApplier")
+        store = memory.sqlite_store
+        if (
+            world_model.sqlite_store is not store
+            or self_model.sqlite_store is not store
+            or skill.sqlite_store is not store
+        ):
+            raise ValueError("semantic target owners must share one canonical SQLiteStore")
         self._memory = memory
         self._world_model = world_model
         self._self_model = self_model
         self._skill = skill
+        self._store = store
+
+    @property
+    def sqlite_store(self):
+        """Return the one SQLite authority shared by all semantic target owners."""
+        return self._store
 
     def apply(
         self,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        address: SemanticUpdateAddress,
+    ) -> SemanticUpdateReceipt:
+        return self._apply(
+            None,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            address=address,
+        )
+
+    def apply_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        address: SemanticUpdateAddress,
+    ) -> SemanticUpdateReceipt:
+        """Route one semantic target effect inside the shared caller transaction."""
+        self._store.require_transaction_connection(conn)
+        return self._apply(
+            conn,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            address=address,
+        )
+
+    def _apply(
+        self,
+        conn: sqlite3.Connection | None,
         *,
         intent: LearningUpdateIntent,
         candidate: CognitionCandidate,
@@ -117,7 +179,16 @@ class LearningSemanticUpdateRouter:
         if intent.target is LearningUpdateTarget.MEMORY:
             if type(address) is not MemoryUpdateAddress:
                 raise TypeError("MEMORY intent requires MemoryUpdateAddress")
-            return self._memory.apply(
+            if conn is None:
+                return self._memory.apply(
+                    **common,
+                    scope=address.scope,
+                    owner_id=address.owner_id,
+                    namespace=address.namespace,
+                    key=address.key,
+                )
+            return self._memory.apply_with_connection(
+                conn,
                 **common,
                 scope=address.scope,
                 owner_id=address.owner_id,
@@ -127,7 +198,14 @@ class LearningSemanticUpdateRouter:
         if intent.target is LearningUpdateTarget.WORLD_MODEL:
             if type(address) is not WorldModelUpdateAddress:
                 raise TypeError("WORLD_MODEL intent requires WorldModelUpdateAddress")
-            return self._world_model.apply(
+            if conn is None:
+                return self._world_model.apply(
+                    **common,
+                    workspace_id=address.workspace_id,
+                    topic=address.topic,
+                )
+            return self._world_model.apply_with_connection(
+                conn,
                 **common,
                 workspace_id=address.workspace_id,
                 topic=address.topic,
@@ -135,7 +213,15 @@ class LearningSemanticUpdateRouter:
         if intent.target is LearningUpdateTarget.SELF_MODEL:
             if type(address) is not SelfModelUpdateAddress:
                 raise TypeError("SELF_MODEL intent requires SelfModelUpdateAddress")
-            return self._self_model.apply(
+            if conn is None:
+                return self._self_model.apply(
+                    **common,
+                    workspace_id=address.workspace_id,
+                    agent_id=address.agent_id,
+                    facet=address.facet,
+                )
+            return self._self_model.apply_with_connection(
+                conn,
                 **common,
                 workspace_id=address.workspace_id,
                 agent_id=address.agent_id,
@@ -144,7 +230,15 @@ class LearningSemanticUpdateRouter:
         if intent.target is LearningUpdateTarget.SKILL:
             if type(address) is not SkillUpdateAddress:
                 raise TypeError("SKILL intent requires SkillUpdateAddress")
-            return self._skill.apply(
+            if conn is None:
+                return self._skill.apply(
+                    **common,
+                    workspace_id=address.workspace_id,
+                    agent_id=address.agent_id,
+                    skill_id=address.skill_id,
+                )
+            return self._skill.apply_with_connection(
+                conn,
                 **common,
                 workspace_id=address.workspace_id,
                 agent_id=address.agent_id,

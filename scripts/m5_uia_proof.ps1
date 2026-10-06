@@ -48,6 +48,14 @@ $requiredNames = @(
     'Текст для озвучення',
     'Озвучити текст',
     'Скасувати озвучення',
+    'Голосовий ввід',
+    'Почати один голосовий ввід',
+    'Скасувати голосовий ввід',
+    'Перенести розпізнаний текст у поле команди',
+    'Локальна модель розпізнавання',
+    'Папка локальної голосової моделі — повний шлях',
+    'Імпортувати голосову модель',
+    'Скасувати імпорт голосової моделі',
     'Клавіатура'
 )
 
@@ -686,6 +694,22 @@ try {
         $startControl = Wait-DescendantName 'Створити завдання' ([System.Windows.Automation.ControlType]::Button)
         $tasksControl = Wait-DescendantName 'Завдання' ([System.Windows.Automation.ControlType]::Text)
         $commandControl = Wait-DescendantName 'Що має зробити Nika?' ([System.Windows.Automation.ControlType]::Edit)
+        $voiceModelSourceControl = Wait-DescendantName 'Папка локальної голосової моделі — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
+        $voiceModelImportControl = Wait-DescendantName 'Імпортувати голосову модель' ([System.Windows.Automation.ControlType]::Button)
+        $voiceModelCancelControl = Wait-DescendantName 'Скасувати імпорт голосової моделі' ([System.Windows.Automation.ControlType]::Button)
+        if (-not (Resolve-BoundControlIdentity $voiceModelSourceControl).Current.IsEnabled) {
+            throw 'Local voice model source input must be enabled when the packaged candidate has no model.'
+        }
+        if (-not (Resolve-BoundControlIdentity $voiceModelImportControl).Current.IsEnabled) {
+            throw 'Local voice model Import control must be enabled when the packaged candidate has no model.'
+        }
+        if ((Resolve-BoundControlIdentity $voiceModelCancelControl).Current.IsEnabled) {
+            throw 'Local voice model Cancel control must be disabled while no import is active.'
+        }
+        Set-BoundControlFocus $voiceModelSourceControl
+        Wait-FocusName $voiceModelSourceControl
+        Write-Host 'Local voice model setup controls are UIA-discoverable and keyboard-focusable; no file import was invoked.'
+
         $speechTextControl = Wait-DescendantName 'Текст для озвучення' ([System.Windows.Automation.ControlType]::Edit)
         $speechStartControl = Wait-DescendantName 'Озвучити текст' ([System.Windows.Automation.ControlType]::Button)
         $speechCancelControl = Wait-DescendantName 'Скасувати озвучення' ([System.Windows.Automation.ControlType]::Button)
@@ -772,6 +796,58 @@ try {
         Wait-BoundTextEvidence 'Модель збережено для нових завдань: ollama, uia-proof-model.'
         Wait-FocusName $commandControl
 
+        # Exercise the reserved intelligence-mode namespace through the same keyboard-only
+        # packaged command path. Each mutation must return focus to the exact command field;
+        # do not retry either effect inside this process because configure increments revision.
+        Set-BoundControlValue $commandControl 'режим інтелекту deterministic'
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('^n')
+        Wait-FocusName $commandControl
+
+        Set-BoundControlValue $commandControl 'режим інтелекту ollama uia-proof-model http://localhost:11434'
+        Set-BoundControlFocus $startControl
+        [System.Windows.Forms.SendKeys]::SendWait('^n')
+        Wait-FocusName $commandControl
+
+        $modeCommandProbe = @'
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    row = db.execute(
+        'SELECT revision, selection_json FROM v01_model_settings WHERE singleton = 1'
+    ).fetchone()
+    if row is None:
+        raise SystemExit('intelligence-mode command did not persist model settings')
+    revision, body = row
+    if revision != 3:
+        raise SystemExit('intelligence-mode command revision count is inconsistent')
+    model = json.loads(body)
+    expected = {
+        'route_kind': 'ollama',
+        'provider_id': 'ollama',
+        'model': 'uia-proof-model',
+        'base_url': 'http://localhost:11434',
+        'credential_ref': None,
+        'private_data_allowed': True,
+        'timeout_seconds': 60.0,
+    }
+    for key, value in expected.items():
+        if model.get(key) != value:
+            raise SystemExit('intelligence-mode command differs at ' + key)
+    task_count = db.execute('SELECT COUNT(*) FROM tasks').fetchone()[0]
+    if task_count != 0:
+        raise SystemExit('intelligence-mode command unexpectedly created a task')
+print('Packaged intelligence-mode commands changed canonical model settings without task creation.')
+'@
+        $modeCommandProbe | python - $env:NIKA_DB_PATH
+        if ($LASTEXITCODE -ne 0) {
+            throw 'Packaged intelligence-mode command path did not persist the expected route.'
+        }
+
         $sourceRootControl = Wait-DescendantName 'Папка джерел — повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $sourceAControl = Wait-DescendantName 'Перший файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
         $sourceBControl = Wait-DescendantName 'Другий файл — назва в цій папці або повний шлях' ([System.Windows.Automation.ControlType]::Edit)
@@ -841,14 +917,50 @@ print('Controlled packaged task froze canonical local model selection.')
                 throw 'Packaged model selection was not durably frozen into the controlled task.'
             }
 
-            # Prove the packaged command center can answer a direct long-task status
-            # command through the same keyboard-only UI without creating another task.
+            # Prove that the packaged task list exposes the canonical task identity
+            # through UI Automation, then use that exact identity in a keyboard-only
+            # targeted status command. The read-only probe emits only the task UUID.
+            $taskIdentityProbe = @'
+import sqlite3
+import sys
+import uuid
+from pathlib import Path
+
+db_path = Path(sys.argv[1]).resolve()
+with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
+    rows = db.execute(
+        'SELECT task_id, state FROM tasks ORDER BY created_at ASC'
+    ).fetchall()
+    if len(rows) != 1:
+        raise SystemExit('controlled proof must own exactly one task before targeted status')
+    task_id, state = rows[0]
+    try:
+        parsed = uuid.UUID(task_id)
+    except (TypeError, ValueError, AttributeError):
+        raise SystemExit('controlled proof task id is not a UUID')
+    if str(parsed) != task_id:
+        raise SystemExit('controlled proof task id is not canonical')
+    if str(state).upper() != 'COMPLETED':
+        raise SystemExit('controlled proof task is not completed before targeted status')
+    print(task_id)
+'@
+            $taskId = ($taskIdentityProbe | python - $env:NIKA_DB_PATH).Trim()
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($taskId)) {
+                throw 'Could not read the controlled canonical task identity.'
+            }
+            $parsedTaskId = [guid]::Empty
+            if (-not [guid]::TryParseExact($taskId, 'D', [ref]$parsedTaskId) -or
+                $parsedTaskId.ToString('D') -cne $taskId) {
+                throw 'Controlled task identity is not a canonical lowercase UUID.'
+            }
+            Wait-BoundTextEvidence "ID: $taskId — Завершено — Порівняй два контрольовані джерела."
+
             Wait-FocusName $commandControl
-            Set-BoundControlValue $commandControl 'current task'
+            Set-BoundControlValue $commandControl "task status $taskId"
             Set-BoundControlFocus $startControl
             [System.Windows.Forms.SendKeys]::SendWait('^n')
             Wait-FocusName $tasksControl
-            Wait-BoundTextEvidence 'Немає незавершеного завдання.'
+            Wait-BoundTextEvidence "Завдання: $taskId; state COMPLETED."
 
             $directStatusProbe = @'
 import sqlite3
@@ -861,14 +973,14 @@ with sqlite3.connect(db_path.as_uri() + '?mode=ro', uri=True) as db:
         'SELECT state FROM tasks ORDER BY created_at ASC'
     ).fetchall()
     if len(rows) != 1:
-        raise SystemExit('direct current-task command unexpectedly changed task count')
+        raise SystemExit('targeted status command unexpectedly changed task count')
     if str(rows[0][0]).upper() != 'COMPLETED':
-        raise SystemExit('controlled task is not terminal after direct status command')
-print('Packaged direct current-task command was read-only.')
+        raise SystemExit('controlled task changed after targeted status command')
+print('Packaged targeted task status command was read-only.')
 '@
             $directStatusProbe | python - $env:NIKA_DB_PATH
             if ($LASTEXITCODE -ne 0) {
-                throw 'Packaged direct current-task status was not a read-only command.'
+                throw 'Packaged targeted task status was not a read-only command.'
             }
         } catch {
             # Diagnostics are restricted to this proof's clean, controlled database

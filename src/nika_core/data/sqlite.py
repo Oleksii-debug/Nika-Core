@@ -29,20 +29,57 @@ from nika_core.research.knowledge_schema import initialize_knowledge_schema
 class SQLiteStore:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
+        self._database_identity = (
+            None
+            if str(self.path) == ":memory:"
+            else self.path.expanduser().resolve(strict=False)
+        )
+        self._active_connections: dict[int, sqlite3.Connection] = {}
+
+    def require_connection(self, conn: sqlite3.Connection) -> None:
+        """Fail closed unless conn is bound to this store's main database."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        if self._active_connections.get(id(conn)) is not conn:
+            raise ValueError("connection was not opened by this SQLiteStore")
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        main_rows = tuple(row for row in rows if row[1] == "main")
+        if len(main_rows) != 1:
+            raise ValueError("connection does not expose one canonical main database")
+        database_file = main_rows[0][2]
+        if self._database_identity is None:
+            if database_file != "":
+                raise ValueError("connection does not belong to this SQLiteStore")
+            return
+        if not database_file:
+            raise ValueError("connection does not belong to this SQLiteStore")
+        actual_identity = Path(database_file).expanduser().resolve(strict=False)
+        if actual_identity != self._database_identity:
+            raise ValueError("connection does not belong to this SQLiteStore")
+
+    def require_transaction_connection(self, conn: sqlite3.Connection) -> None:
+        """Require an owned connection whose SQLite transaction is already active."""
+        self.require_connection(conn)
+        if not conn.in_transaction:
+            raise ValueError("connection must have an active caller-owned transaction")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        connection_id = id(conn)
+        self._active_connections[connection_id] = conn
         try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
+            if self._active_connections.get(connection_id) is conn:
+                del self._active_connections[connection_id]
             conn.close()
 
     def initialize(self) -> None:

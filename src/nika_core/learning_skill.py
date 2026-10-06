@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import sqlite3
 from dataclasses import dataclass
 
 from nika_core.learned_skill import LearnedSkillService, learned_skill_target_ref_sha256
@@ -28,15 +29,77 @@ class LearningSkillApplyReceipt:
 
 
 class LearningSkillApplier:
-    """Apply VERIFIED semantic SKILL intents without granting executable capabilities."""
+    """Apply VERIFIED Loop-B SKILL intents through the canonical target owner."""
 
     def __init__(self, skills: LearnedSkillService) -> None:
         if type(skills) is not LearnedSkillService:
             raise TypeError("skills must be the canonical LearnedSkillService")
         self._skills = skills
 
+    @property
+    def sqlite_store(self):
+        """Return the exact SQLite authority backing this target owner."""
+        return self._skills.sqlite_store
+
     def apply(
         self,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        workspace_id: str,
+        agent_id: str,
+        skill_id: str,
+    ) -> LearningSkillApplyReceipt:
+        return self._apply(
+            None,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            skill_id=skill_id,
+        )
+
+    def apply_with_connection(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        intent: LearningUpdateIntent,
+        candidate: CognitionCandidate,
+        verification: CognitionVerification,
+        expected_verification_policy_sha256: str,
+        expected_requirements: tuple[CognitionVerificationRequirement, ...],
+        payload: bytes,
+        workspace_id: str,
+        agent_id: str,
+        skill_id: str,
+    ) -> LearningSkillApplyReceipt:
+        """Apply one learned-skill CAS inside a caller-owned SQLite transaction."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        return self._apply(
+            conn,
+            intent=intent,
+            candidate=candidate,
+            verification=verification,
+            expected_verification_policy_sha256=expected_verification_policy_sha256,
+            expected_requirements=expected_requirements,
+            payload=payload,
+            workspace_id=workspace_id,
+            agent_id=agent_id,
+            skill_id=skill_id,
+        )
+
+    def _apply(
+        self,
+        conn: sqlite3.Connection | None,
         *,
         intent: LearningUpdateIntent,
         candidate: CognitionCandidate,
@@ -75,13 +138,23 @@ class LearningSkillApplier:
 
         value = decode_learning_json_payload(payload)
         created = canonical.expected_revision_sha256 is None
-        snapshot = self._skills.compare_and_put(
-            workspace_id=workspace_id,
-            agent_id=agent_id,
-            skill_id=skill_id,
-            value=value,
-            expected_revision_sha256=canonical.expected_revision_sha256,
-        )
+        if conn is None:
+            snapshot = self._skills.compare_and_put(
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                skill_id=skill_id,
+                value=value,
+                expected_revision_sha256=canonical.expected_revision_sha256,
+            )
+        else:
+            snapshot = self._skills.compare_and_put_with_connection(
+                conn,
+                workspace_id=workspace_id,
+                agent_id=agent_id,
+                skill_id=skill_id,
+                value=value,
+                expected_revision_sha256=canonical.expected_revision_sha256,
+            )
         return LearningSkillApplyReceipt(
             intent_sha256=canonical.intent_sha256,
             target_ref_sha256=snapshot.target_ref_sha256,
