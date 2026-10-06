@@ -8,6 +8,8 @@ on:
       - "src/nika_core/ui/**"
       - "src/nika_core/config.py"
       - "src/nika_core/reliability/legacy_database.py"
+      - "src/nika_core/reliability/backup.py"
+      - "src/nika_core/reliability/recovery_lease.py"
       - "src/nika_core/windows_autostart.py"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
@@ -19,6 +21,13 @@ on:
       - "tests/test_m11_m12_release.py"
       - "tests/test_v01_stable_packaged_data_location.py"
       - "tests/test_v01_legacy_database_adoption.py"
+      - "tests/test_backup_restore_wal_stale_preview.py"
+      - "tests/test_backup_restore_recovery_process_loss.py"
+      - "tests/test_backup_restore_recovery_lease.py"
+      - "tests/test_backup_restore_recovery_lease_adversarial.py"
+      - "tests/test_backup_restore_guardrails.py"
+      - "tests/test_backup_restore_recovery.py"
+      - "tests/test_backup_restore_metadata_safety.py"
       - "tests/test_config_db_alias_conflict.py"
       - "tests/test_v01_packaged_config_startup.py"
       - "tests/test_release_sbom.py"
@@ -59,6 +68,8 @@ on:
       - "src/nika_core/ui/**"
       - "src/nika_core/config.py"
       - "src/nika_core/reliability/legacy_database.py"
+      - "src/nika_core/reliability/backup.py"
+      - "src/nika_core/reliability/recovery_lease.py"
       - "src/nika_core/windows_autostart.py"
       - "scripts/nika_windows.py"
       - "scripts/m11_release.py"
@@ -70,6 +81,13 @@ on:
       - "tests/test_m11_m12_release.py"
       - "tests/test_v01_stable_packaged_data_location.py"
       - "tests/test_v01_legacy_database_adoption.py"
+      - "tests/test_backup_restore_wal_stale_preview.py"
+      - "tests/test_backup_restore_recovery_process_loss.py"
+      - "tests/test_backup_restore_recovery_lease.py"
+      - "tests/test_backup_restore_recovery_lease_adversarial.py"
+      - "tests/test_backup_restore_guardrails.py"
+      - "tests/test_backup_restore_recovery.py"
+      - "tests/test_backup_restore_metadata_safety.py"
       - "tests/test_config_db_alias_conflict.py"
       - "tests/test_v01_packaged_config_startup.py"
       - "tests/test_release_sbom.py"
@@ -155,6 +173,13 @@ jobs:
           tests/test_m11_m12_release.py
           tests/test_v01_stable_packaged_data_location.py
           tests/test_v01_legacy_database_adoption.py
+          tests/test_backup_restore_wal_stale_preview.py
+          tests/test_backup_restore_recovery_process_loss.py
+          tests/test_backup_restore_recovery_lease.py
+          tests/test_backup_restore_recovery_lease_adversarial.py
+          tests/test_backup_restore_guardrails.py
+          tests/test_backup_restore_recovery.py
+          tests/test_backup_restore_metadata_safety.py
           tests/test_config_db_alias_conflict.py
           tests/test_v01_packaged_config_startup.py
           tests/test_release_sbom.py
