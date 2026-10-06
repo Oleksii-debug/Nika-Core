@@ -6,34 +6,80 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from nika_core.data.experience_ledger_schema import (
+    EXPERIENCE_LEDGER_MIGRATIONS,
+    EXPERIENCE_LEDGER_SCHEMA_VERSION,
+)
 from nika_core.data.multi_agent_state_schema import (
     MULTI_AGENT_STATE_MIGRATIONS,
     MULTI_AGENT_STATE_SCHEMA_VERSION,
 )
 from nika_core.data.schema import MIGRATIONS, SCHEMA_VERSION
+from nika_core.model_artifact_schema import (
+    MODEL_ARTIFACT_MIGRATIONS,
+    MODEL_ARTIFACT_SCHEMA_VERSION,
+)
 from nika_core.product_project_schema import (
     PRODUCT_PROJECT_MIGRATIONS,
     PRODUCT_PROJECT_SCHEMA_VERSION,
 )
+from nika_core.research.knowledge_schema import initialize_knowledge_schema
 
 
 class SQLiteStore:
     def __init__(self, path: Path | str) -> None:
         self.path = Path(path)
+        self._database_identity = (
+            None
+            if str(self.path) == ":memory:"
+            else self.path.expanduser().resolve(strict=False)
+        )
+        self._active_connections: dict[int, sqlite3.Connection] = {}
+
+    def require_connection(self, conn: sqlite3.Connection) -> None:
+        """Fail closed unless conn is bound to this store's main database."""
+        if type(conn) is not sqlite3.Connection:
+            raise TypeError("conn must be an exact sqlite3.Connection")
+        if self._active_connections.get(id(conn)) is not conn:
+            raise ValueError("connection was not opened by this SQLiteStore")
+        rows = conn.execute("PRAGMA database_list").fetchall()
+        main_rows = tuple(row for row in rows if row[1] == "main")
+        if len(main_rows) != 1:
+            raise ValueError("connection does not expose one canonical main database")
+        database_file = main_rows[0][2]
+        if self._database_identity is None:
+            if database_file != "":
+                raise ValueError("connection does not belong to this SQLiteStore")
+            return
+        if not database_file:
+            raise ValueError("connection does not belong to this SQLiteStore")
+        actual_identity = Path(database_file).expanduser().resolve(strict=False)
+        if actual_identity != self._database_identity:
+            raise ValueError("connection does not belong to this SQLiteStore")
+
+    def require_transaction_connection(self, conn: sqlite3.Connection) -> None:
+        """Require an owned connection whose SQLite transaction is already active."""
+        self.require_connection(conn)
+        if not conn.in_transaction:
+            raise ValueError("connection must have an active caller-owned transaction")
 
     @contextmanager
     def connection(self) -> Iterator[sqlite3.Connection]:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA foreign_keys = ON")
+        connection_id = id(conn)
+        self._active_connections[connection_id] = conn
         try:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA foreign_keys = ON")
             yield conn
             conn.commit()
         except Exception:
             conn.rollback()
             raise
         finally:
+            if self._active_connections.get(connection_id) is conn:
+                del self._active_connections[connection_id]
             conn.close()
 
     def initialize(self) -> None:
@@ -58,8 +104,39 @@ class SQLiteStore:
                     "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?)",
                     (version, datetime.now(UTC).isoformat()),
                 )
+            self._initialize_experience_ledger_schema(conn)
             self._initialize_multi_agent_state_schema(conn)
             self._initialize_product_project_schema(conn)
+            self._initialize_model_artifact_schema(conn)
+            initialize_knowledge_schema(conn)
+
+    @staticmethod
+    def _initialize_experience_ledger_schema(conn: sqlite3.Connection) -> None:
+        """Apply continuity Experience Ledger migrations through the canonical store."""
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS experience_ledger_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM experience_ledger_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > EXPERIENCE_LEDGER_SCHEMA_VERSION:
+            raise RuntimeError(
+                "experience ledger database schema "
+                f"{current} is newer than supported schema {EXPERIENCE_LEDGER_SCHEMA_VERSION}"
+            )
+        for version in range(current + 1, EXPERIENCE_LEDGER_SCHEMA_VERSION + 1):
+            statements = EXPERIENCE_LEDGER_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing experience ledger migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO experience_ledger_schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
 
     @staticmethod
     def _initialize_multi_agent_state_schema(conn: sqlite3.Connection) -> None:
@@ -124,7 +201,42 @@ class SQLiteStore:
                 (version, datetime.now(UTC).isoformat()),
             )
 
+    @staticmethod
+    def _initialize_model_artifact_schema(conn: sqlite3.Connection) -> None:
+        """Apply provider-neutral model provenance migrations through the canonical store."""
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS model_artifact_schema_migrations ("
+            "version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)"
+        )
+        row = conn.execute(
+            "SELECT MAX(version) AS version FROM model_artifact_schema_migrations"
+        ).fetchone()
+        current = int(row["version"] or 0)
+        if current > MODEL_ARTIFACT_SCHEMA_VERSION:
+            raise RuntimeError(
+                "model artifact database schema "
+                f"{current} is newer than supported schema {MODEL_ARTIFACT_SCHEMA_VERSION}"
+            )
+        for version in range(current + 1, MODEL_ARTIFACT_SCHEMA_VERSION + 1):
+            statements = MODEL_ARTIFACT_MIGRATIONS.get(version)
+            if statements is None:
+                raise RuntimeError(f"missing model artifact migration {version}")
+            for statement in statements:
+                conn.execute(statement)
+            conn.execute(
+                "INSERT INTO model_artifact_schema_migrations(version, applied_at) "
+                "VALUES (?, ?)",
+                (version, datetime.now(UTC).isoformat()),
+            )
+
     def schema_version(self) -> int:
         with self.connection() as conn:
             row = conn.execute("SELECT MAX(version) AS version FROM schema_migrations").fetchone()
+        return int(row["version"] or 0)
+
+    def knowledge_schema_version(self) -> int:
+        with self.connection() as conn:
+            row = conn.execute(
+                "SELECT MAX(version) AS version FROM knowledge_schema_migrations"
+            ).fetchone()
         return int(row["version"] or 0)

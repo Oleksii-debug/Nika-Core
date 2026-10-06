@@ -262,3 +262,73 @@ def test_waiting_resource_request_can_be_cancelled(tmp_path: Path) -> None:
     assert not manager.request(scope="workspace", owner_id="w", request_id="waiting").granted
     assert manager.cancel_waiting(scope="workspace", owner_id="w", request_id="waiting")
     assert manager.queued(scope="workspace", owner_id="w") == ()
+
+
+def test_resource_manager_revalidates_live_cpu_and_memory_without_queue_mutation(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    observer = FakeObserver(cpu=20, memory=30)
+    manager = ResourceManager(store, observer)
+    manager.set_budget(
+        ResourceBudget(
+            scope="training",
+            owner_id="owner",
+            max_concurrent=1,
+            max_cpu_percent=70,
+            max_memory_percent=80,
+        )
+    )
+    assert manager.request(scope="training", owner_id="owner", request_id="job").granted
+
+    valid = manager.revalidate(scope="training", owner_id="owner", request_id="job")
+    assert (valid.granted, valid.reason, valid.queue_position) == (
+        True,
+        "still_granted",
+        None,
+    )
+    assert manager.queued(scope="training", owner_id="owner") == ()
+
+    observer.cpu = 90
+    cpu_blocked = manager.revalidate(scope="training", owner_id="owner", request_id="job")
+    assert (cpu_blocked.granted, cpu_blocked.reason) == (False, "cpu_limit")
+    assert manager.active_count(scope="training", owner_id="owner") == 1
+    assert manager.queued(scope="training", owner_id="owner") == ()
+
+    observer.cpu = 20
+    observer.memory = 95
+    memory_blocked = manager.revalidate(scope="training", owner_id="owner", request_id="job")
+    assert (memory_blocked.granted, memory_blocked.reason) == (False, "memory_limit")
+    assert manager.active_count(scope="training", owner_id="owner") == 1
+
+
+def test_resource_manager_revalidation_detects_budget_shrink_without_requeue(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    manager = ResourceManager(store, FakeObserver())
+    manager.set_budget(ResourceBudget(scope="training", owner_id="owner", max_concurrent=2))
+    assert manager.request(scope="training", owner_id="owner", request_id="first").granted
+    assert manager.request(scope="training", owner_id="owner", request_id="second").granted
+
+    manager.set_budget(ResourceBudget(scope="training", owner_id="owner", max_concurrent=1))
+    blocked = manager.revalidate(scope="training", owner_id="owner", request_id="first")
+
+    assert (blocked.granted, blocked.reason) == (False, "concurrency_limit")
+    assert manager.active_count(scope="training", owner_id="owner") == 2
+    assert manager.queued(scope="training", owner_id="owner") == ()
+
+
+def test_resource_manager_revalidation_requires_exact_live_grant(tmp_path: Path) -> None:
+    manager = ResourceManager(_store(tmp_path), FakeObserver())
+
+    missing = manager.revalidate(scope="training", owner_id="owner", request_id="missing")
+
+    assert (missing.granted, missing.reason, missing.queue_position) == (
+        False,
+        "not_granted",
+        None,
+    )
+    assert manager.active_count(scope="training", owner_id="owner") == 0
+    assert manager.queued(scope="training", owner_id="owner") == ()
+
