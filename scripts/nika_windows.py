@@ -40,6 +40,10 @@ from nika_core.product_factory_packaged_execution import (
 from nika_core.product_factory_packaged_execution_plan_file import (
     PackagedProductFactoryExecutionPlanFileSource,
 )
+from nika_core.product_factory_packaged_local_startup import (
+    build_packaged_local_product_factory_program,
+    decode_packaged_local_product_factory_startup,
+)
 from nika_core.product_factory_packaged_journey import (
     PackagedProductCommandRouter,
     PackagedProductSelectionStore,
@@ -278,6 +282,13 @@ def build_windows_bridge(
     product_factory_execution_plan_resolver: ProductFactoryExecutionPlanResolver | None = None,
 ) -> tuple[UIActionBridge, ProductProjectCommandService]:
     if (
+        product_factory_execution_host is not None
+        and config.product_factory_local_startup_json is not None
+    ):
+        raise ValueError(
+            "explicit Product Factory execution host conflicts with packaged local startup authority"
+        )
+    if (
         product_factory_execution_host is None
         and product_factory_execution_plan_resolver is not None
     ):
@@ -295,6 +306,18 @@ def build_windows_bridge(
     keymap = Keymap(store, actions)
     source_settings = V01SourceSettings(store, config)
     model_settings = V01ModelSettings(store)
+    local_product_factory_startup = decode_packaged_local_product_factory_startup(
+        config.product_factory_local_startup_json
+    )
+    if local_product_factory_startup is not None:
+        local_product_factory_program = build_packaged_local_product_factory_program(
+            store,
+            settings=model_settings,
+            startup=local_product_factory_startup,
+        )
+        product_factory_execution_host = (
+            local_product_factory_program.multi_repository_host
+        )
     intelligence_mode_commands = PackagedIntelligenceModeCommandAdapter(model_settings)
     cloud_permissions = V01CloudModelPermissionService(
         store=store,
