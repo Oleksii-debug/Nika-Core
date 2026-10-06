@@ -132,11 +132,12 @@ def test_voice_model_setup_background_cancel_is_cooperative(
     source = _write_source(tmp_path)
     data_root = tmp_path / "nika-data"
     data_root.mkdir()
-    submitted: list[Coroutine[Any, Any, Any]] = []
+    submitted: list[tuple[Coroutine[Any, Any, Any], Future[Any]]] = []
 
     def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
-        submitted.append(coroutine)
-        return Future()
+        future: Future[Any] = Future()
+        submitted.append((coroutine, future))
+        return future
 
     setup = PackagedVoiceModelSetup(data_root, submit=submit)
     started = setup.start({"source_root": str(source)})
@@ -150,7 +151,8 @@ def test_voice_model_setup_background_cancel_is_cooperative(
     assert cancelling["active"] is True
     assert duplicate.message == "Скасування імпорту голосової моделі вже запитано."
 
-    asyncio.run(submitted[0])
+    asyncio.run(submitted[0][0])
+    submitted[0][1].set_result(None)
     terminal = setup.snapshot()
 
     assert terminal["status"] == "cancelled"
@@ -158,6 +160,99 @@ def test_voice_model_setup_background_cancel_is_cooperative(
     assert terminal["can_import"] is True
     assert not (data_root / "voice" / "whisper").exists()
     assert not list((data_root / "voice").glob(".whisper-import-*"))
+
+
+def test_voice_model_setup_rejects_invalid_submit_future_and_resets_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return object()  # type: ignore[return-value]
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+
+    result = setup.start({"source_root": str(source)})
+    snapshot = setup.snapshot()
+
+    assert result.status == "failed"
+    assert snapshot["status"] == "failed"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
+    assert len(submitted) == 1
+    assert submitted[0].cr_frame is None
+
+
+def test_voice_model_setup_cancelled_submit_future_settles_and_signals_worker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+    future: Future[Any] = Future()
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    result = setup.start({"source_root": str(source)})
+    cancel_event = setup._cancel_event  # noqa: SLF001 - lifecycle fence regression
+
+    assert result.status == "accepted"
+    assert cancel_event is not None
+    assert future.cancel() is True
+
+    snapshot = setup.snapshot()
+    assert cancel_event.is_set()
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
+    assert setup._active_future is None  # noqa: SLF001
+    submitted[0].close()
+
+
+def test_voice_model_setup_failed_submit_future_is_sanitized_and_recoverable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[Coroutine[Any, Any, Any]] = []
+    future: Future[Any] = Future()
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        submitted.append(coroutine)
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    result = setup.start({"source_root": str(source)})
+    cancel_event = setup._cancel_event  # noqa: SLF001 - lifecycle fence regression
+    canary = r"C:\private\voice-model-secret.onnx"
+
+    assert result.status == "accepted"
+    assert cancel_event is not None
+    future.set_exception(RuntimeError(canary))
+
+    snapshot = setup.snapshot()
+    assert cancel_event.is_set()
+    assert snapshot["status"] == "failed"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is True
+    assert canary not in repr(snapshot)
+    assert setup._active_future is None  # noqa: SLF001
+    submitted[0].close()
 
 
 def test_voice_model_setup_existing_install_is_idempotent(
