@@ -80,6 +80,7 @@ class PackagedReviewedBuildPass:
     node: ExecutionNode
     startup: PackagedLocalProductFactoryStartup
     authority: PackagedBuildAuthorityRuntime
+    configured_components: frozenset[tuple[str, str, str]] | None = None
 
     def __post_init__(self) -> None:
         if type(self.store) is not SQLiteStore:
@@ -90,6 +91,18 @@ class PackagedReviewedBuildPass:
             raise TypeError("startup must be exact PackagedLocalProductFactoryStartup")
         if type(self.authority) is not PackagedBuildAuthorityRuntime:
             raise TypeError("authority must be exact PackagedBuildAuthorityRuntime")
+        if self.configured_components is not None:
+            if type(self.configured_components) is not frozenset:
+                raise TypeError("configured_components must be exact frozenset")
+            for key in self.configured_components:
+                if (
+                    type(key) is not tuple
+                    or len(key) != 3
+                    or any(type(value) is not str or not value.strip() for value in key)
+                ):
+                    raise TypeError(
+                        "configured component keys must be exact project/repository/component tuples"
+                    )
 
     def advance(self, prepared: PreparedProductFactory) -> PackagedBuildPassResult:
         if type(prepared) is not PreparedProductFactory:
@@ -115,6 +128,26 @@ class PackagedReviewedBuildPass:
             )
         if not accepted:
             return PackagedBuildPassResult(project_id, ())
+
+        if self.configured_components is not None:
+            repositories = {
+                component.component_id: component.repository_id
+                for component in state.authority.graph.components
+            }
+            for component_id, _candidate_work_id in accepted:
+                repository_id = repositories.get(component_id)
+                if repository_id is None:
+                    raise PackagedBuildPassError(
+                        "accepted component is absent from current repository graph"
+                    )
+                if (
+                    project_id,
+                    repository_id,
+                    component_id,
+                ) not in self.configured_components:
+                    raise PackagedBuildPassError(
+                        "accepted component has no active packaged build configuration"
+                    )
 
         host = build_packaged_local_durable_build_host(
             self.store,
