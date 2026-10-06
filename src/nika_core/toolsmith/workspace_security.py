@@ -86,6 +86,16 @@ def validate_git_branch_name(branch_name: object) -> str:
     return branch_name
 
 
+def validate_git_commit_sha(value: object, *, label: str = "base_sha") -> str:
+    if (
+        type(value) is not str
+        or len(value) != 40
+        or any(character not in "0123456789abcdef" for character in value.lower())
+    ):
+        raise WorkspaceSecurityError(f"{label} must be a 40-character hexadecimal SHA")
+    return value
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class WorkspacePathPolicy:
     allowed_roots: tuple[str, ...]
@@ -116,10 +126,7 @@ class SterileGitPlan:
 
     def __post_init__(self) -> None:
         validate_git_branch_name(self.branch_name)
-        if len(self.base_sha) != 40 or any(
-            character not in "0123456789abcdef" for character in self.base_sha.lower()
-        ):
-            raise WorkspaceSecurityError("base_sha must be a 40-character hexadecimal SHA")
+        validate_git_commit_sha(self.base_sha)
         if self.private_git_dir == self.repository_root / ".git":
             raise WorkspaceSecurityError("production .git metadata cannot be worker metadata")
         if self.private_git_dir == self.worktree_root / ".git":
@@ -181,10 +188,7 @@ class ProductionIntegritySnapshot:
     tree_digest: str
 
     def __post_init__(self) -> None:
-        if len(self.base_sha) != 40 or any(
-            character not in "0123456789abcdef" for character in self.base_sha.lower()
-        ):
-            raise WorkspaceSecurityError("base_sha must be a 40-character hexadecimal SHA")
+        validate_git_commit_sha(self.base_sha)
         if len(self.tree_digest) != 64 or any(
             character not in "0123456789abcdef" for character in self.tree_digest.lower()
         ):
