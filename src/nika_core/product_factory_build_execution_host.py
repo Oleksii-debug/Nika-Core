@@ -352,6 +352,25 @@ class DurableBuildExecutionHost:
                 raise BuildExecutionDurabilityError(
                     "current execution registry reused a durable PF5 lease id"
                 )
+            if record.state in {
+                BuildExecutionState.DISPATCHING,
+                BuildExecutionState.EFFECT_IN_FLIGHT,
+            }:
+                # Restart treats a crossed dispatch boundary as inspection-only. The
+                # old lease is no longer execution authority and must not require the
+                # prior node to exist in the current registry just to restore identity.
+                key = (lease.project_id, lease.work_id)
+                conflicting_work_lease = current_by_work.get(key)
+                if (
+                    conflicting_work_lease is not None
+                    and conflicting_work_lease.lease_id != lease.lease_id
+                ):
+                    raise BuildExecutionDurabilityError(
+                        "current execution registry already has a different work lease"
+                    )
+                if exact is not None:
+                    drop_current_lease_ids.add(lease.lease_id)
+                continue
             unavailable = record.state is BuildExecutionState.PREPARED and (
                 lease.expires_at <= instant
                 or not self.coordinator.node_availability.is_available(lease.node_id)
