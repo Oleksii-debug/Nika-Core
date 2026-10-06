@@ -425,7 +425,6 @@ def test_prepare_revalidates_tampered_frozen_execution_plan_before_effect(
     assert _task_count(store) == 0
 
 
-
 def test_prepare_normalizes_hostile_mapping_snapshot_failure_before_effect(
     tmp_path: Path,
 ) -> None:
