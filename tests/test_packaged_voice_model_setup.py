@@ -162,6 +162,38 @@ def test_voice_model_setup_background_cancel_is_cooperative(
     assert not list((data_root / "voice").glob(".whisper-import-*"))
 
 
+def test_voice_model_setup_close_cancels_prestart_work_and_stays_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(model_setup.sys, "platform", "win32")
+    source = _write_source(tmp_path)
+    data_root = tmp_path / "nika-data"
+    data_root.mkdir()
+    submitted: list[tuple[Coroutine[Any, Any, Any], Future[Any]]] = []
+
+    def submit(coroutine: Coroutine[Any, Any, Any]) -> Future[Any]:
+        future: Future[Any] = Future()
+        submitted.append((coroutine, future))
+        return future
+
+    setup = PackagedVoiceModelSetup(data_root, submit=submit)
+    result = setup.start({"source_root": str(source)})
+
+    assert result.status == "accepted"
+    setup.close()
+    assert setup.snapshot()["status"] == "cancelling"
+
+    asyncio.run(submitted[0][0])
+    submitted[0][1].set_result(None)
+    snapshot = setup.snapshot()
+
+    assert snapshot["status"] == "cancelled"
+    assert snapshot["active"] is False
+    assert snapshot["can_import"] is False
+    assert not (data_root / "voice" / "whisper").exists()
+
+
 def test_voice_model_setup_rejects_invalid_submit_future_and_resets_state(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
