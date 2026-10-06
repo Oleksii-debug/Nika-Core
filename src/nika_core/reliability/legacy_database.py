@@ -447,9 +447,8 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
             same_source = path == original or (original.exists() and path.samefile(original))
             if not same_source or state.digest != receipt["source_digest"]:
                 raise LegacyDatabaseConflict(_MESSAGE)
-        if pending_identity is None:
-            raise LegacyDatabaseConflict(_MESSAGE)
-        _remove_pending_record(pending_path, expected_identity=pending_identity)
+        if pending_identity is not None:
+            _remove_pending_record(pending_path, expected_identity=pending_identity)
         return
     if not sources and not pending:
         return
@@ -504,6 +503,10 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
             "target_was_absent": current is None,
         }
         _publish_pending(pending_path, pending)
+        published_snapshot = _read_pending_record(pending_path)
+        if published_snapshot is None or published_snapshot[0] != pending:
+            raise LegacyDatabaseConflict(_MESSAGE)
+        pending_identity = published_snapshot[1]
     backup = target.parent / "legacy-adoption-backups" / f"{adoption_id}.sqlite3"
     manager.verify_backup(backup)
     backup_receipt = _inspect(backup).receipt
@@ -527,4 +530,6 @@ def _prepare_locked(target: Path, candidates: Sequence[Path]) -> None:
         raise LegacyDatabaseConflict(_MESSAGE)
     if not _source_unchanged(source, state.digest):
         raise LegacyDatabaseConflict(_MESSAGE)
-    pending_path.unlink(missing_ok=True)
+    if pending_identity is None:
+        raise LegacyDatabaseConflict(_MESSAGE)
+    _remove_pending_record(pending_path, expected_identity=pending_identity)
