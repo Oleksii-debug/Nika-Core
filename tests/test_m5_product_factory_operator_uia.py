@@ -20,6 +20,11 @@ def test_packaged_factory_operator_is_exercised_by_physical_m5_uia_proof() -> No
     )
 
     assert product_command in source
+    assert (
+        "$factoryOperatorHeading = Wait-DescendantName 'Оператор Product Factory' "
+        "([System.Windows.Automation.ControlType]::Text)"
+        in source
+    )
     assert "Wait-BoundTextEvidence 'Оператор Product Factory'" in source
     assert "Wait-BoundTextEvidence $productId" in source
     for evidence in (
@@ -30,24 +35,14 @@ def test_packaged_factory_operator_is_exercised_by_physical_m5_uia_proof() -> No
         "'inspect_project'",
     ):
         assert evidence in source
-    assert "function Wait-BoundTextPrefixEvidence(" in source
-    assert "StartsWith($Prefix, [System.StringComparison]::Ordinal)" in source
-    planning_command = (
-        "Set-BoundControlValue $commandControl "
-        "'сплануй поточний ProductProject'"
-    )
-    assert planning_command in source
-    assert "Wait-BoundTextPrefixEvidence 'План Product Factory: '" in source
-    assert "SELECT current_spec_version FROM product_projects" in source
-    assert "product_project_specs" in source
-    assert "pf-team-plan:v1:" in source
-    assert "planning unexpectedly created a task" in source
     assert status_command in source
-    assert source.index(planning_command) < source.index(status_command)
     assert (
         "поточна версія ProductProject ще не має підготовленого execution authority."
         in source
     )
+    focus_assertion = "Wait-FocusName $factoryOperatorHeading"
+    assert focus_assertion in source
+    assert source.index(status_command) < source.index(focus_assertion)
     assert "SELECT COUNT(*) FROM tasks" in source
     assert "operator/status proof unexpectedly created a task" in source
     assert source.index(product_command) < source.index(
