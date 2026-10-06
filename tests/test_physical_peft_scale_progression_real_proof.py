@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -125,6 +126,125 @@ def test_frozen_package_snapshot_uses_held_file_authority(
 
     assert loaded.manifest_sha256 == package.manifest_sha256
     assert loaded.evaluation_set_sha256 == package.evaluation_set_sha256
+
+
+def test_frozen_package_snapshot_returns_exact_admitted_bytes(
+    proof: ModuleType,
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    payload = (package.to_json() + "\n").encode("utf-8")
+    path = tmp_path / "frozen-package.json"
+    path.write_bytes(payload)
+
+    loaded, admitted = proof._frozen_package_snapshot(
+        path,
+        expected_manifest_sha256=package.manifest_sha256,
+    )
+
+    assert loaded.manifest_sha256 == package.manifest_sha256
+    assert admitted == payload
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow contract")
+def test_snapshot_open_fails_closed_without_posix_nofollow(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "authority.json"
+    path.write_bytes(b'{"value":1}')
+    monkeypatch.delattr(proof.os, "O_NOFOLLOW", raising=False)
+
+    with pytest.raises(
+        proof.ProofError,
+        match="could not be snapshotted",
+    ):
+        proof._stable_file_bytes(
+            path,
+            max_bytes=proof._MAX_JSON_BYTES,
+            name="JSON authority",
+        )
+
+
+def test_sha256_file_binds_digest_to_held_path_identity(
+    proof: ModuleType,
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "base.gguf"
+    payload = b"exact-foundation-authority"
+    path.write_bytes(payload)
+
+    digest, size = proof._sha256_file(path)
+
+    assert digest == _sha(payload)
+    assert size == len(payload)
+
+
+def test_sha256_file_rejects_foundation_above_preparation_bound(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "base.gguf"
+    path.write_bytes(b"foundation")
+    monkeypatch.setattr(proof, "_MAX_FOUNDATION_BYTES", 4)
+
+    with pytest.raises(
+        proof.ProofError,
+        match="file type or size is invalid",
+    ):
+        proof._sha256_file(path)
+
+
+def test_sha256_file_rejects_wrong_held_identity(
+    proof: ModuleType,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "base.gguf"
+    decoy = tmp_path / "decoy.gguf"
+    payload = b"same-foundation-bytes"
+    target.write_bytes(payload)
+    decoy.write_bytes(payload)
+    monkeypatch.setattr(
+        proof,
+        "_open_readonly_snapshot",
+        lambda _path: proof.os.open(decoy, proof.os.O_RDONLY),
+    )
+
+    with pytest.raises(proof.ProofError, match="identity changed"):
+        proof._sha256_file(target)
+
+
+def test_scale_verify_preserves_admitted_package_bytes_for_evidence() -> None:
+    source = (
+        _ROOT / "scripts" / "physical_peft_scale_progression_real_proof.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "tier0_package, tier0_package_bytes = _frozen_package_snapshot("
+        in source
+    )
+    assert (
+        'evidence / "tier0-frozen-package.json",\\n'
+        "        tier0_package_bytes,"
+        in source
+    )
+    assert (
+        "tier1_package, tier1_package_bytes = _frozen_package_snapshot("
+        in source
+    )
+    assert (
+        'evidence / "tier1-frozen-package.json",\n'
+        "        tier1_package_bytes,"
+        in source
+    )
+    assert (
+        "tier0_package.base_artifact_sha256 != base_gguf_sha256"
+        in source
+    )
+    assert '"foundation_model_sha256": base_gguf_sha256' in source
 
 
 def test_frozen_package_snapshot_rejects_wrong_held_identity(
