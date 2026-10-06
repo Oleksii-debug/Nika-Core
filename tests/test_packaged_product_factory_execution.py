@@ -166,6 +166,91 @@ def test_controller_recovers_before_dispatch_through_packaged_submitter() -> Non
     ]
 
 
+def test_controller_resolves_dynamic_execution_context_after_plan_validation() -> None:
+    plan = _plan()
+    preparation = _Preparation()
+    host = _Host()
+    submitter = _ImmediateSubmitter()
+    resolved: list[str] = []
+    contexts: list[PackagedProductFactoryExecutionPlan] = []
+
+    def context_factory(
+        candidate: PackagedProductFactoryExecutionPlan,
+    ) -> tuple[Any, Any]:
+        contexts.append(candidate)
+        return preparation, host
+
+    controller = PackagedProductFactoryExecutionController(
+        execution_context_factory=context_factory,
+        resolve_plan=lambda project_id: resolved.append(project_id) or plan,
+        submit=submitter,
+        max_parallel=2,
+        max_count=5,
+    )
+
+    result = controller.start(_PROJECT_ID)
+
+    assert result.status == "completed"
+    assert resolved == [_PROJECT_ID]
+    assert contexts == [plan]
+    assert preparation.plans == [plan]
+    assert host.calls == [
+        ("recover", "host-task", preparation.prepared.state, 2, None),
+        ("dispatch", "host-task", preparation.prepared.state, 2, 5),
+    ]
+
+
+def test_controller_does_not_resolve_dynamic_context_for_wrong_project_plan() -> None:
+    contexts: list[PackagedProductFactoryExecutionPlan] = []
+    controller = PackagedProductFactoryExecutionController(
+        execution_context_factory=lambda plan: (
+            contexts.append(plan) or _Preparation(),
+            _Host(),
+        ),
+        resolve_plan=lambda _project_id: _plan(_OTHER_PROJECT_ID),
+        submit=_ImmediateSubmitter(),
+    )
+
+    result = controller.start(_PROJECT_ID)
+
+    assert result.status == "rejected"
+    assert contexts == []
+
+
+def test_controller_rejects_conflicting_static_and_dynamic_execution_authority() -> None:
+    with pytest.raises(ValueError, match="conflicts"):
+        PackagedProductFactoryExecutionController(
+            preparation=cast(Any, _Preparation()),
+            host=cast(Any, _Host()),
+            execution_context_factory=lambda _plan: (
+                cast(Any, _Preparation()),
+                cast(Any, _Host()),
+            ),
+            resolve_plan=lambda _project_id: _plan(),
+            submit=_ImmediateSubmitter(),
+        )
+
+
+def test_controller_redacts_dynamic_execution_context_failure() -> None:
+    submitter = _ImmediateSubmitter()
+
+    def explode(_plan: PackagedProductFactoryExecutionPlan) -> tuple[Any, Any]:
+        raise RuntimeError("secret local repository path must not reach UI")
+
+    controller = PackagedProductFactoryExecutionController(
+        execution_context_factory=explode,
+        resolve_plan=lambda _project_id: _plan(),
+        submit=submitter,
+    )
+
+    result = controller.start(_PROJECT_ID)
+
+    assert result.status == "failed"
+    assert "secret" not in result.message
+    assert "repository path" not in result.message
+    assert submitter.calls == 0
+
+
 def test_controller_rejects_concurrent_start_for_same_project() -> None:
     preparation = _Preparation()
     host = _Host()
