@@ -527,7 +527,7 @@ def _stored_memory_depth_is_bounded(body: str) -> bool:
 
 
 def _bounded_memory_int(number: str) -> int:
-    digits = number[1:] if number.startswith("-") else number
+    digits = number.removeprefix("-")
     if len(digits) > _MAX_STORED_MEMORY_INTEGER_DECIMAL_CHARS:
         raise ValueError("stored memory JSON integer exceeds the digit limit")
     value = int(number)
